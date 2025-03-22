@@ -1,0 +1,277 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// 用户相关模型
+model User {
+  id             String             @id @default(uuid())
+  email          String             @unique
+  password       String
+  name           String?
+  avatar         String?
+  
+  // 组织相关字段
+  isOrganization Boolean            @default(false)
+  description    String?            // 组织描述
+  logo           String?            // 组织标志（可以与avatar共用）
+  
+  // 关系
+  createdAt      DateTime           @default(now())
+  updatedAt      DateTime           @updatedAt
+  profile        UserProfile?
+  points         Point[]
+  badges         UserBadge[]
+  participations Participation[]
+  notifications  Notification[]
+  transactions   AssetTransaction[]
+  roles          UserRole[]
+  
+  // 原来从Organization迁移过来的关系
+  createdActivities Activity[]      // 创建的活动
+  dataAssets      NFTDataAsset[]    // 拥有的数据资产
+  createdBadges   Badge[]           // 创建的徽章
+  members         User[]            @relation("OrganizationMembers") // 组织成员
+  organization    User?             @relation("OrganizationMembers", fields: [organizationId], references: [id]) // 所属组织
+  organizationId  String?
+}
+
+model UserProfile {
+  id                String   @id @default(uuid())
+  user              User     @relation(fields: [userId], references: [id])
+  userId            String   @unique
+  phone             String?
+  language          String   @default("en")
+  notificationPrefs Json?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+}
+
+model Role {
+  id          String       @id @default(uuid())
+  name        String
+  description String?
+  permissions Permission[]
+  userRoles   UserRole[]
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+}
+
+model Permission {
+  id          String   @id @default(uuid())
+  name        String
+  description String?
+  roles       Role[]
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model UserRole {
+  user      User     @relation(fields: [userId], references: [id])
+  userId    String
+  role      Role     @relation(fields: [roleId], references: [id])
+  roleId    String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@id([userId, roleId])
+}
+
+// 资产相关模型
+model Point {
+  id        String   @id @default(uuid())
+  user      User     @relation(fields: [userId], references: [id])
+  userId    String
+  amount    Float
+  source    String
+  sourceId  String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Badge {
+  id             String       @id @default(uuid())
+  name           String
+  description    String?
+  image          String
+  creator        User         @relation(fields: [creatorId], references: [id])
+  creatorId      String
+  userBadges     UserBadge[]
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+}
+
+model UserBadge {
+  id         String   @id @default(uuid())
+  user       User     @relation(fields: [userId], references: [id])
+  userId     String
+  badge      Badge    @relation(fields: [badgeId], references: [id])
+  badgeId    String
+  acquiredAt DateTime @default(now())
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@unique([userId, badgeId])
+}
+
+model NFTDataAsset {
+  id             String          @id @default(uuid())
+  name           String
+  description    String?
+  metadata       Json
+  owner          User            @relation(fields: [ownerId], references: [id])
+  ownerId        String
+  authorizations Authorization[]
+  listings       Listing[]
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+}
+
+model Authorization {
+  id          String       @id @default(uuid())
+  asset       NFTDataAsset @relation(fields: [assetId], references: [id])
+  assetId     String
+  grantedTo   String
+  permissions Json
+  validFrom   DateTime
+  validTo     DateTime?
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+}
+
+model AssetTransaction {
+  id          String   @id @default(uuid())
+  user        User     @relation(fields: [userId], references: [id])
+  userId      String
+  type        String // POINT_EARNED, POINT_SPENT, BADGE_ACQUIRED, etc.
+  amount      Float?
+  assetId     String?
+  description String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+// 活动相关模型
+model Activity {
+  id             String             @id @default(uuid())
+  title          String
+  description    String?
+  startDate      DateTime
+  endDate        DateTime?
+  image          String?
+  creator        User               @relation(fields: [creatorId], references: [id])
+  creatorId      String
+  categories     ActivityCategory[]
+  tags           ActivityTag[]
+  participations Participation[]
+  budget         Float?
+  bidStrategy    Json?
+  shareLink      String?
+  
+  // 活动类型和状态
+  type           String             @default("MEMBERSHIP") // MEMBERSHIP 或 REDEMPTION
+  remaining      Int?               // 剩余数量
+  total          Int?               // 总数量
+  statusNote     String?            // 状态说明
+  claimed        Boolean?           @default(false) // 是否已领取
+  
+  // 权益与福利
+  equityTitle    String?            // 权益标题
+  equityDetails  String[]           // 权益详情列表
+  
+  // 外部链接
+  externalLinksTitle String?        // 外部链接标题
+  externalLinks  Json?              // 外部链接列表
+  
+  // NFT 相关信息
+  nftName        String?            // NFT 名称
+  nftDescription String?            // NFT 描述
+  nftImage       String?            // NFT 图片
+  nftTotalSupply Int?               // NFT 总供应量
+  nftPrice       Float?             // NFT 价格
+  nftValidityStart DateTime?        // NFT 有效期开始
+  nftValidityEnd DateTime?          // NFT 有效期结束
+  nftUsageRules  String?            // NFT 使用规则
+  
+  showInExplore  Boolean            @default(true) // 是否在探索页显示
+  
+  createdAt      DateTime           @default(now())
+  updatedAt      DateTime           @updatedAt
+}
+
+model ActivityCategory {
+  id         String     @id @default(uuid())
+  name       String
+  activities Activity[]
+  createdAt  DateTime   @default(now())
+  updatedAt  DateTime   @updatedAt
+}
+
+model ActivityTag {
+  id         String     @id @default(uuid())
+  name       String
+  activities Activity[]
+  createdAt  DateTime   @default(now())
+  updatedAt  DateTime   @updatedAt
+}
+
+model Participation {
+  id             String   @id @default(uuid())
+  user           User     @relation(fields: [userId], references: [id])
+  userId         String
+  activity       Activity @relation(fields: [activityId], references: [id])
+  activityId     String
+  status         String // REGISTERED, COMPLETED, etc.
+  participatedAt DateTime @default(now())
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@unique([userId, activityId])
+}
+
+// 市场相关模型
+model Listing {
+  id        String       @id @default(uuid())
+  asset     NFTDataAsset @relation(fields: [assetId], references: [id])
+  assetId   String
+  price     Float
+  currency  String       @default("USD")
+  status    String // ACTIVE, SOLD, CANCELLED
+  orders    Order[]
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+}
+
+model Order {
+  id        String   @id @default(uuid())
+  listing   Listing  @relation(fields: [listingId], references: [id])
+  listingId String
+  buyerId   String
+  status    String // PENDING, COMPLETED, CANCELLED
+  amount    Float
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// 通知相关模型
+model Notification {
+  id        String   @id @default(uuid())
+  user      User     @relation(fields: [userId], references: [id])
+  userId    String
+  title     String
+  content   String
+  type      String // SYSTEM, ACTIVITY, TRANSACTION
+  isRead    Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}

@@ -1,0 +1,120 @@
+const bcrypt = require('bcryptjs');
+const { PrismaClient } = require('@prisma/client');
+const { generateToken } = require('../utils/jwtUtils');
+
+const prisma = new PrismaClient();
+
+/**
+ * 用户注册
+ * @route POST /api/auth/register
+ * @access Public
+ */
+exports.register = async (req, res) => {
+  try {
+    const { email, password, name } = req.body;
+
+    // 检查用户是否已存在
+    const userExists = await prisma.user.findUnique({
+      where: { email }
+    });
+
+    if (userExists) {
+      return res.status(400).json({
+        status: 'fail',
+        message: '该邮箱已被注册'
+      });
+    }
+
+    // 加密密码
+    const salt = await bcrypt.genSalt(10);
+    const hashedPassword = await bcrypt.hash(password, salt);
+
+    // 创建用户
+    const user = await prisma.user.create({
+      data: {
+        email,
+        password: hashedPassword,
+        name,
+        profile: {
+          create: {
+            language: 'zh'
+          }
+        }
+      },
+      include: {
+        profile: true
+      }
+    });
+
+    // 生成 token
+    const token = generateToken(user.id);
+
+    res.status(201).json({
+      status: 'success',
+      data: {
+        id: user.id,
+        email: user.email,
+        name: user.name,
+        token
+      }
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: 'error',
+      message: '服务器错误',
+      error: error.message
+    });
+  }
+};
+
+/**
+ * 用户登录
+ * @route POST /api/auth/login
+ * @access Public
+ */
+exports.login = async (req, res) => {
+  try {
+    const { email, password } = req.body;
+
+    // 查找用户
+    const user = await prisma.user.findUnique({
+      where: { email }
+    });
+
+    if (!user) {
+      return res.status(401).json({
+        status: 'fail',
+        message: '邮箱或密码不正确'
+      });
+    }
+
+    // 验证密码
+    const isMatch = await bcrypt.compare(password, user.password);
+
+    if (!isMatch) {
+      return res.status(401).json({
+        status: 'fail',
+        message: '邮箱或密码不正确'
+      });
+    }
+
+    // 生成 token
+    const token = generateToken(user.id);
+
+    res.status(200).json({
+      status: 'success',
+      data: {
+        id: user.id,
+        email: user.email,
+        name: user.name,
+        token
+      }
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: 'error',
+      message: '服务器错误',
+      error: error.message
+    });
+  }
+}; 
