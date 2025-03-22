@@ -85,7 +85,7 @@ exports.getBadges = async (req, res) => {
       include: {
         badge: {
           include: {
-            organization: true
+            creator: true
           }
         }
       }
@@ -94,7 +94,7 @@ exports.getBadges = async (req, res) => {
     // 获取所有可用勋章
     const allBadges = await prisma.badge.findMany({
       include: {
-        organization: true
+        creator: true
       }
     });
 
@@ -110,7 +110,11 @@ exports.getBadges = async (req, res) => {
           name: ub.badge.name,
           description: ub.badge.description,
           image: ub.badge.image,
-          organization: ub.badge.organization.name,
+          creator: {
+            id: ub.badge.creator.id,
+            name: ub.badge.creator.name,
+            isOrganization: ub.badge.creator.isOrganization
+          },
           acquiredAt: ub.acquiredAt
         })),
         uncollected: uncollectedBadges.map(badge => ({
@@ -118,7 +122,11 @@ exports.getBadges = async (req, res) => {
           name: badge.name,
           description: badge.description,
           image: badge.image,
-          organization: badge.organization.name
+          creator: {
+            id: badge.creator.id,
+            name: badge.creator.name,
+            isOrganization: badge.creator.isOrganization
+          }
         }))
       }
     });
@@ -170,7 +178,7 @@ exports.getBadgeDetail = async (req, res) => {
     const badge = await prisma.badge.findUnique({
       where: { id },
       include: {
-        organization: true
+        creator: true
       }
     });
     
@@ -198,9 +206,13 @@ exports.getBadgeDetail = async (req, res) => {
         name: badge.name,
         description: badge.description,
         image: badge.image,
-        organization: badge.organization.name,
+        creator: {
+          id: badge.creator.id,
+          name: badge.creator.name,
+          isOrganization: badge.creator.isOrganization
+        },
         isCollected: !!userBadge,
-        acquiredAt: userBadge?.acquiredAt || null
+        acquiredAt: userBadge ? userBadge.acquiredAt : null
       }
     });
   } catch (error) {
@@ -225,7 +237,7 @@ exports.collectBadge = async (req, res) => {
     const badge = await prisma.badge.findUnique({
       where: { id },
       include: {
-        organization: true
+        creator: true
       }
     });
     
@@ -236,7 +248,7 @@ exports.collectBadge = async (req, res) => {
       });
     }
     
-    // 检查用户是否已收集此勋章
+    // 检查用户是否已经收集了这个勋章
     const existingUserBadge = await prisma.userBadge.findUnique({
       where: {
         userId_badgeId: {
@@ -267,7 +279,7 @@ exports.collectBadge = async (req, res) => {
       include: {
         badge: {
           include: {
-            organization: true
+            creator: true
           }
         }
       }
@@ -293,7 +305,7 @@ exports.collectBadge = async (req, res) => {
         },
         type: 'BADGE',
         title: 'New Badge Collected',
-        content: `Congratulations! You've earned the ${badge.name} badge from ${badge.organization.name}.`,
+        content: `Congratulations! You've earned the ${badge.name} badge from ${badge.creator.name}.`,
         isRead: false
       }
     });
@@ -306,7 +318,11 @@ exports.collectBadge = async (req, res) => {
         name: userBadge.badge.name,
         description: userBadge.badge.description,
         image: userBadge.badge.image,
-        organization: userBadge.badge.organization.name,
+        creator: {
+          id: userBadge.badge.creator.id,
+          name: userBadge.badge.creator.name,
+          isOrganization: userBadge.badge.creator.isOrganization
+        },
         acquiredAt: userBadge.acquiredAt
       }
     });
