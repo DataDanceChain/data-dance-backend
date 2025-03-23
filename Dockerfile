@@ -15,34 +15,16 @@ RUN \
     else echo "Lockfile not found." && exit 1; \
     fi
 
-
-# 2. Rebuild the source code only when needed
-FROM base AS builder
-WORKDIR /app
-ENV NODE_ENV=production
-COPY --from=deps /app/node_modules ./node_modules
 COPY . .
-RUN npm run build
+RUN npx prisma generate
 
-# 3. Production image, copy all the files and run next
 FROM base AS runner
 WORKDIR /app
-
+COPY --from=deps /app/node_modules ./node_modules
+COPY --from=deps /app .
 ENV NODE_ENV=production
-
-RUN groupadd -g 1001 nodejs
-RUN useradd -M -u 1001 -g nodejs nextjs
-
-COPY --from=builder /app/public ./public
-
-# Automatically leverage output traces to reduce image size
-# https://nextjs.org/docs/advanced-features/output-file-tracing
-COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
-COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
-
-USER nextjs
 
 ENV PORT 3000
 ENV HOSTNAME 0.0.0.0
 
-CMD ["node", "server.js"]
+CMD ["node", "src/server.js"]
