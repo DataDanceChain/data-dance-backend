@@ -1,0 +1,32 @@
+version: '3.8'
+
+services:
+  ddc-backend-api:
+    image: registry.magipop.xyz/ddc/ddc-backend-js:latest
+    ports:
+      - "127.0.0.1:10000:3000"
+    env_file:
+      - backend.env
+    networks:
+      - backend_network
+    restart: always
+    depends_on:
+      - ddc-backend-db
+
+  ddc-backend-db:
+    image: postgres:latest
+    volumes:
+      - ./db:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:15432:5432"
+    environment:
+      - POSTGRES_USER=ddc
+      - POSTGRES_PASSWORD=ddc
+      - POSTGRES_DB=ddc
+    restart: always
+    networks:
+      - backend_network
+
+networks:
+  backend_network:
+    driver: bridge
