@@ -140,24 +140,58 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 }
 ```
 
-## 活动 API
-
-### 获取所有活动
+### 获取用户积分信息
 
 ```
-GET /activities
+GET /api/users/points
 ```
 
-**查询参数**:
-- `page`: 页码 (默认为1)
-- `limit`: 每页数量 (默认为10)
-- `sort`: 排序字段 (如 "createdAt")
-- `order`: 排序方向 (如 "desc" 或 "asc")
+**请求头**:
+```
+Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+```
 
 **响应** (200 OK):
 ```json
 {
-  "success": true,
+  "status": "success",
+  "data": {
+    "totalPoints": 1250,
+    "history": [
+      {
+        "id": "transaction-uuid",
+        "amount": 100,
+        "description": "Activity participation reward",
+        "createdAt": "2023-06-01T12:00:00.000Z"
+      }
+    ]
+  }
+}
+```
+
+## 活动 API
+
+### 获取活动列表
+
+```
+GET /api/activities
+```
+
+**请求头**:
+```
+Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+```
+
+**查询参数**:
+- `category`: 活动分类ID
+- `search`: 搜索关键词
+- `page`: 页码 (默认为1)
+- `limit`: 每页数量 (默认为10)
+
+**响应** (200 OK):
+```json
+{
+  "status": "success",
   "data": {
     "activities": [
       {
@@ -171,19 +205,43 @@ GET /activities
         "remaining": 100,
         "total": 100,
         "statusNote": "Limited edition, while supplies last",
+        "price": 0.1,
+        "nft": {
+          "name": "Elite Yacht Club Membership",
+          "description": "This NFT grants you exclusive access to Elite Yacht Club facilities and events.",
+          "image": "/assets/nfts/yacht-club.png",
+          "totalSupply": 100,
+          "price": 0.1,
+          "validityStart": "2025-02-19T00:00:00.000Z",
+          "validityEnd": "2026-02-19T00:00:00.000Z",
+          "usageRules": "This NFT can be used to access all Elite Yacht Club facilities and events."
+        },
+        "isClaimed": false,
         "creator": {
           "id": "org-uuid",
           "name": "Yacht Club",
           "logo": "/assets/logos/yacht-club.png",
           "isOrganization": true
-        }
+        },
+        "categories": [
+          {
+            "id": "category-uuid",
+            "name": "Luxury"
+          }
+        ],
+        "tags": [
+          {
+            "id": "tag-uuid",
+            "name": "Membership"
+          }
+        ]
       }
     ],
     "pagination": {
-      "total": 25,
       "page": 1,
       "limit": 10,
-      "pages": 3
+      "total": 50,
+      "pages": 5
     }
   }
 }
@@ -285,10 +343,10 @@ GET /activities/featured
 }
 ```
 
-### 参与活动
+### 领取活动
 
 ```
-POST /activities/{activityId}/participate
+POST /api/activities/{activityId}/claim
 ```
 
 **请求头**:
@@ -301,14 +359,118 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 {
   "status": "success",
   "data": {
-    "participation": {
-      "id": "participation-uuid",
+    "claim": {
+      "id": "claim-uuid",
       "userId": "user-uuid",
       "activityId": "yacht-club-membership",
-      "status": "REGISTERED",
-      "participatedAt": "2023-06-01T12:00:00.000Z"
+      "status": "CLAIMED",
+      "claimedAt": "2023-06-01T12:00:00.000Z"
     }
   }
+}
+```
+
+### 获取用户已领取的活动
+
+```
+GET /api/activities/claimed
+```
+
+**请求头**:
+```
+Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+```
+
+**响应** (200 OK):
+```json
+{
+  "success": true,
+  "data": [
+    {
+      "id": "yacht-club-membership",
+      "title": "Elite Yacht Club Membership NFT Limited Sale",
+      "description": "Elite Yacht Club membership benefits...",
+      "image": "/assets/nfts/yacht-club.png",
+      "startDate": "2025-02-19T00:00:00.000Z",
+      "endDate": "2025-03-19T00:00:00.000Z",
+      "type": "MEMBERSHIP",
+      "remaining": 100,
+      "total": 100,
+      "statusNote": "Limited edition, while supplies last",
+      "claimedAt": "2023-06-01T12:00:00.000Z",
+      "status": "CLAIMED",
+      "creator": {
+        "id": "org-uuid",
+        "name": "Yacht Club",
+        "logo": "/assets/logos/yacht-club.png",
+        "isOrganization": true
+      },
+      "categories": [
+        {
+          "id": "category-uuid",
+          "name": "Luxury"
+        }
+      ],
+      "tags": [
+        {
+          "id": "tag-uuid",
+          "name": "Membership"
+        }
+      ]
+    }
+  ]
+}
+```
+
+### 获取用户已领取的活动（通过过滤活动表）
+
+```
+GET /api/activities/user-claimed
+```
+
+**请求头**:
+```
+Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+```
+
+**响应** (200 OK):
+```json
+{
+  "success": true,
+  "data": [
+    {
+      "id": "yacht-club-membership",
+      "title": "Elite Yacht Club Membership NFT Limited Sale",
+      "description": "Elite Yacht Club membership benefits...",
+      "image": "/assets/nfts/yacht-club.png",
+      "startDate": "2025-02-19T00:00:00.000Z",
+      "endDate": "2025-03-19T00:00:00.000Z",
+      "type": "MEMBERSHIP",
+      "remaining": 100,
+      "total": 100,
+      "statusNote": "Limited edition, while supplies last",
+      "claimedAt": "2023-06-01T12:00:00.000Z",
+      "status": "CLAIMED",
+      "creator": {
+        "id": "org-uuid",
+        "name": "Yacht Club",
+        "logo": "/assets/logos/yacht-club.png",
+        "isOrganization": true
+      },
+      "categories": [
+        {
+          "id": "category-uuid",
+          "name": "Luxury"
+        }
+      ],
+      "tags": [
+        {
+          "id": "tag-uuid",
+          "name": "Membership"
+        }
+      ]
+    }
+  ]
 }
 ```
 
@@ -436,7 +598,6 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 ```
 GET /assets/badges/{badgeId}
 ```
-
 **请求头**:
 ```
 Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
@@ -469,8 +630,7 @@ POST /assets/badges/{badgeId}/collect
 ```
 
 **请求头**:
-```
-Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+```Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 ```
 
 **响应** (200 OK):
@@ -649,3 +809,5 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 - `403 Forbidden`: 权限不足
 - `404 Not Found`: 资源不存在
 - `500 Internal Server Error`: 服务器内部错误
+
+

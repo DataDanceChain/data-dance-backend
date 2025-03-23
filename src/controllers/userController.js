@@ -10,10 +10,12 @@ const prisma = new PrismaClient();
  */
 exports.getMe = async (req, res) => {
   try {
+    // 获取用户信息，包括积分总数
     const user = await prisma.user.findUnique({
       where: { id: req.user.id },
       include: {
-        profile: true
+        profile: true,
+        points: true
       }
     });
 
@@ -24,18 +26,31 @@ exports.getMe = async (req, res) => {
       });
     }
 
-    // 移除敏感信息
-    const { password, ...userWithoutPassword } = user;
+    // 计算用户总积分
+    const totalPoints = user.points.reduce((sum, point) => sum + point.amount, 0);
+
+    // 格式化返回数据
+    const userData = {
+      id: user.id,
+      email: user.email,
+      name: user.name,
+      avatar: user.avatar,
+      isOrganization: user.isOrganization,
+      points: totalPoints // 添加积分总数
+    };
 
     res.status(200).json({
       status: 'success',
-      data: userWithoutPassword
+      data: {
+        user: userData
+      }
     });
   } catch (error) {
+    console.error('Error fetching user:', error);
     res.status(500).json({
       status: 'error',
       message: '服务器错误',
-      error: error.message
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
 };
@@ -143,6 +158,39 @@ exports.updatePassword = async (req, res) => {
       status: 'error',
       message: '服务器错误',
       error: error.message
+    });
+  }
+};
+
+/**
+ * 获取用户积分信息
+ * @route GET /api/users/points
+ * @access Private
+ */
+exports.getUserPoints = async (req, res) => {
+  try {
+    // 获取用户积分记录
+    const pointRecords = await prisma.point.findMany({
+      where: { userId: req.user.id },
+      orderBy: { createdAt: 'desc' }
+    });
+
+    // 计算总积分
+    const totalPoints = pointRecords.reduce((sum, point) => sum + point.amount, 0);
+
+    res.status(200).json({
+      status: 'success',
+      data: {
+        totalPoints,
+        history: pointRecords
+      }
+    });
+  } catch (error) {
+    console.error('Error fetching user points:', error);
+    res.status(500).json({
+      status: 'error',
+      message: '获取用户积分失败',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
 }; 

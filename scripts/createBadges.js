@@ -132,7 +132,7 @@ async function createOrganizationAndBadge(logoFileName) {
       data: {
         name: `${organizationName} Badge`,
         description: `Official badge for ${organizationName}`,
-        image: `/assets/badges/${logoFileName}`,
+        image: `/assets/logos/${logoFileName}`,
         creator: {
           connect: { id: orgUser.id }
         }

@@ -30,9 +30,10 @@ model User {
   createdAt      DateTime           @default(now())
   updatedAt      DateTime           @updatedAt
   profile        UserProfile?
+  totalPoints    Float              @default(0)
   points         Point[]
   badges         UserBadge[]
-  participations Participation[]
+  activityClaims ActivityClaim[]
   notifications  Notification[]
   transactions   AssetTransaction[]
   roles          UserRole[]
@@ -173,7 +174,7 @@ model Activity {
   creatorId      String
   categories     ActivityCategory[]
   tags           ActivityTag[]
-  participations Participation[]
+  claims         ActivityClaim[]
   budget         Float?
   bidStrategy    Json?
   shareLink      String?
@@ -183,7 +184,6 @@ model Activity {
   remaining      Int?               // 剩余数量
   total          Int?               // 总数量
   statusNote     String?            // 状态说明
-  claimed        Boolean?           @default(false) // 是否已领取
   
   // 权益与福利
   equityTitle    String?            // 权益标题
@@ -225,16 +225,16 @@ model ActivityTag {
   updatedAt  DateTime   @updatedAt
 }
 
-model Participation {
-  id             String   @id @default(uuid())
-  user           User     @relation(fields: [userId], references: [id])
-  userId         String
-  activity       Activity @relation(fields: [activityId], references: [id])
-  activityId     String
-  status         String // REGISTERED, COMPLETED, etc.
-  participatedAt DateTime @default(now())
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
+model ActivityClaim {
+  id        String   @id @default(uuid())
+  user      User     @relation(fields: [userId], references: [id])
+  userId    String
+  activity  Activity @relation(fields: [activityId], references: [id])
+  activityId String
+  status    String   // CLAIMED, COMPLETED, etc.
+  claimedAt DateTime @default(now())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@unique([userId, activityId])
 }

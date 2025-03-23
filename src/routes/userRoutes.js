@@ -1,5 +1,5 @@
 const express = require('express');
-const { getMe, updateMe, updateLanguage, updatePassword } = require('../controllers/userController');
+const { getMe, updateMe, updateLanguage, updatePassword, getUserPoints } = require('../controllers/userController');
 const { protect } = require('../middlewares/authMiddleware');
 const router = express.Router();
 
@@ -17,5 +17,8 @@ router.put('/language', updateLanguage);
 
 // 更新密码
 router.put('/password', updatePassword);
+
+// 获取用户积分
+router.get('/points', getUserPoints);
 
 module.exports = router; 
