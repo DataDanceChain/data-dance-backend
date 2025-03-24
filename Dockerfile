@@ -1,9 +1,9 @@
-FROM --platform=linux/amd64 node:20-bookworm-slim AS base
+FROM --platform=linux/amd64 node:lts-bookworm-slim AS base
 
 # 1. Install dependencies only when needed
 FROM base AS deps
 
-RUN apt-get update && apt-get install -y build-essential python3
+RUN apt-get update && apt-get install -y build-essential python3 libssl-dev ca-certificates
 WORKDIR /app
 
 # Install dependencies based on the preferred package manager
@@ -19,6 +19,8 @@ COPY . .
 RUN npx prisma generate
 
 FROM base AS runner
+
+RUN apt-get update && apt-get install -y build-essential python3 libssl-dev ca-certificates
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY --from=deps /app .

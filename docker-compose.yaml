@@ -14,7 +14,7 @@ services:
       - ddc-backend-db
 
   ddc-backend-db:
-    image: postgres:latest
+    image: postgres:17
     volumes:
       - ./db:/var/lib/postgresql/data
     ports:
