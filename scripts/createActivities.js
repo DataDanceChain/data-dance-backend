@@ -28,8 +28,7 @@ const activities = [
     status: {
       remaining: 100,
       total: 100,
-      note: "Limited edition, while supplies last",
-      claimed: true
+      note: "Limited edition, while supplies last"
     },
     description: "Elite Yacht Club membership benefits available for priority purchase, limited to 100 units. Benefits include 60 hours of private yacht usage, free participation in elite gatherings, VIP member area consumption, and cigar room usage without minimum consumption.",
     equity: {
@@ -134,8 +133,7 @@ const activities = [
     status: {
       remaining: 20,
       total: 20,
-      note: "Limited to 20 units",
-      claimed: true
+      note: "Limited to 20 units"
     },
     description: "Explore Peru and embark on a mind-altering spiritual journey, experiencing the mysterious power of pristine nature.",
     equity: {
@@ -187,8 +185,7 @@ const activities = [
     status: {
       remaining: 30,
       total: 30,
-      note: "Limited to 30 units",
-      claimed: true
+      note: "Limited to 30 units"
     },
     description: "Head to Burning Man and fully express yourself in a world of freedom and creativity.",
     equity: {
@@ -347,8 +344,7 @@ const activities = [
     status: {
       remaining: 30,
       total: 30,
-      note: "Limited to 30 units",
-      claimed: true
+      note: "Limited to 30 units"
     },
     description: "Japan Gut Microbiota Transplantation Deep Experience Journey. In Japan, where bustling cities intertwine with tranquil countryside, a journey concerning health and exploration is about to begin—the Japan Gut Microbiota Transplantation Experience Journey. Upon arrival in Japan, a professional medical team will conduct a comprehensive health assessment and customize a personalized gut microbiota transplantation plan based on your physical condition. In advanced and clean medical facilities, experience the charm of cutting-edge medical technology, using strictly screened high-quality microbiota to reshape the gut microecology in a safe and reliable way. Beyond the medical experience, the journey will also lead you to appreciate Japan's unique scenery. In the tranquility of Kyoto's ancient temples, contemplate the sedimentation of history; on Tokyo's bustling streets, taste authentic cuisine and experience the fusion of tradition and modernity. Soak in hot springs at the foot of Mount Fuji, soothe body and mind, and let your body recover vitality through natural nourishment. This is not just a medical journey to improve gut health, but an unforgettable trip to deeply appreciate Japanese culture and relax body and mind.",
     equity: {
@@ -456,8 +452,7 @@ const activities = [
     status: {
       remaining: 20,
       total: 20,
-      note: "Limited to 20 units",
-      claimed: true
+      note: "Limited to 20 units"
     },
     description: "Embark on a Spanish pilgrimage journey, follow the thousand-year-old footsteps of faith, and begin an extraordinary journey that touches the soul. Walking along the ancient Camino de Santiago, beneath your feet are stone-paved roads polished by years, each step seems like a dialogue with history. Pass through quiet and quaint towns, where mottled stone walls tell stories of the past; cross vast and boundless fields, where golden waves of wheat undulate in the wind, like a hymn played by nature. Along the way, walk shoulder to shoulder with pilgrims from all over the world, sharing beliefs and insights with each other. When arriving at the Santiago de Compostela Cathedral, in the solemn and dignified atmosphere, listening to the melodious bell, the fatigue and confusion in the heart instantly dissipate, replaced by unprecedented tranquility and satisfaction. In this pilgrimage journey, not only is there a spiritual baptism, but also the opportunity to appreciate Spain's beautiful scenery and unique culture. Taste authentic cuisine, experience passionate folk customs, and immerse body and soul in this charming land. This is a journey to explore faith and find oneself, and more, it is an experience of deep integration with nature and history. Join us, step onto the Spanish pilgrimage road, and meet a better self.",
     equity: {
@@ -619,8 +614,7 @@ const activities = [
     status: {
       remaining: 2000,
       total: 5000,
-      note: "Limited to 5000 units",
-      claimed: true
+      note: "Limited to 5000 units"
     },
     description: "Join Starbucks Odyssey and begin your coffee exploration journey! As a pioneer of Starbucks' digital membership program, Odyssey NFT brings you an unprecedented membership experience. Each NFT represents a unique coffee culture imprint, allowing you to collect precious digital art while tasting the mellow flavor. Holding Odyssey NFT, you will enjoy: - Limited store exclusive offers - New product tasting privileges - Coffee master courses - Limited edition merchandise priority purchase - Premium coffee tasting events This is not just a membership identity, but a coffee journey full of mellow memories.",
     equity: {
@@ -674,8 +668,7 @@ const activities = [
     status: {
       remaining: 5000,
       total: 20000,
-      note: "First release limited to 20000 units",
-      claimed: true
+      note: "First release limited to 20000 units"
     },
     description: "Nike CryptoKicks, a revolutionary digital sneaker NFT series has now arrived! This is not just a virtual sneaker, but a key to the future sports lifestyle. Each CryptoKicks NFT is a unique piece of art, combining Nike's iconic design elements and cutting-edge digital technology. Exclusive benefits for holders: - Limited physical sneaker redemption rights - Priority purchase for Nike new products - Exclusive designer customization service - Metaverse fashion display space - Limited edition digital collectibles",
     equity: {
@@ -729,8 +722,7 @@ const activities = [
     status: {
       remaining: 500,
       total: 2363,
-      note: "Globally limited to 2363 units",
-      claimed: true
+      note: "Globally limited to 2363 units"
     },
     description: "Porsche launches its first 911 series NFT, perfectly combining the elegance of the legendary sports car with digital art. Each NFT is a unique digital artwork, created by Porsche designers, showcasing the classic style of the 911 from different eras. Holders not only own precious digital collectibles but can also enjoy exclusive experiences provided by Porsche. Exclusive benefits for holders: - Porsche Experience Center VIP pass - Limited edition 911 model - Exclusive new car launch event invitation - Porsche Sport Driving Course discount - Exclusive display position in metaverse showroom",
     equity: {
@@ -784,8 +776,7 @@ const activities = [
     status: {
       remaining: 20000,
       total: 50000,
-      note: "Limited to 50000 units",
-      claimed: true
+      note: "Limited to 50000 units"
     },
     description: "FIFA World Cup launches its first official digital collection NFT, allowing fans to own eternal World Cup memories. Each NFT records classic moments of the World Cup, from amazing goals to touching celebrations, from star performances to team cooperation, these precious moments will be permanently preserved on the blockchain. Exclusive benefits for holders: - World Cup match ticket priority purchase rights - Exclusive match highlights and behind-the-scenes videos - Star meet-and-greet lottery qualification - Limited edition merchandise - Digital collectible trading platform privileges",
     equity: {
@@ -839,8 +830,7 @@ const activities = [
     status: {
       remaining: 100000,
       total: 250000,
-      note: "Limited to 250000 units",
-      claimed: true
+      note: "Limited to 250000 units"
     },
     description: "Super Bowl LVIII official digital ticket NFT, bringing fans an unprecedented viewing experience. Each NFT ticket is not only a viewing credential but also a permanent digital collectible. Holders can enjoy a series of unique benefits, making your Super Bowl night more memorable. Exclusive benefits for holders: - Priority entry for pre-game star performances - Exclusive venue tour opportunity - Limited edition merchandise - Digital collectible exclusive space - Priority purchase for next year's Super Bowl tickets",
     equity: {
@@ -894,8 +884,7 @@ const activities = [
     status: {
       remaining: 10000,
       total: 30000,
-      note: "Limited to 30000 units",
-      claimed: true
+      note: "Limited to 30000 units"
     },
     description: "Adidas' first metaverse series NFT, opening a new era of digital fashion. Into the Metaverse NFT is not just a digital collectible, but also a key to Adidas' metaverse world. Holders can display unique digital equipment in the virtual world and enjoy exclusive benefits in the physical world. Exclusive benefits for holders: - Limited physical apparel redemption rights - VIP invitation to new product launches - Metaverse limited equipment - Digital fashion customization service - Priority purchase at offline pop-up stores",
     equity: {
@@ -949,8 +938,7 @@ const activities = [
     status: {
       remaining: 5000,
       total: 13615,
-      note: "Limited to 13615 units",
-      claimed: true
+      note: "Limited to 13615 units"
     },
     description: "Coca-Cola launches its first Friendship Day limited NFT, allowing memories of happiness and friendship to be permanently stored on the blockchain. Each NFT is a unique digital artwork, combining Coca-Cola's iconic design elements and modern art style. Holders not only own precious digital collectibles but can also enjoy exclusive brand experiences. Exclusive benefits for holders: - Limited edition Coca-Cola physical merchandise - Priority participation rights for brand activities - Priority experience for limited edition drinks - Metaverse exclusive outfit - VIP visit to brand story museum",
     equity: {
@@ -1004,8 +992,7 @@ const activities = [
     status: {
       remaining: 100,
       total: 500,
-      note: "Limited to 500 units",
-      claimed: true
+      note: "Limited to 500 units"
     },
     description: "Louis Vuitton VIA digital treasure chest NFT, opening a new era of luxury digital art. Each NFT is a unique digital artwork, carefully crafted by LV designers. Holders can display exclusive treasure chests in the virtual world and enjoy noble benefits in the physical world. Exclusive benefits for holders: - Limited edition LV physical product redemption rights - VIP invitation to new product launches - Private customization service - Priority visit to brand exhibitions - Exclusive display space in the metaverse",
     equity: {
@@ -1059,8 +1046,7 @@ const activities = [
     status: {
       remaining: 200,
       total: 1000,
-      note: "Limited to 1000 units",
-      claimed: true
+      note: "Limited to 1000 units"
     },
     description: "Gucci Grail digital fashion NFT, leading metaverse fashion trends. Each NFT is a unique digital fashion artwork, created by Gucci's design team. Holders can display exclusive fashion in the virtual world and enjoy luxury experiences in the physical world. Exclusive benefits for holders: - Limited edition Gucci physical products - VIP invitation to fashion shows - Digital fashion customization service - Priority visit to brand exhibitions - Metaverse fashion display",
     equity: {
@@ -1114,8 +1100,7 @@ const activities = [
     status: {
       remaining: 300,
       total: 1000,
-      note: "Limited to 1000 units",
-      claimed: true
+      note: "Limited to 1000 units"
     },
     description: "Mercedes NXT digital art NFT, combining automotive craftsmanship and digital art. Each NFT is a unique digital artwork, carefully created by artist Harm van den Dorpel. Holders not only own precious digital artwork but can also enjoy exclusive Mercedes brand experiences. Exclusive benefits for holders: - VIP invitation to new car launches - Brand experience center visit - Limited edition merchandise - Digital art display space - Priority rights for driving experience activities",
     equity: {
@@ -1169,8 +1154,7 @@ const activities = [
     status: {
       remaining: 500,
       total: 1893,
-      note: "Limited to 1893 units",
-      claimed: true
+      note: "Limited to 1893 units"
     },
     description: "Pepsi launches Mic Drop music-themed NFT, paying tribute to the brand's establishment in 1893. Each NFT is a unique digital microphone artwork, combining music culture and Pepsi's brand spirit. Holders can enjoy exclusive music experiences and brand benefits. Exclusive benefits for holders: - Limited edition Pepsi merchandise - VIP tickets to music festivals - Artist meet-and-greet opportunities - Priority experience for limited drinks - Priority participation in brand activities",
     equity: {
@@ -1224,8 +1208,7 @@ const activities = [
     status: {
       remaining: 2,
       total: 10,
-      note: "Ultra-rare limited to 10 units",
-      claimed: true
+      note: "Ultra-rare limited to 10 units"
     },
     description: "McDonald's launches its first ultra-rare McRib NFT, commemorating the return of the classic food. Each NFT is a unique digital artwork, perfectly presenting the iconic shape of McRib. Holders can enjoy exclusive food experiences and brand benefits. Exclusive benefits for holders: - One year free McRib supply - Priority tasting of McDonald's new products - VIP membership card - Limited edition merchandise package - Special guest at brand activities",
     equity: {
@@ -1279,8 +1262,7 @@ const activities = [
     status: {
       remaining: 3000,
       total: 10000,
-      note: "Limited to 10000 units",
-      claimed: true
+      note: "Limited to 10000 units"
     },
     description: "BMW launches its first Web3 membership NFT, opening a new era of digital owner services. Each NFT is a unique digital membership credential, providing exclusive services and benefits for owners. Holders can enjoy a comprehensive brand experience. Exclusive benefits for holders: - VIP invitation to new car launches - Exclusive customization service discount - Track experience activity quota - Reservation rights for limited edition models - Digital owner club privileges",
     equity: {
@@ -1334,8 +1316,7 @@ const activities = [
     status: {
       remaining: 1000,
       total: 5000,
-      note: "Limited to 5000 units",
-      claimed: true
+      note: "Limited to 5000 units"
     },
     description: "Rolex launches innovative digital certification NFT, providing blockchain anti-counterfeiting proof for luxury watches. Each NFT is a unique digital certificate, recording complete information and history of the watch. Holders can enjoy exclusive brand services. Exclusive benefits for holders: - Watch authenticity certification service - Priority appointment for maintenance and repair - Invitation to new product launches - VIP showroom visit - Reservation rights for limited editions",
     equity: {
@@ -1390,7 +1371,6 @@ function formatActivityData(activity) {
     remaining: activity.status.remaining,
     total: activity.status.total,
     statusNote: activity.status.note,
-    claimed: activity.status.claimed || false,
     
     // 权益与福利
     equityTitle: activity.equity.title,
