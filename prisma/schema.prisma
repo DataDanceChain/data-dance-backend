@@ -21,6 +21,10 @@ model User {
   name           String?
   avatar         String?
   
+  // 区块链相关字段
+  walletAddress  String?            @unique  // 用户的区块链钱包地址
+  chainId        Int?               // 链 ID，例如以太坊主网是 1，Polygon 是 137
+  
   // 组织相关字段
   isOrganization Boolean            @default(false)
   description    String?            // 组织描述

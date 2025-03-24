@@ -76,6 +76,39 @@ POST /auth/login
 }
 ```
 
+### 通过钱包地址注册/登录
+
+```
+POST /api/auth/register-with-wallet
+```
+
+**请求体**:
+```json
+{
+  "walletAddress": "0x1234567890abcdef1234567890abcdef12345678",
+  "chainId": 1,
+  "signature": "0x...", // 钱包签名
+  "message": "Sign this message to verify your wallet ownership" // 签名的消息
+}
+```
+
+**响应** (200 OK 或 201 Created):
+```json
+{
+  "status": "success",
+  "data": {
+    "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+    "user": {
+      "id": "user-uuid",
+      "email": "0x1234567890abcdef1234567890abcdef12345678@wallet.user",
+      "name": "User_123456",
+      "walletAddress": "0x1234567890abcdef1234567890abcdef12345678",
+      "chainId": 1
+    }
+  }
+}
+```
+
 ## 用户 API
 
 ### 获取当前用户信息
@@ -165,6 +198,42 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
         "createdAt": "2023-06-01T12:00:00.000Z"
       }
     ]
+  }
+}
+```
+
+### 更新用户钱包地址
+
+```
+PUT /api/users/wallet
+```
+
+**请求头**:
+```
+Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+```
+
+**请求体**:
+```json
+{
+  "walletAddress": "0x1234567890abcdef1234567890abcdef12345678",
+  "chainId": 1
+}
+```
+
+**响应** (200 OK):
+```json
+{
+  "status": "success",
+  "message": "钱包地址已更新",
+  "data": {
+    "user": {
+      "id": "user-uuid",
+      "email": "user@example.com",
+      "name": "User Name",
+      "walletAddress": "0x1234567890abcdef1234567890abcdef12345678",
+      "chainId": 1
+    }
   }
 }
 ```

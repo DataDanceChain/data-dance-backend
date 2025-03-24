@@ -14,8 +14,7 @@ exports.getMe = async (req, res) => {
     const user = await prisma.user.findUnique({
       where: { id: req.user.id },
       include: {
-        profile: true,
-        points: true
+        profile: true
       }
     });
 
@@ -26,17 +25,16 @@ exports.getMe = async (req, res) => {
       });
     }
 
-    // 计算用户总积分
-    const totalPoints = user.points.reduce((sum, point) => sum + point.amount, 0);
-
     // 格式化返回数据
     const userData = {
       id: user.id,
       email: user.email,
       name: user.name,
       avatar: user.avatar,
+      walletAddress: user.walletAddress,
+      chainId: user.chainId,
       isOrganization: user.isOrganization,
-      points: totalPoints // 添加积分总数
+      totalPoints: user.totalPoints
     };
 
     res.status(200).json({
@@ -190,6 +188,69 @@ exports.getUserPoints = async (req, res) => {
     res.status(500).json({
       status: 'error',
       message: '获取用户积分失败',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+};
+
+/**
+ * 更新用户钱包地址
+ * @route PUT /api/users/wallet
+ * @access Private
+ */
+exports.updateWalletAddress = async (req, res) => {
+  try {
+    const { walletAddress, chainId } = req.body;
+
+    // 验证钱包地址格式（以太坊地址示例）
+    if (walletAddress && !/^0x[a-fA-F0-9]{40}$/.test(walletAddress)) {
+      return res.status(400).json({
+        status: 'fail',
+        message: '无效的钱包地址格式'
+      });
+    }
+
+    // 检查地址是否已被其他用户使用
+    if (walletAddress) {
+      const existingUser = await prisma.user.findFirst({
+        where: {
+          walletAddress,
+          id: { not: req.user.id }
+        }
+      });
+
+      if (existingUser) {
+        return res.status(400).json({
+          status: 'fail',
+          message: '该钱包地址已被其他用户绑定'
+        });
+      }
+    }
+
+    // 更新用户钱包地址
+    const updatedUser = await prisma.user.update({
+      where: { id: req.user.id },
+      data: {
+        walletAddress,
+        chainId: chainId || null
+      }
+    });
+
+    // 移除敏感信息
+    const { password, ...userWithoutPassword } = updatedUser;
+
+    res.status(200).json({
+      status: 'success',
+      message: '钱包地址已更新',
+      data: {
+        user: userWithoutPassword
+      }
+    });
+  } catch (error) {
+    console.error('Error updating wallet address:', error);
+    res.status(500).json({
+      status: 'error',
+      message: '服务器错误',
       error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
