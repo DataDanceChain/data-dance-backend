@@ -1,5 +1,5 @@
 const express = require('express');
-const { getMe, updateMe, updateLanguage, updatePassword, getUserPoints, updateWalletAddress } = require('../controllers/userController');
+const { getMe, updateMe, updateLanguage, updatePassword, getUserPoints, updateWalletAddress, generateWallet, importWallet } = require('../controllers/userController');
 const { protect } = require('../middlewares/authMiddleware');
 const router = express.Router();
 
@@ -23,5 +23,11 @@ router.put('/wallet', updateWalletAddress);
 
 // 获取用户积分
 router.get('/points', getUserPoints);
+
+// 生成钱包
+router.post('/wallet/generate', generateWallet);
+
+// 导入钱包
+router.post('/wallet/import', importWallet);
 
 module.exports = router; 

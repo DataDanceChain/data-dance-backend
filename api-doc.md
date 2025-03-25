@@ -238,6 +238,69 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 }
 ```
 
+### 生成钱包
+
+```
+POST /api/users/wallet/generate
+```
+
+**请求头**:
+```
+Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+```
+
+**响应** (200 OK):
+```json
+{
+  "status": "success",
+  "message": "钱包已生成",
+  "data": {
+    "user": {
+      "id": "user-uuid",
+      "email": "user@example.com",
+      "name": "User Name",
+      "walletAddress": "0x1234567890abcdef1234567890abcdef12345678",
+      "chainId": 1
+    }
+  }
+}
+```
+
+### 导入钱包私钥
+
+```
+POST /api/users/wallet/import
+```
+
+**请求头**:
+```
+Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+```
+
+**请求体**:
+```json
+{
+  "privateKey": "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+}
+```
+
+**响应** (200 OK):
+```json
+{
+  "status": "success",
+  "message": "钱包已导入",
+  "data": {
+    "user": {
+      "id": "user-uuid",
+      "email": "user@example.com",
+      "name": "User Name",
+      "walletAddress": "0x1234567890abcdef1234567890abcdef12345678",
+      "chainId": 1
+    }
+  }
+}
+```
+
 ## 活动 API
 
 ### 获取活动列表

@@ -254,4 +254,113 @@ exports.updateWalletAddress = async (req, res) => {
       error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
+};
+
+/**
+ * 生成钱包
+ * @route POST /api/users/wallet/generate
+ * @access Private
+ */
+exports.generateWallet = async (req, res) => {
+  try {
+    // 这里可以使用 ethers.js 或 web3.js 生成钱包
+    // 为了简化示例，我们只生成一个模拟的钱包地址和私钥
+    const walletAddress = `0x${Array(40).fill(0).map(() => Math.floor(Math.random() * 16).toString(16)).join('')}`;
+    const privateKey = `0x${Array(64).fill(0).map(() => Math.floor(Math.random() * 16).toString(16)).join('')}`;
+    const chainId = 1; // 以太坊主网
+
+    // 更新用户钱包信息
+    const updatedUser = await prisma.user.update({
+      where: { id: req.user.id },
+      data: {
+        walletAddress,
+        privateKey,
+        chainId
+      }
+    });
+
+    // 移除敏感信息
+    const { password, privateKey: pk, ...userWithoutSensitive } = updatedUser;
+
+    res.status(200).json({
+      status: 'success',
+      message: '钱包已生成',
+      data: {
+        user: userWithoutSensitive
+      }
+    });
+  } catch (error) {
+    console.error('Error generating wallet:', error);
+    res.status(500).json({
+      status: 'error',
+      message: '服务器错误',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+};
+
+/**
+ * 导入钱包私钥
+ * @route POST /api/users/wallet/import
+ * @access Private
+ */
+exports.importWallet = async (req, res) => {
+  try {
+    const { privateKey } = req.body;
+
+    if (!privateKey || !privateKey.startsWith('0x') || privateKey.length !== 66) {
+      return res.status(400).json({
+        status: 'fail',
+        message: '无效的私钥格式'
+      });
+    }
+
+    // 这里可以使用 ethers.js 或 web3.js 从私钥导入钱包
+    // 为了简化示例，我们只设置一个模拟的钱包地址
+    const walletAddress = `0x${Array(40).fill(0).map(() => Math.floor(Math.random() * 16).toString(16)).join('')}`;
+    const chainId = 1; // 以太坊主网
+
+    // 检查地址是否已被其他用户使用
+    const existingUser = await prisma.user.findFirst({
+      where: {
+        walletAddress,
+        id: { not: req.user.id }
+      }
+    });
+
+    if (existingUser) {
+      return res.status(400).json({
+        status: 'fail',
+        message: '该钱包地址已被其他用户绑定'
+      });
+    }
+
+    // 更新用户钱包信息
+    const updatedUser = await prisma.user.update({
+      where: { id: req.user.id },
+      data: {
+        walletAddress,
+        privateKey,
+        chainId
+      }
+    });
+
+    // 移除敏感信息
+    const { password, privateKey: pk, ...userWithoutSensitive } = updatedUser;
+
+    res.status(200).json({
+      status: 'success',
+      message: '钱包已导入',
+      data: {
+        user: userWithoutSensitive
+      }
+    });
+  } catch (error) {
+    console.error('Error importing wallet:', error);
+    res.status(500).json({
+      status: 'error',
+      message: '服务器错误',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
 }; 
