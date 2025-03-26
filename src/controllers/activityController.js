@@ -526,7 +526,9 @@ exports.getAllActivities = async (req, res) => {
         id: t.id,
         name: t.name
       })),
-      isClaimed: activity.claims.length > 0
+      isClaimed: activity.claims.length > 0,
+      createdAt: activity.createdAt,
+      updatedAt: activity.updatedAt
     }));
 
     res.status(200).json({
