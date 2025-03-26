@@ -1355,53 +1355,30 @@ const activities = [
 ];
 
 /**
- * 格式化活动数据以匹配数据库模型
+ * 格式化活动数据
  */
-function formatActivityData(activity) {
-  return {
-    id: activity.id,
-    title: activity.title,
-    description: activity.description,
-    image: activity.coverImage,
-    startDate: new Date(activity.basicInfo.duration.start),
-    endDate: new Date(activity.basicInfo.duration.end),
-    
-    // 活动类型和状态
-    type: activity.basicInfo.type,
-    remaining: activity.status.remaining,
-    total: activity.status.total,
-    statusNote: activity.status.note,
-    
-    // 权益与福利
-    equityTitle: activity.equity.title,
-    equityDetails: activity.equity.details,
-    
-    // 外部链接
-    externalLinksTitle: activity.externalLinks.title,
-    externalLinks: activity.externalLinks.links,
-    
-    // NFT 相关信息
-    nftName: activity.nft.name,
-    nftDescription: activity.nft.description,
-    nftImage: activity.nft.image,
-    nftTotalSupply: activity.nft.totalSupply,
-    nftPrice: activity.nft.price,
-    nftValidityStart: new Date(activity.nft.validityPeriod.from),
-    nftValidityEnd: new Date(activity.nft.validityPeriod.to),
-    nftUsageRules: activity.nft.usageRules,
-    
-    showInExplore: activity.showInExplore,
-    
-    // 其他可选字段
-    budget: 0,
-    bidStrategy: {
-      strategy: "FIXED",
-      details: {
-        price: activity.nft.price
-      }
-    },
-    shareLink: null
-  };
+function formatActivityData(data) {
+  // 确保 externalLinks 是 JSON 字符串
+  if (data.externalLinks && typeof data.externalLinks !== 'string') {
+    data.externalLinks = JSON.stringify(data.externalLinks);
+  }
+  
+  // 确保 bidStrategy 是 JSON 字符串
+  if (data.bidStrategy && typeof data.bidStrategy !== 'string') {
+    data.bidStrategy = JSON.stringify(data.bidStrategy);
+  }
+  
+  // 处理区块链相关字段
+  if (data.nft && data.nft.contractAddress) {
+    data.contractAddress = data.nft.contractAddress;
+    data.chainId = data.nft.chainId || 1; // 默认使用以太坊主网
+    data.tokenStandard = data.nft.tokenStandard || 'ERC721'; // 默认使用 ERC721 标准
+  }
+  
+  // 移除 claimed 字段和其他不需要的字段
+  const { claimed, ...formattedData } = data;
+  
+  return formattedData;
 }
 
 /**

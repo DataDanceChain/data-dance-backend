@@ -1,4 +1,5 @@
 const { PrismaClient } = require('@prisma/client');
+const crypto = require('crypto');
 
 const prisma = new PrismaClient();
 
@@ -211,103 +212,98 @@ exports.getActivity = async (req, res) => {
 exports.claimActivity = async (req, res) => {
   try {
     const { id } = req.params;
-    
+    const userId = req.user.id;
+
     // 检查活动是否存在
     const activity = await prisma.activity.findUnique({
       where: { id }
     });
-    
+
     if (!activity) {
       return res.status(404).json({
         status: 'fail',
         message: '活动不存在'
       });
     }
-    
-    // 检查用户是否已领取
+
+    // 检查活动是否已结束
+    if (activity.endDate && new Date(activity.endDate) < new Date()) {
+      return res.status(400).json({
+        status: 'fail',
+        message: '活动已结束'
+      });
+    }
+
+    // 检查活动是否有剩余数量
+    if (activity.remaining !== null && activity.remaining <= 0) {
+      return res.status(400).json({
+        status: 'fail',
+        message: '活动已无剩余数量'
+      });
+    }
+
+    // 检查用户是否已领取过此活动
     const existingClaim = await prisma.activityClaim.findUnique({
       where: {
         userId_activityId: {
-          userId: req.user.id,
+          userId,
           activityId: id
         }
       }
     });
-    
+
     if (existingClaim) {
       return res.status(400).json({
         status: 'fail',
-        message: '您已领取此活动'
+        message: '您已领取过此活动'
       });
     }
-    
-    // 创建领取记录
-    const claim = await prisma.activityClaim.create({
-      data: {
-        user: {
-          connect: { id: req.user.id }
-        },
-        activity: {
-          connect: { id }
-        },
-        status: 'CLAIMED',
-        claimedAt: new Date()
-      }
-    });
-    
-    // 更新活动剩余名额
-    if (activity.remaining !== null) {
-      await prisma.activity.update({
-        where: { id },
+
+    // 开始事务
+    const result = await prisma.$transaction(async (prisma) => {
+      // 创建领取记录
+      const claim = await prisma.activityClaim.create({
         data: {
-          remaining: {
-            decrement: 1
+          user: { connect: { id: userId } },
+          activity: { connect: { id } },
+          status: 'CLAIMED'
+        }
+      });
+
+      // 更新活动剩余数量
+      if (activity.remaining !== null) {
+        await prisma.activity.update({
+          where: { id },
+          data: {
+            remaining: activity.remaining - 1
           }
-        }
-      });
-    }
-    
-    // 记录积分奖励（如果有）
-    if (activity.pointReward) {
-      await prisma.assetTransaction.create({
-        data: {
-          user: {
-            connect: { id: req.user.id }
-          },
-          type: 'POINT_EARNED',
-          amount: activity.pointReward,
-          description: `领取活动 "${activity.title}" 的奖励`
-        }
-      });
+        });
+      }
+
+      // 生成 DataDanceID
+      const identifier = generateIdentifier(userId, id);
       
-      // 更新用户积分
-      await prisma.user.update({
-        where: { id: req.user.id },
+      const dataDanceID = await prisma.dataDanceID.create({
         data: {
-          totalPoints: {
-            increment: activity.pointReward
+          identifier,
+          user: { connect: { id: userId } },
+          activity: { connect: { id } },
+          metadata: {
+            createdAt: new Date().toISOString(),
+            activityTitle: activity.title
           }
         }
       });
-    }
-    
-    // 创建通知
-    await prisma.notification.create({
-      data: {
-        user: {
-          connect: { id: req.user.id }
-        },
-        type: 'ACTIVITY',
-        title: '活动领取成功',
-        content: `您已成功领取活动 "${activity.title}"`,
-        isRead: false
-      }
+
+      return { claim, dataDanceID };
     });
-    
+
     res.status(200).json({
       status: 'success',
+      message: '活动领取成功',
       data: {
-        claim
+        claim: result.claim,
+        dataDanceID: result.dataDanceID
       }
     });
   } catch (error) {
@@ -315,7 +311,7 @@ exports.claimActivity = async (req, res) => {
     res.status(500).json({
       status: 'error',
       message: '服务器错误',
-      error: error.message
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
 };
@@ -873,4 +869,158 @@ exports.getUserClaimedActivities = async (req, res) => {
       error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
-}; 
+};
+
+/**
+ * 更新活动合约信息
+ * @route PATCH /api/activities/:id/contract
+ * @access Private
+ */
+exports.updateActivityContract = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { contractAddress, chainId, tokenStandard } = req.body;
+
+    // 验证合约地址格式（以太坊地址示例）
+    if (contractAddress && !/^0x[a-fA-F0-9]{40}$/.test(contractAddress)) {
+      return res.status(400).json({
+        status: 'fail',
+        message: '无效的合约地址格式'
+      });
+    }
+
+    // 检查活动是否存在
+    const activity = await prisma.activity.findUnique({
+      where: { id }
+    });
+
+    if (!activity) {
+      return res.status(404).json({
+        status: 'fail',
+        message: '活动不存在'
+      });
+    }
+
+    // 检查用户是否有权限更新此活动
+    if (activity.creatorId !== req.user.id) {
+      return res.status(403).json({
+        status: 'fail',
+        message: '您没有权限更新此活动'
+      });
+    }
+
+    // 更新活动合约信息
+    const updatedActivity = await prisma.activity.update({
+      where: { id },
+      data: {
+        contractAddress,
+        chainId,
+        tokenStandard
+      }
+    });
+
+    res.status(200).json({
+      status: 'success',
+      message: '活动合约信息已更新',
+      data: {
+        activity: updatedActivity
+      }
+    });
+  } catch (error) {
+    console.error('Error updating activity contract:', error);
+    res.status(500).json({
+      status: 'error',
+      message: '服务器错误',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+};
+
+/**
+ * 部署活动合约
+ * @route POST /api/activities/:id/deploy-contract
+ * @access Private
+ */
+exports.deployActivityContract = async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    // 检查活动是否存在
+    const activity = await prisma.activity.findUnique({
+      where: { id }
+    });
+
+    if (!activity) {
+      return res.status(404).json({
+        status: 'fail',
+        message: '活动不存在'
+      });
+    }
+
+    // 检查用户是否有权限更新此活动
+    if (activity.creatorId !== req.user.id) {
+      return res.status(403).json({
+        status: 'fail',
+        message: '您没有权限为此活动部署合约'
+      });
+    }
+
+    // 检查用户是否有钱包
+    const user = await prisma.user.findUnique({
+      where: { id: req.user.id }
+    });
+
+    if (!user.walletAddress || !user.privateKey) {
+      return res.status(400).json({
+        status: 'fail',
+        message: '您需要先设置钱包才能部署合约'
+      });
+    }
+
+    // 这里应该有实际的合约部署逻辑
+    // 为了示例，我们只是生成一个模拟的合约地址
+    const contractAddress = `0x${Array(40).fill(0).map(() => Math.floor(Math.random() * 16).toString(16)).join('')}`;
+    const chainId = 1; // 以太坊主网
+    const tokenStandard = 'ERC721'; // 默认使用 ERC721 标准
+
+    // 更新活动合约信息
+    const updatedActivity = await prisma.activity.update({
+      where: { id },
+      data: {
+        contractAddress,
+        chainId,
+        tokenStandard
+      }
+    });
+
+    res.status(200).json({
+      status: 'success',
+      message: '活动合约已部署',
+      data: {
+        activity: updatedActivity
+      }
+    });
+  } catch (error) {
+    console.error('Error deploying activity contract:', error);
+    res.status(500).json({
+      status: 'error',
+      message: '服务器错误',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+};
+
+/**
+ * 生成唯一的 DataDanceID 标识符
+ * @param {string} userId 用户ID
+ * @param {string} activityId 活动ID
+ * @returns {string} 生成的标识符
+ */
+function generateIdentifier(userId, activityId) {
+  // 使用用户ID、活动ID和时间戳生成唯一标识符
+  const baseString = `${userId}-${activityId}-${Date.now()}`;
+  const hash = crypto.createHash('sha256').update(baseString).digest('hex');
+  
+  // 返回前12位，格式为 DDID-XXXX-XXXX
+  return `DDID-${hash.substring(0, 4)}-${hash.substring(4, 8)}`;
+} 

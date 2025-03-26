@@ -606,6 +606,71 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 }
 ```
 
+### 更新活动合约信息
+
+```
+PATCH /api/activities/:id/contract
+```
+
+**请求头**:
+```
+Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+```
+
+**请求体**:
+```json
+{
+  "contractAddress": "0x1234567890abcdef1234567890abcdef12345678",
+  "chainId": 1,
+  "tokenStandard": "ERC721"
+}
+```
+
+**响应** (200 OK):
+```json
+{
+  "status": "success",
+  "message": "活动合约信息已更新",
+  "data": {
+    "activity": {
+      "id": "activity-uuid",
+      "title": "活动标题",
+      "contractAddress": "0x1234567890abcdef1234567890abcdef12345678",
+      "chainId": 1,
+      "tokenStandard": "ERC721"
+    }
+  }
+}
+```
+
+### 部署活动合约
+
+```
+POST /api/activities/:id/deploy-contract
+```
+
+**请求头**:
+```
+Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+```
+
+**响应** (200 OK):
+```json
+{
+  "status": "success",
+  "message": "活动合约已部署",
+  "data": {
+    "activity": {
+      "id": "activity-uuid",
+      "title": "活动标题",
+      "contractAddress": "0x1234567890abcdef1234567890abcdef12345678",
+      "chainId": 1,
+      "tokenStandard": "ERC721"
+    }
+  }
+}
+```
+
 ## 资产 API
 
 ### 获取资产总览
