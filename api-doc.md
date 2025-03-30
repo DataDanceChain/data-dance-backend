@@ -196,7 +196,8 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
       "email": "user@example.com",
       "name": "User Name",
       "avatar": "/assets/avatars/default.png",
-      "isOrganization": false
+      "isOrganization": false,
+      "walletAddress": "0x1234567890abcdef1234567890abcdef12345678"
     }
   }
 }
@@ -231,7 +232,8 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
       "email": "user@example.com",
       "name": "Updated Name",
       "avatar": "/assets/avatars/new-avatar.png",
-      "isOrganization": false
+      "isOrganization": false,
+      "walletAddress": "0x1234567890abcdef1234567890abcdef12345678"
     }
   }
 }

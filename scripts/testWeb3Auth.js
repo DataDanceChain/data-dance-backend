@@ -34,6 +34,17 @@ async function testWeb3Auth() {
     });
 
     console.log('用户信息响应:', userInfoResponse.data);
+    
+    // 验证用户信息中包含钱包地址
+    if (!userInfoResponse.data.data.walletAddress) {
+      throw new Error('用户信息中缺少钱包地址');
+    }
+    
+    if (userInfoResponse.data.data.walletAddress !== '0x' + '1'.repeat(40)) {
+      throw new Error('返回的钱包地址不正确');
+    }
+
+    console.log('钱包地址验证通过:', userInfoResponse.data.data.walletAddress);
 
     // 测试更新钱包地址
     console.log('\n3. 测试更新钱包地址');
