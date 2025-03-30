@@ -33,7 +33,9 @@ exports.getMe = async (req, res) => {
       avatar: user.avatar,
       walletAddress: user.walletAddress,
       chainId: user.chainId,
-      isOrganization: user.isOrganization,
+      isOrganization: user.isOrganization || user.userType === 'organization',
+      userType: user.userType,
+      authType: user.authType,
       totalPoints: user.totalPoints
     };
 
@@ -202,6 +204,22 @@ exports.updateWalletAddress = async (req, res) => {
   try {
     const { walletAddress, chainId } = req.body;
 
+    // 检查用户类型
+    if (req.user.userType === 'organization' || req.user.isOrganization) {
+      return res.status(403).json({
+        status: 'fail',
+        message: '组织用户不能更新钱包地址'
+      });
+    }
+
+    // 检查用户是否已经有钱包地址
+    if (req.user.walletAddress) {
+      return res.status(403).json({
+        status: 'fail',
+        message: '您已绑定钱包地址，不能再次更改'
+      });
+    }
+
     // 验证钱包地址格式（以太坊地址示例）
     if (walletAddress && !/^0x[a-fA-F0-9]{40}$/.test(walletAddress)) {
       return res.status(400).json({
@@ -232,18 +250,21 @@ exports.updateWalletAddress = async (req, res) => {
       where: { id: req.user.id },
       data: {
         walletAddress,
-        chainId: chainId || null
+        chainId: chainId || 1 // 默认以太坊主网
       }
     });
 
     // 移除敏感信息
-    const { password, ...userWithoutPassword } = updatedUser;
+    const { password, privateKey, ...userWithoutSensitive } = updatedUser;
+
+    // 记录钱包绑定日志
+    console.log(`User ${req.user.id} bound wallet address to ${walletAddress}`);
 
     res.status(200).json({
       status: 'success',
-      message: '钱包地址已更新',
+      message: '钱包地址已绑定',
       data: {
-        user: userWithoutPassword
+        user: userWithoutSensitive
       }
     });
   } catch (error) {
@@ -263,8 +284,23 @@ exports.updateWalletAddress = async (req, res) => {
  */
 exports.generateWallet = async (req, res) => {
   try {
-    // 这里可以使用 ethers.js 或 web3.js 生成钱包
-    // 为了简化示例，我们只生成一个模拟的钱包地址和私钥
+    // 检查用户类型
+    if (req.user.userType === 'organization' || req.user.isOrganization) {
+      return res.status(403).json({
+        status: 'fail',
+        message: '组织用户不能生成钱包'
+      });
+    }
+
+    // 检查用户是否已经有钱包地址
+    if (req.user.walletAddress) {
+      return res.status(403).json({
+        status: 'fail',
+        message: '您已绑定钱包地址，不能再次生成'
+      });
+    }
+
+    // 生成钱包地址和私钥（这里使用模拟数据）
     const walletAddress = `0x${Array(40).fill(0).map(() => Math.floor(Math.random() * 16).toString(16)).join('')}`;
     const privateKey = `0x${Array(64).fill(0).map(() => Math.floor(Math.random() * 16).toString(16)).join('')}`;
     const chainId = 1; // 以太坊主网
@@ -307,6 +343,22 @@ exports.generateWallet = async (req, res) => {
 exports.importWallet = async (req, res) => {
   try {
     const { privateKey } = req.body;
+
+    // 检查用户类型
+    if (req.user.userType === 'organization' || req.user.isOrganization) {
+      return res.status(403).json({
+        status: 'fail',
+        message: '组织用户不能导入钱包'
+      });
+    }
+
+    // 检查用户是否已经有钱包地址
+    if (req.user.walletAddress) {
+      return res.status(403).json({
+        status: 'fail',
+        message: '您已绑定钱包地址，不能再次导入'
+      });
+    }
 
     if (!privateKey || !privateKey.startsWith('0x') || privateKey.length !== 66) {
       return res.status(400).json({

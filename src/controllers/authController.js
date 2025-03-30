@@ -11,7 +11,7 @@ const prisma = new PrismaClient();
  */
 exports.register = async (req, res) => {
   try {
-    const { email, password, name } = req.body;
+    const { email, password, name, isOrganization } = req.body;
 
     // 检查用户是否已存在
     const userExists = await prisma.user.findUnique({
@@ -35,6 +35,9 @@ exports.register = async (req, res) => {
         email,
         password: hashedPassword,
         name,
+        isOrganization: isOrganization || false,
+        userType: isOrganization ? 'organization' : 'regular',
+        authType: 'traditional',
         profile: {
           create: {
             language: 'zh'
@@ -49,20 +52,21 @@ exports.register = async (req, res) => {
     // 生成 token
     const token = generateToken(user.id);
 
+    // 移除敏感信息
+    const { password: pwd, privateKey, ...userWithoutSensitive } = user;
+
     res.status(201).json({
       status: 'success',
       data: {
-        id: user.id,
-        email: user.email,
-        name: user.name,
-        token
+        token,
+        user: userWithoutSensitive
       }
     });
   } catch (error) {
     res.status(500).json({
       status: 'error',
       message: '服务器错误',
-      error: error.message
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
 };
@@ -88,7 +92,22 @@ exports.login = async (req, res) => {
       });
     }
 
+    // 检查用户类型 - 只允许组织用户使用传统登录
+    if (user.userType === 'regular' && user.authType === 'web3auth') {
+      return res.status(403).json({
+        status: 'fail',
+        message: '请使用 Web3Auth 登录'
+      });
+    }
+
     // 验证密码
+    if (!user.password) {
+      return res.status(401).json({
+        status: 'fail',
+        message: '邮箱或密码不正确'
+      });
+    }
+
     const isMatch = await bcrypt.compare(password, user.password);
 
     if (!isMatch) {
@@ -101,20 +120,21 @@ exports.login = async (req, res) => {
     // 生成 token
     const token = generateToken(user.id);
 
+    // 移除敏感信息
+    const { password: pwd, privateKey, ...userWithoutSensitive } = user;
+
     res.status(200).json({
       status: 'success',
       data: {
-        id: user.id,
-        email: user.email,
-        name: user.name,
-        token
+        token,
+        user: userWithoutSensitive
       }
     });
   } catch (error) {
     res.status(500).json({
       status: 'error',
       message: '服务器错误',
-      error: error.message
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
 }; 

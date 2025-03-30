@@ -12,7 +12,7 @@ async function createGCCEvent() {
     // 1. 查找或创建 DataDance Official 组织用户
     let orgUser = await prisma.user.findFirst({
       where: { 
-        email: "official@datadance.co",
+        email: "official@datadance.ai",
         isOrganization: true
       }
     });
@@ -24,7 +24,7 @@ async function createGCCEvent() {
       // 创建组织用户
       orgUser = await prisma.user.create({
         data: {
-          email: "official@datadance.co",
+          email: "official@datadance.ai",
           name: "DataDance Official",
           password: hashedPassword,
           isOrganization: true,

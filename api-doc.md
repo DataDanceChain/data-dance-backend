@@ -109,6 +109,70 @@ POST /api/auth/register-with-wallet
 }
 ```
 
+### Web3Auth 登录/注册
+
+```
+POST /api/auth/web3auth-login
+```
+
+**请求体**:
+```json
+{
+  "userInfo": {
+    "email": "user@example.com",
+    "name": "User Name",
+    "profileImage": "https://example.com/profile.jpg",
+    "verifier": "datadance-email-verifier",
+    "verifierId": "user@example.com",
+    "typeOfLogin": "jwt"
+  },
+  "walletAddress": "0x123abc..."
+}
+```
+
+**登录场景**:
+1. 如果提供了钱包地址，系统会尝试通过钱包地址查找用户
+2. 如果提供了邮箱，系统会尝试通过邮箱查找用户
+3. 如果用户不存在且提供了足够信息，系统会创建新用户
+
+**响应** (200 OK - 登录成功):
+```json
+{
+  "status": "success",
+  "data": {
+    "token": "jwt_token_here",
+    "user": {
+      "id": "user_id",
+      "email": "user@example.com",
+      "name": "User Name",
+      "walletAddress": "0x123abc...",
+      "userType": "regular",
+      "authType": "web3auth",
+      "isOrganization": false
+    }
+  }
+}
+```
+
+**响应** (201 Created - 注册成功):
+```json
+{
+  "status": "success",
+    "data": {
+    "token": "jwt_token_here",
+    "user": {
+      "id": "user_id",
+      "email": "user@example.com",
+      "name": "User Name",
+      "walletAddress": "0x123abc...",
+      "userType": "regular",
+      "authType": "web3auth",
+      "isOrganization": false
+    }
+  }
+}
+```
+
 ## 用户 API
 
 ### 获取当前用户信息
@@ -296,6 +360,41 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
       "name": "User Name",
       "walletAddress": "0x1234567890abcdef1234567890abcdef12345678",
       "chainId": 1
+    }
+  }
+}
+```
+
+### 更新用户钱包地址
+
+```
+POST /api/auth/update-wallet
+```
+
+**请求头**:
+```
+Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+```
+
+**请求体**:
+```json
+{
+  "walletAddress": "0x456def..."
+}
+```
+
+**响应** (200 OK):
+```json
+{
+  "status": "success",
+  "message": "钱包地址已更新",
+  "data": {
+    "user": {
+      "id": "user_id",
+      "email": "user@example.com",
+      "walletAddress": "0x456def...",
+      "userType": "regular",
+      "authType": "web3auth"
     }
   }
 }

@@ -10,6 +10,7 @@ const assetRoutes = require('./routes/assetRoutes');
 const activityRoutes = require('./routes/activityRoutes');
 const notificationRoutes = require('./routes/notificationRoutes');
 const dataDanceIdRoutes = require('./routes/dataDanceIdRoutes');
+const web3AuthRoutes = require('./routes/web3AuthRoutes');
 
 const app = express();
 
@@ -25,6 +26,7 @@ app.use('/api/assets', assetRoutes);
 app.use('/api/activities', activityRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/data-dance-ids', dataDanceIdRoutes);
+app.use('/api/auth', web3AuthRoutes);
 
 // 错误处理中间件
 app.use(errorHandler);

@@ -17,7 +17,7 @@ datasource db {
 model User {
   id             String             @id @default(uuid())
   email          String             @unique
-  password       String
+  password       String?            // 现在密码可以为空，因为Web3Auth用户不需要密码
   name           String?
   avatar         String?
   
@@ -25,6 +25,10 @@ model User {
   walletAddress  String?            @unique  // 用户的区块链钱包地址
   chainId        Int?               // 链 ID，例如以太坊主网是 1，Polygon 是 137
   privateKey     String?            // 钱包私钥，用于后端托管钱包
+  
+  // 认证和用户类型
+  authType       String             @default("traditional") // "web3auth" 或 "traditional"
+  userType       String             @default("regular")     // "regular" 或 "organization"
   
   // 组织相关字段
   isOrganization Boolean            @default(false)
