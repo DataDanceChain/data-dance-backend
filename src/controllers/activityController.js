@@ -97,7 +97,8 @@ exports.getActivities = async (req, res) => {
         id: t.id,
         name: t.name
       })),
-      isClaimed: activity.claims.length > 0
+      isClaimed: activity.claims.length > 0,
+      showInExplore: activity.showInExplore,
     }));
 
     res.status(200).json({
@@ -188,7 +189,8 @@ exports.getActivity = async (req, res) => {
         name: t.name
       })),
       isClaimed: activity.claims.length > 0,
-      shareLink: activity.shareLink
+      shareLink: activity.shareLink,
+      showInExplore: activity.showInExplore
     };
 
     res.status(200).json({
@@ -398,7 +400,8 @@ exports.getRecommendedActivities = async (req, res) => {
         id: t.id,
         name: t.name
       })),
-      isClaimed: activity.claims.length > 0 // 只保留 isClaimed 字段
+      isClaimed: activity.claims.length > 0,
+      showInExplore: activity.showInExplore
     }));
     
     res.status(200).json({
@@ -447,7 +450,9 @@ exports.getAllActivities = async (req, res) => {
     const skip = (page - 1) * limit;
 
     // 构建查询条件
-    const where = {};
+    const where = {
+      showInExplore: true  // 添加这个条件，只获取 showInExplore 为 true 的活动
+    };
     
     // 如果有分类筛选
     if (category) {
@@ -486,7 +491,7 @@ exports.getAllActivities = async (req, res) => {
       }
     });
 
-    // 获取总数
+    // 获取总数 - 只计算 showInExplore 为 true 的活动
     const total = await prisma.activity.count({ where });
 
     // 处理返回数据，添加是否已领取标志
@@ -528,7 +533,8 @@ exports.getAllActivities = async (req, res) => {
       })),
       isClaimed: activity.claims.length > 0,
       createdAt: activity.createdAt,
-      updatedAt: activity.updatedAt
+      updatedAt: activity.updatedAt,
+      showInExplore: activity.showInExplore,
     }));
 
     res.status(200).json({
@@ -619,7 +625,8 @@ exports.getActivityById = async (req, res) => {
         name: t.name
       })),
       isClaimed: activity.claims.length > 0,
-      shareLink: activity.shareLink
+      shareLink: activity.shareLink,
+      showInExplore: activity.showInExplore,
     };
 
     res.status(200).json({
@@ -690,7 +697,8 @@ exports.getFeaturedActivities = async (req, res) => {
         logo: activity.creator.avatar,
         isOrganization: activity.creator.isOrganization
       },
-      isClaimed: activity.claims.length > 0
+      isClaimed: activity.claims.length > 0,
+      showInExplore: activity.showInExplore,
     }));
     
     res.status(200).json({
@@ -856,7 +864,8 @@ exports.getUserClaimedActivities = async (req, res) => {
       tags: activity.tags.map(t => ({
         id: t.id,
         name: t.name
-      }))
+      })),
+      showInExplore: activity.showInExplore,
     }));
 
     res.status(200).json({
