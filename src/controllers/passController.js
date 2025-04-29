@@ -257,6 +257,114 @@ exports.generatePass = async (req, res) => {
       }))
     }, null, 2));
 
+    // 获取商家实际的 logo
+    const brandClaim = brandClaims[0];  // 使用第一个 claim 获取商家信息
+    const actualBrandLogo = brandClaim?.activity?.creator?.logo || brandLogo;
+    console.log('使用商家实际 logo:', actualBrandLogo);
+
+    // 生成唯一的 pass ID
+    const passId = uuidv4();
+    console.log('生成 Pass ID:', passId);
+    
+    // 设置过期时间（默认一年后）
+    const expiresAt = new Date();
+    expiresAt.setFullYear(expiresAt.getFullYear() + 1);
+
+    // 创建 pass 目录
+    const modelPath = path.join(__dirname, '../../keys/passes/models/membership.pass');
+    await fs.mkdir(modelPath, { recursive: true });
+
+    // 复制商家 logo 到 pass 目录
+    console.log('开始处理商家 logo...');
+    const defaultLogoPath = path.join(__dirname, '../../public/assets/logos/default-logo.png');
+    let brandLogoPath = path.join(__dirname, '../../public', actualBrandLogo || 'assets/logos/default-logo.png');
+    const iconFiles = ['icon.png', 'icon@2x.png', 'icon@3x.png'];
+    const logoFiles = ['logo.png', 'logo@2x.png', 'logo@3x.png'];
+
+    try {
+      // 验证源logo文件是否存在，如果不存在则使用默认logo
+      try {
+        await fs.access(brandLogoPath);
+        console.log('商家 logo 文件存在:', brandLogoPath);
+      } catch (error) {
+        console.log('商家 logo 文件不存在，尝试使用默认 logo');
+        // 确保默认 logo 目录存在
+        await fs.mkdir(path.dirname(defaultLogoPath), { recursive: true });
+        
+        // 如果默认 logo 不存在，创建一个简单的默认 logo
+        try {
+          await fs.access(defaultLogoPath);
+        } catch (error) {
+          console.log('创建默认 logo');
+          // 创建一个简单的默认 logo（黑色背景的圆形）
+          await sharp({
+            create: {
+              width: 100,
+              height: 100,
+              channels: 4,
+              background: { r: 0, g: 0, b: 0, alpha: 1 }
+            }
+          })
+          .composite([{
+            input: Buffer.from(
+              `<svg width="100" height="100">
+                <circle cx="50" cy="50" r="40" fill="white"/>
+                <text x="50" y="50" font-family="Arial" font-size="20" fill="black" text-anchor="middle" dominant-baseline="middle">
+                  ${brandName.charAt(0)}
+                </text>
+              </svg>`
+            ),
+            top: 0,
+            left: 0
+          }])
+          .toFile(defaultLogoPath);
+        }
+        brandLogoPath = defaultLogoPath;
+      }
+
+      // 生成不同尺寸的 icon 和 logo
+      const sizes = {
+        'icon.png': [29, 29],
+        'icon@2x.png': [58, 58],
+        'icon@3x.png': [87, 87],
+        'logo.png': [30, 30],
+        'logo@2x.png': [60, 60],
+        'logo@3x.png': [90, 90]
+      };
+
+      // 并行处理所有图片尺寸
+      await Promise.all([...iconFiles, ...logoFiles].map(async (filename) => {
+        const [width, height] = sizes[filename];
+        const outputPath = path.join(modelPath, filename);
+        
+        // 创建圆形遮罩
+        const roundedCorners = Buffer.from(
+          `<svg width="${width}" height="${height}">
+            <circle cx="${width/2}" cy="${height/2}" r="${width/2}" fill="white"/>
+          </svg>`
+        );
+
+        // 处理图片：先调整大小，然后应用圆形遮罩
+        await sharp(brandLogoPath)
+          .resize(width, height, {
+            fit: 'cover',
+            position: 'center'
+          })
+          .composite([{
+            input: roundedCorners,
+            blend: 'dest-in'
+          }])
+          .toFile(outputPath);
+        
+        console.log(`生成圆形 ${filename} 完成: ${width}x${height}`);
+      }));
+
+      console.log('所有圆形图标文件生成完成');
+    } catch (error) {
+      console.error('处理商家 logo 时出错:', error);
+      throw new Error('处理商家 logo 失败');
+    }
+
     // 处理NFT数据，添加图片路径
     const nftsWithImages = brandClaims.map(claim => {
       const imageUrl = claim.activity.nftImage || claim.activity.image;
@@ -288,18 +396,6 @@ exports.generatePass = async (req, res) => {
     });
 
     console.log('处理后的NFT数据:', JSON.stringify(nftsWithImages, null, 2));
-
-    // 生成唯一的 pass ID
-    const passId = uuidv4();
-    console.log('生成 Pass ID:', passId);
-    
-    // 设置过期时间（默认一年后）
-    const expiresAt = new Date();
-    expiresAt.setFullYear(expiresAt.getFullYear() + 1);
-
-    // 创建 pass 目录
-    const modelPath = path.join(__dirname, '../../keys/passes/models/membership.pass');
-    await fs.mkdir(modelPath, { recursive: true });
 
     // 如果有NFT数据，生成strip图片
     if (nftsWithImages.length > 0) {

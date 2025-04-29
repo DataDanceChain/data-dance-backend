@@ -138,3 +138,17 @@ bower_components/
 .env.development
 .env.test
 .env.production
+
+# Pass resources
+keys/passes/**/*.pass/icon.png
+keys/passes/**/*.pass/icon@2x.png
+keys/passes/**/*.pass/icon@3x.png
+keys/passes/**/*.pass/logo.png
+keys/passes/**/*.pass/logo@2x.png
+keys/passes/**/*.pass/logo@3x.png
+keys/passes/**/*.pass/strip.png
+keys/passes/**/*.pass/strip@2x.png
+keys/passes/**/*.pass/strip@3x.png
+
+# Generated passes
+public/assets/passes/*.pkpass
