@@ -363,13 +363,6 @@ exports.generatePass = async (req, res) => {
         }
       ],
       storeCard: {
-        primaryFields: [
-          {
-            key: "status",
-            label: "STATUS",
-            value: "MEMBER"
-          }
-        ],
         secondaryFields: [
           {
             key: "name",

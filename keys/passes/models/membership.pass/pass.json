@@ -1,11 +1,11 @@
 {
   "formatVersion": 1,
   "passTypeIdentifier": "pass.ai.datadance.app",
-  "serialNumber": "38a1c4b4-5553-4c51-a81c-b89d3bb70a94",
+  "serialNumber": "aac44385-dd50-4c7c-a597-940ab9cb9429",
   "teamIdentifier": "R2DAZ94F4S",
-  "organizationName": "OFF GRID",
-  "description": "OFF GRID Membership Pass",
-  "logoText": "OFF GRID",
+  "organizationName": "DataDance Official",
+  "description": "DataDance Official Membership Pass",
+  "logoText": "DataDance Official",
   "foregroundColor": "rgb(255, 255, 255)",
   "backgroundColor": "rgb(10, 32, 77)",
   "labelColor": "rgb(200, 200, 200)",
@@ -23,13 +23,6 @@
     }
   ],
   "storeCard": {
-    "primaryFields": [
-      {
-        "key": "status",
-        "label": "STATUS",
-        "value": "MEMBER"
-      }
-    ],
     "secondaryFields": [
       {
         "key": "name",
@@ -51,14 +44,14 @@
       {
         "key": "lastMint",
         "label": "LAST MINT",
-        "value": "4/5/2025"
+        "value": "3/31/2025"
       }
     ],
     "backFields": [
       {
         "key": "brandName",
         "label": "Brand",
-        "value": "OFF GRID"
+        "value": "DataDance Official"
       },
       {
         "key": "walletAddress",
@@ -68,7 +61,7 @@
       {
         "key": "nftList",
         "label": "Your NFTs",
-        "value": "1. OFF GRID x RPC Genesis Co-Creator NFT\nType: Web3, Entertainment, Music\nTags: Fan Co-creation, Music Industry, Artist Development, Community\nMint Date: 4/5/2025\n\n"
+        "value": "1. Culture & Web3 Forum 2025 - Attendance NFT\nType: Web3, Forum, Entertainment\nTags: Hong Kong, Fan Economy, IP, Entertainment\nMint Date: 3/31/2025\n\n"
       },
       {
         "key": "expiry",
