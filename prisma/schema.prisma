@@ -312,3 +312,20 @@ model DataDanceID {
   // 确保用户和活动的组合是唯一的
   @@unique([userId, activityId])
 }
+
+model Pass {
+  id        String   @id @default(uuid())
+  brandId   String
+  brandName String
+  brandLogo String
+  userId    String
+  userName  String
+  userWalletAddress String
+  passUrl   String
+  status    String   @default("active") // active, revoked, expired
+  createdAt DateTime @default(now())
+  expiresAt DateTime
+
+  @@index([userId])
+  @@index([brandId])
+}

@@ -992,6 +992,170 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 }
 ```
 
+### 生成Apple Wallet Pass
+
+```
+POST /assets/passes/generate
+```
+
+**请求头**:
+```
+Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+```
+
+**请求体**:
+```json
+{
+  "brandId": "brand-uuid",
+  "brandName": "Brand Name",
+  "brandLogo": "/assets/logos/brand-logo.png",
+  "userId": "user-uuid",
+  "userName": "User Name",
+  "userWalletAddress": "0x1234567890abcdef1234567890abcdef12345678"
+}
+```
+
+**响应** (200 OK):
+```json
+{
+  "status": "success",
+  "data": {
+    "passUrl": "https://api.datadance.app/assets/passes/1234567890.pkpass",
+    "expiresAt": "2024-12-31T23:59:59.000Z"
+  }
+}
+```
+
+**Pass 显示说明**:
+1. Pass 背景图片（strip）会显示用户在该品牌下拥有的 NFT：
+   - 单个 NFT：完整显示
+   - 两个 NFT：左右平分显示
+   - 三个及以上 NFT：显示最新的三个，平均分配空间
+2. Pass 正面显示：
+   - 品牌名称
+   - 会员状态
+   - 会员姓名
+   - 钱包地址（简略形式）
+   - NFT 总数
+   - 最后铸造日期
+3. Pass 背面显示：
+   - 品牌名称
+   - 完整钱包地址
+   - NFT 列表（包含名称、类型、标签、铸造日期）
+   - 有效期
+
+**错误响应**:
+
+**响应** (400 Bad Request):
+```json
+{
+  "status": "fail",
+  "message": "Invalid request parameters"
+}
+```
+
+**响应** (500 Internal Server Error):
+```json
+{
+  "status": "error",
+  "message": "Failed to generate pass",
+  "error": "Error details (only in development)"
+}
+```
+
+**注意事项**:
+1. Pass 有效期默认为生成日期起一年
+2. NFT 图片会自动调整大小以适应显示区域
+3. 所有图片资源（NFT图片、品牌logo等）必须可以通过提供的URL访问
+
+### 获取用户的所有Pass
+
+```
+GET /assets/passes
+```
+
+**请求头**:
+```
+Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+```
+
+**响应** (200 OK):
+```json
+{
+  "status": "success",
+  "data": {
+    "passes": [
+      {
+        "id": "pass-uuid",
+        "brandId": "brand-uuid",
+        "brandName": "Brand Name",
+        "brandLogo": "/assets/logos/brand-logo.png",
+        "passUrl": "https://api.datadance.app/assets/passes/1234567890.pkpass",
+        "createdAt": "2024-03-20T12:00:00.000Z",
+        "expiresAt": "2024-12-31T23:59:59.000Z"
+      }
+    ]
+  }
+}
+```
+
+### 获取单个Pass详情
+
+```
+GET /assets/passes/{passId}
+```
+
+**请求头**:
+```
+Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+```
+
+**响应** (200 OK):
+```json
+{
+  "status": "success",
+  "data": {
+    "id": "pass-uuid",
+    "brandId": "brand-uuid",
+    "brandName": "Brand Name",
+    "brandLogo": "/assets/logos/brand-logo.png",
+    "passUrl": "https://api.datadance.app/assets/passes/1234567890.pkpass",
+    "createdAt": "2024-03-20T12:00:00.000Z",
+    "expiresAt": "2024-12-31T23:59:59.000Z",
+    "status": "active"
+  }
+}
+```
+
+### 更新Pass状态
+
+```
+PATCH /assets/passes/{passId}/status
+```
+
+**请求头**:
+```
+Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+```
+
+**请求体**:
+```json
+{
+  "status": "revoked" // 可选值: "active", "revoked", "expired"
+}
+```
+
+**响应** (200 OK):
+```json
+{
+  "status": "success",
+  "data": {
+    "id": "pass-uuid",
+    "status": "revoked"
+  }
+}
+```
+
 ## 通知 API
 
 ### 获取通知列表
@@ -1114,5 +1278,3 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 - `403 Forbidden`: 权限不足
 - `404 Not Found`: 资源不存在
 - `500 Internal Server Error`: 服务器内部错误
-
-

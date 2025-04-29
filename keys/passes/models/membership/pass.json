@@ -1,0 +1,52 @@
+{
+  "formatVersion": 1,
+  "passTypeIdentifier": "pass.ai.datadance.app",
+  "serialNumber": "10ba7a83-5022-4991-ad83-230bb64295c3",
+  "teamIdentifier": "R2DAZ94F4S",
+  "organizationName": "OFF GRID",
+  "description": "OFF GRID Membership Pass",
+  "logoText": "OFF GRID",
+  "foregroundColor": "rgb(255, 255, 255)",
+  "backgroundColor": "rgb(60, 60, 60)",
+  "labelColor": "rgb(255, 255, 255)",
+  "storeCard": {
+    "primaryFields": [
+      {
+        "key": "balance",
+        "label": "MEMBERSHIP",
+        "value": "ACTIVE"
+      }
+    ],
+    "secondaryFields": [
+      {
+        "key": "name",
+        "label": "NAME",
+        "value": "Race Li"
+      }
+    ],
+    "auxiliaryFields": [
+      {
+        "key": "wallet",
+        "label": "WALLET",
+        "value": "0x5b23...5430"
+      }
+    ],
+    "backFields": [
+      {
+        "key": "brandName",
+        "label": "Brand",
+        "value": "OFF GRID"
+      },
+      {
+        "key": "walletAddress",
+        "label": "Wallet Address",
+        "value": "0x5b236f3d914919236ba7bb1bc2bdbc1f59ff5430"
+      },
+      {
+        "key": "expiry",
+        "label": "Valid Until",
+        "value": "4/29/2026"
+      }
+    ]
+  }
+}
