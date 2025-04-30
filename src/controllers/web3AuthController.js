@@ -1,6 +1,5 @@
-const { PrismaClient } = require('@prisma/client');
+const prisma = require('../utils/prisma');
 const { generateToken } = require('../utils/jwtUtils');
-const prisma = new PrismaClient();
 
 /**
  * Web3Auth 登录/注册
@@ -260,4 +259,4 @@ exports.updateWallet = async (req, res) => {
       error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
-}; 
+};

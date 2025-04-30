@@ -11,6 +11,8 @@ const activityRoutes = require('./routes/activityRoutes');
 const notificationRoutes = require('./routes/notificationRoutes');
 const dataDanceIdRoutes = require('./routes/dataDanceIdRoutes');
 const web3AuthRoutes = require('./routes/web3AuthRoutes');
+const awardRoutes = require('./routes/awardRoutes');
+const taskRoutes = require('./routes/taskRoutes');
 
 const app = express();
 
@@ -27,8 +29,11 @@ app.use('/api/activities', activityRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/data-dance-ids', dataDanceIdRoutes);
 app.use('/api/auth', web3AuthRoutes);
+// 调整 awardRoutes 和 taskRoutes 的挂载路径
+app.use('/api', awardRoutes);
+app.use('/api', taskRoutes);
 
 // 错误处理中间件
 app.use(errorHandler);
 
-module.exports = app; 
+module.exports = app;

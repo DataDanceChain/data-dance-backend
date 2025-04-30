@@ -1,8 +1,7 @@
-const { PrismaClient } = require('@prisma/client');
+const prisma = require('../src/utils/prisma');
 const fs = require('fs');
 const path = require('path');
 const bcrypt = require('bcryptjs');
-const prisma = new PrismaClient();
 
 /**
  * 确保角色存在

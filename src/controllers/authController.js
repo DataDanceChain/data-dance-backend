@@ -1,8 +1,6 @@
 const bcrypt = require('bcryptjs');
-const { PrismaClient } = require('@prisma/client');
 const { generateToken } = require('../utils/jwtUtils');
-
-const prisma = new PrismaClient();
+const prisma = require('../utils/prisma');
 
 /**
  * 用户注册
@@ -137,4 +135,4 @@ exports.login = async (req, res) => {
       error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
-}; 
+};

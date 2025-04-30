@@ -1,7 +1,5 @@
 const bcrypt = require('bcryptjs');
-const { PrismaClient } = require('@prisma/client');
-
-const prisma = new PrismaClient();
+const prisma = require('../utils/prisma');
 
 /**
  * 获取当前用户信息
@@ -415,4 +413,36 @@ exports.importWallet = async (req, res) => {
       error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
-}; 
+};
+
+/**
+ * 获取当前用户的邀请码
+ * @route GET /api/users/invite-code
+ * @access Private
+ */
+exports.getInviteCode = async (req, res) => {
+  try {
+    // 查找当前用户作为邀请人生成的推荐码
+    const referral = await prisma.referral.findFirst({ where: { inviterId: req.user.id }, select: { code: true } });
+    if (!referral) {
+      return res.status(404).json({ status: 'fail', message: '邀请码不存在' });
+    }
+    res.status(200).json({ status: 'success', data: { code: referral.code } });
+  } catch (error) {
+    res.status(500).json({ status: 'error', message: '服务器错误', error: error.message });
+  }
+};
+
+/**
+ * 获取当前用户注册时间
+ * @route GET /api/users/registered-at
+ * @access Private
+ */
+exports.getRegistrationTime = async (req, res) => {
+  try {
+    const user = await prisma.user.findUnique({ where: { id: req.user.id }, select: { createdAt: true } });
+    res.status(200).json({ status: 'success', data: { registeredAt: user.createdAt } });
+  } catch (error) {
+    res.status(500).json({ status: 'error', message: '服务器错误', error: error.message });
+  }
+};

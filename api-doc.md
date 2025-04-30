@@ -13,13 +13,14 @@
 3. [活动 API](#活动-api)
 4. [资产 API](#资产-api)
 5. [通知 API](#通知-api)
+6. [奖励 API](#奖励-api)
 
 ## 认证 API
 
 ### 用户注册
 
 ```
-POST /auth/register
+POST /api/auth/register
 ```
 
 **请求体**:
@@ -49,7 +50,7 @@ POST /auth/register
 ### 用户登录
 
 ```
-POST /auth/login
+POST /api/auth/login
 ```
 
 **请求体**:
@@ -178,7 +179,7 @@ POST /api/auth/web3auth-login
 ### 获取当前用户信息
 
 ```
-GET /users/me
+GET /api/users/me
 ```
 
 **请求头**:
@@ -206,7 +207,7 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 ### 更新用户信息
 
 ```
-PATCH /users/me
+PATCH /api/users/me
 ```
 
 **请求头**:
@@ -402,6 +403,44 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 }
 ```
 
+### 获取当前用户邀请码
+
+```
+GET /api/users/invite-code
+```
+
+**请求头**:
+```
+Authorization: Bearer <token>
+```
+
+**响应** (200 OK):
+```json
+{
+  "status": "success",
+  "data": { "code": "INVITE12345" }
+}
+```
+
+### 获取当前用户注册时间
+
+```
+GET /api/users/registered-at
+```
+
+**请求头**:
+```
+Authorization: Bearer <token>
+```
+
+**响应** (200 OK):
+```json
+{
+  "status": "success",
+  "data": { "registeredAt": "2025-01-15T08:30:00.000Z" }
+}
+```
+
 ## 活动 API
 
 ### 获取活动列表
@@ -483,7 +522,7 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 ### 获取单个活动详情
 
 ```
-GET /activities/{activityId}
+GET /api/activities/{activityId}
 ```
 
 **响应** (200 OK):
@@ -550,7 +589,7 @@ GET /activities/{activityId}
 ### 获取推荐活动
 
 ```
-GET /activities/featured
+GET /api/activities/featured
 ```
 
 **响应** (200 OK):
@@ -777,7 +816,7 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 ### 获取资产总览
 
 ```
-GET /assets
+GET /api/assets
 ```
 
 **请求头**:
@@ -818,7 +857,7 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 ### 获取积分
 
 ```
-GET /assets/points
+GET /api/assets/points
 ```
 
 **请求头**:
@@ -847,7 +886,7 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 ### 获取徽章列表
 
 ```
-GET /assets/badges
+GET /api/assets/badges
 ```
 
 **请求头**:
@@ -894,7 +933,7 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 ### 获取徽章详情
 
 ```
-GET /assets/badges/{badgeId}
+GET /api/assets/badges/{badgeId}
 ```
 **请求头**:
 ```
@@ -924,7 +963,7 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 ### 收集徽章
 
 ```
-POST /assets/badges/{badgeId}/collect
+POST /api/assets/badges/{badgeId}/collect
 ```
 
 **请求头**:
@@ -954,7 +993,7 @@ POST /assets/badges/{badgeId}/collect
 ### 获取交易记录
 
 ```
-GET /assets/transactions
+GET /api/assets/transactions
 ```
 
 **请求头**:
@@ -990,7 +1029,7 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 ### 获取通知列表
 
 ```
-GET /notifications
+GET /api/notifications
 ```
 
 **请求头**:
@@ -1032,7 +1071,7 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 ### 标记通知为已读
 
 ```
-PATCH /notifications/{notificationId}/read
+PATCH /api/notifications/{notificationId}/read
 ```
 
 **请求头**:
@@ -1056,7 +1095,7 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 ### 标记所有通知为已读
 
 ```
-PATCH /notifications/read-all
+PATCH /api/notifications/read-all
 ```
 
 **请求头**:
@@ -1071,6 +1110,164 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
   "message": "All notifications marked as read",
   "data": {
     "updatedCount": 3
+  }
+}
+```
+
+## 奖励 API
+
+### 获取所有平台奖励定义
+```
+GET /api/awards
+```
+响应 (200 OK):
+```json
+{
+  "status": "success",
+  "data": {
+    "awards": [
+      {
+        "id": "profile-complete",
+        "title": "Complete Profile",
+        "description": "Fill in your profile information including name, email, and profile picture.",
+        "points": 100,
+        "completionType": "ONE_TIME"  // 一次性任务，完成并领取后不可重复领取
+      }
+      // ...其他奖励定义...
+    ]
+  }
+}
+```
+
+### 获取用户奖励状态
+```
+GET /api/users/awards
+```
+请求头:
+```
+Authorization: Bearer <token>
+```
+响应 (200 OK):
+```json
+{
+  "status": "success",
+  "data": {
+    "awards": [
+      {
+        "awardId": "profile-complete",
+        "title": "Complete Profile",
+        "points": 100,
+        "status": "COMPLETED",   // COMPLETED | IN_PROGRESS | LOCKED
+        "progress": 1,
+        "claimed": false          // 是否已领取
+      }
+      // ...其他用户奖励状态...
+    ]
+  }
+}
+```
+
+### 获取指定奖励下的子任务列表
+```
+GET /api/awards/:awardId/tasks
+```
+请求头:
+```
+Authorization: Bearer <token>
+```
+响应 (200 OK):
+```json
+{
+  "status": "success",
+  "data": {
+    "tasks": [
+      {
+        "id": "social-1",
+        "title": "DataDance Launch",
+        "description": "Repost announcement",
+        "type": "ONE_TIME",
+        "totalCount": 1,
+        "points": 50,
+        "requirement": "...",
+        "order": 1,
+        "progress": 1,
+        "completed": true,
+        "claimed": true
+      }
+      // ...其他任务
+    ]
+  }
+}
+```
+
+### 记录子任务进度
+```
+POST /api/users/tasks/:taskId/progress
+```
+请求头:
+```
+Authorization: Bearer <token>
+```
+请求体:
+```json
+{ "delta": 1 }
+```
+响应 (200 OK):
+```json
+{ "status": "success", "data": { "taskId": "social-1", "progress": 1, "completed": true } }
+```
+
+### 领取子任务奖励
+```
+POST /api/users/tasks/:taskId/claim
+```
+请求头:
+```
+Authorization: Bearer <token>
+```
+响应 (200 OK):
+```json
+{ "status": "success", "data": { "taskId": "social-1", "claimedAt": "2025-04-30T...Z", "points": 50 } }
+```
+
+### 获取用户推荐网络概览
+```
+GET /api/users/referrals
+```
+请求头:
+```
+Authorization: Bearer <token>
+```
+响应 (200 OK):
+```json
+{
+  "status": "success",
+  "data": {
+    "referrals": [ /* 多级嵌套推荐人列表 */ ],
+    "networkSize": 7,
+    "referralTotalEarning": 150,
+    "networkActivity": 520,
+    "unclaimReferralAwards": 30
+  }
+}
+```
+
+### 一键领取推荐奖励
+```
+POST /api/users/referrals/claim
+```
+**请求头**:
+```
+Authorization: Bearer <token>
+```
+**响应** (200 OK):
+```json
+{
+  "status": "success",
+  "data": {
+    "claimedAt": "2025-04-30T12:34:56.000Z",
+    "totalPoints": 150,
+    "count": 3
   }
 }
 ```
@@ -1107,5 +1304,3 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 - `403 Forbidden`: 权限不足
 - `404 Not Found`: 资源不存在
 - `500 Internal Server Error`: 服务器内部错误
-
-

@@ -1,6 +1,5 @@
-const { PrismaClient } = require('@prisma/client');
 const bcrypt = require('bcryptjs');
-const prisma = new PrismaClient();
+const prisma = require('../src/utils/prisma');
 
 // 活动类型枚举
 const ActivityType = {
@@ -1358,6 +1357,11 @@ const activities = [
  * 格式化活动数据
  */
 function formatActivityData(data) {
+  // Extract start and end dates for prisma model
+  if (data.basicInfo?.duration) {
+    data.startDate = new Date(data.basicInfo.duration.start);
+    data.endDate = new Date(data.basicInfo.duration.end);
+  }
   // 确保 externalLinks 是 JSON 字符串
   if (data.externalLinks && typeof data.externalLinks !== 'string') {
     data.externalLinks = JSON.stringify(data.externalLinks);
@@ -1376,6 +1380,7 @@ function formatActivityData(data) {
   }
   
   // 移除 claimed 字段和其他不需要的字段
+  delete data.basicInfo;
   const { claimed, ...formattedData } = data;
   
   return formattedData;
@@ -1548,4 +1553,4 @@ async function createAllActivities() {
 // 运行脚本
 createAllActivities()
   .then(() => console.log('Script completed successfully'))
-  .catch(error => console.error('Script failed:', error)); 
+  .catch(error => console.error('Script failed:', error));

@@ -1,6 +1,4 @@
-const { PrismaClient } = require('@prisma/client');
-
-const prisma = new PrismaClient();
+const prisma = require('../utils/prisma');
 
 /**
  * 获取用户通知
@@ -157,4 +155,4 @@ exports.updatePreferences = async (req, res) => {
       error: error.message
     });
   }
-}; 
+};

@@ -1,6 +1,5 @@
-const { PrismaClient } = require('@prisma/client');
+const prisma = require('../src/utils/prisma');
 const bcrypt = require('bcryptjs');
-const prisma = new PrismaClient();
 
 /**
  * 创建 RPC Club Party 活动
