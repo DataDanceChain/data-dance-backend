@@ -10,6 +10,40 @@ const axios = require('axios');
 const os = require('os');
 
 /**
+ * 从图片中提取主色调
+ * @param {Buffer} imageBuffer 图片Buffer
+ * @returns {string} RGB颜色字符串
+ */
+async function extractDominantColor(imageBuffer) {
+  try {
+    // 调整图片大小以加快处理速度
+    const resized = await sharp(imageBuffer)
+      .resize(100, 100, { fit: 'inside' })
+      .toBuffer();
+
+    // 获取图片的统计信息
+    const stats = await sharp(resized)
+      .stats();
+
+    // 获取主色调
+    const dominant = stats.channels.reduce((acc, channel, index) => {
+      const color = Math.round(channel.mean);
+      return acc + (index === 0 ? `rgb(${color},` : index === 1 ? `${color},` : `${color})`);
+    }, '');
+
+    // 确保颜色足够深
+    const [r, g, b] = dominant.match(/\d+/g).map(Number);
+    const darkened = `rgb(${Math.max(0, r - 50)}, ${Math.max(0, g - 50)}, ${Math.max(0, b - 50)})`;
+    
+    return darkened;
+  } catch (error) {
+    console.error('提取主色调失败:', error);
+    // 返回默认的深青绿色
+    return 'rgb(0, 50, 50)';
+  }
+}
+
+/**
  * 生成 strip 图片
  * @param {Array} nftImages NFT图片URL数组
  * @param {string} outputPath 输出路径
@@ -302,6 +336,11 @@ exports.generatePass = async (req, res) => {
       creatorLogoPath = defaultLogoPath;
     }
 
+    // 读取logo文件并提取主色调
+    const logoBuffer = await fs.readFile(creatorLogoPath);
+    const backgroundColor = await extractDominantColor(logoBuffer);
+    console.log('使用背景色:', backgroundColor);
+
     // 检查证书文件
     console.log('开始检查证书文件...');
     const certFiles = {
@@ -335,7 +374,7 @@ exports.generatePass = async (req, res) => {
       organizationName: actualCreatorName,
       logoText: actualCreatorName,
       foregroundColor: 'rgb(255, 255, 255)',
-      backgroundColor: 'rgb(60, 60, 60)',
+      backgroundColor: backgroundColor,
       labelColor: 'rgb(255, 255, 255)',
       relevantDate: new Date().toISOString(),
       expirationDate: expirationDate.toISOString(),
