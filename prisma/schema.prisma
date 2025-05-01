@@ -1,9 +1,3 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
-
-// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
-// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
-
 generator client {
   provider = "prisma-client-js"
 }
@@ -13,126 +7,113 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-// 用户相关模型
 model User {
-  id             String             @id @default(uuid())
-  email          String             @unique
-  password       String?            // 现在密码可以为空，因为Web3Auth用户不需要密码
-  name           String?
-  avatar         String?
-  
-  // 区块链相关字段
-  walletAddress  String?            @unique  // 用户的区块链钱包地址
-  chainId        Int?               // 链 ID，例如以太坊主网是 1，Polygon 是 137
-  privateKey     String?            // 钱包私钥，用于后端托管钱包
-  
-  // 认证和用户类型
-  authType       String             @default("traditional") // "web3auth" 或 "traditional"
-  userType       String             @default("regular")     // "regular" 或 "organization"
-  
-  // 组织相关字段
-  isOrganization Boolean            @default(false)
-  description    String?            // 组织描述
-  logo           String?            // 组织标志（可以与avatar共用）
-  
-  // 关系
-  createdAt      DateTime           @default(now())
-  updatedAt      DateTime           @updatedAt
-  profile        UserProfile?
-  totalPoints    Float              @default(0)
-  points         Point[]
-  badges         UserBadge[]
-  activityClaims ActivityClaim[]
-  notifications  Notification[]
-  transactions   AssetTransaction[]
-  roles          UserRole[]
-  
-  // 原来从Organization迁移过来的关系
-  createdActivities Activity[]      // 创建的活动
-  dataAssets      NFTDataAsset[]    // 拥有的数据资产
-  createdBadges   Badge[]           // 创建的徽章
-  members         User[]            @relation("OrganizationMembers") // 组织成员
-  organization    User?             @relation("OrganizationMembers", fields: [organizationId], references: [id]) // 所属组织
-  organizationId  String?
-  
-  // 添加关系
-  dataDanceIDs   DataDanceID[]
+  id                String             @id @default(uuid())
+  email             String             @unique
+  password          String?
+  name              String?
+  avatar            String?
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+  organizationId    String?
+  description       String?
+  isOrganization    Boolean            @default(false)
+  logo              String?
+  chainId           Int?
+  totalPoints       Float              @default(0)
+  walletAddress     String?            @unique
+  privateKey        String?
+  authType          String             @default("traditional")
+  userType          String             @default("regular")
+  createdActivities Activity[]
+  activityClaims    ActivityClaim[]
+  transactions      AssetTransaction[]
+  createdBadges     Badge[]
+  dataDanceIDs      DataDanceID[]
+  dataAssets        NFTDataAsset[]
+  notifications     Notification[]
+  points            Point[]
+  organization      User?              @relation("OrganizationMembers", fields: [organizationId], references: [id])
+  members           User[]             @relation("OrganizationMembers")
+  badges            UserBadge[]
+  profile           UserProfile?
+  roles             UserRole[]
+  passes            Pass[]
 }
 
 model UserProfile {
   id                String   @id @default(uuid())
-  user              User     @relation(fields: [userId], references: [id])
   userId            String   @unique
   phone             String?
   language          String   @default("en")
   notificationPrefs Json?
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
+  user              User     @relation(fields: [userId], references: [id])
 }
 
 model Role {
   id          String       @id @default(uuid())
   name        String
   description String?
-  permissions Permission[]
-  userRoles   UserRole[]
   createdAt   DateTime     @default(now())
   updatedAt   DateTime     @updatedAt
+  userRoles   UserRole[]
+  permissions Permission[] @relation("PermissionToRole")
 }
 
 model Permission {
   id          String   @id @default(uuid())
   name        String
   description String?
-  roles       Role[]
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
+  roles       Role[]   @relation("PermissionToRole")
 }
 
 model UserRole {
-  user      User     @relation(fields: [userId], references: [id])
   userId    String
-  role      Role     @relation(fields: [roleId], references: [id])
   roleId    String
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+  role      Role     @relation(fields: [roleId], references: [id])
+  user      User     @relation(fields: [userId], references: [id])
 
   @@id([userId, roleId])
 }
 
-// 资产相关模型
 model Point {
   id        String   @id @default(uuid())
-  user      User     @relation(fields: [userId], references: [id])
   userId    String
   amount    Float
   source    String
   sourceId  String?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+  user      User     @relation(fields: [userId], references: [id])
 }
 
 model Badge {
-  id             String       @id @default(uuid())
-  name           String
-  description    String?
-  image          String
-  creator        User         @relation(fields: [creatorId], references: [id])
-  creatorId      String
-  userBadges     UserBadge[]
-  createdAt      DateTime     @default(now())
-  updatedAt      DateTime     @updatedAt
+  id          String      @id @default(uuid())
+  name        String
+  description String?
+  image       String
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+  creatorId   String
+  creator     User        @relation(fields: [creatorId], references: [id])
+  userBadges  UserBadge[]
 }
 
 model UserBadge {
   id         String   @id @default(uuid())
-  user       User     @relation(fields: [userId], references: [id])
   userId     String
-  badge      Badge    @relation(fields: [badgeId], references: [id])
   badgeId    String
   acquiredAt DateTime @default(now())
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
+  badge      Badge    @relation(fields: [badgeId], references: [id])
+  user       User     @relation(fields: [userId], references: [id])
 
   @@unique([userId, badgeId])
 }
@@ -142,17 +123,16 @@ model NFTDataAsset {
   name           String
   description    String?
   metadata       Json
-  owner          User            @relation(fields: [ownerId], references: [id])
   ownerId        String
-  authorizations Authorization[]
-  listings       Listing[]
   createdAt      DateTime        @default(now())
   updatedAt      DateTime        @updatedAt
+  authorizations Authorization[]
+  listings       Listing[]
+  owner          User            @relation(fields: [ownerId], references: [id])
 }
 
 model Authorization {
   id          String       @id @default(uuid())
-  asset       NFTDataAsset @relation(fields: [assetId], references: [id])
   assetId     String
   grantedTo   String
   permissions Json
@@ -160,172 +140,159 @@ model Authorization {
   validTo     DateTime?
   createdAt   DateTime     @default(now())
   updatedAt   DateTime     @updatedAt
+  asset       NFTDataAsset @relation(fields: [assetId], references: [id])
 }
 
 model AssetTransaction {
   id          String   @id @default(uuid())
-  user        User     @relation(fields: [userId], references: [id])
   userId      String
-  type        String // POINT_EARNED, POINT_SPENT, BADGE_ACQUIRED, etc.
+  type        String
   amount      Float?
   assetId     String?
   description String?
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
+  user        User     @relation(fields: [userId], references: [id])
 }
 
-// 活动相关模型
 model Activity {
-  id             String             @id @default(uuid())
-  title          String
-  description    String?
-  startDate      DateTime
-  endDate        DateTime?
-  image          String?
-  creator        User               @relation(fields: [creatorId], references: [id])
-  creatorId      String
-  categories     ActivityCategory[]
-  tags           ActivityTag[]
-  claims         ActivityClaim[]
-  budget         Float?
-  bidStrategy    Json?
-  shareLink      String?
-  
-  // 活动类型和状态
-  type           String             @default("MEMBERSHIP") // MEMBERSHIP 或 REDEMPTION
-  remaining      Int?               // 剩余数量
-  total          Int?               // 总数量
-  statusNote     String?            // 状态说明
-  
-  // 权益与福利
-  equityTitle    String?            // 权益标题
-  equityDetails  String[]           // 权益详情列表
-  
-  // 外部链接
-  externalLinksTitle String?        // 外部链接标题
-  externalLinks  Json?              // 外部链接列表
-  
-  // NFT 相关信息
-  nftName        String?            // NFT 名称
-  nftDescription String?            // NFT 描述
-  nftImage       String?            // NFT 图片
-  nftTotalSupply Int?               // NFT 总供应量
-  nftPrice       Float?             // NFT 价格
-  nftValidityStart DateTime?        // NFT 有效期开始
-  nftValidityEnd DateTime?          // NFT 有效期结束
-  nftUsageRules  String?            // NFT 使用规则
-  
-  // 区块链相关字段
-  contractAddress String?           // 链上合约地址
-  chainId        Int?               // 链 ID，例如以太坊主网是 1，Polygon 是 137
-  tokenStandard  String?            // 代币标准，如 ERC721, ERC1155
-  
-  showInExplore  Boolean            @default(true) // 是否在探索页显示
-  
-  createdAt      DateTime           @default(now())
-  updatedAt      DateTime           @updatedAt
-  
-  // 添加关系
-  dataDanceIDs   DataDanceID[]
+  id                 String             @id @default(uuid())
+  title              String
+  description        String?
+  startDate          DateTime
+  endDate            DateTime?
+  image              String?
+  creatorId          String
+  budget             Float?
+  bidStrategy        Json?
+  shareLink          String?
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
+  equityDetails      String[]
+  equityTitle        String?
+  externalLinks      Json?
+  externalLinksTitle String?
+  nftDescription     String?
+  nftImage           String?
+  nftName            String?
+  nftPrice           Float?
+  nftTotalSupply     Int?
+  nftUsageRules      String?
+  nftValidityEnd     DateTime?
+  nftValidityStart   DateTime?
+  remaining          Int?
+  showInExplore      Boolean            @default(true)
+  statusNote         String?
+  total              Int?
+  type               String             @default("MEMBERSHIP")
+  contractAddress    String?
+  chainId            Int?
+  tokenStandard      String?
+  creator            User               @relation(fields: [creatorId], references: [id])
+  claims             ActivityClaim[]
+  dataDanceIDs       DataDanceID[]
+  categories         ActivityCategory[] @relation("ActivityToActivityCategory")
+  tags               ActivityTag[]      @relation("ActivityToActivityTag")
 }
 
 model ActivityCategory {
   id         String     @id @default(uuid())
   name       String
-  activities Activity[]
   createdAt  DateTime   @default(now())
   updatedAt  DateTime   @updatedAt
+  activities Activity[] @relation("ActivityToActivityCategory")
 }
 
 model ActivityTag {
   id         String     @id @default(uuid())
   name       String
-  activities Activity[]
   createdAt  DateTime   @default(now())
   updatedAt  DateTime   @updatedAt
+  activities Activity[] @relation("ActivityToActivityTag")
 }
 
 model ActivityClaim {
-  id        String   @id @default(uuid())
-  user      User     @relation(fields: [userId], references: [id])
-  userId    String
-  activity  Activity @relation(fields: [activityId], references: [id])
+  id         String   @id @default(uuid())
+  userId     String
   activityId String
-  status    String   // CLAIMED, COMPLETED, etc.
-  claimedAt DateTime @default(now())
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  status     String
+  claimedAt  DateTime @default(now())
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  activity   Activity @relation(fields: [activityId], references: [id])
+  user       User     @relation(fields: [userId], references: [id])
 
   @@unique([userId, activityId])
 }
 
-// 市场相关模型
 model Listing {
   id        String       @id @default(uuid())
-  asset     NFTDataAsset @relation(fields: [assetId], references: [id])
   assetId   String
   price     Float
   currency  String       @default("USD")
-  status    String // ACTIVE, SOLD, CANCELLED
-  orders    Order[]
+  status    String
   createdAt DateTime     @default(now())
   updatedAt DateTime     @updatedAt
+  asset     NFTDataAsset @relation(fields: [assetId], references: [id])
+  orders    Order[]
 }
 
 model Order {
   id        String   @id @default(uuid())
-  listing   Listing  @relation(fields: [listingId], references: [id])
   listingId String
   buyerId   String
-  status    String // PENDING, COMPLETED, CANCELLED
+  status    String
   amount    Float
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+  listing   Listing  @relation(fields: [listingId], references: [id])
 }
 
-// 通知相关模型
 model Notification {
   id        String   @id @default(uuid())
-  user      User     @relation(fields: [userId], references: [id])
   userId    String
   title     String
   content   String
-  type      String // SYSTEM, ACTIVITY, TRANSACTION
+  type      String
   isRead    Boolean  @default(false)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+  user      User     @relation(fields: [userId], references: [id])
 }
 
-// DataDanceID 模型 - 用户参与活动时生成的唯一标识
 model DataDanceID {
-  id            String    @id @default(uuid())
-  identifier    String    @unique // 生成的唯一标识符
-  user          User      @relation(fields: [userId], references: [id])
-  userId        String
-  activity      Activity  @relation(fields: [activityId], references: [id])
-  activityId    String
-  status        String    @default("ACTIVE") // ACTIVE, REVOKED
-  metadata      Json?     // 可以存储额外的元数据
-  createdAt     DateTime  @default(now())
-  updatedAt     DateTime  @updatedAt
+  id         String   @id @default(uuid())
+  identifier String   @unique
+  userId     String
+  activityId String
+  status     String   @default("ACTIVE")
+  metadata   Json?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  activity   Activity @relation(fields: [activityId], references: [id])
+  user       User     @relation(fields: [userId], references: [id])
 
-  // 确保用户和活动的组合是唯一的
   @@unique([userId, activityId])
 }
 
 model Pass {
-  id        String   @id @default(uuid())
-  brandId   String
-  brandName String
-  brandLogo String
-  userId    String
-  userName  String
+  id                String   @id @default(uuid())
+  creatorId         String
+  creatorName       String
+  creatorLogo       String
+  userId            String
+  userName          String
   userWalletAddress String
-  passUrl   String
-  status    String   @default("active") // active, revoked, expired
-  createdAt DateTime @default(now())
-  expiresAt DateTime
+  passUrl           String?
+  status            String   @default("active")
+  createdAt         DateTime @default(now())
+  expiresAt         DateTime
+  serialNumber      String?  @unique
+  updatedAt         DateTime @updatedAt
 
+  // Relations
+  user              User     @relation(fields: [userId], references: [id])
+
+  @@index([creatorId])
   @@index([userId])
-  @@index([brandId])
 }

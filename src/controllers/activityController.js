@@ -302,10 +302,14 @@ exports.claimActivity = async (req, res) => {
 
     res.status(200).json({
       status: 'success',
-      message: '活动领取成功',
       data: {
-        claim: result.claim,
-        dataDanceID: result.dataDanceID
+        claim: {
+          id: result.claim.id,
+          userId: result.claim.userId,
+          activityId: result.claim.activityId,
+          status: result.claim.status,
+          claimedAt: result.claim.claimedAt
+        }
       }
     });
   } catch (error) {

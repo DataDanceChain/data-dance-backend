@@ -7,6 +7,7 @@ const { PKPass } = require('passkit-generator');
 const crypto = require('crypto');
 const sharp = require('sharp');
 const axios = require('axios');
+const os = require('os');
 
 /**
  * 生成 strip 图片
@@ -171,474 +172,456 @@ exports.generatePass = async (req, res) => {
   try {
     console.log('开始生成 Pass...');
     const {
-      brandId,
-      brandName,
-      brandLogo,
+      creatorId,
+      creatorName,
+      creatorLogo,
       userId,
       userName,
       userWalletAddress
     } = req.body;
 
-    console.log('请求参数:', { brandId, brandName, brandLogo, userId, userName, userWalletAddress });
+    console.log('请求参数:', { creatorId, creatorName, creatorLogo, userId, userName, userWalletAddress });
 
     // 验证必要参数
-    if (!brandId || !brandName || !userId || !userName || !userWalletAddress) {
+    if (!creatorId || !creatorName || !userId || !userName || !userWalletAddress) {
+      console.log('缺少必要参数:', { creatorId, creatorName, userId, userName, userWalletAddress });
       return res.status(400).json({
         status: 'fail',
         message: '缺少必要参数'
       });
     }
 
-    // 获取用户已领取的该商家的活动
-    console.log('获取用户已领取的商家活动...');
-    console.log('查询条件:', {
-      userId,
-      brandName,
-      status: 'CLAIMED'
-    });
-
-    // 查询用户的所有已领取活动
+    // 获取用户的所有已认领活动
+    console.log('开始获取用户认领活动...');
     const userClaims = await prisma.activityClaim.findMany({
       where: {
         userId: userId,
-        status: 'CLAIMED',
+        activity: {
+          creator: {
+            id: creatorId === 'default' ? undefined : creatorId,
+            OR: creatorId === 'default' ? [{ name: creatorName }] : undefined
+          }
+        }
       },
       include: {
         activity: {
           include: {
-            creator: true,
-            categories: true,
-            tags: true
+            creator: true
           }
         }
       },
       orderBy: {
-        claimedAt: 'desc'
+        createdAt: 'desc'
       }
     });
+    console.log('用户认领活动数量:', userClaims.length);
 
-    console.log('用户所有已领取的活动数据:', JSON.stringify({
-      totalClaims: userClaims.length,
-      claims: userClaims.map(claim => ({
-        id: claim.id,
-        activityId: claim.activityId,
-        status: claim.status,
-        claimedAt: claim.claimedAt,
-        activity: {
-          id: claim.activity.id,
-          title: claim.activity.title,
-          creator: claim.activity.creator,
-          categories: claim.activity.categories,
-          tags: claim.activity.tags
+    if (userClaims.length === 0) {
+      console.log('未找到认领记录，尝试直接查询创建者...');
+      // 尝试直接查找创建者
+      const creator = await prisma.creator.findFirst({
+        where: {
+          OR: [
+            { id: creatorId },
+            { name: creatorName }
+          ]
         }
-      }))
-    }, null, 2));
+      });
 
-    // 过滤当前商家的活动 - 使用商家名称匹配
-    const brandClaims = userClaims.filter(claim => 
-      claim.activity.creator.name === brandName
-    );
+      if (!creator) {
+        return res.status(400).json({
+          status: 'fail',
+          message: '未找到该创建者'
+        });
+      }
 
-    console.log('当前商家的活动数据:', JSON.stringify({
-      brandName,
-      totalBrandClaims: brandClaims.length,
-      claims: brandClaims.map(claim => ({
-        id: claim.id,
-        activityId: claim.activityId,
-        status: claim.status,
-        claimedAt: claim.claimedAt,
-        activity: {
-          id: claim.activity.id,
-          title: claim.activity.title,
-          creator: claim.activity.creator,
-          categories: claim.activity.categories,
-          tags: claim.activity.tags
-        }
-      }))
-    }, null, 2));
+      return res.status(400).json({
+        status: 'fail',
+        message: '未找到该创建者的认领记录'
+      });
+    }
 
-    // 获取商家实际的 logo
-    const brandClaim = brandClaims[0];  // 使用第一个 claim 获取商家信息
-    const actualBrandLogo = brandClaim?.activity?.creator?.logo || brandLogo;
-    console.log('使用商家实际 logo:', actualBrandLogo);
+    // 使用第一个 claim 获取创建者信息
+    const creatorClaim = userClaims[0];
+    const actualCreatorId = creatorClaim.activity.creatorId;
+    const actualCreatorName = creatorClaim.activity.creator.name;
+    const actualCreatorLogo = creatorClaim.activity.creator.logo;
+    console.log('使用创建者信息:', {
+      id: actualCreatorId,
+      name: actualCreatorName,
+      logo: actualCreatorLogo
+    });
 
-    // 生成唯一的 pass ID
+    // 获取该创建者的所有NFT图片
+    const nftsWithImages = userClaims.map(claim => ({
+      name: claim.activity.name,
+      image: claim.activity.nftImage,
+      mintDate: claim.createdAt
+    }));
+    console.log('NFT 图片数量:', nftsWithImages.length);
+
+    // 生成通行证
     const passId = uuidv4();
-    console.log('生成 Pass ID:', passId);
-    
-    // 设置过期时间（默认一年后）
-    const expiresAt = new Date();
-    expiresAt.setFullYear(expiresAt.getFullYear() + 1);
+    const serialNumber = uuidv4();
+    console.log('生成的 Pass ID:', passId);
+    console.log('生成的序列号:', serialNumber);
 
-    // 创建 pass 目录
-    const modelPath = path.join(__dirname, '../../keys/passes/models/membership.pass');
-    await fs.mkdir(modelPath, { recursive: true });
+    // 设置过期时间为一年后
+    const expirationDate = new Date();
+    expirationDate.setFullYear(expirationDate.getFullYear() + 1);
+    console.log('Pass 过期时间:', expirationDate);
 
-    // 复制商家 logo 到 pass 目录
-    console.log('开始处理商家 logo...');
+    // 创建 Pass 记录
+    console.log('开始创建 Pass 数据库记录...');
+    const passRecord = await prisma.pass.create({
+      data: {
+        id: passId,
+        creatorId: actualCreatorId,
+        creatorName: actualCreatorName,
+        creatorLogo: actualCreatorLogo,
+        userId,
+        userName,
+        userWalletAddress,
+        serialNumber,
+        expiresAt: expirationDate
+      }
+    });
+    console.log('Pass 数据库记录创建成功:', passRecord);
+
+    // 处理创建者logo
+    let creatorLogoPath = path.join(__dirname, '../../public', actualCreatorLogo);
     const defaultLogoPath = path.join(__dirname, '../../public/assets/logos/default-logo.png');
-    let brandLogoPath = path.join(__dirname, '../../public', actualBrandLogo || 'assets/logos/default-logo.png');
-    const iconFiles = ['icon.png', 'icon@2x.png', 'icon@3x.png'];
-    const logoFiles = ['logo.png', 'logo@2x.png', 'logo@3x.png'];
+    console.log('创建者 logo 路径:', creatorLogoPath);
+    console.log('默认 logo 路径:', defaultLogoPath);
 
     try {
-      // 验证源logo文件是否存在，如果不存在则使用默认logo
-      try {
-        await fs.access(brandLogoPath);
-        console.log('商家 logo 文件存在:', brandLogoPath);
-      } catch (error) {
-        console.log('商家 logo 文件不存在，尝试使用默认 logo');
-        // 确保默认 logo 目录存在
-        await fs.mkdir(path.dirname(defaultLogoPath), { recursive: true });
-        
-        // 如果默认 logo 不存在，创建一个简单的默认 logo
-        try {
-          await fs.access(defaultLogoPath);
-        } catch (error) {
-          console.log('创建默认 logo');
-          // 创建一个简单的默认 logo（黑色背景的圆形）
-          await sharp({
-            create: {
-              width: 100,
-              height: 100,
-              channels: 4,
-              background: { r: 0, g: 0, b: 0, alpha: 1 }
-            }
-          })
-          .composite([{
-            input: Buffer.from(
-              `<svg width="100" height="100">
-                <circle cx="50" cy="50" r="40" fill="white"/>
-                <text x="50" y="50" font-family="Arial" font-size="20" fill="black" text-anchor="middle" dominant-baseline="middle">
-                  ${brandName.charAt(0)}
-                </text>
-              </svg>`
-            ),
-            top: 0,
-            left: 0
-          }])
-          .toFile(defaultLogoPath);
-        }
-        brandLogoPath = defaultLogoPath;
-      }
-
-      // 生成不同尺寸的 icon 和 logo
-      const sizes = {
-        'icon.png': [29, 29],
-        'icon@2x.png': [58, 58],
-        'icon@3x.png': [87, 87],
-        'logo.png': [30, 30],
-        'logo@2x.png': [60, 60],
-        'logo@3x.png': [90, 90]
-      };
-
-      // 并行处理所有图片尺寸
-      await Promise.all([...iconFiles, ...logoFiles].map(async (filename) => {
-        const [width, height] = sizes[filename];
-        const outputPath = path.join(modelPath, filename);
-        
-        // 创建圆形遮罩
-        const roundedCorners = Buffer.from(
-          `<svg width="${width}" height="${height}">
-            <circle cx="${width/2}" cy="${height/2}" r="${width/2}" fill="white"/>
-          </svg>`
-        );
-
-        // 处理图片：先调整大小，然后应用圆形遮罩
-        await sharp(brandLogoPath)
-          .resize(width, height, {
-            fit: 'cover',
-            position: 'center'
-          })
-          .composite([{
-            input: roundedCorners,
-            blend: 'dest-in'
-          }])
-          .toFile(outputPath);
-        
-        console.log(`生成圆形 ${filename} 完成: ${width}x${height}`);
-      }));
-
-      console.log('所有圆形图标文件生成完成');
+      await fs.access(creatorLogoPath);
+      console.log('创建者 logo 文件存在:', creatorLogoPath);
     } catch (error) {
-      console.error('处理商家 logo 时出错:', error);
-      throw new Error('处理商家 logo 失败');
+      console.log('创建者 logo 文件不存在，使用默认 logo');
+      creatorLogoPath = defaultLogoPath;
     }
-
-    // 处理NFT数据，添加图片路径
-    const nftsWithImages = brandClaims.map(claim => {
-      const imageUrl = claim.activity.nftImage || claim.activity.image;
-      console.log('处理NFT图片:', {
-        activityId: claim.activity.id,
-        nftImage: claim.activity.nftImage,
-        image: claim.activity.image,
-        imageUrl
-      });
-      
-      // 检查图片是否存在
-      const imagePath = path.join(__dirname, '../../public', imageUrl);
-      console.log('完整图片路径:', imagePath);
-      
-      return {
-        id: claim.activity.id,
-        name: claim.activity.nftName || claim.activity.title,
-        description: claim.activity.nftDescription || claim.activity.description,
-        imageUrl: imagePath,
-        contractAddress: claim.activity.contractAddress,
-        chainId: claim.activity.chainId,
-        mintDate: claim.claimedAt,
-        categories: claim.activity.categories,
-        tags: claim.activity.tags,
-        openseaUrl: claim.activity.contractAddress ? 
-          `https://opensea.io/assets/ethereum/${claim.activity.contractAddress}/${claim.activity.id}` :
-          null
-      };
-    });
-
-    console.log('处理后的NFT数据:', JSON.stringify(nftsWithImages, null, 2));
-
-    // 如果有NFT数据，生成strip图片
-    if (nftsWithImages.length > 0) {
-      console.log('开始处理NFT图片生成strip...');
-      const stripPath = path.join(modelPath, 'strip.png');
-      
-      // 验证所有图片路径是否存在
-      for (const nft of nftsWithImages) {
-        try {
-          await fs.access(nft.imageUrl);
-          const stats = await fs.stat(nft.imageUrl);
-          console.log(`图片文件存在: ${nft.imageUrl}, 大小: ${stats.size} 字节`);
-        } catch (error) {
-          console.error(`图片文件不存在或无法访问: ${nft.imageUrl}`);
-          console.error(error);
-          // 如果图片不存在，跳过生成strip
-          console.log('由于图片不存在，跳过生成strip');
-          continue;
-        }
-      }
-
-      try {
-        await generateStripImage(
-          nftsWithImages.map(nft => nft.imageUrl),
-          stripPath
-        );
-        console.log('Strip 图片生成完成');
-
-        // 验证生成的strip图片
-        const stats = await fs.stat(stripPath);
-        console.log(`Strip 图片已生成: ${stripPath}, 大小: ${stats.size} 字节`);
-      } catch (error) {
-        console.error('生成strip图片失败，继续生成Pass:', error);
-        // 即使strip生成失败，也继续生成Pass
-      }
-    }
-
-    // Pass 配置
-    const passData = {
-      formatVersion: 1,
-      passTypeIdentifier: "pass.ai.datadance.app",
-      serialNumber: passId,
-      teamIdentifier: "R2DAZ94F4S",
-      organizationName: brandName,
-      description: `${brandName} Membership Pass`,
-      logoText: brandName,
-      foregroundColor: "rgb(255, 255, 255)",
-      backgroundColor: "rgb(10, 32, 77)",
-      labelColor: "rgb(200, 200, 200)",
-      stripColor: "rgb(10, 32, 77)",
-      strip: {
-        backgroundColor: "rgb(10, 32, 77)"
-      },
-      suppressStripShine: true,  // 禁用strip的光泽效果
-      barcodes: [
-        {
-          message: userWalletAddress,
-          format: "PKBarcodeFormatQR",
-          messageEncoding: "iso-8859-1",
-          altText: `Wallet: ${userWalletAddress.slice(0, 6)}...${userWalletAddress.slice(-4)}`
-        }
-      ],
-      storeCard: {
-        secondaryFields: [
-          {
-            key: "name",
-            label: "MEMBER",
-            value: userName
-          },
-          {
-            key: "wallet",
-            label: "WALLET ID",
-            value: `${userWalletAddress.slice(0, 6)}...${userWalletAddress.slice(-4)}`
-          }
-        ],
-        auxiliaryFields: [
-          {
-            key: "nftCount",
-            label: "TOTAL NFTs",
-            value: String(nftsWithImages.length)
-          },
-          {
-            key: "lastMint",
-            label: "LAST MINT",
-            value: nftsWithImages.length > 0 ? 
-              new Date(nftsWithImages[0].mintDate).toLocaleDateString() : 
-              new Date().toLocaleDateString()
-          }
-        ],
-        backFields: [
-          {
-            key: "brandName",
-            label: "Brand",
-            value: brandName
-          },
-          {
-            key: "walletAddress",
-            label: "Full Wallet Address",
-            value: userWalletAddress
-          },
-          {
-            key: "nftList",
-            label: "Your NFTs",
-            value: nftsWithImages.length > 0 ? 
-              nftsWithImages.map((nft, index) => 
-                `${index + 1}. ${nft.name}\n` +
-                `Type: ${nft.categories.map(c => c.name).join(', ')}\n` +
-                `Tags: ${nft.tags.map(t => t.name).join(', ')}\n` +
-                `Mint Date: ${new Date(nft.mintDate).toLocaleDateString()}\n` +
-                (nft.openseaUrl ? `View: ${nft.openseaUrl}\n` : '') +
-                `\n`
-              ).join('') :
-              "No NFTs found"
-          },
-          {
-            key: "expiry",
-            label: "Valid Until",
-            value: expiresAt.toLocaleDateString()
-          }
-        ]
-      }
-    };
-
-    console.log('Pass 配置:', JSON.stringify(passData, null, 2));
-
-    // 创建临时的 pass.json 文件
-    const passJsonPath = path.join(modelPath, 'pass.json');
-    console.log('写入配置文件:', passJsonPath);
-    
-    await fs.writeFile(passJsonPath, JSON.stringify(passData, null, 2));
 
     // 检查证书文件
+    console.log('开始检查证书文件...');
     const certFiles = {
       wwdr: path.join(__dirname, '../../keys_fixed/wwdr.pem'),
       signerCert: path.join(__dirname, '../../keys_fixed/signerCert.pem'),
       signerKey: path.join(__dirname, '../../keys_fixed/signerKey.pem')
     };
+    console.log('证书文件路径:', certFiles);
 
-    // 验证证书
-    for (const [key, filePath] of Object.entries(certFiles)) {
-      try {
-        const certContent = await fs.readFile(filePath, 'utf-8');
-        
-        // 尝试使用 Node.js 的加密模块验证证书
-        if (key === 'signerKey') {
-          // 验证私钥
-          try {
-            crypto.createPrivateKey(certContent);
-            console.log(`${key} 私钥验证成功`);
-          } catch (e) {
-            throw new Error(`${key} 私钥格式无效: ${e.message}`);
-          }
-        } else {
-          // 验证证书
-          try {
-            crypto.createPublicKey(certContent);
-            console.log(`${key} 证书验证成功`);
-          } catch (e) {
-            throw new Error(`${key} 证书格式无效: ${e.message}`);
-          }
-        }
-      } catch (error) {
-        console.error(`${key} 证书验证失败:`, error.message);
-        throw error;
-      }
-    }
-
-    // 检查资源文件
-    const resourceFiles = [
-      'icon.png',
-      'icon@2x.png',
-      'icon@3x.png',
-      'logo.png',
-      'logo@2x.png',
-      'logo@3x.png'
-    ];
-
-    for (const file of resourceFiles) {
-      const filePath = path.join(modelPath, file);
-      try {
-        await fs.access(filePath);
-        console.log(`资源文件存在:`, file);
-      } catch (error) {
-        console.warn(`资源文件不存在:`, file);
-      }
-    }
-
-    console.log('开始创建 Pass...');
-    
     // 读取证书内容
+    console.log('读取证书内容...');
     const certificates = {
       wwdr: await fs.readFile(certFiles.wwdr, 'utf-8'),
       signerCert: await fs.readFile(certFiles.signerCert, 'utf-8'),
       signerKey: await fs.readFile(certFiles.signerKey, 'utf-8')
     };
+    console.log('证书内容读取完成');
 
-    // 创建 pass
-    const pass = await PKPass.from({
-      model: modelPath,
+    // 创建临时目录用于生成 pass
+    const tempDir = path.join(os.tmpdir(), `pass-${passId}.pass`);
+    await fs.mkdir(tempDir, { recursive: true });
+    console.log('创建临时目录:', tempDir);
+
+    // 创建基础 pass.json
+    const passJson = {
+      formatVersion: 1,
+      passTypeIdentifier: "pass.ai.datadance.app",
+      teamIdentifier: "R2DAZ94F4S",
+      serialNumber,
+      description: `${actualCreatorName} Membership Pass`,
+      organizationName: actualCreatorName,
+      logoText: actualCreatorName,
+      foregroundColor: 'rgb(255, 255, 255)',
+      backgroundColor: 'rgb(60, 60, 60)',
+      labelColor: 'rgb(255, 255, 255)',
+      relevantDate: new Date().toISOString(),
+      expirationDate: expirationDate.toISOString(),
+      suppressStripShine: true,
+      barcodes: [{
+        message: userWalletAddress,
+        format: "PKBarcodeFormatQR",
+        messageEncoding: "iso-8859-1",
+        altText: `Wallet: ${userWalletAddress.slice(0, 6)}...${userWalletAddress.slice(-4)}`
+      }],
+      storeCard: {
+        headerFields: [],
+        primaryFields: [],
+        secondaryFields: [
+          {
+            key: "nftCount",
+            label: "NFTs",
+            value: nftsWithImages.length.toString()
+          },
+          {
+            key: "wallet",
+            label: "Wallet",
+            value: `${userWalletAddress.slice(0, 6)}...${userWalletAddress.slice(-4)}`
+          },
+          {
+            key: "name",
+            label: "Name",
+            value: userName
+          },
+          {
+            key: "status",
+            label: "Status",
+            value: "MEMBER"
+          }
+        ],
+        auxiliaryFields: [],
+        backFields: [
+          {
+            key: "wallet-full",
+            label: "Wallet Address",
+            value: userWalletAddress
+          },
+          {
+            key: "nft-list",
+            label: "NFT Collection",
+            value: nftsWithImages.map(nft => 
+              `${nft.name}\nMint Date: ${new Date(nft.mintDate).toLocaleDateString()}`
+            ).join("\n\n")
+          },
+          {
+            key: "expiry",
+            label: "Valid Until",
+            value: expirationDate.toLocaleDateString()
+          }
+        ]
+      }
+    };
+
+    // 写入临时的 pass.json
+    await fs.writeFile(path.join(tempDir, 'pass.json'), JSON.stringify(passJson, null, 2));
+
+    // 创建 PKPass 实例
+    console.log('创建 PKPass 实例...');
+    
+    // 处理创建者头像
+    const creatorAvatarPath = path.join(__dirname, '../../public', actualCreatorLogo);
+    console.log('使用创建者头像路径:', creatorAvatarPath);
+    const avatarBuffer = await fs.readFile(creatorAvatarPath);
+
+    // 生成圆形裁剪的 icon
+    const iconSizes = {
+      'icon.png': 29,
+      'icon@2x.png': 58,
+      'icon@3x.png': 87
+    };
+
+    // 先生成所有图片文件
+    for (const [filename, size] of Object.entries(iconSizes)) {
+      console.log(`处理 ${filename}, 尺寸: ${size}x${size}`);
+      
+      // 创建圆形蒙版
+      const svgCircle = `
+        <svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" xmlns="http://www.w3.org/2000/svg">
+          <circle cx="${size/2}" cy="${size/2}" r="${size/2}" fill="white"/>
+        </svg>
+      `;
+      
+      // 先调整图片大小并转为 PNG
+      const resized = await sharp(avatarBuffer)
+        .resize(size, size, {
+          fit: 'cover',
+          position: 'center'
+        })
+        .png()
+        .toBuffer();
+
+      // 应用圆形蒙版
+      const iconBuffer = await sharp(resized)
+        .composite([{
+          input: Buffer.from(svgCircle),
+          blend: 'dest-in'
+        }])
+        .png()
+        .toBuffer();
+
+      await fs.writeFile(path.join(tempDir, filename), iconBuffer);
+      console.log(`${filename} 圆形裁剪完成`);
+    }
+
+    // 生成 logo（不需要圆形裁剪）
+    const logoSizes = {
+      'logo.png': 29,
+      'logo@2x.png': 58,
+      'logo@3x.png': 87
+    };
+
+    for (const [filename, size] of Object.entries(logoSizes)) {
+      console.log(`处理 ${filename}, 尺寸: ${size}x${size}`);
+      const logoBuffer = await sharp(avatarBuffer)
+        .resize(size, size, {
+          fit: 'cover',
+          position: 'center'
+        })
+        .png()
+        .toBuffer();
+      
+      await fs.writeFile(path.join(tempDir, filename), logoBuffer);
+    }
+
+    // 生成 strip 图片（拼接 NFT 图片）
+    const stripSizes = {
+      'strip.png': { width: 624, height: 250 },
+      'strip@2x.png': { width: 1248, height: 500 },
+      'strip@3x.png': { width: 1872, height: 750 }
+    };
+
+    // 获取 NFT 图片路径
+    const nftImages = nftsWithImages.map(nft => path.join(__dirname, '../../public', nft.image));
+    console.log('NFT 图片路径:', nftImages);
+
+    for (const [filename, dimensions] of Object.entries(stripSizes)) {
+      console.log(`处理 ${filename}, 尺寸: ${dimensions.width}x${dimensions.height}`);
+      
+      // 验证和处理 NFT 图片
+      const validImages = [];
+      for (const imagePath of nftImages) {
+        try {
+          const imageBuffer = await fs.readFile(imagePath);
+          validImages.push(imageBuffer);
+        } catch (error) {
+          console.error(`无法读取 NFT 图片: ${imagePath}`, error);
+        }
+      }
+
+      // 限制最多处理3张图片
+      const imagesToProcess = validImages.slice(0, Math.min(3, validImages.length));
+      
+      if (imagesToProcess.length === 0) {
+        console.log('没有有效的 NFT 图片，创建空的 strip');
+        // 创建空的透明背景
+        const emptyStrip = await sharp({
+          create: {
+            width: dimensions.width,
+            height: dimensions.height,
+            channels: 4,
+            background: { r: 0, g: 0, b: 0, alpha: 0 }
+          }
+        })
+        .png()
+        .toBuffer();
+        
+        await fs.writeFile(path.join(tempDir, filename), emptyStrip);
+        continue;
+      }
+
+      // 处理每张 NFT 图片
+      const processedImages = [];
+      for (let i = 0; i < imagesToProcess.length; i++) {
+        const imageBuffer = imagesToProcess[i];
+        let width = dimensions.width;
+        
+        // 根据图片数量调整宽度
+        if (imagesToProcess.length === 2) {
+          width = dimensions.width / 2;
+        } else if (imagesToProcess.length === 3) {
+          width = dimensions.width / 3;
+        }
+
+        const resizedImage = await sharp(imageBuffer)
+          .resize(width, dimensions.height, {
+            fit: 'cover',
+            position: 'center'
+          })
+          .toBuffer();
+        
+        processedImages.push({
+          input: resizedImage,
+          left: i * width,
+          top: 0
+        });
+      }
+
+      // 创建最终的 strip 图片
+      const stripBuffer = await sharp({
+        create: {
+          width: dimensions.width,
+          height: dimensions.height,
+          channels: 4,
+          background: { r: 0, g: 0, b: 0, alpha: 0 }
+        }
+      })
+      .composite(processedImages)
+      .png()
+      .toBuffer();
+
+      await fs.writeFile(path.join(tempDir, filename), stripBuffer);
+    }
+
+    // 创建 PKPass 实例
+    const pkPass = await PKPass.from({
+      model: tempDir,
       certificates
     });
+    console.log('PKPass 实例创建成功');
 
-    console.log('生成 Pass Buffer...');
     // 生成 pass buffer
-    const passBuffer = await pass.getAsBuffer();
+    console.log('生成 Pass Buffer...');
+    const passBuffer = await pkPass.getAsBuffer();
+    console.log('Pass Buffer 生成完成，大小:', passBuffer.length);
 
-    // 确保目录存在
+    // 清理临时目录
+    try {
+      await fs.rm(tempDir, { recursive: true, force: true });
+      console.log('临时目录已清理:', tempDir);
+    } catch (error) {
+      console.error('清理临时目录失败:', error);
+    }
+
+    // 确保公共目录存在
     const passDir = path.join(__dirname, '../../public/assets/passes');
     await fs.mkdir(passDir, { recursive: true });
+    console.log('Pass 目录已创建:', passDir);
 
     // 保存 .pkpass 文件
     const passPath = path.join(passDir, `${passId}.pkpass`);
     console.log('保存 Pass 文件:', passPath);
     await fs.writeFile(passPath, passBuffer);
+    console.log('Pass 文件保存成功');
 
-    // 生成 pass URL（不再使用 API 前缀）
+    // 设置定时器在一段时间后删除文件（例如 5 分钟）
+    setTimeout(async () => {
+      try {
+        await fs.unlink(passPath);
+        console.log('Pass 文件已自动删除:', passPath);
+      } catch (error) {
+        console.error('删除 Pass 文件失败:', error);
+      }
+    }, 5 * 60 * 1000); // 5 分钟后删除
+
+    // 生成 pass URL (使用非 API 路径以避免认证检查)
     const passUrl = `/assets/passes/${passId}.pkpass`;
+    console.log('Pass URL:', passUrl);
 
-    // 创建 pass 记录
-    const passRecord = await prisma.pass.create({
+    // 更新 pass 记录
+    console.log('更新 Pass 数据库记录...');
+    const updatedPassRecord = await prisma.pass.update({
+      where: { id: passId },
       data: {
-        id: passId,
-        brandId,
-        brandName,
-        brandLogo,
-        userId,
-        userName,
-        userWalletAddress,
-        passUrl,
-        expiresAt
+        passUrl
       }
     });
+    console.log('Pass 数据库记录更新成功:', updatedPassRecord);
 
     console.log('Pass 生成完成');
     
-    // 获取 API 基础 URL，如果环境变量未设置则使用默认值
-    const apiBaseUrl = process.env.API_BASE_URL || `http://localhost:${process.env.PORT || 3000}`;
+    // 获取 API 基础 URL，移除 /api 后缀
+    const baseUrl = process.env.API_BASE_URL 
+      ? process.env.API_BASE_URL.replace(/\/api$/, '')
+      : `http://localhost:${process.env.PORT || 3000}`;
+    console.log('使用基础 URL:', baseUrl);
     
     res.status(200).json({
       status: 'success',
       data: {
-        passUrl: `${apiBaseUrl}${passUrl}`,
-        expiresAt: passRecord.expiresAt
+        passUrl: `${baseUrl}${passUrl}`,  // 使用非 API 路径
+        expiresAt: updatedPassRecord.expiresAt
       }
     });
   } catch (error) {

@@ -18,7 +18,7 @@ const activities = [
       type: ActivityType.MEMBERSHIP,
       duration: {
         start: "2025-02-19",
-        end: "2025-03-19"
+        end: "2026-03-19"
       }
     },
     organizer: {
@@ -54,10 +54,10 @@ const activities = [
       description: "Enjoy top-tier club membership benefits, limited to 100 units",
       image: "/assets/nfts/yacht-club.png",
       totalSupply: 100,
-      price: 38888.00,
+      price: 0,
       validityPeriod: {
         from: "2025-02-19",
-        to: "2025-03-19"
+        to: "2026-03-19"
       },
       usageRules: "This NFT is only for the holder to redeem membership benefits. Final interpretation rights belong to the Elite Yacht Club."
     },
@@ -71,7 +71,7 @@ const activities = [
       type: ActivityType.MEMBERSHIP,
       duration: {
         start: "2025-02-21",
-        end: "2025-03-21"
+        end: "2026-03-21"
       }
     },
     organizer: {
@@ -106,10 +106,10 @@ const activities = [
       description: "Polar expedition, limited to 30 units",
       image: "/assets/nfts/antarctic-expedition.jpg",
       totalSupply: 30,
-      price: 188888.00,
+      price: 0,
       validityPeriod: {
         from: "2025-02-21",
-        to: "2025-03-21"
+        to: "2026-03-21"
       },
       usageRules: "This NFT is only for the holder to redeem the Antarctic travel package. Final interpretation rights belong to the organizer."
     },
@@ -123,7 +123,7 @@ const activities = [
       type: ActivityType.REDEMPTION,
       duration: {
         start: "2025-03-01",
-        end: "2025-03-15"
+        end: "2026-03-15"
       }
     },
     organizer: {
@@ -158,10 +158,10 @@ const activities = [
       description: "Mysterious spiritual journey, limited to 20 units",
       image: "/assets/nfts/peru-spiritual.png",
       totalSupply: 20,
-      price: 158888.00,
+      price: 0,
       validityPeriod: {
         from: "2025-03-01",
-        to: "2025-03-15"
+        to: "2026-03-15"
       },
       usageRules: "This NFT is only for the holder to redeem the Peru spiritual journey. Final interpretation rights belong to the organizer."
     },
@@ -175,7 +175,7 @@ const activities = [
       type: ActivityType.REDEMPTION,
       duration: {
         start: "2025-03-01",
-        end: "2025-08-07"
+        end: "2026-08-07"
       }
     },
     organizer: {
@@ -210,10 +210,10 @@ const activities = [
       description: "A feast of freedom and creativity, limited to 30 units",
       image: "/assets/nfts/burning-man.png",
       totalSupply: 30,
-      price: 128888.00,
+      price: 0,
       validityPeriod: {
         from: "2025-03-01",
-        to: "2025-08-07"
+        to: "2026-08-07"
       },
       usageRules: "This NFT is only for the holder to redeem the Burning Man VIP experience. Final interpretation rights belong to the organizer."
     },
@@ -227,7 +227,7 @@ const activities = [
       type: ActivityType.MEMBERSHIP,
       duration: {
         start: "2025-02-21",
-        end: "2025-03-21"
+        end: "2026-03-21"
       }
     },
     organizer: {
@@ -263,7 +263,7 @@ const activities = [
       description: "City Explorer Series NFT, limited to 1000 units",
       image: "/assets/nfts/25burger.jpg",
       totalSupply: 1000,
-      price: 68.00,
+      price: 0,
       validityPeriod: {
         from: "2025-02-21",
         to: "2026-02-20"
@@ -280,7 +280,7 @@ const activities = [
       type: ActivityType.MEMBERSHIP,
       duration: {
         start: "2025-03-19",
-        end: "2025-03-27"
+        end: "2026-03-27"
       }
     },
     organizer: {
@@ -317,10 +317,10 @@ const activities = [
       description: "Limited to 50 units of meditation experience NFT, including meals, accommodation and dharma instruments during the meditation period",
       image: "/assets/nfts/jingci-temple.png",
       totalSupply: 50,
-      price: 2888.00,
+      price: 0,
       validityPeriod: {
         from: "2025-03-19",
-        to: "2025-03-27"
+        to: "2026-03-27"
       },
       usageRules: "This NFT is only for the holder's personal use and cannot be transferred."
     },
@@ -334,7 +334,7 @@ const activities = [
       type: ActivityType.MEMBERSHIP,
       duration: {
         start: "2025-02-21",
-        end: "2025-03-21"
+        end: "2026-03-21"
       }
     },
     organizer: {
@@ -371,10 +371,10 @@ const activities = [
       description: "Limited to 30 units of high-end medical experience NFT, including medical and accommodation expenses",
       image: "/assets/nfts/japan-microbiota.jpg",
       totalSupply: 30,
-      price: 138888.00,
+      price: 0,
       validityPeriod: {
         from: "2025-02-21",
-        to: "2025-03-21"
+        to: "2026-03-21"
       },
       usageRules: "This NFT is only for the holder's personal use and cannot be transferred."
     },
@@ -388,7 +388,7 @@ const activities = [
       type: ActivityType.MEMBERSHIP,
       duration: {
         start: "2025-02-21",
-        end: "2025-02-25"
+        end: "2026-02-25"
       }
     },
     organizer: {
@@ -425,10 +425,10 @@ const activities = [
       description: "Limited to 20 units of luxury experience NFT, enjoy full VIP service",
       image: "/assets/nfts/sanya-vip.png",
       totalSupply: 20,
-      price: 28888.00,
+      price: 0,
       validityPeriod: {
         from: "2025-02-21",
-        to: "2025-02-25"
+        to: "2026-02-25"
       },
       usageRules: "This NFT is only for the holder's personal use and cannot be transferred."
     },
@@ -442,7 +442,7 @@ const activities = [
       type: ActivityType.MEMBERSHIP,
       duration: {
         start: "2025-03-21",
-        end: "2025-03-27"
+        end: "2026-03-27"
       }
     },
     organizer: {
@@ -479,10 +479,10 @@ const activities = [
       description: "Limited to 20 units of pilgrimage experience NFT, including full board and service",
       image: "/assets/nfts/spain-pilgrimage.png",
       totalSupply: 20,
-      price: 88888.00,
+      price: 0,
       validityPeriod: {
         from: "2025-03-21",
-        to: "2025-03-27"
+        to: "2026-03-27"
       },
       usageRules: "This NFT is only for the holder's personal use and cannot be transferred."
     },
@@ -496,7 +496,7 @@ const activities = [
       type: ActivityType.MEMBERSHIP,
       duration: {
         start: "2025-03-21",
-        end: "2025-03-27"
+        end: "2026-03-27"
       }
     },
     organizer: {
@@ -533,10 +533,10 @@ const activities = [
       description: "Limited to 20 units of girl group accompaniment NFT, enjoy full VIP service",
       image: "/assets/nfts/kpop-culture.avif",
       totalSupply: 20,
-      price: 128888.00,
+      price: 0,
       validityPeriod: {
         from: "2025-03-21",
-        to: "2025-03-27"
+        to: "2026-03-27"
       },
       usageRules: "This NFT is only for the holder's personal use and cannot be transferred."
     },
@@ -550,7 +550,7 @@ const activities = [
       type: ActivityType.MEMBERSHIP,
       duration: {
         start: "2025-03-16",
-        end: "2025-03-24"
+        end: "2026-03-24"
       }
     },
     organizer: {
@@ -587,10 +587,10 @@ const activities = [
       description: "Limited to 100 units of VIP experience NFT, enjoy exclusive member benefits",
       image: "/assets/nfts/deyun-club.png",
       totalSupply: 100,
-      price: 888.00,
+      price: 0,
       validityPeriod: {
         from: "2025-03-16",
-        to: "2025-03-24"
+        to: "2026-03-24"
       },
       usageRules: "This NFT is only for the holder's personal use and cannot be transferred."
     },
@@ -604,7 +604,7 @@ const activities = [
       type: ActivityType.MEMBERSHIP,
       duration: {
         start: "2025-03-01",
-        end: "2025-03-31"
+        end: "2026-03-31"
       }
     },
     organizer: {
@@ -658,7 +658,7 @@ const activities = [
       type: ActivityType.MEMBERSHIP,
       duration: {
         start: "2025-04-01",
-        end: "2025-04-30"
+        end: "2026-04-30"
       }
     },
     organizer: {
@@ -698,7 +698,7 @@ const activities = [
       price: 0,
       validityPeriod: {
         from: "2025-04-01",
-        to: "2026-03-31"
+        to: "2026-04-30"
       },
       usageRules: "This NFT includes digital benefits and physical redemption rights, see instructions for details."
     },
@@ -712,7 +712,7 @@ const activities = [
       type: ActivityType.MEMBERSHIP,
       duration: {
         start: "2025-05-01",
-        end: "2025-05-31"
+        end: "2026-05-31"
       }
     },
     organizer: {
@@ -752,7 +752,7 @@ const activities = [
       price: 0,
       validityPeriod: {
         from: "2025-05-01",
-        to: "2026-04-30"
+        to: "2026-05-31"
       },
       usageRules: "This NFT is an officially authorized Porsche digital collectible, including physical benefits."
     },
@@ -766,7 +766,7 @@ const activities = [
       type: ActivityType.MEMBERSHIP,
       duration: {
         start: "2025-06-01",
-        end: "2025-06-30"
+        end: "2026-06-30"
       }
     },
     organizer: {
@@ -806,7 +806,7 @@ const activities = [
       price: 0,
       validityPeriod: {
         from: "2025-06-01",
-        to: "2026-05-31"
+        to: "2026-06-30"
       },
       usageRules: "This NFT is a FIFA officially authorized digital collectible."
     },
@@ -820,7 +820,7 @@ const activities = [
       type: ActivityType.MEMBERSHIP,
       duration: {
         start: "2025-01-01",
-        end: "2025-02-11"
+        end: "2026-02-11"
       }
     },
     organizer: {
@@ -860,7 +860,7 @@ const activities = [
       price: 0,
       validityPeriod: {
         from: "2025-01-01",
-        to: "2025-02-11"
+        to: "2026-02-11"
       },
       usageRules: "This NFT is an NFL officially authorized digital ticket, including physical viewing benefits."
     },
@@ -874,7 +874,7 @@ const activities = [
       type: ActivityType.MEMBERSHIP,
       duration: {
         start: "2025-07-01",
-        end: "2025-07-31"
+        end: "2026-07-31"
       }
     },
     organizer: {
@@ -914,7 +914,7 @@ const activities = [
       price: 0,
       validityPeriod: {
         from: "2025-07-01",
-        to: "2026-06-30"
+        to: "2026-07-31"
       },
       usageRules: "This NFT is an Adidas officially authorized digital collectible, including virtual and physical benefits."
     },
@@ -928,7 +928,7 @@ const activities = [
       type: ActivityType.MEMBERSHIP,
       duration: {
         start: "2025-07-01",
-        end: "2025-07-30"
+        end: "2026-07-31"
       }
     },
     organizer: {
@@ -968,7 +968,7 @@ const activities = [
       price: 0,
       validityPeriod: {
         from: "2025-07-01",
-        to: "2026-06-30"
+        to: "2026-07-31"
       },
       usageRules: "This NFT is a Coca-Cola officially authorized digital collectible."
     },
@@ -982,7 +982,7 @@ const activities = [
       type: ActivityType.MEMBERSHIP,
       duration: {
         start: "2025-08-01",
-        end: "2025-08-31"
+        end: "2026-08-31"
       }
     },
     organizer: {
@@ -1022,7 +1022,7 @@ const activities = [
       price: 0,
       validityPeriod: {
         from: "2025-08-01",
-        to: "2026-07-31"
+        to: "2026-08-31"
       },
       usageRules: "This NFT is a Louis Vuitton officially authorized digital collectible."
     },
@@ -1036,7 +1036,7 @@ const activities = [
       type: ActivityType.MEMBERSHIP,
       duration: {
         start: "2025-09-01",
-        end: "2025-09-30"
+        end: "2026-09-30"
       }
     },
     organizer: {
@@ -1076,7 +1076,7 @@ const activities = [
       price: 0,
       validityPeriod: {
         from: "2025-09-01",
-        to: "2026-08-31"
+        to: "2026-09-30"
       },
       usageRules: "This NFT is a Gucci officially authorized digital collectible."
     },
@@ -1090,7 +1090,7 @@ const activities = [
       type: ActivityType.MEMBERSHIP,
       duration: {
         start: "2025-10-01",
-        end: "2025-10-31"
+        end: "2026-10-31"
       }
     },
     organizer: {
@@ -1130,7 +1130,7 @@ const activities = [
       price: 0,
       validityPeriod: {
         from: "2025-10-01",
-        to: "2026-09-30"
+        to: "2026-10-31"
       },
       usageRules: "This NFT is a Mercedes officially authorized digital collectible."
     },
@@ -1144,7 +1144,7 @@ const activities = [
       type: ActivityType.MEMBERSHIP,
       duration: {
         start: "2025-11-01",
-        end: "2025-11-30"
+        end: "2026-11-30"
       }
     },
     organizer: {
@@ -1184,7 +1184,7 @@ const activities = [
       price: 0,
       validityPeriod: {
         from: "2025-11-01",
-        to: "2026-10-31"
+        to: "2026-11-30"
       },
       usageRules: "This NFT is a Pepsi officially authorized digital collectible."
     },
@@ -1198,7 +1198,7 @@ const activities = [
       type: ActivityType.MEMBERSHIP,
       duration: {
         start: "2025-11-15",
-        end: "2025-12-15"
+        end: "2026-12-15"
       }
     },
     organizer: {
@@ -1238,7 +1238,7 @@ const activities = [
       price: 0,
       validityPeriod: {
         from: "2025-11-15",
-        to: "2026-11-14"
+        to: "2026-12-14"
       },
       usageRules: "This NFT is a McDonald's officially authorized digital collectible."
     },
@@ -1252,7 +1252,7 @@ const activities = [
       type: ActivityType.MEMBERSHIP,
       duration: {
         start: "2025-12-01",
-        end: "2025-12-31"
+        end: "2026-12-31"
       }
     },
     organizer: {
@@ -1292,7 +1292,7 @@ const activities = [
       price: 0,
       validityPeriod: {
         from: "2025-12-01",
-        to: "2026-11-30"
+        to: "2026-12-30"
       },
       usageRules: "This NFT is a BMW officially authorized digital membership credential."
     },
@@ -1346,7 +1346,7 @@ const activities = [
       price: 0,
       validityPeriod: {
         from: "2026-01-01",
-        to: "2026-12-31"
+        to: "2026-01-31"
       },
       usageRules: "This NFT is a Rolex officially authorized digital certification credential."
     },
@@ -1374,9 +1374,51 @@ function formatActivityData(data) {
     data.chainId = data.nft.chainId || 1; // 默认使用以太坊主网
     data.tokenStandard = data.nft.tokenStandard || 'ERC721'; // 默认使用 ERC721 标准
   }
+
+  // 从 basicInfo.duration 提取开始和结束日期
+  if (data.basicInfo && data.basicInfo.duration) {
+    data.startDate = new Date(data.basicInfo.duration.start);
+    data.endDate = new Date(data.basicInfo.duration.end);
+  }
+
+  // 从 NFT 数据中提取相关字段
+  if (data.nft) {
+    data.nftName = data.nft.name;
+    data.nftDescription = data.nft.description;
+    data.nftImage = data.nft.image;
+    data.nftTotalSupply = data.nft.totalSupply;
+    data.nftPrice = data.nft.price;
+    data.nftValidityStart = new Date(data.nft.validityPeriod.from);
+    data.nftValidityEnd = new Date(data.nft.validityPeriod.to);
+    data.nftUsageRules = data.nft.usageRules;
+  }
+
+  // 处理状态字段
+  if (data.status) {
+    data.remaining = data.status.remaining;
+    data.total = data.status.total;
+    data.statusNote = data.status.note;
+  }
+
+  // 处理权益字段
+  if (data.equity) {
+    data.equityTitle = data.equity.title;
+    data.equityDetails = data.equity.details;
+  }
+
+  // 处理外部链接字段
+  if (data.externalLinks) {
+    const links = JSON.parse(data.externalLinks);
+    data.externalLinksTitle = links.title;
+  }
+
+  // 处理图片字段
+  if (data.coverImage) {
+    data.image = data.coverImage;
+  }
   
-  // 移除 claimed 字段和其他不需要的字段
-  const { claimed, ...formattedData } = data;
+  // 移除不需要的字段
+  const { claimed, basicInfo, nft, organizer, coverImage, status, equity, ...formattedData } = data;
   
   return formattedData;
 }

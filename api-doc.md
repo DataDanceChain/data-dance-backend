@@ -1006,9 +1006,9 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 **请求体**:
 ```json
 {
-  "brandId": "brand-uuid",
-  "brandName": "Brand Name",
-  "brandLogo": "/assets/logos/brand-logo.png",
+  "creatorId": "creator-uuid",
+  "creatorName": "Creator Name",
+  "creatorLogo": "/assets/logos/creator-logo.png",
   "userId": "user-uuid",
   "userName": "User Name",
   "userWalletAddress": "0x1234567890abcdef1234567890abcdef12345678"
@@ -1027,19 +1027,19 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 ```
 
 **Pass 显示说明**:
-1. Pass 背景图片（strip）会显示用户在该品牌下拥有的 NFT：
+1. Pass 背景图片（strip）会显示用户在该创作者下拥有的 NFT：
    - 单个 NFT：完整显示
    - 两个 NFT：左右平分显示
    - 三个及以上 NFT：显示最新的三个，平均分配空间
 2. Pass 正面显示：
-   - 品牌名称
+   - 创作者名称
    - 会员状态
    - 会员姓名
    - 钱包地址（简略形式）
    - NFT 总数
    - 最后铸造日期
 3. Pass 背面显示：
-   - 品牌名称
+   - 创作者名称
    - 完整钱包地址
    - NFT 列表（包含名称、类型、标签、铸造日期）
    - 有效期
@@ -1066,7 +1066,7 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 **注意事项**:
 1. Pass 有效期默认为生成日期起一年
 2. NFT 图片会自动调整大小以适应显示区域
-3. 所有图片资源（NFT图片、品牌logo等）必须可以通过提供的URL访问
+3. 所有图片资源（NFT图片、创作者logo等）必须可以通过提供的URL访问
 
 ### 获取用户的所有Pass
 
@@ -1087,9 +1087,9 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
     "passes": [
       {
         "id": "pass-uuid",
-        "brandId": "brand-uuid",
-        "brandName": "Brand Name",
-        "brandLogo": "/assets/logos/brand-logo.png",
+        "creatorId": "creator-uuid",
+        "creatorName": "Creator Name",
+        "creatorLogo": "/assets/logos/creator-logo.png",
         "passUrl": "https://api.datadance.app/assets/passes/1234567890.pkpass",
         "createdAt": "2024-03-20T12:00:00.000Z",
         "expiresAt": "2024-12-31T23:59:59.000Z"
@@ -1116,9 +1116,9 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
   "status": "success",
   "data": {
     "id": "pass-uuid",
-    "brandId": "brand-uuid",
-    "brandName": "Brand Name",
-    "brandLogo": "/assets/logos/brand-logo.png",
+    "creatorId": "creator-uuid",
+    "creatorName": "Creator Name",
+    "creatorLogo": "/assets/logos/creator-logo.png",
     "passUrl": "https://api.datadance.app/assets/passes/1234567890.pkpass",
     "createdAt": "2024-03-20T12:00:00.000Z",
     "expiresAt": "2024-12-31T23:59:59.000Z",
