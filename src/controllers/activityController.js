@@ -116,7 +116,7 @@ exports.getActivities = async (req, res) => {
   } catch (error) {
     res.status(500).json({
       status: 'error',
-      message: '服务器错误',
+      message: 'Server error',
       error: error.message
     });
   }
@@ -148,7 +148,7 @@ exports.getActivity = async (req, res) => {
     if (!activity) {
       return res.status(404).json({
         status: 'fail',
-        message: '活动不存在'
+        message: 'The activity does not exist'
       });
     }
 
@@ -200,7 +200,7 @@ exports.getActivity = async (req, res) => {
   } catch (error) {
     res.status(500).json({
       status: 'error',
-      message: '服务器错误',
+      message: 'Server error',
       error: error.message
     });
   }
@@ -224,7 +224,7 @@ exports.claimActivity = async (req, res) => {
     if (!activity) {
       return res.status(404).json({
         status: 'fail',
-        message: '活动不存在'
+        message: 'The activity does not exist'
       });
     }
 
@@ -232,7 +232,7 @@ exports.claimActivity = async (req, res) => {
     if (activity.endDate && new Date(activity.endDate) < new Date()) {
       return res.status(400).json({
         status: 'fail',
-        message: '活动已结束'
+        message: 'The activity has ended'
       });
     }
 
@@ -240,7 +240,7 @@ exports.claimActivity = async (req, res) => {
     if (activity.remaining !== null && activity.remaining <= 0) {
       return res.status(400).json({
         status: 'fail',
-        message: '活动已无剩余数量'
+        message: 'The activity has no remaining quantity'
       });
     }
 
@@ -257,7 +257,7 @@ exports.claimActivity = async (req, res) => {
     if (existingClaim) {
       return res.status(400).json({
         status: 'fail',
-        message: '您已领取过此活动'
+        message: 'You have already claimed this activity'
       });
     }
 
@@ -316,7 +316,7 @@ exports.claimActivity = async (req, res) => {
     console.error('Error claiming activity:', error);
     res.status(500).json({
       status: 'error',
-      message: '服务器错误',
+      message: 'Server error',
       error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
@@ -437,7 +437,7 @@ exports.getCategories = async (req, res) => {
   } catch (error) {
     res.status(500).json({
       status: 'error',
-      message: '服务器错误',
+      message: 'Server error',
       error: error.message
     });
   }
@@ -557,7 +557,7 @@ exports.getAllActivities = async (req, res) => {
     console.error('Error fetching activities:', error);
     res.status(500).json({
       status: 'error',
-      message: '服务器错误',
+      message: 'Server error',
       error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
@@ -587,7 +587,7 @@ exports.getActivityById = async (req, res) => {
     if (!activity) {
       return res.status(404).json({
         status: 'fail',
-        message: '活动不存在'
+        message: 'The activity does not exist'
       });
     }
 
@@ -641,7 +641,7 @@ exports.getActivityById = async (req, res) => {
     console.error('Error fetching activity:', error);
     res.status(500).json({
       status: 'error',
-      message: '服务器错误',
+      message: 'Server error',
       error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
@@ -793,7 +793,7 @@ exports.getClaimedActivities = async (req, res) => {
     console.error('Error fetching claimed activities:', error);
     res.status(500).json({
       success: false,
-      message: '获取已领取活动失败',
+      message: 'Failed to fetch claimed activities',
       error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
@@ -880,7 +880,7 @@ exports.getUserClaimedActivities = async (req, res) => {
     console.error('Error fetching user claimed activities:', error);
     res.status(500).json({
       success: false,
-      message: '获取用户已领取活动失败',
+      message: 'Failed to fetch user claimed activities',
       error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
@@ -900,7 +900,7 @@ exports.updateActivityContract = async (req, res) => {
     if (contractAddress && !/^0x[a-fA-F0-9]{40}$/.test(contractAddress)) {
       return res.status(400).json({
         status: 'fail',
-        message: '无效的合约地址格式'
+        message: 'Invalid contract address format'
       });
     }
 
@@ -912,7 +912,7 @@ exports.updateActivityContract = async (req, res) => {
     if (!activity) {
       return res.status(404).json({
         status: 'fail',
-        message: '活动不存在'
+        message: 'The activity does not exist'
       });
     }
 
@@ -920,7 +920,7 @@ exports.updateActivityContract = async (req, res) => {
     if (activity.creatorId !== req.user.id) {
       return res.status(403).json({
         status: 'fail',
-        message: '您没有权限更新此活动'
+        message: 'You do not have permission to update this activity'
       });
     }
 
@@ -936,7 +936,7 @@ exports.updateActivityContract = async (req, res) => {
 
     res.status(200).json({
       status: 'success',
-      message: '活动合约信息已更新',
+      message: 'Activity contract information has been updated',
       data: {
         activity: updatedActivity
       }
@@ -945,7 +945,7 @@ exports.updateActivityContract = async (req, res) => {
     console.error('Error updating activity contract:', error);
     res.status(500).json({
       status: 'error',
-      message: '服务器错误',
+      message: 'Server error',
       error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
@@ -968,7 +968,7 @@ exports.deployActivityContract = async (req, res) => {
     if (!activity) {
       return res.status(404).json({
         status: 'fail',
-        message: '活动不存在'
+        message: 'The activity does not exist'
       });
     }
 
@@ -976,7 +976,7 @@ exports.deployActivityContract = async (req, res) => {
     if (activity.creatorId !== req.user.id) {
       return res.status(403).json({
         status: 'fail',
-        message: '您没有权限为此活动部署合约'
+        message: 'You do not have permission to deploy a contract for this activity'
       });
     }
 
@@ -988,7 +988,7 @@ exports.deployActivityContract = async (req, res) => {
     if (!user.walletAddress || !user.privateKey) {
       return res.status(400).json({
         status: 'fail',
-        message: '您需要先设置钱包才能部署合约'
+        message: 'You need to set a wallet first'
       });
     }
 
@@ -1010,7 +1010,7 @@ exports.deployActivityContract = async (req, res) => {
 
     res.status(200).json({
       status: 'success',
-      message: '活动合约已部署',
+      message: 'Activity contract has been deployed',
       data: {
         activity: updatedActivity
       }
@@ -1019,7 +1019,7 @@ exports.deployActivityContract = async (req, res) => {
     console.error('Error deploying activity contract:', error);
     res.status(500).json({
       status: 'error',
-      message: '服务器错误',
+      message: 'Server error',
       error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
