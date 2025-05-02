@@ -1374,7 +1374,7 @@ function formatActivityData(data) {
     data.chainId = data.nft.chainId || 1; // 默认使用以太坊主网
     data.tokenStandard = data.nft.tokenStandard || 'ERC721'; // 默认使用 ERC721 标准
   }
-
+  
   // 从 basicInfo.duration 提取开始和结束日期
   if (data.basicInfo && data.basicInfo.duration) {
     data.startDate = new Date(data.basicInfo.duration.start);

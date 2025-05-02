@@ -294,33 +294,58 @@ exports.generatePass = async (req, res) => {
     }));
     console.log('NFT 图片数量:', nftsWithImages.length);
 
-    // 生成通行证
-    const passId = uuidv4();
-    const serialNumber = uuidv4();
-    console.log('生成的 Pass ID:', passId);
-    console.log('生成的序列号:', serialNumber);
-
     // 设置过期时间为一年后
     const expirationDate = new Date();
     expirationDate.setFullYear(expirationDate.getFullYear() + 1);
     console.log('Pass 过期时间:', expirationDate);
 
-    // 创建 Pass 记录
-    console.log('开始创建 Pass 数据库记录...');
-    const passRecord = await prisma.pass.create({
-      data: {
-        id: passId,
-        creatorId: actualCreatorId,
-        creatorName: actualCreatorName,
-        creatorLogo: actualCreatorLogo,
+    let passId;
+    let serialNumber;
+
+    // 检查是否已存在相同用户和创建者的 Pass
+    const existingPass = await prisma.pass.findFirst({
+      where: {
         userId,
-        userName,
-        userWalletAddress,
-        serialNumber,
-        expiresAt: expirationDate
+        creatorId: actualCreatorId
       }
     });
-    console.log('Pass 数据库记录创建成功:', passRecord);
+
+    if (existingPass) {
+      // 只更新内容，不更换 id 和 serialNumber
+      passId = existingPass.id;
+      serialNumber = existingPass.serialNumber;
+      console.log('已存在 Pass，内容更新:', existingPass.id);
+      await prisma.pass.update({
+        where: { id: existingPass.id },
+        data: {
+          creatorName: actualCreatorName,
+          creatorLogo: actualCreatorLogo,
+          userName,
+          userWalletAddress,
+          expiresAt: expirationDate,
+          status: 'active',
+          updatedAt: new Date()
+        }
+      });
+    } else {
+      // 新建 Pass
+      passId = uuidv4();
+      serialNumber = uuidv4();
+      console.log('新建 Pass');
+      await prisma.pass.create({
+        data: {
+          id: passId,
+          creatorId: actualCreatorId,
+          creatorName: actualCreatorName,
+          creatorLogo: actualCreatorLogo,
+          userId,
+          userName,
+          userWalletAddress,
+          serialNumber,
+          expiresAt: expirationDate
+        }
+      });
+    }
 
     // 处理创建者logo
     let creatorLogoPath = path.join(__dirname, '../../public', actualCreatorLogo);
@@ -365,11 +390,19 @@ exports.generatePass = async (req, res) => {
     console.log('创建临时目录:', tempDir);
 
     // 创建基础 pass.json
+    const apiBaseUrl = process.env.API_BASE_URL;
+    if (!apiBaseUrl) {
+      throw new Error('API_BASE_URL environment variable is not set');
+    }
+    console.log('Using API Base URL:', apiBaseUrl);
+    
     const passJson = {
       formatVersion: 1,
-      passTypeIdentifier: "pass.ai.datadance.app",
-      teamIdentifier: "R2DAZ94F4S",
-      serialNumber,
+      passTypeIdentifier: process.env.PASS_TYPE_ID,
+      teamIdentifier: process.env.APNS_TEAM_ID,
+      serialNumber: serialNumber,
+      webServiceURL: `${apiBaseUrl}`,  // 移除所有多余的路径段
+      authenticationToken: crypto.randomBytes(32).toString('hex'),
       description: `${actualCreatorName} Membership Pass`,
       organizationName: actualCreatorName,
       logoText: actualCreatorName,
@@ -624,7 +657,7 @@ exports.generatePass = async (req, res) => {
     await fs.writeFile(passPath, passBuffer);
     console.log('Pass 文件保存成功');
 
-    // 设置定时器在一段时间后删除文件（例如 5 分钟）
+    // 设置定时器在一段时间后删除文件（例如 1 小时）
     setTimeout(async () => {
       try {
         await fs.unlink(passPath);
@@ -632,7 +665,7 @@ exports.generatePass = async (req, res) => {
       } catch (error) {
         console.error('删除 Pass 文件失败:', error);
       }
-    }, 5 * 60 * 1000); // 5 分钟后删除
+    }, 60 * 60 * 1000); // 1 小时后删除
 
     // 生成 pass URL (使用非 API 路径以避免认证检查)
     const passUrl = `/assets/passes/${passId}.pkpass`;

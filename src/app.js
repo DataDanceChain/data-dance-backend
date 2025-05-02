@@ -13,6 +13,7 @@ const notificationRoutes = require('./routes/notificationRoutes');
 const dataDanceIdRoutes = require('./routes/dataDanceIdRoutes');
 const web3AuthRoutes = require('./routes/web3AuthRoutes');
 const passRoutes = require('./routes/passRoutes');
+const passWebServiceRoutes = require('./routes/passWebServiceRoutes');
 
 const app = express();
 
@@ -56,6 +57,7 @@ app.use('/api/notifications', notificationRoutes);
 app.use('/api/data-dance-ids', dataDanceIdRoutes);
 app.use('/api/auth', web3AuthRoutes);
 app.use('/api/assets/passes', passRoutes);
+app.use('/v1', passWebServiceRoutes);
 
 // 错误处理中间件
 app.use(errorHandler);

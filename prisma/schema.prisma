@@ -288,11 +288,14 @@ model Pass {
   createdAt         DateTime @default(now())
   expiresAt         DateTime
   serialNumber      String?  @unique
+  pushToken         String?
   updatedAt         DateTime @updatedAt
+  passTypeIdentifier String  @default("pass.ai.datadance.app")
 
   // Relations
   user              User     @relation(fields: [userId], references: [id])
 
+  @@unique([userId, creatorId])
   @@index([creatorId])
   @@index([userId])
 }
