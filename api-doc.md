@@ -1156,6 +1156,55 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 }
 ```
 
+### 生成 Google Wallet Pass
+
+```
+POST /assets/passes/generate
+```
+
+**请求头**:
+```
+Authorization: Bearer <token>
+```
+
+**请求体**:
+```json
+{
+  "creatorId": "creator-uuid",
+  "creatorName": "Creator Name",
+  "creatorLogo": "/assets/logos/creator-logo.png",
+  "userId": "user-uuid",
+  "userName": "User Name",
+  "userWalletAddress": "0x1234567890abcdef1234567890abcdef12345678",
+  "platform": "google" // 指定为 google 即生成 Google Wallet Pass
+}
+```
+
+**响应** (200 OK):
+```json
+{
+  "status": "success",
+  "data": {
+    "passUrl": "https://pay.google.com/gp/v/save/eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9...",
+    "expiresAt": "2024-12-31T23:59:59.000Z",
+    "googleObjectId": "loyalty_creator-uuid_user-uuid",
+    "googleClassId": "loyalty_creator-uuid"
+  }
+}
+```
+
+**Google Wallet Pass 显示说明**:
+1. Pass 类型为 Loyalty（会员卡），每个 creator 一个 class，每个 user/creator 组合一个 object。
+2. Pass 上会显示该用户在该 creator 下的所有 NFT 信息（如 NFT 名称、铸造日期等）。
+3. 用户点击 passUrl 跳转到 Google Wallet 领取页面，需在 Android 真机上操作。
+4. 领取后可在 Google Wallet App 中查看。
+
+**注意事项**:
+- 生成 Google Wallet Pass 时，platform 字段必须为 "google"。
+- 其余参数与 Apple Wallet Pass 一致。
+- Apple Wallet Pass 默认 platform 为 "apple"，返回 .pkpass 文件下载链接。
+- Google Wallet Pass 返回 passUrl 为 Google 官方领取链接。
+
 ## 通知 API
 
 ### 获取通知列表

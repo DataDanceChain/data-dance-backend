@@ -14,6 +14,7 @@ const dataDanceIdRoutes = require('./routes/dataDanceIdRoutes');
 const web3AuthRoutes = require('./routes/web3AuthRoutes');
 const passRoutes = require('./routes/passRoutes');
 const passWebServiceRoutes = require('./routes/passWebServiceRoutes');
+const googleWalletRoutes = require('./routes/googleWalletRoutes');
 
 const app = express();
 
@@ -58,6 +59,7 @@ app.use('/api/data-dance-ids', dataDanceIdRoutes);
 app.use('/api/auth', web3AuthRoutes);
 app.use('/api/assets/passes', passRoutes);
 app.use('/v1', passWebServiceRoutes);
+app.use('/api/google-wallet', googleWalletRoutes);
 
 // 错误处理中间件
 app.use(errorHandler);

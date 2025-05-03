@@ -8,6 +8,7 @@ const crypto = require('crypto');
 const sharp = require('sharp');
 const axios = require('axios');
 const os = require('os');
+const googleWalletController = require('./googleWalletController');
 
 /**
  * 从图片中提取主色调
@@ -211,10 +212,14 @@ exports.generatePass = async (req, res) => {
       creatorLogo,
       userId,
       userName,
-      userWalletAddress
+      userWalletAddress,
+      platform
     } = req.body;
 
-    console.log('请求参数:', { creatorId, creatorName, creatorLogo, userId, userName, userWalletAddress });
+    // 默认 platform 为 'apple'
+    const passPlatform = platform || 'apple';
+
+    console.log('请求参数:', { creatorId, creatorName, creatorLogo, userId, userName, userWalletAddress, platform });
 
     // 验证必要参数
     if (!creatorId || !creatorName || !userId || !userName || !userWalletAddress) {
@@ -306,7 +311,8 @@ exports.generatePass = async (req, res) => {
     const existingPass = await prisma.pass.findFirst({
       where: {
         userId,
-        creatorId: actualCreatorId
+        creatorId: actualCreatorId,
+        platform: passPlatform
       }
     });
 
@@ -324,7 +330,14 @@ exports.generatePass = async (req, res) => {
           userWalletAddress,
           expiresAt: expirationDate,
           status: 'active',
-          updatedAt: new Date()
+          updatedAt: new Date(),
+          platform: passPlatform,
+          // 如果是 Google Wallet，更新相关字段
+          ...(passPlatform === 'google' ? {
+            googleObjectId: req.body.googleObjectId,
+            googleClassId: req.body.googleClassId,
+            googleAddUrl: req.body.googleAddUrl
+          } : {})
         }
       });
     } else {
@@ -342,7 +355,14 @@ exports.generatePass = async (req, res) => {
           userName,
           userWalletAddress,
           serialNumber,
-          expiresAt: expirationDate
+          expiresAt: expirationDate,
+          platform: passPlatform,
+          // 如果是 Google Wallet，添加相关字段
+          ...(passPlatform === 'google' ? {
+            googleObjectId: req.body.googleObjectId,
+            googleClassId: req.body.googleClassId,
+            googleAddUrl: req.body.googleAddUrl
+          } : {})
         }
       });
     }
@@ -689,13 +709,107 @@ exports.generatePass = async (req, res) => {
       : `http://localhost:${process.env.PORT || 3000}`;
     console.log('使用基础 URL:', baseUrl);
     
-    res.status(200).json({
-      status: 'success',
-      data: {
-        passUrl: `${baseUrl}${passUrl}`,  // 使用非 API 路径
-        expiresAt: updatedPassRecord.expiresAt
+    // 根据 platform 返回不同的响应
+    if (passPlatform === 'google') {
+      // 1. 生成 classId 和 objectId
+      const googleClassId = `loyalty_${actualCreatorId}`;
+      const googleObjectId = `loyalty_${actualCreatorId}_${userId}`;
+      const issuerId = process.env.GOOGLE_WALLET_ISSUER_ID;
+      const fullClassId = `${issuerId}.${googleClassId}`;
+      const fullObjectId = `${issuerId}.${googleObjectId}`;
+
+      // 2. 检查/创建 LoyaltyClass
+      const classExists = await googleWalletController.classExists(fullClassId);
+      if (!classExists) {
+        await googleWalletController.createLoyaltyClass({
+          id: fullClassId,
+          issuerName: actualCreatorName,
+          programName: `${actualCreatorName} 会员卡`,
+          programLogo: { sourceUri: { uri: `${process.env.API_BASE_URL}${actualCreatorLogo}` } },
+          reviewStatus: 'UNDER_REVIEW',
+          // 你可以根据业务补充更多字段
+        });
       }
-    });
+
+      // 3. 检查/创建 LoyaltyObject
+      const objectExists = await googleWalletController.objectExists(fullObjectId);
+      if (!objectExists) {
+        await googleWalletController.createLoyaltyObject({
+          id: fullObjectId,
+          classId: fullClassId,
+          accountId: userId,
+          accountName: userName,
+          state: 'active',
+          textModulesData: [
+            {
+              header: 'NFT Collection',
+              body: nftsWithImages.map(nft => `${nft.name} - ${new Date(nft.mintDate).toLocaleDateString()}`).join('\n')
+            }
+          ],
+          barcode: {
+            type: 'QR_CODE',
+            value: userWalletAddress
+          },
+          // 你可以根据业务补充更多字段
+        });
+      }
+
+      // 4. 生成 add to wallet 链接
+      const googleAddUrl = require('../utils/googleWalletUtils').generateAddToWalletUrl({
+        objectId: googleObjectId,
+        classId: googleClassId,
+        extraData: {}
+      });
+
+      // 5. 存入数据库
+      if (existingPass) {
+        await prisma.pass.update({
+          where: { id: existingPass.id },
+          data: {
+            googleObjectId: googleObjectId,
+            googleClassId: googleClassId,
+            googleAddUrl: googleAddUrl
+          }
+        });
+      } else {
+        await prisma.pass.create({
+          data: {
+            id: passId,
+            creatorId: actualCreatorId,
+            creatorName: actualCreatorName,
+            creatorLogo: actualCreatorLogo,
+            userId,
+            userName,
+            userWalletAddress,
+            serialNumber,
+            expiresAt: expirationDate,
+            platform: passPlatform,
+            googleObjectId: googleObjectId,
+            googleClassId: googleClassId,
+            googleAddUrl: googleAddUrl
+          }
+        });
+      }
+
+      // 6. 返回 addUrl
+      return res.status(200).json({
+        status: 'success',
+        data: {
+          passUrl: googleAddUrl,
+          expiresAt: expirationDate,
+          googleObjectId,
+          googleClassId
+        }
+      });
+    } else {
+      res.status(200).json({
+        status: 'success',
+        data: {
+          passUrl: `${baseUrl}${passUrl}`,
+          expiresAt: updatedPassRecord.expiresAt
+        }
+      });
+    }
   } catch (error) {
     console.error('生成 Pass 时出错:', error);
     res.status(500).json({
@@ -714,9 +828,13 @@ exports.generatePass = async (req, res) => {
 exports.getUserPasses = async (req, res) => {
   try {
     const userId = req.user.id;
+    const { platform } = req.query; // 支持按 platform 筛选
 
     const passes = await prisma.pass.findMany({
-      where: { userId },
+      where: { 
+        userId,
+        ...(platform ? { platform } : {}) // 如果提供了 platform 参数，则按 platform 筛选
+      },
       orderBy: { createdAt: 'desc' }
     });
 
@@ -725,7 +843,11 @@ exports.getUserPasses = async (req, res) => {
       data: {
         passes: passes.map(pass => ({
           ...pass,
-          passUrl: `${process.env.API_BASE_URL}${pass.passUrl}`
+          passUrl: `${process.env.API_BASE_URL}${pass.passUrl}`,
+          // 如果是 Google Wallet，返回 googleAddUrl 而不是 passUrl
+          ...(pass.platform === 'google' && pass.googleAddUrl ? {
+            passUrl: pass.googleAddUrl
+          } : {})
         }))
       }
     });
@@ -767,7 +889,11 @@ exports.getPassDetail = async (req, res) => {
       status: 'success',
       data: {
         ...pass,
-        passUrl: `${process.env.API_BASE_URL}${pass.passUrl}`
+        passUrl: `${process.env.API_BASE_URL}${pass.passUrl}`,
+        // 如果是 Google Wallet，返回 googleAddUrl 而不是 passUrl
+        ...(pass.platform === 'google' && pass.googleAddUrl ? {
+          passUrl: pass.googleAddUrl
+          } : {})
       }
     });
   } catch (error) {

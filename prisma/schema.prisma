@@ -291,11 +291,13 @@ model Pass {
   pushToken         String?
   updatedAt         DateTime @updatedAt
   passTypeIdentifier String  @default("pass.ai.datadance.app")
-
-  // Relations
+  platform          String   @default("apple")
+  googleObjectId    String?
+  googleClassId     String?
+  googleAddUrl      String?
   user              User     @relation(fields: [userId], references: [id])
 
-  @@unique([userId, creatorId])
+  @@unique([userId, creatorId, platform])
   @@index([creatorId])
   @@index([userId])
 }
