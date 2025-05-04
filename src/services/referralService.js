@@ -1,5 +1,6 @@
 // referral service: build referral overview up to 4 levels
 const prisma = require('../utils/prisma');
+const { recordTaskProgress } = require('./taskService');
 
 async function fetchReferrals(userId, level, maxLevel) {
   if (level > maxLevel) return [];
@@ -55,4 +56,29 @@ async function claimReferralRewards(userId) {
   return { claimedAt: now, totalPoints, count: uts.length };
 }
 
-module.exports = { getReferralOverview, claimReferralRewards };
+/**
+ * Process a new referral: create Referral row and propagate progress up to 3 levels
+ * @param {string} newUserId - the invitee user ID
+ * @param {string} inviterId - the direct inviter user ID
+ */
+async function processReferral(newUserId, inviterId) {
+  // create direct referral record
+  await prisma.referral.create({
+    data: { inviterId, inviteeId: newUserId }
+  });
+  
+  // propagate to up to 3 levels
+  let current = inviterId;
+  for (let level = 1; level <= 3 && current; level++) {
+    const taskId = `ref-${level}`;  // must match Task definitions
+    await recordTaskProgress(current, taskId, 1);
+    // move to next level inviter
+    const parent = await prisma.referral.findUnique({
+      where: { inviteeId: current },
+      select: { inviterId: true }
+    });
+    current = parent?.inviterId;
+  }
+}
+
+module.exports = { getReferralOverview, claimReferralRewards, processReferral };

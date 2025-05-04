@@ -9,7 +9,9 @@
     "build": "tsc",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
-    "prisma:studio": "prisma studio"
+    "prisma:studio": "prisma studio",
+    "seed:testusers": "node scripts/seedTestUserData.js",
+    "seed:all": "node scripts/createAwards.js && node scripts/createBadges.js && node scripts/createCultureWeb3Event.js && node scripts/createGCCEvent.js && node scripts/createHashGlobalUser.js && node scripts/createOffGridEvent.js && node scripts/createRPCParty.js && node scripts/seedTestUserData.js"
   },
   "dependencies": {
     "@prisma/client": "5.0.0",

@@ -16,7 +16,8 @@ exports.recordTaskProgress = async (req, res) => {
   const { delta } = req.body;
   try {
     const ut = await recordTaskProgress(req.user.id, taskId, delta);
-    return res.json({ status: 'success', data: { taskId: ut.taskId, progress: ut.progress, completed: ut.completed } });
+    // Return updated task status
+    return res.json({ status: 'success', data: { taskId: ut.taskId, status: ut.status } });
   } catch (error) {
     console.error(error);
     return res.status(400).json({ status: 'fail', message: error.message });

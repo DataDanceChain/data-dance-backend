@@ -13,5 +13,7 @@ router.get('/users/awards', protect, getUserAwards);
 router.get('/users/referrals', protect, referralController.getReferralOverview);
 // 一键领取推荐奖励
 router.post('/users/referrals/claim', protect, referralController.claimReferralRewards);
+// Process a referral upon new user signup or manual trigger
+router.post('/users/referrals/process', protect, referralController.processReferral);
 
 module.exports = router;

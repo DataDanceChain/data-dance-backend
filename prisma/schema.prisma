@@ -46,6 +46,7 @@ model User {
   notifications  Notification[]
   transactions   AssetTransaction[]
   roles          UserRole[]
+ inviteCode String  @unique @default(uuid())
   
   // 原来从Organization迁移过来的关系
   createdActivities Activity[]      // 创建的活动
@@ -54,7 +55,7 @@ model User {
   members         User[]            @relation("OrganizationMembers") // 组织成员
   organization    User?             @relation("OrganizationMembers", fields: [organizationId], references: [id]) // 所属组织
   organizationId  String?
-  
+
   // 添加关系
   dataDanceIDs   DataDanceID[]
   UserAwards     UserAward[]
@@ -312,84 +313,81 @@ model DataDanceID {
   metadata      Json?     // 可以存储额外的元数据
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
-
   // 确保用户和活动的组合是唯一的
   @@unique([userId, activityId])
 }
 
 // Award相关模型
 model Award {
-  id             String                @id
-  title          String
-  description    String
-  rewards        Int     // total reward points for this award
-  icon           String? // front-end icon name
-  color          String? // front-end display color
-  comingSoon     Boolean @default(false)
-  completionType AwardCompletionType
-  tasks          Task[]                // relation to Task for award's sub-tasks
-  metadata       Json?                 @default("{}")
-  createdAt      DateTime              @default(now())
-  updatedAt      DateTime              @updatedAt
-  UserAwards     UserAward[]
+  id          String      @id @default(uuid()) // 奖励唯一标识
+  title       String      // 奖励标题
+  description String      // 奖励描述
+  icon        String?     // 前端图标名
+  color       String?     // 前端展示颜色
+  status      AwardStatus @default(LOCKED) // 全局奖励状态：LOCKED/ LIVE/ INVALID
+  metadata    Json?       @default("{}") // 可选元数据
+  tasks       Task[]      // 子任务列表
+  UserAwards  UserAward[] // 用户奖励关联表
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @default(now())
 }
 
+// 用户奖励状态和领取记录
 model UserAward {
-  id        String       @id @default(uuid())
-  userId    String
-  awardId   String
-  status    AwardStatus
-  progress  Int?         @default(0)
-  claimed   Boolean      @default(false)
-  claimedAt DateTime?
-  createdAt DateTime     @default(now())
-
+  id        String      @id @default(uuid()) // 记录唯一标识
+  userId    String      // 用户 ID
+  awardId   String      // 奖励 ID
+  status    AwardStatus @default(LOCKED) // 此用户此奖励的状态
+  claimed   Boolean     @default(false)  // 是否已领取过
+  createdAt DateTime    @default(now())  // 记录创建时间
   @@unique([userId, awardId])
-  User      User         @relation(fields: [userId], references: [id])
-  Award     Award        @relation(fields: [awardId], references: [id])
+  User      User        @relation(fields: [userId], references: [id])
+  Award     Award       @relation(fields: [awardId], references: [id])
 }
 
-enum AwardCompletionType {
-  PARALLEL
-  TIERED
-}
-
+// 全局奖励三态：锁定、开放、失效
 enum AwardStatus {
-  LOCKED
-  IN_PROGRESS
-  COMPLETED
+  LOCKED   // 未发布或前置未达成
+  LIVE     // 正常开放
+  INVALID  // 已过期或灰度外
 }
-// 奖励任务定义
+
+// Global status states for awards and tasks
+// LOCKED: not available; LIVE: active; INVALID: expired or inaccessible
+// Reuse AwardStatus enum for tasks as well
+
 model Task {
-  id           String    @id @default(uuid())
-  award        Award     @relation(fields: [awardId], references: [id])
+  id           String      @id @default(uuid())
+  award        Award       @relation(fields: [awardId], references: [id])
   awardId      String
-  title        String
-  description  String?
-  type         TaskType
-  totalCount   Int      // front-end totalCount
-  points       Int      // points rewarded per completion
-  requirement  String?  // front-end requirement text
-  order        Int
-  createdAt    DateTime  @default(now())
-  updatedAt    DateTime  @default(now())
-  UserTasks    UserTask[]
+  title        String      // Task title
+  description  String?     // Task description
+  type         TaskType    // ONE_TIME or CONTINUOUS
+  prerequisiteTaskId String? // Optional ID of a prerequisite task for unlocking this one
+  prerequisiteTask   Task?   @relation("TaskPrerequisite", fields: [prerequisiteTaskId], references: [id])
+  claimLimit    Int?        // Max claims for CONTINUOUS tasks, null = unlimited
+  points        Int         // Reward points per completion
+  icon          String?     // Optional icon name
+  picture       String?     // Optional image URL
+  url           String?     // Optional action link
+  status        AwardStatus @default(LOCKED) // Task status: LOCKED/LIVE/INVALID
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @default(now())
+
+  UserTasks     UserTask[]
+  dependentTasks Task[]   @relation("TaskPrerequisite")
 }
 
-// 用户Task进度
 model UserTask {
-  id          String    @id @default(uuid())
-  user        User      @relation(fields: [userId], references: [id])
-  userId      String
-  task        Task      @relation(fields: [taskId], references: [id])
-  taskId      String
-  progress    Int       @default(0)
-  completed   Boolean   @default(false)
-  claimed     Boolean   @default(false)
-  completedAt DateTime?
-  createdAt   DateTime  @default(now())
-  updatedAt   DateTime  @default(now())
-
+  id            String      @id @default(uuid())
+  user          User        @relation(fields: [userId], references: [id])
+  userId        String
+  task          Task        @relation(fields: [taskId], references: [id])
+  taskId        String
+  status        AwardStatus @default(LOCKED) // User task status: LOCKED/LIVE/INVALID
+  claimRecords  DateTime[]  @default([]) // Timestamps of each claim; count = length of this array
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @default(now())
   @@unique([userId, taskId])
 }
 
