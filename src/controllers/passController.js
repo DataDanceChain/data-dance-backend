@@ -818,6 +818,15 @@ exports.generatePass = async (req, res) => {
         extraData: {}
       });
 
+      // 检查是否已存在相同用户和创建者的 Pass
+      const existingPass = await prisma.pass.findFirst({
+        where: {
+          userId,
+          creatorId: actualCreatorId,
+          platform: passPlatform
+        }
+      });
+
       // 5. 存入数据库
       if (existingPass) {
         await prisma.pass.update({
