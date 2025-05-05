@@ -1,6 +1,9 @@
 const { PrismaClient } = require('@prisma/client');
 const prisma = new PrismaClient();
 const { GoogleAuth } = require('google-auth-library');
+require('dotenv').config();
+const { google } = require('googleapis');
+
 // Node.js 18+ 有全局 fetch，否则用 node-fetch polyfill
 let fetchFn;
 try {
@@ -193,73 +196,75 @@ exports.handleGoogleWalletCallback = async (req, res) => {
   }
 };
 
-// 获取 Google API 访问 token
-async function getAccessToken() {
-  const auth = new GoogleAuth({
+
+// 检查 GenericObject 是否存在
+exports.genericObjectExists = async (objectId) => {
+  const accessToken = await getAccessToken();
+  const url = `${WALLET_API_BASE}/genericObject/${objectId}`;
+  const res = await fetchFn(url, {
+    headers: { Authorization: `Bearer ${accessToken}` }
+  });
+  return res.status === 200;
+};
+
+
+
+// 创建 GenericObject
+exports.createGenericObject = async (issuerId, objectSuffix, objectData) => {
+  const auth = new google.auth.GoogleAuth({
     credentials: {
-      client_email: process.env.GOOGLE_WALLET_SERVICE_ACCOUNT_EMAIL,
+      client_email: process.env.GOOGLE_WALLET_SERVICE_ACCOUNT,
       private_key: process.env.GOOGLE_WALLET_PRIVATE_KEY.replace(/\\n/g, '\n'),
     },
-    scopes: ['https://www.googleapis.com/auth/wallet_object.issuer']
+    scopes: ['https://www.googleapis.com/auth/wallet_object.issuer'],
   });
-  const client = await auth.getClient();
-  return await client.getAccessToken();
-}
 
-// 检查 LoyaltyClass 是否存在
+  const client = google.walletobjects({
+    version: 'v1',
+    auth: auth,
+  });
+
+  let response;
+
+  // Check if the object exists
+  try {
+    response = await client.genericobject.get({
+      resourceId: `${issuerId}.${objectSuffix}`
+    });
+
+    console.log(`Object ${issuerId}.${objectSuffix} already exists!`);
+
+    return `${issuerId}.${objectSuffix}`;
+  } catch (err) {
+    if (err.response && err.response.status !== 404) {
+      // Something else went wrong...
+      console.log(err);
+      return `${issuerId}.${objectSuffix}`;
+    }
+  }
+  response = await client.genericobject.insert({
+    requestBody: objectData
+  });
+
+  console.log('Object insert response');
+  console.log(response);
+
+  return `${issuerId}.${objectSuffix}`;
+
+
+
+};
+
+// 检查 GenericClass 是否存在
 exports.classExists = async (classId) => {
   const accessToken = await getAccessToken();
-  const url = `${WALLET_API_BASE}/loyaltyClass/${classId}`;
+  const url = `${WALLET_API_BASE}/genericClass/${classId}`;
+  console.log('Checking classId:', classId);
+  console.log('Checking class exists:', url);
   const res = await fetchFn(url, {
     headers: { Authorization: `Bearer ${accessToken}` }
   });
+  const text = await res.text();
+  console.log('classExists response:', res.status, text);
   return res.status === 200;
-};
-
-// 创建 LoyaltyClass
-exports.createLoyaltyClass = async (classData) => {
-  const accessToken = await getAccessToken();
-  const url = `${WALLET_API_BASE}/loyaltyClass`;
-  console.log('Google Wallet API LoyaltyClass payload:', JSON.stringify(classData, null, 2));
-  const res = await fetchFn(url, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify(classData)
-  });
-  if (!res.ok) {
-    const errorText = await res.text();
-    console.error('Google Wallet API createLoyaltyClass error:', errorText);
-    throw new Error('Failed to create LoyaltyClass');
-  }
-  return await res.json();
-};
-
-// 检查 LoyaltyObject 是否存在
-exports.objectExists = async (objectId) => {
-  const accessToken = await getAccessToken();
-  const url = `${WALLET_API_BASE}/loyaltyObject/${objectId}`;
-  const res = await fetchFn(url, {
-    headers: { Authorization: `Bearer ${accessToken}` }
-  });
-  return res.status === 200;
-};
-
-// 创建 LoyaltyObject
-exports.createLoyaltyObject = async (objectData) => {
-  const accessToken = await getAccessToken();
-  const url = `${WALLET_API_BASE}/loyaltyObject`;
-  console.log('Google Wallet API LoyaltyObject payload:', JSON.stringify(objectData, null, 2));
-  const res = await fetchFn(url, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify(objectData)
-  });
-  if (!res.ok) throw new Error('Failed to create LoyaltyObject');
-  return await res.json();
 }; 

@@ -317,7 +317,6 @@ exports.generatePass = async (req, res) => {
     });
 
     if (existingPass) {
-      // 只更新内容，不更换 id 和 serialNumber
       passId = existingPass.id;
       serialNumber = existingPass.serialNumber;
       console.log('已存在 Pass，内容更新:', existingPass.id);
@@ -332,7 +331,6 @@ exports.generatePass = async (req, res) => {
           status: 'active',
           updatedAt: new Date(),
           platform: passPlatform,
-          // 如果是 Google Wallet，更新相关字段
           ...(passPlatform === 'google' ? {
             googleObjectId: req.body.googleObjectId,
             googleClassId: req.body.googleClassId,
@@ -341,7 +339,6 @@ exports.generatePass = async (req, res) => {
         }
       });
     } else {
-      // 新建 Pass
       passId = uuidv4();
       serialNumber = uuidv4();
       console.log('新建 Pass');
@@ -357,7 +354,6 @@ exports.generatePass = async (req, res) => {
           serialNumber,
           expiresAt: expirationDate,
           platform: passPlatform,
-          // 如果是 Google Wallet，添加相关字段
           ...(passPlatform === 'google' ? {
             googleObjectId: req.body.googleObjectId,
             googleClassId: req.body.googleClassId,
@@ -366,6 +362,12 @@ exports.generatePass = async (req, res) => {
         }
       });
     }
+
+    // === strip 图片生成逻辑，确保每次都执行 ===
+    const stripNftImages = nftsWithImages.map(nft => path.join(__dirname, '../../public', nft.image));
+    const stripPath = path.join(__dirname, '../../public/assets/passes', `${passId}.strip.png`);
+    await generateStripImage(stripNftImages, stripPath);
+    // === strip 图片生成逻辑 END ===
 
     // 处理创建者logo
     let creatorLogoPath = path.join(__dirname, '../../public', actualCreatorLogo);
@@ -385,6 +387,17 @@ exports.generatePass = async (req, res) => {
     const logoBuffer = await fs.readFile(creatorLogoPath);
     const backgroundColor = await extractDominantColor(logoBuffer);
     console.log('使用背景色:', backgroundColor);
+
+    // 新增：将 rgb 转为 hex
+    function rgbToHex(rgb) {
+      const result = rgb.match(/\d+/g);
+      if (!result || result.length < 3) return '#4285f4';
+      return (
+        '#' +
+        result.slice(0, 3).map(x => (+x).toString(16).padStart(2, '0')).join('')
+      );
+    }
+    const hexBackgroundColor = rgbToHex(backgroundColor);
 
     // 检查证书文件
     console.log('开始检查证书文件...');
@@ -416,6 +429,54 @@ exports.generatePass = async (req, res) => {
     }
     console.log('Using API Base URL:', apiBaseUrl);
     
+    // Apple Pass 字段
+    const appleFields = [
+      {
+        key: 'nftCount',
+        label: 'NFTs',
+        value: nftsWithImages.length.toString()
+      },
+      {
+        key: 'wallet',
+        label: 'Wallet',
+        value: userWalletAddress
+      },
+      {
+        key: 'name',
+        label: 'Name',
+        value: userName
+      },
+      {
+        key: 'status',
+        label: 'Status',
+        value: 'Member'
+      }
+    ];
+
+    // Google Pass 字段
+    const googleFields = [
+      {
+        id: 'nftCount',
+        header: 'NFTs',
+        body: nftsWithImages.length.toString()
+      },
+      {
+        id: 'wallet',
+        header: 'Wallet',
+        body: userWalletAddress
+      },
+      {
+        id: 'name',
+        header: 'Name',
+        body: userName
+      },
+      {
+        id: 'status',
+        header: 'Status',
+        body: 'Member'
+      }
+    ];
+
     const passJson = {
       formatVersion: 1,
       passTypeIdentifier: process.env.PASS_TYPE_ID,
@@ -441,28 +502,7 @@ exports.generatePass = async (req, res) => {
       storeCard: {
         headerFields: [],
         primaryFields: [],
-        secondaryFields: [
-          {
-            key: "nftCount",
-            label: "NFTs",
-            value: nftsWithImages.length.toString()
-          },
-          {
-            key: "wallet",
-            label: "Wallet",
-            value: `${userWalletAddress.slice(0, 6)}...${userWalletAddress.slice(-4)}`
-          },
-          {
-            key: "name",
-            label: "Name",
-            value: userName
-          },
-          {
-            key: "status",
-            label: "Status",
-            value: "MEMBER"
-          }
-        ],
+        secondaryFields: appleFields,
         auxiliaryFields: [],
         backFields: [
           {
@@ -712,49 +752,66 @@ exports.generatePass = async (req, res) => {
     // 根据 platform 返回不同的响应
     if (passPlatform === 'google') {
       // 1. 生成 classId 和 objectId
-      const googleClassId = `loyalty_${actualCreatorId}`;
-      const googleObjectId = `loyalty_${actualCreatorId}_${userId}`;
+      const googleClassId = `DataDanceGoogleWalletPass`;
+      const googleObjectId = `DataDanceGoogleWalletPassObject_${userId}_${actualCreatorId}`;
       const issuerId = process.env.GOOGLE_WALLET_ISSUER_ID;
       const fullClassId = `${issuerId}.${googleClassId}`;
       const fullObjectId = `${issuerId}.${googleObjectId}`;
 
-      // 2. 检查/创建 LoyaltyClass
-      const classExists = await googleWalletController.classExists(fullClassId);
-      if (!classExists) {
-        await googleWalletController.createLoyaltyClass({
-          id: fullClassId,
-          issuerName: actualCreatorName,
-          programName: `${actualCreatorName} 会员卡`,
-          programLogo: { sourceUri: { uri: `${process.env.API_BASE_URL}${actualCreatorLogo}` } },
-          reviewStatus: 'UNDER_REVIEW',
-          // 你可以根据业务补充更多字段
-        });
-      }
-
-      // 3. 检查/创建 LoyaltyObject
-      const objectExists = await googleWalletController.objectExists(fullObjectId);
-      if (!objectExists) {
-        await googleWalletController.createLoyaltyObject({
-          id: fullObjectId,
-          classId: fullClassId,
-          accountId: userId,
-          accountName: userName,
-          state: 'active',
-          textModulesData: [
-            {
-              header: 'NFT Collection',
-              body: nftsWithImages.map(nft => `${nft.name} - ${new Date(nft.mintDate).toLocaleDateString()}`).join('\n')
-            }
-          ],
-          barcode: {
-            type: 'QR_CODE',
-            value: userWalletAddress
+      // 3. 创建 GenericObject
+      await googleWalletController.createGenericObject(issuerId, googleObjectId, {
+        id: fullObjectId,
+        classId: fullClassId,
+        cardTitle: {
+          defaultValue: {
+            language: 'en-US',
+            value: actualCreatorName || 'DataDance'
+          }
+        },
+        subheader: {
+          defaultValue: {
+            language: 'en-US',
+            value: 'NFTs'
+          }
+        },
+        header: {
+          defaultValue: {
+            language: 'en-US',
+            value: nftsWithImages.length.toString()
+          }
+        },
+        textModulesData: googleFields,
+        barcode: {
+          type: 'QR_CODE',
+          value: userWalletAddress,
+          alternateText: `Wallet: ${userWalletAddress.slice(0, 6)}...${userWalletAddress.slice(-4)}`
+        },
+        hexBackgroundColor: hexBackgroundColor,
+        heroImage: {
+          sourceUri: {
+            uri: `${process.env.API_BASE_URL || 'http://localhost:3000'}/assets/passes/${passId}.strip.png`
           },
-          // 你可以根据业务补充更多字段
-        });
-      }
+          contentDescription: {
+            defaultValue: {
+              language: 'en-US',
+              value: actualCreatorName || 'HERO_IMAGE_DESCRIPTION'
+            }
+          }
+        },
+        logo: {
+          sourceUri: {
+            uri: actualCreatorLogo ? `${process.env.API_BASE_URL || 'http://localhost:3000'}${actualCreatorLogo}` : 'https://storage.googleapis.com/wallet-lab-tools-codelab-artifacts-public/google-io-hero-demo-only.png'
+          },
+          contentDescription: {
+            defaultValue: {
+              language: 'en-US',
+              value: actualCreatorName || 'LOGO'
+            }
+          }
+        }
+      });
 
-      // 4. 生成 add to wallet 链接
+      // 4. 生成 add to wallet 链接（如有 JWT 生成工具可用）
       const googleAddUrl = require('../utils/googleWalletUtils').generateAddToWalletUrl({
         objectId: googleObjectId,
         classId: googleClassId,

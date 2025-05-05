@@ -4,7 +4,7 @@ const crypto = require('crypto');
 class GoogleWalletUtils {
   constructor() {
     this.issuerId = process.env.GOOGLE_WALLET_ISSUER_ID;
-    this.serviceAccountEmail = process.env.GOOGLE_WALLET_SERVICE_ACCOUNT_EMAIL;
+    this.serviceAccountEmail = process.env.GOOGLE_WALLET_SERVICE_ACCOUNT;
     this.privateKey = process.env.GOOGLE_WALLET_PRIVATE_KEY;
   }
 
