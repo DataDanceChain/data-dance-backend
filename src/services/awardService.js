@@ -1,7 +1,6 @@
 const prisma = require('../utils/prisma');
-const { recordTaskProgress, getTasksByAward } = require('./taskService');
+const { getTasksByAward } = require('./taskService');
 const { getReferralOverview } = require('./referralService');
-const assetService = require('./assetService');
 
 /**
  * Fetch platform award definitions (id, title, description, icon, color, status, metadata)
@@ -26,53 +25,41 @@ async function getAwardDefinitions() {
  * Returns final award/task statuses and referral overview.
  */
 async function getUserAwards(userId) {
-  // load user profile
-  const user = await prisma.user.findUnique({ where: { id: userId } });
-
-  // 1. Profile completion
-  if (user.name && user.email && user.avatar) {
-    await recordTaskProgress(userId, 'profile-1', 1);
-  }
-
-  // 2. Early registration
-  const cutoff = new Date('2025-06-01');
-  if (user.createdAt < cutoff) {
-    await recordTaskProgress(userId, 'early-1', 1);
-  }
-
-  // 3. Invite friends: referral progress happens in processReferral on signup
+  // progress updates delegated to taskService.updateProgressForAwardTasks in getTasksByAward
+  // fetch referral overview separately
   const referralOverview = await getReferralOverview(userId);
 
-  // 4. NFT collection
-  const nftCount = await assetService.getUserNFTCount(userId);
-  [1, 3, 5].forEach(async (n, i) => {
-    if (nftCount >= n) await recordTaskProgress(userId, `assets-${i+1}`, 1);
-  });
-
-  // 5. Badge collection
-  const badgeCount = await assetService.getUserBadgeCount(userId);
-  [1, 3, 5].forEach(async (n, i) => {
-    if (badgeCount >= n) await recordTaskProgress(userId, `badge-${i+1}`, 1);
-  });
-
-  // 6. DDC holdings
-  const balance = await assetService.getDDCBalance(userId);
-  [50, 100, 200, 500, 1000].forEach(async (threshold, idx) => {
-    if (balance >= threshold) await recordTaskProgress(userId, `ddc-${threshold}`, 1);
-  });
-
-  // 7. Social engagement: implementation depends on external hook, assume ut updated elsewhere
-
-  // assemble final awards
-  const awards = await prisma.award.findMany({ where: { status: 'LIVE' } });
+  // fetch all awards and user's awards
+  const awardsRaw = await prisma.award.findMany({ select: { id: true, title: true, description: true, icon: true, color: true, metadata: true, status: true } });
+  const userAwards = await prisma.userAward.findMany({ where: { userId }, select: { awardId: true, status: true, claimed: true } });
   const result = [];
-  for (const award of awards) {
+  for (const award of awardsRaw) {
     const tasks = await getTasksByAward(userId, award.id);
+    const total = tasks.length;
+    const claimedCount = tasks.filter(t => t.claimed).length;
+    const progress = total > 0 ? claimedCount / total : 0;
+    // find userAward record
+    const ua = userAwards.find(u => u.awardId === award.id) || { status: 'LOCKED', claimed: false };
+    // compute finalStatus per award
+    let finalStatus;
+    if (ua.claimed) finalStatus = 'CLAIMED';
+    else if (award.status === 'INVALID') finalStatus = 'INVALID';
+    else if (award.status === 'LIVE' && ua.status === 'LOCKED') finalStatus = 'PARTICIPATE';
+    else if (award.status === 'LOCKED' && ua.status === 'LOCKED') finalStatus = 'COMING_SOON';
+    else if (ua.status === 'LIVE') {
+      finalStatus = progress >= 1 ? 'COMPLETED' : 'IN_PROGRESS';
+    } else finalStatus = 'COMING_SOON';
     result.push({
       awardId: award.id,
       title: award.title,
       description: award.description,
-      status: award.status,
+      icon: award.icon,
+      color: award.color,
+      metadata: award.metadata,
+      totalTasks: total,
+      claimedTasks: claimedCount,
+      progress,
+      finalStatus,
       tasks
     });
   }
@@ -80,4 +67,13 @@ async function getUserAwards(userId) {
   return { awards: result, referralOverview };
 }
 
-module.exports = { getUserAwards, getAwardDefinitions };
+/**
+ * Initialize UserAward entries for a new user, default LOCKED, claimed=false
+ */
+async function initializeUserAwards(userId) {
+  const awards = await prisma.award.findMany({ select: { id: true } });
+  const data = awards.map(a => ({ userId, awardId: a.id, status: 'LOCKED', claimed: false }));
+  await prisma.userAward.createMany({ data, skipDuplicates: true });
+}
+
+module.exports = { getUserAwards, getAwardDefinitions, initializeUserAwards };

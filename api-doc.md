@@ -14,6 +14,7 @@
 4. [资产 API](#资产-api)
 5. [通知 API](#通知-api)
 6. [奖励 API](#奖励-api)
+7. [邀请系统 API](#邀请系统-api)
 
 ## 认证 API
 
@@ -1159,11 +1160,6 @@ GET /api/awards
 ```
 GET /api/awards/:awardId/tasks
 ```
-**实现映射**:
-- 路由: GET /api/awards/:awardId/tasks
-- Controller: taskController.getTasksByAward
-- Service: taskService.getTasksByAward
-
 **响应示例** (200 OK):
 ```json
 {
@@ -1171,26 +1167,71 @@ GET /api/awards/:awardId/tasks
   "data": {
     "tasks": [
       {
-        "id": "profile-1",               
-        "title": "Complete Profile",    
-        "description": "Fill in name, email, avatar",  
-        "type": "ONE_TIME",             
-        "points": 100,                    
-        "status": "LIVE",               
-        "claimRecords": [],              
-        "claimable": true                
+        "id": "profile-1",
+        "title": "Complete Profile",
+        "description": "Fill in name, email, avatar",
+        "points": 100,
+        "claimLimit": 1,
+        "claimRecords": [],           
+        "claimed": false,
+        "progress": 0,
+        "finalStatus": "LOCKED"
       },
       {
-        "id": "profile-2",               
-        "title": "Add Bio",             
-        "description": "Write a short bio in profile page",  
-        "type": "ONE_TIME",             
-        "points": 50,                     
-        "status": "LOCKED",             
-        "claimRecords": [],              
-        "claimable": false               
+        "id": "profile-2",
+        "title": "Add Bio",
+        "description": "Write a short bio",
+        "points": 50,
+        "claimLimit": 1,
+        "claimRecords": ["2025-05-06T10:00:00.000Z"],
+        "claimed": true,
+        "progress": 1,
+        "finalStatus": "CLAIMED"
       }
     ]
+  }
+}
+```
+
+### 记录子任务进度
+```
+POST /api/users/tasks/{taskId}/progress
+```
+**请求头**:
+```
+Authorization: Bearer <token>
+```
+**请求体**:
+```json
+{ "delta": 1 }
+```
+**响应** (200 OK):
+```json
+{
+  "status": "success",
+  "data": {
+    "taskId": "profile-1",
+    "status": "IN_PROGRESS"
+  }
+}
+```
+
+### 领取子任务奖励
+```
+POST /api/users/tasks/{taskId}/claim
+```
+**请求头**:
+```
+Authorization: Bearer <token>
+```
+**响应** (200 OK):
+```json
+{
+  "status": "success",
+  "data": {
+    "taskId": "profile-1",
+    "claimedAt": "2025-05-07T12:00:00.000Z",
+    "points": 100
   }
 }
 ```
@@ -1220,95 +1261,97 @@ GET /api/users/awards
             "id": "profile-1",
             "title": "Complete Profile",
             "description": "Fill in name, email, avatar",
-            "type": "ONE_TIME",
             "points": 100,
-            "status": "LIVE",
+            "claimLimit": 1,
             "claimRecords": [],
-            "claimable": true
-          }
-        ]
-      },
-      {
-        "awardId": "award-early",
-        "title": "Early Registration",
-        "description": "Register before cutoff date",
-        "status": "LIVE",
-        "tasks": [
-          {
-            "id": "early-1",
-            "title": "Early Registration Bonus",
-            "description": "Register before 2025-06-01",
-            "type": "ONE_TIME",
-            "points": 100,
-            "status": "LIVE",
-            "claimRecords": [],
-            "claimable": true
+            "claimed": false,
+            "progress": 0,
+            "finalStatus": "LOCKED"
           }
         ]
       }
       // ...更多用户奖励...
     ],
     "referralOverview": {
-      "networkSize": 9,
-      "referralTotalEarning": 150,
-      "networkActivity": 520,
-      "unclaimReferralAwards": 30,
-      "referrals": [
-        {
-          "userId": "user-2",
-          "nickname": "user2",
-          "points": 50,
-          "level": 1,
-          "referrals": [
-            {
-              "userId": "user-5",
-              "nickname": "user5",
-              "points": 30,
-              "level": 2
-            }
-          ]
-        }
-      ]
+      // ...保持不变...
     }
   }
 }
 ```
 
-### 验证与触发说明 (7 大奖励类型)
-以下奖励逻辑均在 `GET /api/users/awards` 中一并计算并推进状态，前端无需额外 API 调用，只需：
+## 邀请系统 API
 
-1. Profile 完成 (Profile Completion)
-   - 条件: `user.name && user.email && user.avatar` 均非空
-   - 触发: 在用户调用 `PATCH /api/users/me` 更新个人信息后，前端重新 `GET /api/users/awards` 即可
+### 获取当前用户邀请码
+```
+GET /api/users/invite-code
+```
+**请求头**:
+```
+Authorization: Bearer <token>
+```
 
-2. Early 注册 (Early Registration)
-   - 条件: `user.createdAt < 固定截止日期`
-   - 触发: 用户第一次注册后符合条件，后端自动评估并返回状态
+### 获取邀请概览
+```
+GET /api/users/referrals
+```
+**请求头**:
+```
+Authorization: Bearer <token>
+```
+**响应** (200 OK):
+```json
+{
+  "status": "success",
+  "data": {
+    "referrals": [ /* 多级邀请列表 */ ],
+    "networkSize": 10,
+    "levelCounts": { "1": 5, "2": 3, "3": 1, "4": 1 },
+    "earnedByLevel": [50, 5, 3, 1],
+    "totalReferralPoints": 59,
+    "unclaimReferralAwards": 0
+  }
+}
+```
 
-3. 邀请好友 (Referral)
-   - 条件: 通过 `POST /api/users/referrals/process` 创建 `Referral` 记录
-   - 前端: 在用户注册或手动输入邀请码后，调用此 API，再次 `GET /api/users/awards`
+### 领取邀请奖励
 
-4. NFT 持有 (NFT Collection)
-   - 条件: 链上或 DB 中 `nFTDataAsset.count(ownerId)==n`
-   - 前端: 在用户钱包有新 NFT 后，刷新 `GET /api/users/awards` 即可获取最新状态
+```
+POST /api/users/referrals/claim
+```
 
-5. 徽章收集 (Badge Collection)
-   - 条件: DB 表 `UserBadge.count(userId)==n`
-   - 前端: 通过 `POST /api/assets/badges/{badgeId}/collect` 后，调用 `GET /api/users/awards`
+**请求头**:
+```
+Authorization: Bearer <token>
+```
 
-6. DDC 持仓 (DDC Holdings)
-   - 条件: 调用 `web3Service.getDDCBalance(walletAddress)>=n`
-   - 前端: 在钱包余额变化后，刷新 `GET /api/users/awards`
+**响应** (200 OK):
+```json
+{
+  "status": "success",
+  "data": {
+    "claimedPoints": 10,
+    "totalReferralPoints": 59,
+    "unclaimedReferralAwards": 0
+  }
+}
+```
 
-7. 社区互动 (Social Engagement)
-   - 条件: 根据具体 `taskId`，前端完成动作后，调用
-     ```bash
-     POST /api/users/tasks/{taskId}/progress { "delta": 1 }
-     ```
-   - 前端: 成功后再 `GET /api/users/awards` 查看更新
-
-以上触发方式让前端控制最小化，所有进度评估和状态计算均由后端 `awardService.getUserAwards` 集中完成。
+### 处理新邀请
+```
+POST /api/users/referrals/process
+```
+**请求头**:
+```
+Authorization: Bearer <token>
+```
+**请求体**:
+```json
+{ "inviterId": "user-uuid" }
+```
+**响应** (200 OK):
+```json
+{ "status": "success", "data": { "processed": true } }
+```
 
 ## 错误响应
 

@@ -72,7 +72,7 @@ model UserProfile {
   language          String   @default("en")
   notificationPrefs Json?
   createdAt         DateTime @default(now())
-  updatedAt         DateTime @updatedAt
+  updatedAt         DateTime @default(now())
 }
 
 model Role {
@@ -362,7 +362,7 @@ model Task {
   awardId      String
   title        String      // Task title
   description  String?     // Task description
-  type         TaskType    // ONE_TIME or CONTINUOUS
+  status        AwardStatus @default(LOCKED) // Task status: LOCKED/LIVE/INVALID
   prerequisiteTaskId String? // Optional ID of a prerequisite task for unlocking this one
   prerequisiteTask   Task?   @relation("TaskPrerequisite", fields: [prerequisiteTaskId], references: [id])
   claimLimit    Int?        // Max claims for CONTINUOUS tasks, null = unlimited
@@ -370,10 +370,8 @@ model Task {
   icon          String?     // Optional icon name
   picture       String?     // Optional image URL
   url           String?     // Optional action link
-  status        AwardStatus @default(LOCKED) // Task status: LOCKED/LIVE/INVALID
   createdAt     DateTime    @default(now())
   updatedAt     DateTime    @default(now())
-
   UserTasks     UserTask[]
   dependentTasks Task[]   @relation("TaskPrerequisite")
 }
@@ -386,15 +384,10 @@ model UserTask {
   taskId        String
   status        AwardStatus @default(LOCKED) // User task status: LOCKED/LIVE/INVALID
   claimRecords  DateTime[]  @default([]) // Timestamps of each claim; count = length of this array
+  claimed       Boolean     @default(false)  // whether user has claimed reward
   createdAt     DateTime    @default(now())
   updatedAt     DateTime    @default(now())
   @@unique([userId, taskId])
-}
-
-// 任务类型：一次性或持续性
-enum TaskType {
-  ONE_TIME
-  CONTINUOUS
 }
 
 // 多级邀请关系表

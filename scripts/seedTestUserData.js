@@ -2,6 +2,7 @@ const prisma = require('../src/utils/prisma');
 require('dotenv').config();
 const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
+const { recordTaskProgress } = require('../src/services/taskService');
 
 /**
  * Seed test users, referral relationships, UserAward, and UserTask data.
@@ -11,67 +12,54 @@ async function main() {
   const mainEmail = process.env.TEST_USER_EMAIL;
   if (!mainEmail) throw new Error('Please set TEST_USER_EMAIL in environment');
 
-  // Prepare list of test users: main + ten others
-  const otherEmails = Array.from({ length: 10 }, (_, i) => `test_user${i + 1}@example.com`);
-  const emails = [mainEmail, ...otherEmails];
+  // Prepare list of test users: only main test user
+  const emails = [mainEmail];
 
-  // Precompute password hash for all test users (avoid repeating bcrypt.hash)
+  // Precompute password hash for main test user
   const defaultPassword = 'sloantest';
   const defaultHash = await bcrypt.hash(defaultPassword, 10);
-  // Upsert test users and build map
+  // Upsert main test user and build map
   const userMap = {};
-  await Promise.all(emails.map(async (email) => {
-    const user = await prisma.user.upsert({
-      where: { email },
-      update: { name: email.split('@')[0] },
-      create: { email, name: email.split('@')[0], password: defaultHash, profile: { create: { language: 'en' } } }
-    });
-    userMap[email] = user;
-  }));
-  console.log(`[seedTestUserData] Upserted ${emails.length} base test users`);
+  const mainUser = await prisma.user.upsert({
+    where: { email: mainEmail },
+    update: { name: mainEmail.split('@')[0] },
+    create: { email: mainEmail, name: mainEmail.split('@')[0], password: defaultHash, profile: { create: { language: 'en' } } }
+  });
+  userMap[mainEmail] = mainUser;
+  console.log(`[seedTestUserData] Upserted main test user: ${mainEmail}`);
+  console.log('[seedTestUserData] Base user seeding complete');
 
-  // Define referral chains, using inviter.inviteCode
-  const referralPairs = [
-    [mainEmail, otherEmails[0]],
-    [otherEmails[0], otherEmails[1]],
-    [otherEmails[1], otherEmails[2]],
-    [mainEmail, otherEmails[3]],
-    [otherEmails[3], otherEmails[4]],
-    [otherEmails[4], otherEmails[5]],
-    [otherEmails[1], otherEmails[6]]
-  ];
-
-  // Generate multi-level referral relationships (3 levels deep, 3 children each)
-  const levels = [emails];
-  const referralPairsExtended = [];
-  const numLevels = 3;
-  for (let lvl = 1; lvl <= numLevels; lvl++) {
-    const prevEmails = levels[lvl - 1];
-    const currentEmails = [];
-    for (const inviterEmail of prevEmails) {
-      for (let i = 1; i <= 3; i++) {
-        const childEmail = `${inviterEmail}_lvl${lvl}_${i}@example.com`;
-        currentEmails.push(childEmail);
-        referralPairsExtended.push([inviterEmail, childEmail]);
+  // Generate 4-level referrals under main user, naming Test_user_path
+  const levels = [[{ email: mainEmail, path: '' }]];
+  const referralPairs = [];
+  for (let lvl = 1; lvl <= 4; lvl++) {
+    const current = [];
+    for (const { email: inviterEmail, path } of levels[lvl-1]) {
+      const count = Math.floor(Math.random() * 5) + 1;
+      for (let i = 1; i <= count; i++) {
+        const newPath = path ? `${path}_${i}` : `${i}`;
+        const childEmail = `test_user_${newPath}@example.com`;
+        referralPairs.push([inviterEmail, childEmail]);
+        current.push({ email: childEmail, path: newPath });
       }
     }
-    levels.push(currentEmails);
+    levels.push(current);
   }
-  // Upsert all multi-level users in parallel per level
-  for (const levelEmails of levels.slice(1)) {
-    await Promise.all(levelEmails.map(async (email) => {
-      const user = await prisma.user.upsert({
-        where: { email }, update: {},
-        create: { email, name: email.split('@')[0], password: defaultHash, profile: { create: { language: 'en' } } }
-      });
-      userMap[email] = user;
-      emails.push(email);
-    }));
-  }
-  console.log(`[seedTestUserData] Generated and upserted multi-level users, total users now: ${emails.length}`);
 
-  // Combine original and extended referrals
-  const allPairs = referralPairs.concat(referralPairsExtended);
+  // Upsert each referral user with path-based name
+  await Promise.all(referralPairs.map(async ([, childEmail]) => {
+    const path = levels.flat().find(o => o.email === childEmail)?.path;
+    const name = path ? `Test_user_${path}` : childEmail.split('@')[0];
+    const user = await prisma.user.upsert({
+      where: { email: childEmail }, update: { name },
+      create: { email: childEmail, name, password: defaultHash, profile: { create: { language: 'en' } } }
+    });
+    userMap[childEmail] = user;
+    emails.push(childEmail);
+  }));
+  console.log(`[seedTestUserData] Created referral users across 4 levels: total ${emails.length}`);
+
+  const allPairs = referralPairs;
 
   // Batch create referral relations
   await Promise.all(allPairs.map(async ([invEmail, invrEmail]) => {
@@ -86,25 +74,39 @@ async function main() {
   }));
   console.log(`[seedTestUserData] Created ${allPairs.length} referral relationships`);
 
-  // Seed UserAward/UserTask for all test users
-  const awards = await prisma.award.findMany();
+  // Prefill referral task progress for referral levels 1–4
+  const parentMap = {};
+  allPairs.forEach(([invEmail, inviteeEmail]) => { parentMap[inviteeEmail] = invEmail; });
+  for (let lvl = 1; lvl <= 4; lvl++) {
+    const taskId = `referral-${lvl}`;
+    for (const { email } of levels[lvl]) {
+      const inviterId = userMap[parentMap[email]].id;
+      await recordTaskProgress(inviterId, taskId, 1);
+    }
+  }
+  console.log('[seedTestUserData] Prefilled referral task progress for levels 1-4');
+
+  // Only seed for active awards (status LIVE)
+  const awards = await prisma.award.findMany({ where: { status: 'LIVE' } });
   // Batch seed UserAward and UserTask per user
   await Promise.all(emails.map(async (email) => {
     const userId = userMap[email].id;
     for (const award of awards) {
       await prisma.userAward.upsert({
         where: { userId_awardId: { userId, awardId: award.id } },
-        update: { status: 'LIVE', claimed: false },
-        create: { userId, awardId: award.id, status: 'LIVE', claimed: false }
+        update: { status: award.status, claimed: false },
+        create: { userId, awardId: award.id, status: award.status, claimed: false }
       });
       const tasks = await prisma.task.findMany({ where: { awardId: award.id } });
-      await Promise.all(tasks.map(task => 
-        prisma.userTask.upsert({
+      await Promise.all(tasks.map(task => {
+        // Tasks with a prerequisite should start locked
+        const initStatus = task.prerequisiteTaskId ? 'LOCKED' : task.status;
+        return prisma.userTask.upsert({
           where: { userId_taskId: { userId, taskId: task.id } },
-          update: { status: task.status, claimRecords: [] },
-          create: { userId, taskId: task.id, status: task.status, claimRecords: [] }
-        })
-      ));
+          update: { status: initStatus, claimRecords: [], claimed: false },
+          create: { userId, taskId: task.id, status: initStatus, claimRecords: [], claimed: false }
+        });
+      }));
     }
   }));
   console.log(`[seedTestUserData] Seeded UserAward/UserTask for ${emails.length} users`);

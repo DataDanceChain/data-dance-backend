@@ -1,4 +1,5 @@
 const prisma = require('../utils/prisma');
+const web3Service = require('./web3Service');
 
 /**
  * Get the count of NFTs owned by a user
@@ -27,7 +28,7 @@ async function getUserBadgeCount(userId) {
 async function getDDCBalance(userId) {
   // assume we stored walletAddress on user
   const user = await prisma.user.findUnique({ where: { id: userId } });
-  const balance = await require('./web3Service').getDDCBalance(user.walletAddress);
+  const balance = await web3Service.getDDCBalance(user.walletAddress);
   return balance;
 }
 
