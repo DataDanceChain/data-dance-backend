@@ -37,7 +37,8 @@ async function getUserAwards(userId) {
     const tasks = await getTasksByAward(userId, award.id);
     const total = tasks.length;
     const claimedCount = tasks.filter(t => t.claimed).length;
-    const progress = total > 0 ? claimedCount / total : 0;
+    // weighted progress: sum of each task's progress divided by total tasks
+    const progress = total > 0 ? tasks.reduce((sum, t) => sum + (t.progress || 0), 0) / total : 0;
     // find userAward record
     const ua = userAwards.find(u => u.awardId === award.id) || { status: 'LOCKED', claimed: false };
     // compute finalStatus per award

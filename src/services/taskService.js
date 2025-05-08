@@ -11,7 +11,8 @@ const awardStrategies = {
     prepare: async (userId) => ({ user: await prisma.user.findUnique({ where: { id: userId } }) }),
     computeProgress: async (task, userId, { user }) => {
       const filled = ['name','email','avatar'].reduce((c,f) => c + (user[f] ? 1 : 0), 0);
-      return filled / 3;
+      const total = task.requirementCount ?? 3;
+      return total > 0 ? filled / total : 0;
     }
   },
   'early-registration': {
@@ -44,11 +45,11 @@ const awardStrategies = {
     },
     prepare: async (userId) => ({ nftCount: await assetService.getUserNFTCount(userId) }),
     computeProgress: async (task, userId, { nftCount }) => {
-      // thresholds per task index: assets-1=3, assets-2=10, assets-3=20, assets-4=50, assets-5=100
+      // use requirementCount if defined, otherwise fallback thresholds
       const thresholds = [3, 10, 20, 50, 100];
       const idx = parseInt(task.id.split('-')[1], 10) - 1;
-      const threshold = thresholds[idx] || (task.claimLimit || 1);
-      return Math.min(nftCount / threshold, 1);
+      const threshold = task.requirementCount ?? thresholds[idx] ?? (task.claimLimit || 1);
+      return threshold > 0 ? Math.min(nftCount / threshold, 1) : 0;
     }
   },
   'badge-collection': {
@@ -57,11 +58,10 @@ const awardStrategies = {
     },
     prepare: async (userId) => ({ badgeCount: await assetService.getUserBadgeCount(userId) }),
     computeProgress: async (task, userId, { badgeCount }) => {
-      // thresholds per task index: badge-1=3, badge-2=5, badge-3=10, badge-4=20
       const thresholds = [3, 5, 10, 20];
       const idx = parseInt(task.id.split('-')[1], 10) - 1;
-      const threshold = thresholds[idx] || (task.claimLimit || 1);
-      return Math.min(badgeCount / threshold, 1);
+      const threshold = task.requirementCount ?? thresholds[idx] ?? (task.claimLimit || 1);
+      return threshold > 0 ? Math.min(badgeCount / threshold, 1) : 0;
     }
   },
   'ddc-holdings': {
@@ -70,11 +70,10 @@ const awardStrategies = {
     },
     prepare: async (userId) => ({ ddcBalance: await assetService.getDDCBalance(userId) }),
     computeProgress: async (task, userId, { ddcBalance }) => {
-      // thresholds per task index: ddc-1=10, ddc-2=50, ddc-3=100, ddc-4=200, ddc-5=500, ddc-6=1000, ddc-7=2000, ddc-8=5000
       const thresholds = [10, 50, 100, 200, 500, 1000, 2000, 5000];
       const idx = parseInt(task.id.split('-')[1], 10) - 1;
-      const threshold = thresholds[idx] || (task.claimLimit || 1);
-      return Math.min(ddcBalance / threshold, 1);
+      const threshold = task.requirementCount ?? thresholds[idx] ?? (task.claimLimit || 1);
+      return threshold > 0 ? Math.min(ddcBalance / threshold, 1) : 0;
     }
   }
 };
@@ -83,7 +82,18 @@ async function getTasksByAward(userId, awardId) {
   // Unlock tasks based on award-specific conditions
   await updateProgressForAwardTasks(userId, awardId);
   // Fetch static tasks and userTask records
-  const tasks = await prisma.task.findMany({ where: { awardId }, select: { id:true, title:true, description:true, points:true, claimLimit:true, prerequisiteTaskId:true }});
+  const tasks = await prisma.task.findMany({
+    where: { awardId },
+    select: {
+      id: true,
+      title: true,
+      description: true,
+      points: true,
+      claimLimit: true,
+      requirementCount: true,
+      prerequisiteTaskId: true
+    }
+  });
   const userTasks = await prisma.userTask.findMany({ where: { userId } });
   const strategy = awardStrategies[awardId] || {};
   // Prepare shared context if needed
@@ -118,13 +128,41 @@ async function getTasksByAward(userId, awardId) {
       finalStatus = 'LOCKED';
     }
 
+    // compute doneCount based on requirementCount and context per award type
+    let doneCount;
+    if (task.requirementCount != null) {
+      switch (awardId) {
+        case 'profile-awards': {
+          // count filled profile fields
+          const filled = ['name','email','avatar'].reduce((c, f) => c + (context.user[f] ? 1 : 0), 0);
+          doneCount = Math.min(filled, task.requirementCount);
+          break;
+        }
+        case 'assets-collection':
+          doneCount = Math.min(context.nftCount, task.requirementCount);
+          break;
+        case 'badge-collection':
+          doneCount = Math.min(context.badgeCount, task.requirementCount);
+          break;
+        case 'ddc-holdings':
+          doneCount = Math.min(context.ddcBalance, task.requirementCount);
+          break;
+        default:
+          doneCount = Math.min(Math.floor(progress * task.requirementCount), task.requirementCount);
+      }
+    } else {
+      // fallback: either fully claimed or zero
+      const total = task.claimLimit ?? 1;
+      doneCount = claimed ? total : 0;
+    }
     return {
       id: task.id,
       title: task.title,
       description: task.description,
       points: task.points,
       claimLimit: task.claimLimit,
-      prerequisiteTaskId: task.prerequisiteTaskId,
+      requirementCount: task.requirementCount,
+      doneCount,
       claimRecords,
       claimed,
       progress,
@@ -141,21 +179,42 @@ async function updateProgressForAwardTasks(userId, awardId) {
 async function recordTaskProgress(userId, taskId, delta) {
   const ut = await prisma.userTask.upsert({
     where: { userId_taskId: { userId, taskId } },
-    update: { status: 'LIVE', claimed: false },
-    create: { userId, taskId, status: 'LIVE', claimed: false }
+    update: { status: 'LIVE' },
+    create: { userId, taskId, status: 'LIVE' }
   });
   return ut;
 }
 
 async function claimTask(userId, taskId) {
-  const ut = await prisma.userTask.findUnique({ where: { userId_taskId: { userId, taskId } }, include: { task: true } });
-  if (!ut || ut.status !== 'LIVE') throw new Error('Task not claimable');
+  // fetch userTask with claimRecords and claimed flag
+  const ut = await prisma.userTask.findUnique({
+    where: { userId_taskId: { userId, taskId } },
+    select: {
+      claimRecords: true,
+      claimed: true,
+      status: true,
+      task: { select: { claimLimit: true, points: true } }
+    }
+  });
+  // only allow claim if live, not already claimed, and below limit
+  // treat null claimLimit as unlimited
+  const limit = ut.task.claimLimit != null ? ut.task.claimLimit : Infinity;
+  if (!ut || ut.status !== 'LIVE' || ut.claimed || ut.claimRecords.length >= limit) {
+    throw new Error('Task not claimable');
+  }
   const now = new Date();
-  // append claim timestamp and update status if limit reached
-  const isFinal = ut.task.claimLimit != null && (ut.claimRecords.length + 1) >= ut.task.claimLimit;
-  const updates = { claimRecords: { push: now }, claimed: true };
-  if (isFinal) updates.status = 'INVALID';
-  await prisma.userTask.update({ where: { userId_taskId: { userId, taskId } }, data: updates });
+  // append claim timestamp and set claimed flag; if last claim, mark invalid
+  const newCount = ut.claimRecords.length + 1;
+  // only finalize if claimLimit is defined
+  const isFinal = ut.task.claimLimit != null && newCount >= ut.task.claimLimit;
+  await prisma.userTask.update({
+    where: { userId_taskId: { userId, taskId } },
+    data: {
+      claimRecords: { push: now },
+      claimed: true,
+      ...(isFinal ? { status: 'INVALID' } : {})
+    }
+  });
 
   // award points
   await prisma.point.create({ data: { userId, amount: ut.task.points, source: 'TASK_CLAIM', sourceId: taskId } });
@@ -163,6 +222,16 @@ async function claimTask(userId, taskId) {
   const dependents = await prisma.task.findMany({ where: { prerequisiteTaskId: taskId }, select: { id: true } });
   for (const dt of dependents) {
     await recordTaskProgress(userId, dt.id, 1);
+  }
+  // If all tasks under this award are now claimed, mark the UserAward as claimed and invalid
+  const { awardId } = await prisma.task.findUnique({ where: { id: taskId }, select: { awardId: true } });
+  const totalTasks = await prisma.task.count({ where: { awardId } });
+  const claimedTasks = await prisma.userTask.count({ where: { userId, task: { awardId }, claimed: true } });
+  if (claimedTasks >= totalTasks) {
+    await prisma.userAward.update({
+      where: { userId_awardId: { userId, awardId } },
+      data: { claimed: true, status: 'INVALID' }
+    });
   }
   return { claimedAt: now, points: ut.task.points };
 }

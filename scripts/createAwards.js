@@ -53,7 +53,7 @@ async function main() {
       { id: 'social-4', title: 'New Feature Release', requirement: "Repost: 'Introducing DataDance 2.0! 🌟 Enhanced rewards, smoother experience, and more ways to earn! Check out our latest features now! #DataDanceUpdate'", points: 50, claimLimit: 1 }
     ],
     'profile-awards': [
-      { id: 'profile-1', title: 'Complete Profile', requirement: 'Fill in your profile information including name, email, and profile picture to help us know you better', points: 100, claimLimit: 1 }
+      { id: 'profile-1', title: 'Complete Profile', requirement: 'Fill in your profile information including name, email, and profile picture to help us know you better',requirementCount: 3, points: 100, claimLimit: 1 }
     ],
     'early-registration': [
       { id: 'early-1', title: 'Early Registration Bonus', requirement: 'Register and join DataDance before June 2025 to receive early adopter rewards', points: 100, claimLimit: 1 }
@@ -65,27 +65,27 @@ async function main() {
       { id: 'referral-4', title: 'Level 4 Referral Bonus', requirement: 'Bonus for referrals made at level 4', points: 1, claimLimit: null }
     ],
     'assets-collection': [
-      { id: 'assets-1', title: 'Novice Collector', requirement: 'Hold 3 NFTs in your collection', points: 50, claimLimit: 1 },
-      { id: 'assets-2', title: 'Rising Collector', requirement: 'Hold 10 NFTs in your collection', points: 100, claimLimit: 1, prerequisiteTaskId: 'assets-1' },
-      { id: 'assets-3', title: 'Advanced Collector', requirement: 'Hold 20 NFTs in your collection', points: 100, claimLimit: 1, prerequisiteTaskId: 'assets-2' },
-      { id: 'assets-4', title: 'Elite Collector', requirement: 'Hold 50 NFTs in your collection', points: 100, claimLimit: 1, prerequisiteTaskId: 'assets-3' },
-      { id: 'assets-5', title: 'Legendary Collector', requirement: "Hold 100 NFTs in your collection - Earn the 'Affluent Player' title", points: 150, claimLimit: 1, prerequisiteTaskId: 'assets-4' }
+      { id: 'assets-1', title: 'Novice Collector', requirement: 'Hold 3 NFTs in your collection',requirementCount: 3, points: 50, claimLimit: 1 },
+      { id: 'assets-2', title: 'Rising Collector', requirement: 'Hold 10 NFTs in your collection',requirementCount: 10, points: 100, claimLimit: 1, prerequisiteTaskId: 'assets-1' },
+      { id: 'assets-3', title: 'Advanced Collector', requirement: 'Hold 20 NFTs in your collection',requirementCount: 20, points: 100, claimLimit: 1, prerequisiteTaskId: 'assets-2' },
+      { id: 'assets-4', title: 'Elite Collector', requirement: 'Hold 50 NFTs in your collection',requirementCount: 50, points: 100, claimLimit: 1, prerequisiteTaskId: 'assets-3' },
+      { id: 'assets-5', title: 'Legendary Collector', requirement: "Hold 100 NFTs in your collection - Earn the 'Affluent Player' title",requirementCount: 100, points: 150, claimLimit: 1, prerequisiteTaskId: 'assets-4' }
     ],
     'badge-collection': [
-      { id: 'badge-1', title: 'Brand Explorer', requirement: 'Collect badges from 3 different brands', points: 50, claimLimit: 1 },
-      { id: 'badge-2', title: 'Brand Enthusiast', requirement: 'Collect badges from 5 different brands', points: 50, claimLimit: 1, prerequisiteTaskId: 'badge-1' },
-      { id: 'badge-3', title: 'Brand Connoisseur', requirement: 'Collect badges from 10 different brands', points: 100, claimLimit: 1, prerequisiteTaskId: 'badge-2' },
-      { id: 'badge-4', title: 'Brand Master', requirement: 'Collect badges from 20 different brands', points: 100, claimLimit: 1, prerequisiteTaskId: 'badge-3' }
+      { id: 'badge-1', title: 'Brand Explorer', requirement: 'Collect badges from 3 different brands',requirementCount: 3, points: 50, claimLimit: 1 },
+      { id: 'badge-2', title: 'Brand Enthusiast', requirement: 'Collect badges from 5 different brands',requirementCount: 5, points: 50, claimLimit: 1, prerequisiteTaskId: 'badge-1' },
+      { id: 'badge-3', title: 'Brand Connoisseur', requirement: 'Collect badges from 10 different brands',requirementCount: 10, points: 100, claimLimit: 1, prerequisiteTaskId: 'badge-2' },
+      { id: 'badge-4', title: 'Brand Master', requirement: 'Collect badges from 20 different brands',requirementCount: 20, points: 100, claimLimit: 1, prerequisiteTaskId: 'badge-3' }
     ],
     'ddc-holdings': [
-      { id: 'ddc-1', title: 'DDC Starter', requirement: 'Hold 10 DDC in your wallet', points: 50, claimLimit: 1 },
-      { id: 'ddc-2', title: 'DDC Collector', requirement: 'Hold 50 DDC in your wallet', points: 100, claimLimit: 1, prerequisiteTaskId: 'ddc-1' },
-      { id: 'ddc-3', title: 'DDC Enthusiast', requirement: 'Hold 100 DDC in your wallet', points: 100, claimLimit: 1, prerequisiteTaskId: 'ddc-2' },
-      { id: 'ddc-4', title: 'DDC Investor', requirement: 'Hold 200 DDC in your wallet', points: 150, claimLimit: 1, prerequisiteTaskId: 'ddc-3' },
-      { id: 'ddc-5', title: 'DDC Whale', requirement: 'Hold 500 DDC in your wallet', points: 150, claimLimit: 1, prerequisiteTaskId: 'ddc-4' },
-      { id: 'ddc-6', title: 'DDC Mogul', requirement: 'Hold 1000 DDC in your wallet', points: 200, claimLimit: 1, prerequisiteTaskId: 'ddc-5' },
-      { id: 'ddc-7', title: 'DDC Tycoon', requirement: 'Hold 2000 DDC in your wallet', points: 200, claimLimit: 1, prerequisiteTaskId: 'ddc-6' },
-      { id: 'ddc-8', title: 'DDC Legend', requirement: 'Hold 5000 DDC in your wallet', points: 250, claimLimit: 1, prerequisiteTaskId: 'ddc-7' }
+      { id: 'ddc-1', title: 'DDC Starter', requirement: 'Hold 10 DDC in your wallet',requirementCount: 10, points: 50, claimLimit: 1 },
+      { id: 'ddc-2', title: 'DDC Collector', requirement: 'Hold 50 DDC in your wallet',requirementCount: 50, points: 100, claimLimit: 1, prerequisiteTaskId: 'ddc-1' },
+      { id: 'ddc-3', title: 'DDC Enthusiast', requirement: 'Hold 100 DDC in your wallet',requirementCount: 100, points: 100, claimLimit: 1, prerequisiteTaskId: 'ddc-2' },
+      { id: 'ddc-4', title: 'DDC Investor', requirement: 'Hold 200 DDC in your wallet',requirementCount: 200, points: 150, claimLimit: 1, prerequisiteTaskId: 'ddc-3' },
+      { id: 'ddc-5', title: 'DDC Whale', requirement: 'Hold 500 DDC in your wallet',requirementCount: 500, points: 150, claimLimit: 1, prerequisiteTaskId: 'ddc-4' },
+      { id: 'ddc-6', title: 'DDC Mogul', requirement: 'Hold 1000 DDC in your wallet',requirementCount: 1000, points: 200, claimLimit: 1, prerequisiteTaskId: 'ddc-5' },
+      { id: 'ddc-7', title: 'DDC Tycoon', requirement: 'Hold 2000 DDC in your wallet',requirementCount: 2000, points: 200, claimLimit: 1, prerequisiteTaskId: 'ddc-6' },
+      { id: 'ddc-8', title: 'DDC Legend', requirement: 'Hold 5000 DDC in your wallet',requirementCount: 5000, points: 250, claimLimit: 1, prerequisiteTaskId: 'ddc-7' }
     ],
     'ecosystem-participation': [
       { id: 'eco-1', title: 'Data Contribution', requirement: 'Share your first dataset on the platform and help build the community', points: 200, claimLimit: 1 },
@@ -124,6 +124,7 @@ async function main() {
           points: t.points,
           status: award.status,
           claimLimit: t.claimLimit,
+          requirementCount: t.requirementCount,
           prerequisiteTaskId: t.prerequisiteTaskId || null
         },
         create: {
@@ -134,6 +135,7 @@ async function main() {
           points: t.points,
           status: award.status,
           claimLimit: t.claimLimit,
+          requirementCount: t.requirementCount,
           prerequisiteTaskId: t.prerequisiteTaskId || null
         }
       });

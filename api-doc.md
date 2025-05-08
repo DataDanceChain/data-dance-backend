@@ -1121,10 +1121,19 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 ```
 GET /api/awards
 ```
-**实现映射**:
-- 路由: GET /api/awards
-- Controller: awardController.getAwards
-- Service: awardService.getAwardDefinitions
+描述：返回平台上所有奖励的元数据定义。
+**请求头**:
+```
+Authorization: Bearer <token>  // 可选：公开接口，可不传
+```
+**响应字段说明**:
+- id (string): 奖励唯一标识
+- title (string): 奖励标题
+- description (string): 奖励描述
+- icon (string): 奖励图标名称
+- color (string): 奖励颜色值（十六进制）
+- status (string): 奖励状态，取值 ["LIVE","LOCKED","INVALID"]
+- metadata (object): 扩展属性
 
 **响应示例** (200 OK):
 ```json
@@ -1133,24 +1142,15 @@ GET /api/awards
   "data": {
     "awards": [
       {
-        "id": "award-profile",
+        "id": "profile-awards",
         "title": "Profile Awards",
         "description": "Complete your profile to earn rewards",
         "icon": "people-outline",
         "color": "#34C8B9",
         "status": "LIVE",
         "metadata": {}
-      },
-      {
-        "id": "award-early",
-        "title": "Early Registration",
-        "description": "Early adopter rewards for registering before cutoff date",
-        "icon": "calendar-outline",
-        "color": "#4ECDC4",
-        "status": "LIVE",
-        "metadata": {}
       }
-      // ...更多奖励定义...
+      // ...更多奖励定义
     ]
   }
 }
@@ -1160,6 +1160,28 @@ GET /api/awards
 ```
 GET /api/awards/:awardId/tasks
 ```
+描述：返回某个奖励（award）下所有任务的当前状态。
+**请求头**:
+```
+Authorization: Bearer <token>
+```
+**路径参数**:
+- awardId (string): 奖励 ID
+
+**响应字段说明** (`data.tasks` 数组中的对象):
+- id (string): 任务ID
+- title (string): 任务标题
+- description (string): 任务描述
+- points (number): 完成任务可获得积分数
+- claimLimit (number|null): 领取上限次数
+- requirementCount (number|null): 任务达成所需的数量，如果定义则返回
+- doneCount (number): 已完成的数量（用于前端显示已完成 x/y）
+- prerequisiteTaskId (string|null): 前置任务ID，未完成前置任务时此任务为 LOCKED
+- claimRecords (array): 已领取记录列表，包含时间戳
+- claimed (boolean): 是否已达领取上限
+- progress (number): 任务进度，0~1
+- finalStatus (string): 任务当前状态，取值 ["LOCKED","IN_PROGRESS","COMPLETED","CLAIMED"]
+
 **响应示例** (200 OK):
 ```json
 {
@@ -1172,22 +1194,15 @@ GET /api/awards/:awardId/tasks
         "description": "Fill in name, email, avatar",
         "points": 100,
         "claimLimit": 1,
-        "claimRecords": [],           
+        "requirementCount": 3,
+        "doneCount": 2,
+        "prerequisiteTaskId": null,
+        "claimRecords": [],
         "claimed": false,
-        "progress": 0,
-        "finalStatus": "LOCKED"
-      },
-      {
-        "id": "profile-2",
-        "title": "Add Bio",
-        "description": "Write a short bio",
-        "points": 50,
-        "claimLimit": 1,
-        "claimRecords": ["2025-05-06T10:00:00.000Z"],
-        "claimed": true,
-        "progress": 1,
-        "finalStatus": "CLAIMED"
+        "progress": 0.67,
+        "finalStatus": "IN_PROGRESS"
       }
+      // ...更多任务
     ]
   }
 }
@@ -1195,17 +1210,22 @@ GET /api/awards/:awardId/tasks
 
 ### 记录子任务进度
 ```
-POST /api/users/tasks/{taskId}/progress
+POST /api/users/tasks/:taskId/progress
 ```
+描述：向指定任务记录进度，触发解锁逻辑。
 **请求头**:
 ```
 Authorization: Bearer <token>
 ```
+**路径参数**:
+- taskId (string): 任务 ID
 **请求体**:
 ```json
 { "delta": 1 }
 ```
-**响应** (200 OK):
+- delta (number): 增量，>=1 表示可解锁或累积进度
+
+**响应示例** (200 OK):
 ```json
 {
   "status": "success",
@@ -1218,13 +1238,17 @@ Authorization: Bearer <token>
 
 ### 领取子任务奖励
 ```
-POST /api/users/tasks/{taskId}/claim
+POST /api/users/tasks/:taskId/claim
 ```
+描述：领取已完成的任务奖励，发放积分并解锁下游任务。
 **请求头**:
 ```
 Authorization: Bearer <token>
 ```
-**响应** (200 OK):
+**路径参数**:
+- taskId (string): 任务 ID
+
+**响应示例** (200 OK):
 ```json
 {
   "status": "success",
@@ -1240,10 +1264,31 @@ Authorization: Bearer <token>
 ```
 GET /api/users/awards
 ```
-**实现映射**:
-- 路由: GET /api/users/awards
-- Controller: awardController.getUserAwards
-- Service: awardService.getUserAwards
+描述：返回当前用户的所有奖励及每个奖励下子任务的状态，并附带邀请概览。
+**请求头**:
+```
+Authorization: Bearer <token>
+```
+
+**响应字段说明**:
+- awards (array): 奖励列表，每项对象包含：
+  - awardId (string)
+  - title (string)
+  - description (string)
+  - icon (string)
+  - color (string)
+  - metadata (object)
+  - totalTasks (number): 奖励下总任务数
+  - claimedTasks (number): 已领取的任务数
+  - progress (number): 奖励整体进度(0~1)
+  - finalStatus (string): 奖励状态，取值 ["COMING_SOON","PARTICIPATE","IN_PROGRESS","COMPLETED","CLAIMED","INVALID"]
+  - tasks (array): 任务对象数组，与“获取指定奖励下的子任务列表”一致，含 `requirementCount` 和 `doneCount`
+- referralOverview (object): 邀请概览，包含：
+  - referrals (array): 嵌套邀请列表，对象包含 id, email, nickname, level, referrals
+  - levelCounts (object): 各层级邀请人数统计
+  - earnedByLevel (array): 各层级已获积分
+  - totalReferralPoints (number): 推荐总积分
+  - unclaimReferralAwards (number): 未领取邀请奖励积分
 
 **响应示例** (200 OK):
 ```json
@@ -1252,10 +1297,16 @@ GET /api/users/awards
   "data": {
     "awards": [
       {
-        "awardId": "award-profile",
+        "awardId": "profile-awards",
         "title": "Profile Awards",
-        "description": "Complete your profile to earn rewards",
-        "status": "LIVE",
+        "description": "Complete your profile",
+        "icon": "people-outline",
+        "color": "#34C8B9",
+        "metadata": {},
+        "totalTasks": 2,
+        "claimedTasks": 1,
+        "progress": 0.5,
+        "finalStatus": "IN_PROGRESS",
         "tasks": [
           {
             "id": "profile-1",
@@ -1263,17 +1314,31 @@ GET /api/users/awards
             "description": "Fill in name, email, avatar",
             "points": 100,
             "claimLimit": 1,
+            "requirementCount": 3,
+            "doneCount": 2,
+            "prerequisiteTaskId": null,
             "claimRecords": [],
             "claimed": false,
-            "progress": 0,
-            "finalStatus": "LOCKED"
+            "progress": 0.67,
+            "finalStatus": "IN_PROGRESS"
           }
         ]
       }
-      // ...更多用户奖励...
     ],
     "referralOverview": {
-      // ...保持不变...
+      "referrals": [
+        {
+          "id": "user-123",
+          "email": "ref@example.com",
+          "nickname": "RefUser",
+          "level": 1,
+          "referrals": []
+        }
+      ],
+      "levelCounts": { "1": 1, "2": 0, "3": 0, "4": 0 },
+      "earnedByLevel": [50,0,0,0],
+      "totalReferralPoints": 50,
+      "unclaimReferralAwards": 0
     }
   }
 }
@@ -1288,6 +1353,13 @@ GET /api/users/invite-code
 **请求头**:
 ```
 Authorization: Bearer <token>
+```
+**响应** (200 OK):
+```json
+{
+  "status": "success",
+  "data": { "code": "INVITE12345" }
+}
 ```
 
 ### 获取邀请概览
@@ -1304,7 +1376,6 @@ Authorization: Bearer <token>
   "status": "success",
   "data": {
     "referrals": [ /* 多级邀请列表 */ ],
-    "networkSize": 10,
     "levelCounts": { "1": 5, "2": 3, "3": 1, "4": 1 },
     "earnedByLevel": [50, 5, 3, 1],
     "totalReferralPoints": 59,
@@ -1314,24 +1385,21 @@ Authorization: Bearer <token>
 ```
 
 ### 领取邀请奖励
-
 ```
 POST /api/users/referrals/claim
 ```
-
 **请求头**:
 ```
 Authorization: Bearer <token>
 ```
-
 **响应** (200 OK):
 ```json
 {
   "status": "success",
   "data": {
-    "claimedPoints": 10,
-    "totalReferralPoints": 59,
-    "unclaimedReferralAwards": 0
+    "claimedAt": "2025-05-07T12:00:00.000Z",
+    "totalPoints": 100,
+    "count": 2
   }
 }
 ```
@@ -1350,7 +1418,10 @@ Authorization: Bearer <token>
 ```
 **响应** (200 OK):
 ```json
-{ "status": "success", "data": { "processed": true } }
+{
+  "status": "success",
+  "data": { "processed": true }
+}
 ```
 
 ## 错误响应

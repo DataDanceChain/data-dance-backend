@@ -75,7 +75,38 @@ async function getReferralOverview(userId) {
   ];
   const totalReferralPoints = earnedByLevel.reduce((a, b) => a + b, 0);
   const unclaimReferralAwards = Object.values(unclaimedByLevel).reduce((a, b) => a + b, 0);
-  return { referrals, levelCounts, earnedByLevel, totalReferralPoints, unclaimReferralAwards };
+  // prepare levelPoints mapping from referralTasks
+  const levelPointsMap = {};
+  referralTasks.forEach(t => {
+    const lvl = parseInt(t.id.split('-')[1], 10);
+    levelPointsMap[lvl] = t.points;
+  });
+  // annotate each referral node with theirPoints and yourReward
+  const commissionRates = { 1: 5, 2: 3, 3: 1 };
+  function annotate(nodes) {
+    nodes.forEach(n => {
+      const cnt = n.referrals.length;
+      const lvl = n.level;
+      // theirPoints: child count * 50
+      n.theirPoints = cnt * 50;
+      // yourReward: child count * commission rate for this level (only levels 1-3)
+      n.yourReward = cnt * (commissionRates[lvl] || 0);
+      annotate(n.referrals);
+    });
+  }
+  annotate(referrals);
+  // compute networkActivity: totalReferralPoints + sum of levelCounts 2-4 * 50
+  const lvl234Count = (levelCounts[2] || 0) + (levelCounts[3] || 0) + (levelCounts[4] || 0);
+  const networkActivity = totalReferralPoints + lvl234Count * 50;
+
+  return {
+    referrals,
+    levelCounts,
+    earnedByLevel,
+    totalReferralPoints,
+    unclaimReferralAwards,
+    networkActivity
+  };
 }
 
 async function claimReferralRewards(userId) {

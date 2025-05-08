@@ -366,6 +366,7 @@ model Task {
   prerequisiteTaskId String? // Optional ID of a prerequisite task for unlocking this one
   prerequisiteTask   Task?   @relation("TaskPrerequisite", fields: [prerequisiteTaskId], references: [id])
   claimLimit    Int?        // Max claims for CONTINUOUS tasks, null = unlimited
+  requirementCount Int?    // Optional numeric requirement for progress (e.g. fields to fill, NFTs to collect)
   points        Int         // Reward points per completion
   icon          String?     // Optional icon name
   picture       String?     // Optional image URL
