@@ -28,6 +28,7 @@
     "next": "^15.3.1",
     "node-apn": "^3.0.0",
     "node-fetch": "^3.3.2",
+    "nodemailer": "^7.0.3",
     "passkit-generator": "^3.3.1",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",

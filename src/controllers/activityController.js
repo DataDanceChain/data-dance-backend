@@ -10,7 +10,7 @@ const prisma = new PrismaClient();
  */
 exports.getActivities = async (req, res) => {
   try {
-    const { category, search, page = 1, limit = 10 } = req.query;
+    const { category, search, page = 1, limit = 10, isPromoted } = req.query;
     const skip = (page - 1) * limit;
 
     // 构建查询条件
@@ -31,6 +31,11 @@ exports.getActivities = async (req, res) => {
         { title: { contains: search, mode: 'insensitive' } },
         { description: { contains: search, mode: 'insensitive' } }
       ];
+    }
+
+    // 如果指定了是否只返回推广活动
+    if (isPromoted !== undefined) {
+      where.isPromoted = isPromoted === 'true';
     }
     
     // 只获取当前和未来的活动
@@ -62,50 +67,13 @@ exports.getActivities = async (req, res) => {
     // 获取总数
     const total = await prisma.activity.count({ where });
 
-    // 处理返回数据，添加是否已领取标志
-    const formattedActivities = activities.map(activity => ({
-      id: activity.id,
-      title: activity.title,
-      description: activity.description,
-      startDate: activity.startDate,
-      endDate: activity.endDate,
-      image: activity.image,
-      type: activity.type,
-      remaining: activity.remaining,
-      total: activity.total,
-      statusNote: activity.statusNote,
-      price: activity.nftPrice,
-      nft: activity.nftPrice ? {
-        name: activity.nftName,
-        description: activity.nftDescription,
-        image: activity.nftImage,
-        totalSupply: activity.nftTotalSupply,
-        price: activity.nftPrice,
-        validityStart: activity.nftValidityStart,
-        validityEnd: activity.nftValidityEnd,
-        usageRules: activity.nftUsageRules
-      } : null,
-      creator: {
-        id: activity.creator.id,
-        name: activity.creator.name,
-        logo: activity.creator.logo
-      },
-      categories: activity.categories.map(c => ({
-        id: c.id,
-        name: c.name
-      })),
-      tags: activity.tags.map(t => ({
-        id: t.id,
-        name: t.name
-      })),
-      isClaimed: activity.claims.length > 0,
-      showInExplore: activity.showInExplore,
-    }));
-
     res.status(200).json({
       status: 'success',
       data: {
-        activities: formattedActivities,
+        activities: activities.map(activity => ({
+          ...activity,
+          isClaimed: activity.claims.length > 0
+        })),
         pagination: {
           page: Number(page),
           limit: Number(limit),
@@ -115,10 +83,11 @@ exports.getActivities = async (req, res) => {
       }
     });
   } catch (error) {
+    console.error('Error getting activities:', error);
     res.status(500).json({
       status: 'error',
       message: 'Server error',
-      error: error.message
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
 };
@@ -167,6 +136,7 @@ exports.getActivity = async (req, res) => {
       total: activity.total,
       statusNote: activity.statusNote,
       price: activity.nftPrice,
+      size: activity.claims.length,
       nft: activity.nftPrice ? {
         name: activity.nftName,
         description: activity.nftDescription,
@@ -453,7 +423,7 @@ exports.getCategories = async (req, res) => {
  */
 exports.getAllActivities = async (req, res) => {
   try {
-    const { category, search, page = 1, limit = 10 } = req.query;
+    const { category, search, page = 1, limit = 10, isPromoted } = req.query;
     const skip = (page - 1) * limit;
 
     // 构建查询条件
@@ -478,6 +448,11 @@ exports.getAllActivities = async (req, res) => {
       ];
     }
 
+    // 如果指定了是否只返回推广活动
+    if (isPromoted !== undefined) {
+      where.isPromoted = isPromoted === 'true';
+    }
+
     // 查询活动
     const activities = await prisma.activity.findMany({
       where,
@@ -488,7 +463,7 @@ exports.getAllActivities = async (req, res) => {
         claims: {
           where: {
             userId: req.user.id
-        }
+          }
         },
         nftMarketOrders: true
       },
@@ -502,53 +477,13 @@ exports.getAllActivities = async (req, res) => {
     // 获取总数 - 只计算 showInExplore 为 true 的活动
     const total = await prisma.activity.count({ where });
 
-    // 处理返回数据，添加是否已领取标志
-    const formattedActivities = activities.map(activity => ({
-      id: activity.id,
-      title: activity.title,
-      description: activity.description,
-      startDate: activity.startDate,
-      endDate: activity.endDate,
-      image: activity.image,
-      type: activity.type,
-      remaining: activity.remaining,
-      total: activity.total,
-      statusNote: activity.statusNote,
-      price: activity.nftPrice,
-      nft: activity.nftPrice ? {
-        name: activity.nftName,
-        description: activity.nftDescription,
-        image: activity.nftImage,
-        totalSupply: activity.nftTotalSupply,
-        price: activity.nftPrice,
-        validityStart: activity.nftValidityStart,
-        validityEnd: activity.nftValidityEnd,
-        usageRules: activity.nftUsageRules
-      } : null,
-      creator: {
-        id: activity.creator.id,
-        name: activity.creator.name,
-        logo: activity.creator.logo,
-        isOrganization: activity.creator.isOrganization
-      },
-      categories: activity.categories.map(c => ({
-        id: c.id,
-        name: c.name
-      })),
-      tags: activity.tags.map(t => ({
-        id: t.id,
-        name: t.name
-      })),
-      isClaimed: activity.claims.length > 0,
-      createdAt: activity.createdAt,
-      updatedAt: activity.updatedAt,
-      showInExplore: activity.showInExplore,
-    }));
-
     res.status(200).json({
       status: 'success',
       data: {
-        activities: formattedActivities,
+        activities: activities.map(activity => ({
+          ...activity,
+          isClaimed: activity.claims.length > 0
+        })),
         pagination: {
           page: Number(page),
           limit: Number(limit),
@@ -558,7 +493,7 @@ exports.getAllActivities = async (req, res) => {
       }
     });
   } catch (error) {
-    console.error('Error fetching activities:', error);
+    console.error('Error getting all activities:', error);
     res.status(500).json({
       status: 'error',
       message: 'Server error',
@@ -1170,5 +1105,138 @@ exports.setActivityTags = async (req, res) => {
     res.status(200).json({ status: 'success', data: updated.tags });
   } catch (error) {
     res.status(500).json({ status: 'error', message: 'Server error', error: error.message });
+  }
+};
+
+/**
+ * 创建活动
+ * @route POST /api/activities/new
+ * @access Private
+ */
+exports.createActivity = async (req, res) => {
+  try {
+    console.log('创建活动请求:', {
+      body: req.body,
+      files: req.files
+    });
+
+    const {
+      title,
+      description,
+      startDate,
+      endDate,
+      type,
+      categories = '[]',
+      tags = '[]',
+      nftName,
+      nftDescription,
+      nftSupply,
+      nftValidityStart,
+      nftValidityEnd,
+      nftUsageRules,
+      nftPrice,
+      total,
+      remaining,
+      statusNote,
+      showInExplore,
+      equityTitle,
+      equityDetails,
+      externalLinksTitle,
+      externalLinks,
+      isPromoted = false,
+      dataNfts = []
+    } = req.body;
+
+    // 检查必填字段
+    const missingFields = [];
+    if (!title) missingFields.push('title');
+    if (!description) missingFields.push('description');
+    if (!startDate) missingFields.push('startDate');
+    if (!endDate) missingFields.push('endDate');
+    if (!type) missingFields.push('type');
+
+    if (missingFields.length > 0) {
+      console.log('缺少必填字段:', missingFields);
+      return res.status(400).json({
+        success: false,
+        message: `缺少必填字段: ${missingFields.join(', ')}`
+      });
+    }
+
+    // 处理文件上传
+    const bannerFile = req.files?.find(file => file.fieldname === 'banner');
+    const nftFile = req.files?.find(file => file.fieldname === 'nft');
+
+    // 解析数组字段
+    const parsedCategories = JSON.parse(categories);
+    const parsedTags = JSON.parse(tags);
+    const parsedEquityDetails = JSON.parse(equityDetails || '[]');
+    const parsedExternalLinks = JSON.parse(externalLinks || '[]');
+
+    // 准备活动数据
+    const activityData = {
+      title,
+      description,
+      startDate: new Date(startDate),
+      endDate: new Date(endDate),
+      type,
+      categories: {
+        connect: parsedCategories.map(id => ({ id }))
+      },
+      tags: {
+        connect: parsedTags.map(id => ({ id }))
+      },
+      creator: {
+        connect: { id: req.user.id }
+      },
+      image: bannerFile ? `/assets/banners/${bannerFile.filename}` : null,
+      nftName: nftName || null,
+      nftDescription: nftDescription || null,
+      nftTotalSupply: nftSupply ? parseInt(nftSupply) : null,
+      nftImage: nftFile ? `/assets/nfts/${nftFile.filename}` : null,
+      nftValidityStart: nftValidityStart ? new Date(nftValidityStart) : null,
+      nftValidityEnd: nftValidityEnd ? new Date(nftValidityEnd) : null,
+      nftUsageRules: nftUsageRules || null,
+      nftPrice: nftPrice ? parseFloat(nftPrice) : 0,
+      total: total ? parseInt(total) : null,
+      remaining: remaining ? parseInt(remaining) : null,
+      statusNote: statusNote || null,
+      showInExplore: showInExplore === 'true',
+      equityTitle: equityTitle || null,
+      equityDetails: parsedEquityDetails,
+      externalLinksTitle: externalLinksTitle || null,
+      externalLinks: parsedExternalLinks,
+      isPromoted: isPromoted === true || isPromoted === 'true',
+      promotionInfo: dataNfts.length > 0 ? { dataNfts } : null
+    };
+
+    console.log('准备创建活动数据:', activityData);
+
+    // 创建活动
+    const activity = await prisma.activity.create({
+      data: activityData,
+      include: {
+        creator: true,
+        categories: true,
+        tags: true
+      }
+    });
+
+    res.status(201).json({
+      success: true,
+      data: activity
+    });
+  } catch (error) {
+    console.error('创建活动失败:', {
+      name: error.name,
+      message: error.message,
+      code: error.code,
+      stack: error.stack
+    });
+    res.status(500).json({
+      success: false,
+      message: '创建活动失败',
+      error: error.message
+    });
   }
 }; 

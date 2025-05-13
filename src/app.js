@@ -1,7 +1,9 @@
 const express = require('express');
 const cors = require('cors');
 const morgan = require('morgan');
+const multer = require('multer');
 const path = require('path');
+const fs = require('fs');
 const { errorHandler } = require('./middlewares/errorMiddleware');
 
 // 导入路由
@@ -19,8 +21,44 @@ const tagRoutes = require('./routes/tagRoutes');
 const nftMarketRoutes = require('./routes/nftMarketRoutes');
 const snapshotRoutes = require('./routes/snapshotRoutes');
 const dataNFTRoutes = require('./routes/dataNFTRoutes');
+const promotionRoutes = require('./routes/promotionRoutes');
 
 const app = express();
+
+// 确保上传目录存在
+const publicDir = path.join(__dirname, '../public');
+const bannerDir = path.join(publicDir, 'assets/banners');
+const nftDir = path.join(publicDir, 'assets/nfts');
+
+[publicDir, bannerDir, nftDir].forEach(dir => {
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+});
+
+// 配置文件上传
+const storage = multer.diskStorage({
+  destination: function (req, file, cb) {
+    // 根据字段名决定存储目录
+    const dest = file.fieldname === 'banner' ? bannerDir : nftDir;
+    cb(null, dest);
+  },
+  filename: function (req, file, cb) {
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+    cb(null, file.fieldname + '-' + uniqueSuffix + path.extname(file.originalname));
+  }
+});
+
+// 创建 multer 实例
+const upload = multer({ 
+  storage: storage,
+  limits: {
+    fileSize: 5 * 1024 * 1024 // 限制5MB
+  }
+});
+
+// 将 multer 实例添加到 app 对象中，以便路由可以使用
+app.set('upload', upload);
 
 // CORS 配置
 app.use(cors({
@@ -39,6 +77,7 @@ app.use((req, res, next) => {
 
 // 中间件
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 app.use(morgan('dev'));
 
 // 配置 MIME 类型
@@ -68,6 +107,7 @@ app.use('/api/tags', tagRoutes);
 app.use('/api/nft-market', nftMarketRoutes);
 app.use('/api/snapshots', snapshotRoutes);
 app.use('/api/data-nfts', dataNFTRoutes);
+app.use('/api/promotions', promotionRoutes);
 
 // 错误处理中间件
 app.use(errorHandler);

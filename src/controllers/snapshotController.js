@@ -12,6 +12,23 @@ const createSnapshot = async (req, res) => {
       where: {
         id: activityId,
         creatorId: merchantId
+      },
+      include: {
+        claims: {
+          select: {
+            id: true,
+            userId: true,
+            status: true,
+            claimedAt: true,
+            user: {
+              select: {
+                id: true,
+                name: true,
+                email: true
+              }
+            }
+          }
+        }
       }
     });
 
@@ -19,13 +36,27 @@ const createSnapshot = async (req, res) => {
       return res.status(404).json({ error: 'Activity not found or not authorized' });
     }
 
-    // Create snapshot with tags
+    // 格式化 claims 数据
+    const formattedClaims = activity.claims.map(claim => ({
+      id: claim.id,
+      userId: claim.userId,
+      status: claim.status,
+      claimedAt: claim.claimedAt,
+      user: {
+        id: claim.user.id,
+        name: claim.user.name,
+        email: claim.user.email
+      }
+    }));
+
+    // Create snapshot with tags and claims
     const snapshot = await prisma.snapshot.create({
       data: {
         name,
         description,
         activityId,
         merchantId,
+        claims: formattedClaims, // 保存格式化后的 claims 信息
         tags: {
           connect: tags?.map(tagId => ({ id: tagId })) || []
         }

@@ -192,6 +192,8 @@ model Activity {
   contractAddress    String?
   chainId            Int?
   tokenStandard      String?
+  isPromoted         Boolean            @default(false)
+  promotionInfo      Json?              // 存储推广活动相关的信息，如 selectedDataNfts
   creator            User               @relation(fields: [creatorId], references: [id])
   claims             ActivityClaim[]
   dataDanceIDs       DataDanceID[]
@@ -336,6 +338,7 @@ model Snapshot {
   merchant    User     @relation(fields: [merchantId], references: [id])
   dataNFTs    DataNFT[]
   tags        Tag[]     @relation("SnapshotToTag")
+  claims      Json?     // 存储创建时的 claims 信息
 }
 
 model DataNFT {

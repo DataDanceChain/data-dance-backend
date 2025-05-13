@@ -32,4 +32,7 @@ router.post('/:id/unpublish', protect, dataNFTController.unpublishDataNFT);
 // Purchase a DataNFT
 router.post('/:id/purchase', protect, dataNFTController.purchaseDataNFT);
 
+// Get DataNFT holders
+router.get('/:id/holders', protect, dataNFTController.getDataNFTHolders);
+
 module.exports = router; 

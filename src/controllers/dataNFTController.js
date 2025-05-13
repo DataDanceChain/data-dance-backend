@@ -124,8 +124,11 @@ const getDataNFTs = async (req, res) => {
 
     // 为每个 DataNFT 计算 size 字段
     const dataWithSize = dataNFTs.map(nft => {
-      const userIds = nft.snapshots.map(s => s.userId).filter(Boolean);
-      const size = new Set(userIds).size;
+      // 获取所有 snapshots 的 claims
+      const allClaims = nft.snapshots.flatMap(s => s.claims || []);
+      // 获取所有不重复的 userId
+      const uniqueUserIds = [...new Set(allClaims.map(c => c.userId).filter(Boolean))];
+      const size = uniqueUserIds.length;
       return { ...nft, size };
     });
 
@@ -510,6 +513,76 @@ const getPurchasedDataNFTs = async (req, res) => {
   }
 };
 
+// Get DataNFT holders
+const getDataNFTHolders = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { page = 1, limit = 10 } = req.query;
+    const skip = (page - 1) * limit;
+
+    // 验证 DataNFT 是否存在
+    const dataNFT = await prisma.dataNFT.findUnique({
+      where: { id }
+    });
+
+    if (!dataNFT) {
+      return res.status(404).json({
+        status: 'fail',
+        message: 'DataNFT not found'
+      });
+    }
+
+    // 获取持有者信息
+    const [holders, total] = await Promise.all([
+      prisma.dataNFTPurchase.findMany({
+        where: { dataNFTId: id },
+        include: {
+          buyer: {
+            select: {
+              id: true,
+              email: true,
+              name: true,
+              avatar: true
+            }
+          }
+        },
+        skip,
+        take: Number(limit),
+        orderBy: { createdAt: 'desc' }
+      }),
+      prisma.dataNFTPurchase.count({
+        where: { dataNFTId: id }
+      })
+    ]);
+
+    res.status(200).json({
+      status: 'success',
+      data: {
+        holders: holders.map(h => ({
+          id: h.buyer.id,
+          email: h.buyer.email,
+          name: h.buyer.name,
+          avatar: h.buyer.avatar,
+          purchasedAt: h.createdAt
+        })),
+        pagination: {
+          page: Number(page),
+          limit: Number(limit),
+          total,
+          pages: Math.ceil(total / limit)
+        }
+      }
+    });
+  } catch (error) {
+    console.error('Error fetching DataNFT holders:', error);
+    res.status(500).json({
+      status: 'error',
+      message: 'Server error',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+};
+
 module.exports = {
   mergeSnapshots,
   getDataNFTs,
@@ -520,5 +593,6 @@ module.exports = {
   unpublishDataNFT,
   purchaseDataNFT,
   getDataNFTsByMerchant,
-  getPurchasedDataNFTs
+  getPurchasedDataNFTs,
+  getDataNFTHolders
 }; 

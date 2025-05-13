@@ -15,6 +15,7 @@
 5. [通知 API](#通知-api)
 6. [NFT 数据市场 API](#nft-数据市场-api)
 7. [Data NFT 快照与市场 API](#data-nft-快照与市场-api)
+8. [Promotions API](#promotions-api)
 
 ## 测试账号
 为了方便测试，我们提供了一个测试账号，可以使用账号密码登录：
@@ -429,6 +430,7 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 - `search`: 搜索关键词
 - `page`: 页码 (默认为1)
 - `limit`: 每页数量 (默认为10)
+- `isPromoted`: 是否只返回推广活动 (true/false)
 
 **响应** (200 OK):
 ```json
@@ -448,6 +450,22 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
         "total": 100,
         "statusNote": "Limited edition, while supplies last",
         "price": 0.1,
+        "isPromoted": true,
+        "promotionInfo": {
+          "selectedDataNfts": [
+            {
+              "id": "data-nft-uuid",
+              "name": "数据资产包名称",
+              "isOwned": true
+            },
+            {
+              "id": "data-nft-uuid-2",
+              "name": "数据资产包名称",
+              "isOwned": false,
+              "quantity": 1
+            }
+          ]
+        },
         "nft": {
           "name": "Elite Yacht Club Membership",
           "description": "This NFT grants you exclusive access to Elite Yacht Club facilities and events.",
@@ -511,6 +529,22 @@ GET /activities/{activityId}
     "total": 100,
     "statusNote": "Limited edition, while supplies last",
     "claimed": true,
+    "isPromoted": true,
+    "promotionInfo": {
+      "selectedDataNfts": [
+        {
+          "id": "data-nft-uuid",
+          "name": "数据资产包名称",
+          "isOwned": true
+        },
+        {
+          "id": "data-nft-uuid-2",
+          "name": "数据资产包名称",
+          "isOwned": false,
+          "quantity": 1
+        }
+      ]
+    },
     "equityTitle": "EQUITY & BENEFITS",
     "equityDetails": [
       "60 hours of private yacht usage",
@@ -555,6 +589,13 @@ GET /activities/{activityId}
   }
 }
 ```
+
+**说明**:
+- `isPromoted`: 标识该活动是否为推广活动
+- `promotionInfo`: 当 `isPromoted` 为 true 时，包含推广相关的信息
+  - `selectedDataNfts`: 推广活动关联的数据资产列表
+    - `isOwned`: 标识当前用户是否拥有该数据资产
+    - `quantity`: 当 `isOwned` 为 false 时，表示需要购买的数量
 
 ### 获取推荐活动
 
@@ -885,6 +926,8 @@ Content-Type: multipart/form-data
 | externalLinksTitle | string     | 外链标题                   |
 | externalLinks    | json/string  | 外链（JSON字符串）         |
 | showInExplore    | boolean      | 是否在探索页展示           |
+| isPromoted       | boolean      | 是否为推广活动             |
+| dataNfts         | json/string  | 推广活动关联的数据资产列表 |
 | categories       | string[]     | 分类ID数组                 |
 | tags             | string[]     | 标签ID数组                 |
 | logo             | file         | 组织logo图片（图片文件）    |
@@ -895,6 +938,21 @@ Content-Type: multipart/form-data
 - 图片字段需用 `FormData` 上传，字段名分别为 `logo`、`nft`、`banner`。
 - 其他字段为普通表单字段。
 - 图片会自动存储到 `/assets/logos/`、`/assets/nfts/`、`/assets/banners/`，返回图片路径。
+- `isPromoted` 字段用于标识是否为推广活动。
+- `dataNfts` 字段为 JSON 字符串，格式如下：
+```json
+[
+  {
+    "id": "data-nft-uuid",
+    "isOwned": true
+  },
+  {
+    "id": "data-nft-uuid-2",
+    "isOwned": false,
+    "quantity": 1
+  }
+]
+```
 
 **响应** (201 Created):
 ```json
@@ -913,6 +971,22 @@ Content-Type: multipart/form-data
     "remaining": 100,
     "total": 100,
     "price": 0.1,
+    "isPromoted": true,
+    "promotionInfo": {
+      "dataNfts": [
+        {
+          "id": "data-nft-uuid",
+          "name": "数据资产包名称",
+          "isOwned": true
+        },
+        {
+          "id": "data-nft-uuid-2",
+          "name": "数据资产包名称",
+          "isOwned": false,
+          "quantity": 1
+        }
+      ]
+    },
     ... // 其他字段
   }
 }
@@ -930,6 +1004,8 @@ Content-Type: multipart/form-data
 - `logo`：组织logo图片路径
 - `nftImage`：NFT图片路径
 - `image`：Banner图片路径
+- `isPromoted`：是否为推广活动
+- `promotionInfo`：推广活动相关信息，包含关联的数据资产列表
 - 其他字段同上
 
 ### Tag Management API
@@ -1592,12 +1668,12 @@ Authorization: Bearer <token>
       "id": "nft-uuid",
       "title": "数据资产名称",
       "coverImage": "/assets/nfts/cover.png",
+      "image": "/assets/nfts/cover.png",
       "owner": "组织/商家名称",
       "ownerAvatar": "/assets/avatars/org.png",
       "size": 10000,
       "price": 2.5,
-      "description": "数据资产简介",
-      "tags": ["旅游", "高净值"]
+      "description": "数据资产简介"
     }
   ]
 }
@@ -1622,6 +1698,7 @@ Authorization: Bearer <token>
     "id": "nft-uuid",
     "title": "数据资产名称",
     "coverImage": "/assets/nfts/cover.png",
+    "image": "/assets/nfts/cover.png",
     "owner": "组织/商家名称",
     "ownerAvatar": "/assets/avatars/org.png",
     "size": 10000,
@@ -1645,6 +1722,13 @@ POST /nft-market/{id}/purchase
 Authorization: Bearer <token>
 ```
 
+**请求体**:
+```json
+{
+  "quantity": 1
+}
+```
+
 **响应** (200 OK):
 ```json
 {
@@ -1653,7 +1737,9 @@ Authorization: Bearer <token>
   "data": {
     "orderId": "order-uuid",
     "nftId": "nft-uuid",
+    "quantity": 1,
     "price": 2.5,
+    "total": 2.5,
     "purchasedAt": "2024-06-01T12:00:00.000Z"
   }
 }
@@ -1680,7 +1766,9 @@ Authorization: Bearer <token>
       "nftId": "nft-uuid",
       "title": "数据资产名称",
       "coverImage": "/assets/nfts/cover.png",
+      "quantity": 1,
       "price": 2.5,
+      "total": 2.5,
       "purchasedAt": "2024-06-01T12:00:00.000Z"
     }
   ]
@@ -1724,7 +1812,7 @@ POST /api/snapshots
 ```
 **请求头**: Authorization: Bearer <token>
 **请求体**:
-```
+```json
 {
   "name": "快照名称",
   "description": "快照描述",
@@ -1732,13 +1820,66 @@ POST /api/snapshots
   "tags": ["tag-uuid-1", "tag-uuid-2"]
 }
 ```
+
+**字段说明**:
+- `name`: 快照名称
+- `description`: 快照描述（可选）
+- `activityId`: 关联的活动ID
+- `tags`: 标签ID数组（可选）
+
 **响应** (201 Created):
-```
+```json
 {
   "status": "success",
-  "data": { "id": "snapshot-uuid", ... }
+  "data": {
+    "id": "snapshot-uuid",
+    "name": "快照名称",
+    "description": "快照描述",
+    "activityId": "activity-uuid",
+    "merchantId": "merchant-uuid",
+    "claims": [
+      {
+        "id": "claim-uuid",
+        "userId": "user-uuid",
+        "status": "CLAIMED",
+        "claimedAt": "2024-03-20T12:00:00.000Z",
+        "user": {
+          "id": "user-uuid",
+          "name": "User Name",
+          "email": "user@example.com"
+        }
+      }
+    ],
+    "activity": {
+      "id": "activity-uuid",
+      "title": "活动标题"
+    },
+    "merchant": {
+      "id": "merchant-uuid",
+      "name": "商家名称"
+    },
+    "tags": [
+      {
+        "id": "tag-uuid-1",
+        "name": "标签1"
+      },
+      {
+        "id": "tag-uuid-2",
+        "name": "标签2"
+      }
+    ],
+    "createdAt": "2024-03-20T12:00:00.000Z",
+    "updatedAt": "2024-03-20T12:00:00.000Z"
+  }
 }
 ```
+
+**说明**:
+- 创建快照时会自动从关联的 Activity 获取当前的 claims 信息
+- claims 信息反映了创建快照时 Activity 的领取状态
+- 快照创建后，claims 信息会被永久保存，不会随着 Activity 的后续变化而改变
+- 只有活动的创建者（商家）可以创建快照
+- 系统会自动验证 Activity 的所有权，确保只有创建者可以创建快照
 
 #### 获取快照列表（支持分页、筛选）
 ```
@@ -2014,6 +2155,329 @@ GET /api/data-nfts/purchased?page=1&limit=10
 ---
 
 > 其余原有接口文档可保留，建议在目录和相关章节补充"新版快照与DataNFT API"说明。
+
+## Promotions API
+
+### 获取标签相关的 DataNFT 列表
+
+```
+GET /api/promotions/data-nfts/by-tags
+```
+
+**请求头**:
+```
+Authorization: Bearer <token>
+```
+
+**查询参数**:
+- `tags`: 标签ID数组，用逗号分隔 (例如: tag-uuid-1,tag-uuid-2)
+- `page`: 页码 (默认为1)
+- `limit`: 每页数量 (默认为10)
+
+**响应** (200 OK):
+```json
+{
+  "status": "success",
+  "data": {
+    "owned": [
+      {
+        "id": "data-nft-uuid",
+        "name": "数据资产包名称",
+        "description": "数据资产简介",
+        "price": 2.5,
+        "image": "/assets/nfts/cover.png",
+        "isPublished": true,
+        "merchant": {
+          "id": "merchant-uuid",
+          "name": "组织/商家名称",
+          "avatar": "/assets/avatars/org.png"
+        },
+        "tags": [
+          { "id": "tag-uuid-1", "name": "旅游" },
+          { "id": "tag-uuid-2", "name": "高净值" }
+        ]
+      }
+    ],
+    "available": [
+      {
+        "id": "data-nft-uuid-2",
+        "name": "数据资产包名称",
+        "description": "数据资产简介",
+        "price": 2.5,
+        "image": "/assets/nfts/cover.png",
+        "isPublished": true,
+        "merchant": {
+          "id": "merchant-uuid",
+          "name": "组织/商家名称",
+          "avatar": "/assets/avatars/org.png"
+        },
+        "tags": [
+          { "id": "tag-uuid-1", "name": "旅游" },
+          { "id": "tag-uuid-2", "name": "高净值" }
+        ]
+      }
+    ],
+    "pagination": {
+      "total": 20,
+      "page": 1,
+      "limit": 10,
+      "pages": 2
+    }
+  }
+}
+```
+
+### 创建推广活动
+
+```
+POST /api/promotions
+```
+
+**请求头**:
+```
+Authorization: Bearer <token>
+Content-Type: application/json
+```
+
+**请求体**:
+```json
+{
+  "title": "推广活动标题",
+  "description": "推广活动描述",
+  "startDate": "2024-03-20T00:00:00.000Z",
+  "endDate": "2024-04-20T00:00:00.000Z",
+  "type": "PROMOTION",
+  "total": 100,
+  "remaining": 100,
+  "price": 0.1,
+  "selectedDataNfts": [
+    {
+      "id": "data-nft-uuid",
+      "isOwned": true
+    },
+    {
+      "id": "data-nft-uuid-2",
+      "isOwned": false,
+      "quantity": 1
+    }
+  ],
+  "nft": {
+    "name": "NFT名称",
+    "description": "NFT描述",
+    "totalSupply": 100,
+    "price": 0.1,
+    "validityStart": "2024-03-20T00:00:00.000Z",
+    "validityEnd": "2024-04-20T00:00:00.000Z",
+    "usageRules": "使用规则"
+  }
+}
+```
+
+**响应** (201 Created):
+```json
+{
+  "status": "success",
+  "data": {
+    "id": "promotion-uuid",
+    "title": "推广活动标题",
+    "description": "推广活动描述",
+    "startDate": "2024-03-20T00:00:00.000Z",
+    "endDate": "2024-04-20T00:00:00.000Z",
+    "type": "PROMOTION",
+    "total": 100,
+    "remaining": 100,
+    "price": 0.1,
+    "isPromoted": true,
+    "promotionInfo": {
+      "selectedDataNfts": [
+        {
+          "id": "data-nft-uuid",
+          "name": "数据资产包名称",
+          "isOwned": true
+        },
+        {
+          "id": "data-nft-uuid-2",
+          "name": "数据资产包名称",
+          "isOwned": false,
+          "quantity": 1
+        }
+      ]
+    },
+    "nft": {
+      "name": "NFT名称",
+      "description": "NFT描述",
+      "totalSupply": 100,
+      "price": 0.1,
+      "validityStart": "2024-03-20T00:00:00.000Z",
+      "validityEnd": "2024-04-20T00:00:00.000Z",
+      "usageRules": "使用规则"
+    },
+    "creator": {
+      "id": "creator-uuid",
+      "name": "创建者名称",
+      "avatar": "/assets/avatars/creator.png"
+    }
+  }
+}
+```
+
+### 获取推广活动列表
+
+```
+GET /api/promotions
+```
+
+**请求头**:
+```
+Authorization: Bearer <token>
+```
+
+**查询参数**:
+- `page`: 页码 (默认为1)
+- `limit`: 每页数量 (默认为10)
+- `status`: 状态筛选 (可选: "active", "ended", "all")
+
+**响应** (200 OK):
+```json
+{
+  "status": "success",
+  "data": {
+    "promotions": [
+      {
+        "id": "promotion-uuid",
+        "title": "推广活动标题",
+        "description": "推广活动描述",
+        "startDate": "2024-03-20T00:00:00.000Z",
+        "endDate": "2024-04-20T00:00:00.000Z",
+        "type": "PROMOTION",
+        "total": 100,
+        "remaining": 100,
+        "price": 0.1,
+        "isPromoted": true,
+        "promotionInfo": {
+          "selectedDataNfts": [
+            {
+              "id": "data-nft-uuid",
+              "name": "数据资产包名称",
+              "isOwned": true
+            },
+            {
+              "id": "data-nft-uuid-2",
+              "name": "数据资产包名称",
+              "isOwned": false,
+              "quantity": 1
+            }
+          ]
+        },
+        "nft": {
+          "name": "NFT名称",
+          "description": "NFT描述",
+          "totalSupply": 100,
+          "price": 0.1,
+          "validityStart": "2024-03-20T00:00:00.000Z",
+          "validityEnd": "2024-04-20T00:00:00.000Z",
+          "usageRules": "使用规则"
+        },
+        "creator": {
+          "id": "creator-uuid",
+          "name": "创建者名称",
+          "avatar": "/assets/avatars/creator.png"
+        }
+      }
+    ],
+    "pagination": {
+      "total": 20,
+      "page": 1,
+      "limit": 10,
+      "pages": 2
+    }
+  }
+}
+```
+
+### 获取推广活动详情
+
+```
+GET /api/promotions/{id}
+```
+
+**请求头**:
+```
+Authorization: Bearer <token>
+```
+
+**响应** (200 OK):
+```json
+{
+  "status": "success",
+  "data": {
+    "id": "promotion-uuid",
+    "title": "推广活动标题",
+    "description": "推广活动描述",
+    "startDate": "2024-03-20T00:00:00.000Z",
+    "endDate": "2024-04-20T00:00:00.000Z",
+    "type": "PROMOTION",
+    "total": 100,
+    "remaining": 100,
+    "price": 0.1,
+    "isPromoted": true,
+    "promotionInfo": {
+      "selectedDataNfts": [
+        {
+          "id": "data-nft-uuid",
+          "name": "数据资产包名称",
+          "isOwned": true
+        },
+        {
+          "id": "data-nft-uuid-2",
+          "name": "数据资产包名称",
+          "isOwned": false,
+          "quantity": 1
+        }
+      ]
+    },
+    "nft": {
+      "name": "NFT名称",
+      "description": "NFT描述",
+      "totalSupply": 100,
+      "price": 0.1,
+      "validityStart": "2024-03-20T00:00:00.000Z",
+      "validityEnd": "2024-04-20T00:00:00.000Z",
+      "usageRules": "使用规则"
+    },
+    "creator": {
+      "id": "creator-uuid",
+      "name": "创建者名称",
+      "avatar": "/assets/avatars/creator.png"
+    }
+  }
+}
+```
+
+### 字段说明
+
+#### 推广活动状态
+- `active`: 当前时间在 startDate 和 endDate 之间
+- `ended`: 当前时间已超过 endDate
+- `all`: 所有状态
+
+#### 推广活动字段
+- `isPromoted`: 是否为推广活动
+- `promotionInfo`: 推广活动相关信息
+  - `selectedDataNfts`: 选中的数据资产列表
+    - `id`: 数据资产ID
+    - `name`: 数据资产名称
+    - `isOwned`: 是否已拥有
+    - `quantity`: 数量（仅当 isOwned 为 false 时有效）
+
+#### NFT 字段
+- `name`: NFT 名称
+- `description`: NFT 描述
+- `totalSupply`: 总供应量
+- `price`: 价格
+- `validityStart`: 有效期开始时间
+- `validityEnd`: 有效期结束时间
+- `usageRules`: 使用规则
 
 ## 错误响应
 
