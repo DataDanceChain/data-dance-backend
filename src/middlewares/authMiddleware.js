@@ -5,7 +5,7 @@ const prisma = new PrismaClient();
 /**
  * 验证用户是否已登录
  */
-exports.protect = async (req, res, next) => {
+const protect = async (req, res, next) => {
   try {
     let token;
 
@@ -50,7 +50,7 @@ exports.protect = async (req, res, next) => {
 /**
  * 检查用户是否为组织用户
  */
-exports.isOrganization = (req, res, next) => {
+const isOrganization = (req, res, next) => {
   if (!req.user) {
     return res.status(401).json({
       status: 'error',
@@ -66,4 +66,16 @@ exports.isOrganization = (req, res, next) => {
   }
   
   next();
+};
+
+const authenticateToken = (req, res, next) => {
+  // TODO: 实现你的鉴权逻辑。当前为开发环境默认放行。
+  // 生产环境请替换为真实的 token 校验逻辑。
+  next();
+};
+
+module.exports = {
+  authenticateToken,
+  protect,
+  isOrganization,
 }; 

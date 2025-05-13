@@ -49,7 +49,8 @@ exports.getActivities = async (req, res) => {
           where: {
             userId: req.user.id
           }
-        }
+        },
+        nftMarketOrders: true
       },
       skip,
       take: Number(limit),
@@ -141,7 +142,8 @@ exports.getActivity = async (req, res) => {
           where: {
             userId: req.user.id
           }
-        }
+        },
+        nftMarketOrders: true
       }
     });
 
@@ -369,8 +371,9 @@ exports.getRecommendedActivities = async (req, res) => {
         claims: {
           where: {
             userId: req.user.id
-          }
         }
+        },
+        nftMarketOrders: true
       },
       take: 10,
       orderBy: {
@@ -485,8 +488,9 @@ exports.getAllActivities = async (req, res) => {
         claims: {
           where: {
             userId: req.user.id
-          }
         }
+        },
+        nftMarketOrders: true
       },
       skip,
       take: Number(limit),
@@ -580,7 +584,8 @@ exports.getActivityById = async (req, res) => {
           where: {
             userId: req.user.id
           }
-        }
+        },
+        nftMarketOrders: true
       }
     });
 
@@ -664,8 +669,9 @@ exports.getFeaturedActivities = async (req, res) => {
         claims: {
           where: {
             userId: req.user.id
-          }
         }
+        },
+        nftMarketOrders: true
       },
       orderBy: {
         createdAt: 'desc'
@@ -735,7 +741,8 @@ exports.getClaimedActivities = async (req, res) => {
           include: {
             creator: true,
             categories: true,
-            tags: true
+            tags: true,
+            nftMarketOrders: true
           }
         }
       },
@@ -782,7 +789,7 @@ exports.getClaimedActivities = async (req, res) => {
       tags: claim.activity.tags.map(t => ({
         id: t.id,
         name: t.name
-      }))
+      })),
     }));
 
     res.status(200).json({
@@ -822,8 +829,9 @@ exports.getUserClaimedActivities = async (req, res) => {
         claims: {
           where: {
             userId: req.user.id
-          }
         }
+        },
+        nftMarketOrders: true
       },
       orderBy: {
         updatedAt: 'desc'
@@ -1039,3 +1047,128 @@ function generateIdentifier(userId, activityId) {
   // 返回前12位，格式为 DDID-XXXX-XXXX
   return `DDID-${hash.substring(0, 4)}-${hash.substring(4, 8)}`;
 } 
+
+/**
+ * 获取商家创建的活动
+ * @route GET /api/activities/created-by-me
+ * @access Private
+ */
+exports.getCreatedActivities = async (req, res) => {
+  try {
+    const { page = 1, limit = 10, search } = req.query;
+    const skip = (page - 1) * limit;
+    const where = { creatorId: req.user.id };
+    if (search) {
+      where.OR = [
+        { title: { contains: search, mode: 'insensitive' } },
+        { description: { contains: search, mode: 'insensitive' } }
+      ];
+    }
+    const activities = await prisma.activity.findMany({
+      where,
+      include: {
+        creator: true,
+        categories: true,
+        tags: true,
+        claims: { where: { userId: req.user.id } },
+        nftMarketOrders: true
+      },
+      skip,
+      take: Number(limit),
+      orderBy: { createdAt: 'desc' }
+    });
+    const total = await prisma.activity.count({ where });
+    const formattedActivities = activities.map(activity => ({
+      id: activity.id,
+      title: activity.title,
+      description: activity.description,
+      startDate: activity.startDate,
+      endDate: activity.endDate,
+      image: activity.image,
+      type: activity.type,
+      remaining: activity.remaining,
+      total: activity.total,
+      statusNote: activity.statusNote,
+      price: activity.nftPrice,
+      nft: activity.nftPrice ? {
+        name: activity.nftName,
+        description: activity.nftDescription,
+        image: activity.nftImage,
+        totalSupply: activity.nftTotalSupply,
+        price: activity.nftPrice,
+        validityStart: activity.nftValidityStart,
+        validityEnd: activity.nftValidityEnd,
+        usageRules: activity.nftUsageRules
+      } : null,
+      creator: {
+        id: activity.creator.id,
+        name: activity.creator.name,
+        logo: activity.creator.logo,
+        isOrganization: activity.creator.isOrganization
+      },
+      categories: activity.categories.map(c => ({ id: c.id, name: c.name })),
+      tags: activity.tags.map(t => ({ id: t.id, name: t.name })),
+      isClaimed: activity.claims.length > 0,
+      createdAt: activity.createdAt,
+      updatedAt: activity.updatedAt,
+      showInExplore: activity.showInExplore,
+    }));
+    res.status(200).json({
+      status: 'success',
+      data: {
+        activities: formattedActivities,
+        pagination: {
+          page: Number(page),
+          limit: Number(limit),
+          total,
+          pages: Math.ceil(total / limit)
+        }
+      }
+    });
+  } catch (error) {
+    console.error('Error fetching created activities:', error);
+    res.status(500).json({
+      status: 'error',
+      message: 'Server error',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+};
+
+/**
+ * 给活动设置标签
+ * @route POST /api/activities/:id/tags
+ * @access Private
+ */
+exports.setActivityTags = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { tags } = req.body;
+    if (!Array.isArray(tags) || tags.length === 0) {
+      return res.status(400).json({ status: 'fail', message: 'Invalid tag IDs' });
+    }
+    // 检查活动是否存在
+    const activity = await prisma.activity.findUnique({ where: { id } });
+    if (!activity) {
+      return res.status(404).json({ status: 'fail', message: 'Activity not found' });
+    }
+    // 检查所有 tag 是否存在
+    const foundTags = await prisma.activityTag.findMany({ where: { id: { in: tags } } });
+    if (foundTags.length !== tags.length) {
+      return res.status(400).json({ status: 'fail', message: 'Invalid tag IDs' });
+    }
+    // 更新活动标签
+    const updated = await prisma.activity.update({
+      where: { id },
+      data: {
+        tags: {
+          set: tags.map(tagId => ({ id: tagId }))
+        }
+      },
+      include: { tags: true }
+    });
+    res.status(200).json({ status: 'success', data: updated.tags });
+  } catch (error) {
+    res.status(500).json({ status: 'error', message: 'Server error', error: error.message });
+  }
+}; 

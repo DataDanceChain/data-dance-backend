@@ -39,6 +39,10 @@ model User {
   profile           UserProfile?
   roles             UserRole[]
   passes            Pass[]
+  nftMarketOrders   NftMarketOrder[]
+  snapshots         Snapshot[]
+  dataNFTs          DataNFT[]
+  dataNFTPurchases  DataNFTPurchase[]
 }
 
 model UserProfile {
@@ -192,7 +196,9 @@ model Activity {
   claims             ActivityClaim[]
   dataDanceIDs       DataDanceID[]
   categories         ActivityCategory[] @relation("ActivityToActivityCategory")
-  tags               ActivityTag[]      @relation("ActivityToActivityTag")
+  tags               Tag[]              @relation("ActivityToTag")
+  nftMarketOrders    NftMarketOrder[]
+  snapshots          Snapshot[]
 }
 
 model ActivityCategory {
@@ -203,12 +209,14 @@ model ActivityCategory {
   activities Activity[] @relation("ActivityToActivityCategory")
 }
 
-model ActivityTag {
+model Tag {
   id         String     @id @default(uuid())
   name       String
   createdAt  DateTime   @default(now())
   updatedAt  DateTime   @updatedAt
-  activities Activity[] @relation("ActivityToActivityTag")
+  activities Activity[] @relation("ActivityToTag")
+  snapshots  Snapshot[] @relation("SnapshotToTag")
+  dataNFTs   DataNFT[]  @relation("DataNFTToTag")
 }
 
 model ActivityClaim {
@@ -300,4 +308,59 @@ model Pass {
   @@unique([userId, creatorId, platform])
   @@index([creatorId])
   @@index([userId])
+}
+
+model NftMarketOrder {
+  id          String   @id @default(uuid())
+  userId      String
+  activityId  String
+  quantity    Int
+  price       Float
+  total       Float
+  purchasedAt DateTime @default(now())
+  user        User     @relation(fields: [userId], references: [id])
+  activity    Activity @relation(fields: [activityId], references: [id])
+  @@index([userId])
+  @@index([activityId])
+}
+
+model Snapshot {
+  id          String   @id @default(uuid())
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  name        String
+  description String?
+  activityId  String
+  activity    Activity @relation(fields: [activityId], references: [id])
+  merchantId  String
+  merchant    User     @relation(fields: [merchantId], references: [id])
+  dataNFTs    DataNFT[]
+  tags        Tag[]     @relation("SnapshotToTag")
+}
+
+model DataNFT {
+  id          String   @id @default(uuid())
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  name        String
+  description String?
+  price       Float
+  isPublished Boolean  @default(false)
+  maxSales    Int      @default(1)
+  currentSales Int     @default(0)
+  merchantId  String
+  merchant    User     @relation(fields: [merchantId], references: [id])
+  snapshots   Snapshot[]
+  tags        Tag[]     @relation("DataNFTToTag")
+  purchases   DataNFTPurchase[]
+  image       String?
+}
+
+model DataNFTPurchase {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+  dataNFTId String
+  dataNFT   DataNFT  @relation(fields: [dataNFTId], references: [id])
+  buyerId   String
+  buyer     User     @relation(fields: [buyerId], references: [id])
 }

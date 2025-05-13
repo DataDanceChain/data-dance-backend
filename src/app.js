@@ -15,6 +15,10 @@ const web3AuthRoutes = require('./routes/web3AuthRoutes');
 const passRoutes = require('./routes/passRoutes');
 const passWebServiceRoutes = require('./routes/passWebServiceRoutes');
 const googleWalletRoutes = require('./routes/googleWalletRoutes');
+const tagRoutes = require('./routes/tagRoutes');
+const nftMarketRoutes = require('./routes/nftMarketRoutes');
+const snapshotRoutes = require('./routes/snapshotRoutes');
+const dataNFTRoutes = require('./routes/dataNFTRoutes');
 
 const app = express();
 
@@ -60,6 +64,10 @@ app.use('/api/auth', web3AuthRoutes);
 app.use('/api/assets/passes', passRoutes);
 app.use('/v1', passWebServiceRoutes);
 app.use('/api/google-wallet', googleWalletRoutes);
+app.use('/api/tags', tagRoutes);
+app.use('/api/nft-market', nftMarketRoutes);
+app.use('/api/snapshots', snapshotRoutes);
+app.use('/api/data-nfts', dataNFTRoutes);
 
 // 错误处理中间件
 app.use(errorHandler);

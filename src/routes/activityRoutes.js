@@ -9,7 +9,8 @@ const {
   getActivityById,
   getClaimedActivities,
   getUserClaimedActivities,
-  claimActivity
+  claimActivity,
+  getCreatedActivities
 } = require('../controllers/activityController');
 const { protect } = require('../middlewares/authMiddleware');
 const router = express.Router();
@@ -32,10 +33,16 @@ router.get('/user-claimed', getUserClaimedActivities);
 // 获取活动列表
 router.get('/', getAllActivities);
 
+// 获取商家创建的活动
+router.get('/created-by-me', getCreatedActivities);
+
 // 获取活动详情 - 这个路由应该放在最后
 router.get('/:id', getActivityById);
 
 // 领取活动
 router.post('/:id/claim', claimActivity);
+
+// 给活动设置标签
+router.post('/:id/tags', require('../controllers/activityController').setActivityTags);
 
 module.exports = router; 

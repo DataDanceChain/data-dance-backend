@@ -13,6 +13,8 @@
 3. [活动 API](#活动-api)
 4. [资产 API](#资产-api)
 5. [通知 API](#通知-api)
+6. [NFT 数据市场 API](#nft-数据市场-api)
+7. [Data NFT 快照与市场 API](#data-nft-快照与市场-api)
 
 ## 测试账号
 为了方便测试，我们提供了一个测试账号，可以使用账号密码登录：
@@ -779,6 +781,275 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 }
 ```
 
+### 获取我创建的活动
+
+```
+GET /api/activities/created-by-me
+```
+
+**请求头**:
+```
+Authorization: Bearer <token>
+```
+
+**说明**:
+- 仅返回当前登录用户（组织/商家）作为创建者（creator）的所有活动。
+- 适用于商家后台活动管理页面。
+
+**响应** (200 OK):
+```json
+{
+  "status": "success",
+  "data": {
+    "activities": [
+      {
+        "id": "activity-uuid",
+        "title": "Activity Title",
+        "description": "Activity description...",
+        "image": "/assets/nfts/yacht-club.png",
+        "startDate": "2025-02-19T00:00:00.000Z",
+        "endDate": "2025-03-19T00:00:00.000Z",
+        "type": "MEMBERSHIP",
+        "remaining": 100,
+        "total": 100,
+        "statusNote": "Limited edition, while supplies last",
+        "price": 0.1,
+        "nft": { /* ... */ },
+        "isClaimed": false,
+        "creator": {
+          "id": "org-uuid",
+          "name": "Yacht Club",
+          "logo": "/assets/logos/yacht-club.png",
+          "isOrganization": true
+        },
+        "categories": [
+          { "id": "category-uuid", "name": "Luxury" }
+        ],
+        "tags": [
+          { "id": "tag-uuid", "name": "Membership" }
+        ]
+      }
+      // ...更多活动
+    ],
+    "pagination": {
+      "page": 1,
+      "limit": 10,
+      "total": 2,
+      "pages": 1
+    }
+  }
+}
+```
+
+**状态码说明**:
+- `200 OK`: 请求成功，返回当前组织/商家发起的活动列表
+- `401 Unauthorized`: 未登录或 token 无效
+- `403 Forbidden`: 权限不足（非组织/商家用户）
+
+**接口说明**:
+- 该接口根据当前登录用户的 token 自动筛选，只返回该用户（组织/商家）创建的活动。
+- 支持分页、搜索等参数（如有需要可补充）。
+
+### 创建新活动
+
+```
+POST /api/activities/new
+```
+
+**请求头**:
+```
+Authorization: Bearer <token>
+Content-Type: multipart/form-data
+```
+
+**请求体**（multipart/form-data，支持图片上传）：
+| 字段名           | 类型         | 说明                       |
+|------------------|--------------|----------------------------|
+| title            | string       | 活动标题                   |
+| description      | string       | 活动描述                   |
+| startDate        | string/date  | 开始时间（ISO字符串）      |
+| endDate          | string/date  | 结束时间（ISO字符串）      |
+| type             | string       | 活动类型（如 MEMBERSHIP）  |
+| total            | int          | 总量                       |
+| remaining        | int          | 剩余                       |
+| statusNote       | string       | 状态说明                   |
+| price            | float        | NFT价格                    |
+| nftName          | string       | NFT名称                    |
+| nftDescription   | string       | NFT描述                    |
+| nftTotalSupply   | int          | NFT总量                    |
+| nftUsageRules    | string       | NFT使用规则                |
+| nftValidityStart | string/date  | NFT有效期开始              |
+| nftValidityEnd   | string/date  | NFT有效期结束              |
+| equityTitle      | string       | 权益标题                   |
+| equityDetails    | string[]     | 权益详情（可多选）         |
+| externalLinksTitle | string     | 外链标题                   |
+| externalLinks    | json/string  | 外链（JSON字符串）         |
+| showInExplore    | boolean      | 是否在探索页展示           |
+| categories       | string[]     | 分类ID数组                 |
+| tags             | string[]     | 标签ID数组                 |
+| logo             | file         | 组织logo图片（图片文件）    |
+| nft              | file         | NFT图片（图片文件）        |
+| banner           | file         | Banner图片（图片文件）     |
+
+**说明**：
+- 图片字段需用 `FormData` 上传，字段名分别为 `logo`、`nft`、`banner`。
+- 其他字段为普通表单字段。
+- 图片会自动存储到 `/assets/logos/`、`/assets/nfts/`、`/assets/banners/`，返回图片路径。
+
+**响应** (201 Created):
+```json
+{
+  "status": "success",
+  "data": {
+    "id": "activity-uuid",
+    "title": "Elite Yacht Club Membership NFT Limited Sale",
+    "description": "Elite Yacht Club membership benefits...",
+    "logo": "/assets/logos/xxx.jpg",
+    "nftImage": "/assets/nfts/xxx.jpg",
+    "image": "/assets/banners/xxx.jpg",
+    "startDate": "2025-02-19T00:00:00.000Z",
+    "endDate": "2025-03-19T00:00:00.000Z",
+    "type": "MEMBERSHIP",
+    "remaining": 100,
+    "total": 100,
+    "price": 0.1,
+    ... // 其他字段
+  }
+}
+```
+
+**错误响应** (400 Bad Request):
+```json
+{
+  "status": "fail",
+  "message": "Invalid request parameters"
+}
+```
+
+**字段说明**:
+- `logo`：组织logo图片路径
+- `nftImage`：NFT图片路径
+- `image`：Banner图片路径
+- 其他字段同上
+
+### Tag Management API
+
+#### Get All Tags
+
+```
+GET /api/tags
+```
+
+**Request Headers:**
+- (optional) Authorization: Bearer <token>
+
+**Response** (200 OK):
+```json
+{
+  "status": "success",
+  "data": [
+    { "id": "tag-uuid-1", "name": "Sports & Fitness" },
+    { "id": "tag-uuid-2", "name": "Music & Entertainment" }
+    // ...
+  ]
+}
+```
+
+---
+
+#### Create a New Tag
+
+```
+POST /api/tags
+```
+
+**Request Headers:**
+- Authorization: Bearer <token>
+- Content-Type: application/json
+
+**Request Body:**
+```json
+{
+  "name": "Blockchain"
+}
+```
+
+**Response** (201 Created):
+```json
+{
+  "status": "success",
+  "data": { "id": "tag-uuid-3", "name": "Blockchain" }
+}
+```
+
+**Error Response** (400 Bad Request):
+```json
+{
+  "status": "fail",
+  "message": "Tag already exists"
+}
+```
+
+---
+
+#### Associate Tags with an Activity
+
+```
+POST /api/activities/:id/tags
+```
+
+**Request Headers:**
+- Authorization: Bearer <token>
+- Content-Type: application/json
+
+**Request Body:**
+```json
+{
+  "tags": ["tag-uuid-1", "tag-uuid-3"]
+}
+```
+
+**Response** (200 OK):
+```json
+{
+  "status": "success",
+  "data": [
+    { "id": "tag-uuid-1", "name": "Sports & Fitness" },
+    { "id": "tag-uuid-3", "name": "Blockchain" }
+  ]
+}
+```
+
+**Error Response** (400 Bad Request):
+```json
+{
+  "status": "fail",
+  "message": "Invalid tag IDs"
+}
+```
+
+---
+
+#### Activity Object Tag Field
+
+- In all activity GET/list responses, the `tags` field should be an array of tag objects or tag IDs, e.g.:
+
+```json
+{
+  "id": "activity-uuid",
+  "title": "Activity Title",
+  ...
+  "tags": [
+    { "id": "tag-uuid-1", "name": "Sports & Fitness" },
+    { "id": "tag-uuid-3", "name": "Blockchain" }
+  ]
+}
+```
+
+**Field Explanation:**
+- `id`: Tag unique ID
+- `name`: Tag name (string)
+
 ## 资产 API
 
 ### 获取资产总览
@@ -903,6 +1174,7 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 ```
 GET /assets/badges/{badgeId}
 ```
+
 **请求头**:
 ```
 Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
@@ -1294,6 +1566,454 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
   }
 }
 ```
+
+## NFT 数据市场 API
+
+### 获取市场 NFT 数据资产列表
+
+```
+GET /nft-market
+```
+
+**请求头**:
+```
+Authorization: Bearer <token>
+```
+
+**查询参数**:
+- `tag` (可选): 标签筛选
+
+**响应** (200 OK):
+```json
+{
+  "status": "success",
+  "data": [
+    {
+      "id": "nft-uuid",
+      "title": "数据资产名称",
+      "coverImage": "/assets/nfts/cover.png",
+      "owner": "组织/商家名称",
+      "ownerAvatar": "/assets/avatars/org.png",
+      "size": 10000,
+      "price": 2.5,
+      "description": "数据资产简介",
+      "tags": ["旅游", "高净值"]
+    }
+  ]
+}
+```
+
+### 获取市场 NFT 数据资产详情
+
+```
+GET /nft-market/{id}
+```
+
+**请求头**:
+```
+Authorization: Bearer <token>
+```
+
+**响应** (200 OK):
+```json
+{
+  "status": "success",
+  "data": {
+    "id": "nft-uuid",
+    "title": "数据资产名称",
+    "coverImage": "/assets/nfts/cover.png",
+    "owner": "组织/商家名称",
+    "ownerAvatar": "/assets/avatars/org.png",
+    "size": 10000,
+    "price": 2.5,
+    "description": "数据资产简介",
+    "tags": ["旅游", "高净值"],
+    "sales": 123,
+    "revenue": 456.78
+  }
+}
+```
+
+### 购买市场 NFT 数据资产
+
+```
+POST /nft-market/{id}/purchase
+```
+
+**请求头**:
+```
+Authorization: Bearer <token>
+```
+
+**响应** (200 OK):
+```json
+{
+  "status": "success",
+  "message": "Purchase successful",
+  "data": {
+    "orderId": "order-uuid",
+    "nftId": "nft-uuid",
+    "price": 2.5,
+    "purchasedAt": "2024-06-01T12:00:00.000Z"
+  }
+}
+```
+
+### 获取我购买的 NFT 数据资产
+
+```
+GET /nft-market/my-purchases
+```
+
+**请求头**:
+```
+Authorization: Bearer <token>
+```
+
+**响应** (200 OK):
+```json
+{
+  "status": "success",
+  "data": [
+    {
+      "orderId": "order-uuid",
+      "nftId": "nft-uuid",
+      "title": "数据资产名称",
+      "coverImage": "/assets/nfts/cover.png",
+      "price": 2.5,
+      "purchasedAt": "2024-06-01T12:00:00.000Z"
+    }
+  ]
+}
+```
+
+### 获取我发售的 NFT 数据资产及销售情况
+
+```
+GET /nft-market/my-sales
+```
+
+**请求头**:
+```
+Authorization: Bearer <token>
+```
+
+**响应** (200 OK):
+```json
+{
+  "status": "success",
+  "data": [
+    {
+      "nftId": "nft-uuid",
+      "title": "数据资产名称",
+      "coverImage": "/assets/nfts/cover.png",
+      "sales": 123,
+      "revenue": 456.78
+    }
+  ]
+}
+```
+
+## Data NFT 快照与市场 API（新版）
+
+### 快照（Snapshot）API
+
+#### 创建快照
+```
+POST /api/snapshots
+```
+**请求头**: Authorization: Bearer <token>
+**请求体**:
+```
+{
+  "name": "快照名称",
+  "description": "快照描述",
+  "activityId": "activity-uuid",
+  "tags": ["tag-uuid-1", "tag-uuid-2"]
+}
+```
+**响应** (201 Created):
+```
+{
+  "status": "success",
+  "data": { "id": "snapshot-uuid", ... }
+}
+```
+
+#### 获取快照列表（支持分页、筛选）
+```
+GET /api/snapshots?page=1&limit=10&activityId=xxx&merchantId=xxx&search=xxx
+```
+**响应** (200 OK):
+```
+{
+  "status": "success",
+  "data": {
+    "snapshots": [ { "id": "snapshot-uuid", ... } ],
+    "total": 20,
+    "page": 1,
+    "totalPages": 2
+  }
+}
+```
+
+#### 获取单个快照
+```
+GET /api/snapshots/{id}
+```
+**响应** (200 OK):
+```
+{
+  "status": "success",
+  "data": { "id": "snapshot-uuid", ... }
+}
+```
+
+#### 更新快照
+```
+PUT /api/snapshots/{id}
+```
+**请求体**:
+```
+{
+  "name": "新名称",
+  "description": "新描述",
+  "tags": ["tag-uuid-1", "tag-uuid-2"]
+}
+```
+**响应** (200 OK):
+```
+{
+  "status": "success",
+  "data": { "id": "snapshot-uuid", ... }
+}
+```
+
+#### 删除快照
+```
+DELETE /api/snapshots/{id}
+```
+**响应** (200 OK):
+```
+{
+  "status": "success",
+  "message": "Snapshot deleted successfully"
+}
+```
+
+#### 按活动/商家获取快照
+```
+GET /api/snapshots/activity/{activityId}?page=1&limit=10
+GET /api/snapshots/merchant/{merchantId}?page=1&limit=10
+```
+**响应** (200 OK):
+```
+{
+  "status": "success",
+  "data": {
+    "snapshots": [ { ... } ],
+    "total": 10,
+    "page": 1,
+    "totalPages": 1
+  }
+}
+```
+
+---
+
+### DataNFT API（商家侧管理）
+
+#### 合并快照生成 DataNFT（支持图片上传）
+```
+POST /api/data-nfts/merge
+```
+**请求头**:
+- Authorization: Bearer <token>
+- Content-Type: multipart/form-data
+
+**请求体**（multipart/form-data）：
+| 字段名   | 类型         | 说明                                 |
+|----------|--------------|--------------------------------------|
+| name     | string       | 数据资产包名称                       |
+| price    | float        | 价格                                 |
+| image    | file/string  | 配图，支持图片文件或已有图片路径     |
+| ...      | ...          | 其它字段同上                         |
+
+- `image` 字段可上传图片文件（file），也可直接传已有图片路径（string）。
+- 图片会保存到 `/assets/nfts/` 目录，返回图片路径。
+
+**响应** (201 Created):
+```json
+{
+  "status": "success",
+  "data": { "id": "data-nft-uuid", "image": "/assets/nfts/xxx.jpg", ... }
+}
+```
+
+#### 获取 DataNFT 列表（支持分页、筛选、标签）
+```
+GET /api/data-nfts?page=1&limit=10&search=xxx&minPrice=0&maxPrice=100&tags=tag-uuid-1,tag-uuid-2
+```
+**响应** (200 OK):
+```
+{
+  "status": "success",
+  "data": {
+    "data": [
+      {
+        "id": "data-nft-uuid",
+        "name": "数据资产包名称",
+        "size": 100,
+        "price": 2.5,
+        "image": "/assets/nfts/cover.png",
+        ... // 其它字段
+      }
+    ],
+    "pagination": {
+      "total": 20,
+      "page": 1,
+      "limit": 10,
+      "pages": 2
+    }
+  }
+}
+```
+
+#### 获取单个 DataNFT
+```
+GET /api/data-nfts/{id}
+```
+**响应** (200 OK):
+```
+{
+  "status": "success",
+  "data": {
+    "id": "data-nft-uuid",
+    "name": "数据资产包名称",
+    "size": 100,
+    "price": 2.5,
+    "image": "/assets/nfts/cover.png",
+    ... // 其它字段
+  }
+}
+```
+
+#### 更新 DataNFT（支持图片上传）
+```
+PUT /api/data-nfts/{id}
+```
+**请求头**:
+- Authorization: Bearer <token>
+- Content-Type: multipart/form-data
+
+**请求体**（multipart/form-data）同上。
+
+---
+
+#### 发布/下架 DataNFT
+```
+POST /api/data-nfts/{id}/publish
+POST /api/data-nfts/{id}/unpublish
+```
+**响应** (200 OK):
+```
+{
+  "status": "success",
+  "data": { ... }
+}
+```
+
+#### 购买 DataNFT
+```
+POST /api/data-nfts/{id}/purchase
+```
+**响应** (201 Created):
+```
+{
+  "status": "success",
+  "data": { ... }
+}
+```
+
+#### 按商家获取 DataNFT
+```
+GET /api/data-nfts/merchant/{merchantId}?page=1&limit=10
+```
+**响应** (200 OK):
+```
+{
+  "status": "success",
+  "data": {
+    "data": [ { ... } ],
+    "pagination": { ... }
+  }
+}
+```
+
+#### 获取我已购买的 DataNFT
+```
+GET /api/data-nfts/purchased?page=1&limit=10
+```
+**响应** (200 OK):
+```
+{
+  "status": "success",
+  "data": {
+    "data": [ { ... } ],
+    "pagination": { ... }
+  }
+}
+```
+
+---
+
+### /nft-market 说明
+- `/nft-market` 相关接口为市场公开展示和购买入口，主要面向所有用户。
+- `/api/data-nfts` 相关接口为商家侧管理和个人资产查询。
+- 两者数据结构类似，但 `/nft-market` 只展示已发布（isPublished=true）的 DataNFT。
+
+---
+
+### tags 字段说明
+- DataNFT、Snapshot、Activity 等对象的 `tags` 字段均为对象数组：
+```
+"tags": [
+  { "id": "tag-uuid-1", "name": "A" },
+  { "id": "tag-uuid-2", "name": "B" }
+]
+```
+
+---
+
+### 响应格式统一
+所有接口响应均推荐如下格式：
+```
+{
+  "status": "success",
+  "data": ...
+}
+```
+或分页：
+```
+{
+  "status": "success",
+  "data": {
+    "data": [ ... ],
+    "pagination": { ... }
+  }
+}
+```
+或删除：
+```
+{
+  "status": "success",
+  "message": "xxx"
+}
+```
+
+---
+
+> 其余原有接口文档可保留，建议在目录和相关章节补充"新版快照与DataNFT API"说明。
 
 ## 错误响应
 

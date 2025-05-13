@@ -100,7 +100,7 @@ Exclusive Swag:
 Milady stickers, Ethereum stickers, Ethpanda stickers, GCC stickers, DDC Swag, Cat Club toys`,
         startDate: new Date("2024-04-06T19:00:00+08:00"),
         endDate: new Date("2024-04-06T22:40:00+08:00"),
-        image: "/assets/nfts/gcc-ethpanda-ddc.png",
+        image: "/assets/nfts/gcc-ethpanda-ddc.jpg",
         creator: {
           connect: { id: orgUser.id }
         },
