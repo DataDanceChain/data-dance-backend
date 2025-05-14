@@ -426,10 +426,15 @@ exports.getAllActivities = async (req, res) => {
     const { category, search, page = 1, limit = 10, isPromoted } = req.query;
     const skip = (page - 1) * limit;
 
+    console.log('Query parameters:', { category, search, page, limit, isPromoted });
+
     // 构建查询条件
-    const where = {
-      showInExplore: true  // 添加这个条件，只获取 showInExplore 为 true 的活动
-    };
+    const where = {};
+    
+    // 如果不是查询推广活动，则只显示 showInExplore 为 true 的活动
+    if (isPromoted === undefined || isPromoted === 'false') {
+      where.showInExplore = true;
+    }
     
     // 如果有分类筛选
     if (category) {
@@ -450,8 +455,11 @@ exports.getAllActivities = async (req, res) => {
 
     // 如果指定了是否只返回推广活动
     if (isPromoted !== undefined) {
-      where.isPromoted = isPromoted === 'true';
+      where.isPromoted = isPromoted === 'true' || isPromoted === true;
+      console.log('Filtering by isPromoted:', where.isPromoted);
     }
+
+    console.log('Final where clause:', JSON.stringify(where, null, 2));
 
     // 查询活动
     const activities = await prisma.activity.findMany({
@@ -474,16 +482,55 @@ exports.getAllActivities = async (req, res) => {
       }
     });
 
-    // 获取总数 - 只计算 showInExplore 为 true 的活动
+    console.log('Found activities count:', activities.length);
+    console.log('First activity isPromoted value:', activities[0]?.isPromoted);
+
+    // 获取总数
     const total = await prisma.activity.count({ where });
+
+    // 格式化返回数据
+    const formattedActivities = activities.map(activity => ({
+      id: activity.id,
+      title: activity.title,
+      description: activity.description,
+      startDate: activity.startDate,
+      endDate: activity.endDate,
+      image: activity.image,
+      type: activity.type,
+      remaining: activity.remaining,
+      total: activity.total,
+      statusNote: activity.statusNote,
+      price: activity.nftPrice,
+      nft: activity.nftPrice ? {
+        name: activity.nftName,
+        description: activity.nftDescription,
+        image: activity.nftImage,
+        totalSupply: activity.nftTotalSupply,
+        price: activity.nftPrice,
+        validityStart: activity.nftValidityStart,
+        validityEnd: activity.nftValidityEnd,
+        usageRules: activity.nftUsageRules
+      } : null,
+      creator: {
+        id: activity.creator.id,
+        name: activity.creator.name,
+        logo: activity.creator.logo,
+        isOrganization: activity.creator.isOrganization
+      },
+      categories: activity.categories.map(c => ({ id: c.id, name: c.name })),
+      tags: activity.tags.map(t => ({ id: t.id, name: t.name })),
+      isClaimed: activity.claims.length > 0,
+      createdAt: activity.createdAt,
+      updatedAt: activity.updatedAt,
+      showInExplore: activity.showInExplore,
+      isPromoted: activity.isPromoted,
+      promotionInfo: activity.promotionInfo
+    }));
 
     res.status(200).json({
       status: 'success',
       data: {
-        activities: activities.map(activity => ({
-          ...activity,
-          isClaimed: activity.claims.length > 0
-        })),
+        activities: formattedActivities,
         pagination: {
           page: Number(page),
           limit: Number(limit),
@@ -1047,6 +1094,8 @@ exports.getCreatedActivities = async (req, res) => {
       createdAt: activity.createdAt,
       updatedAt: activity.updatedAt,
       showInExplore: activity.showInExplore,
+      isPromoted: activity.isPromoted,
+      promotionInfo: activity.promotionInfo
     }));
     res.status(200).json({
       status: 'success',
