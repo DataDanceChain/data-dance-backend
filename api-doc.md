@@ -13,8 +13,8 @@
 3. [活动 API](#活动-api)
 4. [资产 API](#资产-api)
 5. [通知 API](#通知-api)
-6. [奖励 API](#奖励-api)
-7. [邀请系统 API](#邀请系统-api)
+6. [Award System API](#6-award-system-api)
+7. [X API](#7-x-api)
 
 ## 认证 API
 
@@ -38,7 +38,7 @@ POST /api/auth/register
 {
   "status": "success",
   "data": {
-    "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+    "token": " <token>",
     "user": {
       "id": "user-uuid",
       "email": "user@example.com",
@@ -67,7 +67,7 @@ POST /api/auth/login
 {
   "status": "success",
   "data": {
-    "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+    "token": " <token>",
     "user": {
       "id": "user-uuid",
       "email": "user@example.com",
@@ -99,7 +99,7 @@ POST /api/auth/register-with-wallet
 {
   "status": "success",
   "data": {
-    "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+    "token": " <token>",
     "user": {
       "id": "user-uuid",
       "email": "0x1234567890abcdef1234567890abcdef12345678@wallet.user",
@@ -128,7 +128,10 @@ POST /api/auth/web3auth-login
     "verifierId": "user@example.com",
     "typeOfLogin": "jwt"
   },
-  "walletAddress": "0x123abc..."
+  "walletAddress": "0x123abc...",
+  "xid": "user@example.com",         // X 返回的 verifierId
+  "xAccessToken": "access-token",   // X 返回的 Access Token
+  "xRefreshToken": "refresh-token"  // X 返回的 Refresh Token
 }
 ```
 
@@ -150,6 +153,9 @@ POST /api/auth/web3auth-login
       "walletAddress": "0x123abc...",
       "userType": "regular",
       "authType": "web3auth",
+      "xid": "user@example.com",
+      "xAccessToken": "access-token",
+      "xRefreshToken": "refresh-token",
       "isOrganization": false
     }
   }
@@ -160,7 +166,7 @@ POST /api/auth/web3auth-login
 ```json
 {
   "status": "success",
-    "data": {
+  "data": {
     "token": "jwt_token_here",
     "user": {
       "id": "user_id",
@@ -169,6 +175,9 @@ POST /api/auth/web3auth-login
       "walletAddress": "0x123abc...",
       "userType": "regular",
       "authType": "web3auth",
+      "xid": "user@example.com",
+      "xAccessToken": "access-token",
+      "xRefreshToken": "refresh-token",
       "isOrganization": false
     }
   }
@@ -185,7 +194,7 @@ GET /api/users/me
 
 **请求头**:
 ```
-Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+Authorization: Bearer <token>
 ```
 
 **响应** (200 OK):
@@ -213,7 +222,7 @@ PATCH /api/users/me
 
 **请求头**:
 ```
-Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+Authorization: Bearer <token>
 ```
 
 **请求体**:
@@ -249,7 +258,7 @@ GET /api/users/points
 
 **请求头**:
 ```
-Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+Authorization: Bearer <token>
 ```
 
 **响应** (200 OK):
@@ -278,7 +287,7 @@ PUT /api/users/wallet
 
 **请求头**:
 ```
-Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+Authorization: Bearer <token>
 ```
 
 **请求体**:
@@ -314,7 +323,7 @@ POST /api/users/wallet/generate
 
 **请求头**:
 ```
-Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+Authorization: Bearer <token>
 ```
 
 **响应** (200 OK):
@@ -342,7 +351,7 @@ POST /api/users/wallet/import
 
 **请求头**:
 ```
-Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+Authorization: Bearer <token>
 ```
 
 **请求体**:
@@ -377,7 +386,7 @@ POST /api/auth/update-wallet
 
 **请求头**:
 ```
-Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+Authorization: Bearer <token>
 ```
 
 **请求体**:
@@ -452,7 +461,7 @@ GET /api/activities
 
 **请求头**:
 ```
-Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+Authorization: Bearer <token>
 ```
 
 **查询参数**:
@@ -624,7 +633,7 @@ POST /api/activities/{activityId}/claim
 
 **请求头**:
 ```
-Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+Authorization: Bearer <token>
 ```
 
 **响应** (200 OK):
@@ -651,7 +660,7 @@ GET /api/activities/claimed
 
 **请求头**:
 ```
-Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+Authorization: Bearer <token>
 ```
 
 **响应** (200 OK):
@@ -703,7 +712,7 @@ GET /api/activities/user-claimed
 
 **请求头**:
 ```
-Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+Authorization: Bearer <token>
 ```
 
 **响应** (200 OK):
@@ -755,7 +764,7 @@ PATCH /api/activities/:id/contract
 
 **请求头**:
 ```
-Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+Authorization: Bearer <token>
 ```
 
 **请求体**:
@@ -792,7 +801,7 @@ POST /api/activities/:id/deploy-contract
 
 **请求头**:
 ```
-Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+Authorization: Bearer <token>
 ```
 
 **响应** (200 OK):
@@ -822,7 +831,7 @@ GET /api/assets
 
 **请求头**:
 ```
-Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+Authorization: Bearer <token>
 ```
 
 **响应** (200 OK):
@@ -863,7 +872,7 @@ GET /api/assets/points
 
 **请求头**:
 ```
-Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+Authorization: Bearer <token>
 ```
 
 **响应** (200 OK):
@@ -892,7 +901,7 @@ GET /api/assets/badges
 
 **请求头**:
 ```
-Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+Authorization: Bearer <token>
 ```
 
 **响应** (200 OK):
@@ -938,7 +947,7 @@ GET /api/assets/badges/{badgeId}
 ```
 **请求头**:
 ```
-Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+Authorization: Bearer <token>
 ```
 
 **响应** (200 OK):
@@ -968,7 +977,7 @@ POST /api/assets/badges/{badgeId}/collect
 ```
 
 **请求头**:
-```Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+```Authorization: Bearer <token>
 ```
 
 **响应** (200 OK):
@@ -999,7 +1008,7 @@ GET /api/assets/transactions
 
 **请求头**:
 ```
-Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+Authorization: Bearer <token>
 ```
 
 **响应** (200 OK):
@@ -1035,7 +1044,7 @@ GET /api/notifications
 
 **请求头**:
 ```
-Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+Authorization: Bearer <token>
 ```
 
 **查询参数**:
@@ -1077,7 +1086,7 @@ PATCH /api/notifications/{notificationId}/read
 
 **请求头**:
 ```
-Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+Authorization: Bearer <token>
 ```
 
 **响应** (200 OK):
@@ -1101,7 +1110,7 @@ PATCH /api/notifications/read-all
 
 **请求头**:
 ```
-Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+Authorization: Bearer <token>
 ```
 
 **响应** (200 OK):
@@ -1115,344 +1124,240 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 }
 ```
 
-## 奖励 API
+## 6. Award System API
 
-### 获取所有平台奖励定义
-```
-GET /api/awards
-```
-描述：返回平台上所有奖励的元数据定义。
-**请求头**:
-```
-Authorization: Bearer <token>  // 可选：公开接口，可不传
-```
-**响应字段说明**:
-- id (string): 奖励唯一标识
-- title (string): 奖励标题
-- description (string): 奖励描述
-- icon (string): 奖励图标名称
-- color (string): 奖励颜色值（十六进制）
-- status (string): 奖励状态，取值 ["LIVE","LOCKED","INVALID"]
-- metadata (object): 扩展属性
+### Get User Reward List
 
-**响应示例** (200 OK):
-```json
-{
-  "status": "success",
-  "data": {
-    "awards": [
-      {
-        "id": "profile-awards",
-        "title": "Profile Awards",
-        "description": "Complete your profile to earn rewards",
-        "icon": "people-outline",
-        "color": "#34C8B9",
-        "status": "LIVE",
-        "metadata": {}
-      }
-      // ...更多奖励定义
-    ]
-  }
-}
-```
-
-### 获取指定奖励下的子任务列表
-```
-GET /api/awards/:awardId/tasks
-```
-描述：返回某个奖励（award）下所有任务的当前状态。
-**请求头**:
-```
-Authorization: Bearer <token>
-```
-**路径参数**:
-- awardId (string): 奖励 ID
-
-**响应字段说明** (`data.tasks` 数组中的对象):
-- id (string): 任务ID
-- title (string): 任务标题
-- description (string): 任务描述
-- points (number): 完成任务可获得积分数
-- claimLimit (number|null): 领取上限次数
-- requirementCount (number|null): 任务达成所需的数量，如果定义则返回
-- doneCount (number): 已完成的数量（用于前端显示已完成 x/y）
-- prerequisiteTaskId (string|null): 前置任务ID，未完成前置任务时此任务为 LOCKED
-- claimRecords (array): 已领取记录列表，包含时间戳
-- claimed (boolean): 是否已达领取上限
-- progress (number): 任务进度，0~1
-- finalStatus (string): 任务当前状态，取值 ["LOCKED","IN_PROGRESS","COMPLETED","CLAIMED"]
-
-**响应示例** (200 OK):
-```json
-{
-  "status": "success",
-  "data": {
-    "tasks": [
-      {
-        "id": "profile-1",
-        "title": "Complete Profile",
-        "description": "Fill in name, email, avatar",
-        "points": 100,
-        "claimLimit": 1,
-        "requirementCount": 3,
-        "doneCount": 2,
-        "prerequisiteTaskId": null,
-        "claimRecords": [],
-        "claimed": false,
-        "progress": 0.67,
-        "finalStatus": "IN_PROGRESS"
-      }
-      // ...更多任务
-    ]
-  }
-}
-```
-
-### 记录子任务进度
-```
-POST /api/users/tasks/:taskId/progress
-```
-描述：向指定任务记录进度，触发解锁逻辑。
-**请求头**:
-```
-Authorization: Bearer <token>
-```
-**路径参数**:
-- taskId (string): 任务 ID
-**请求体**:
-```json
-{ "delta": 1 }
-```
-- delta (number): 增量，>=1 表示可解锁或累积进度
-
-**响应示例** (200 OK):
-```json
-{
-  "status": "success",
-  "data": {
-    "taskId": "profile-1",
-    "status": "IN_PROGRESS"
-  }
-}
-```
-
-### 领取子任务奖励
-```
-POST /api/users/tasks/:taskId/claim
-```
-描述：领取已完成的任务奖励，发放积分并解锁下游任务。
-**请求头**:
-```
-Authorization: Bearer <token>
-```
-**路径参数**:
-- taskId (string): 任务 ID
-
-**响应示例** (200 OK):
-```json
-{
-  "status": "success",
-  "data": {
-    "taskId": "profile-1",
-    "claimedAt": "2025-05-07T12:00:00.000Z",
-    "points": 100
-  }
-}
-```
-
-### 获取当前用户所有奖励和任务状态
-```
-GET /api/users/awards
-```
-描述：返回当前用户的所有奖励及每个奖励下子任务的状态，并附带邀请概览。
-**请求头**:
-```
-Authorization: Bearer <token>
-```
-
-**响应字段说明**:
-- awards (array): 奖励列表，每项对象包含：
-  - awardId (string)
-  - title (string)
-  - description (string)
-  - icon (string)
-  - color (string)
-  - metadata (object)
-  - totalTasks (number): 奖励下总任务数
-  - claimedTasks (number): 已领取的任务数
-  - progress (number): 奖励整体进度(0~1)
-  - finalStatus (string): 奖励状态，取值 ["COMING_SOON","PARTICIPATE","IN_PROGRESS","COMPLETED","CLAIMED","INVALID"]
-  - tasks (array): 任务对象数组，与“获取指定奖励下的子任务列表”一致，含 `requirementCount` 和 `doneCount`
-- referralOverview (object): 邀请概览，包含：
-  - referrals (array): 嵌套邀请列表，对象包含 id, email, nickname, level, referrals
-  - levelCounts (object): 各层级邀请人数统计
-  - earnedByLevel (array): 各层级已获积分
-  - totalReferralPoints (number): 推荐总积分
-  - unclaimReferralAwards (number): 未领取邀请奖励积分
-
-**响应示例** (200 OK):
-```json
-{
-  "status": "success",
-  "data": {
-    "awards": [
-      {
-        "awardId": "profile-awards",
-        "title": "Profile Awards",
-        "description": "Complete your profile",
-        "icon": "people-outline",
-        "color": "#34C8B9",
-        "metadata": {},
-        "totalTasks": 2,
-        "claimedTasks": 1,
-        "progress": 0.5,
-        "finalStatus": "IN_PROGRESS",
-        "tasks": [
-          {
-            "id": "profile-1",
-            "title": "Complete Profile",
-            "description": "Fill in name, email, avatar",
-            "points": 100,
-            "claimLimit": 1,
-            "requirementCount": 3,
-            "doneCount": 2,
-            "prerequisiteTaskId": null,
-            "claimRecords": [],
-            "claimed": false,
-            "progress": 0.67,
-            "finalStatus": "IN_PROGRESS"
-          }
-        ]
-      }
-    ],
-    "referralOverview": {
-      "referrals": [
+- **GET** `/api/rewards`
+- **Purpose**: Get the reward list for the currently authenticated user.
+- **Authentication**: Bearer Token required.
+- **Response (200 OK)**:
+  ```json
+  {
+    "status": "success",
+    "data": {
+      "rewards": [
         {
-          "id": "user-123",
-          "email": "ref@example.com",
-          "nickname": "RefUser",
-          "level": 1,
-          "referrals": []
+          "id": "reward-uuid",
+          "name": "早鸟奖励",
+          "description": "感谢您早期参与！",
+          "type": "POINTS",
+          "value": 100,
+          "isClaimed": false,
+          "claimedAt": null
         }
-      ],
-      "levelCounts": { "1": 1, "2": 0, "3": 0, "4": 0 },
-      "earnedByLevel": [50,0,0,0],
-      "totalReferralPoints": 50,
-      "unclaimReferralAwards": 0
+      ]
     }
   }
-}
-```
+  ```
 
-## 邀请系统 API
+### Claim Reward
 
-### 获取当前用户邀请码
-```
-GET /api/users/invite-code
-```
-**请求头**:
-```
-Authorization: Bearer <token>
-```
-**响应** (200 OK):
-```json
-{
-  "status": "success",
-  "data": { "code": "INVITE12345" }
-}
-```
-
-### 获取邀请概览
-```
-GET /api/users/referrals
-```
-**请求头**:
-```
-Authorization: Bearer <token>
-```
-**响应** (200 OK):
-```json
-{
-  "status": "success",
-  "data": {
-    "referrals": [ /* 多级邀请列表 */ ],
-    "levelCounts": { "1": 5, "2": 3, "3": 1, "4": 1 },
-    "earnedByLevel": [50, 5, 3, 1],
-    "totalReferralPoints": 59,
-    "unclaimReferralAwards": 0
+- **POST** `/api/rewards/{rewardId}/claim`
+- **Purpose**: Allows a user to claim a specific reward.
+- **Authentication**: Bearer Token required.
+- **Path Parameters**:
+    - `rewardId`: The ID of the reward to be claimed.
+- **Response (200 OK)**:
+  ```json
+  {
+    "status": "success",
+    "message": "Reward claimed successfully.",
+    "data": {
+      "reward": {
+        "id": "reward-uuid",
+        "name": "早鸟奖励",
+        "isClaimed": true,
+        "claimedAt": "2023-07-15T10:00:00.000Z"
+      },
+      "pointsAwarded": 100 // If the reward type is points
+    }
   }
-}
-```
-
-### 领取邀请奖励
-```
-POST /api/users/referrals/claim
-```
-**请求头**:
-```
-Authorization: Bearer <token>
-```
-**响应** (200 OK):
-```json
-{
-  "status": "success",
-  "data": {
-    "claimedAt": "2025-05-07T12:00:00.000Z",
-    "totalPoints": 100,
-    "count": 2
+  ```
+- **Error Response (404 Not Found)**: If the reward does not exist or has already been claimed.
+  ```json
+  {
+    "status": "error",
+    "message": "Reward not found or already claimed."
   }
-}
-```
+  ```
 
-### 处理新邀请
-```
-POST /api/users/referrals/process
-```
-**请求头**:
-```
-Authorization: Bearer <token>
-```
-**请求体**:
-```json
-{ "inviterId": "user-uuid" }
-```
-**响应** (200 OK):
-```json
-{
-  "status": "success",
-  "data": { "processed": true }
-}
-```
+### Use Invitation Code
 
-## 错误响应
+- **POST** `/api/invite/use`
+- **Purpose**: Allows a user to use an invitation code, typically after registration or under specific conditions.
+- **Authentication**: Bearer Token required.
+- **Request Body**:
+  ```json
+  {
+    "code": "INVITE123"
+  }
+  ```
+- **Response (200 OK)**:
+  ```json
+  {
+    "status": "success",
+    "message": "Invitation code used successfully.",
+    "data": {
+      "inviterId": "inviter-user-uuid",
+      "inviteeId": "current-user-uuid",
+      "reward": "100积分已发放" // Reward description
+    }
+  }
+  ```
+- **Error Response (400 Bad Request)**: Invalid or expired invitation code.
+  ```json
+  {
+    "status": "error",
+    "message": "Invalid or expired invitation code."
+  }
+  ```
 
-所有API在发生错误时会返回一致的错误格式：
+### Get Invitation Status
 
-### 客户端错误 (400, 401, 403, 404)
+- **GET** `/api/invite/status`
+- **Purpose**: Get the current user's invitation status, such as the number of invited users and rewards earned.
+- **Authentication**: Bearer Token required.
+- **Response (200 OK)**:
+  ```json
+  {
+    "status": "success",
+    "data": {
+      "invitedCount": 5,
+      "rewardsEarned": 500, // Total rewards, can be points or other
+      "invitees": [
+        {
+          "userId": "invitee1-uuid",
+          "name": "被邀请者1",
+          "rewardReceived": "100积分"
+        }
+      ]
+    }
+  }
+  ```
 
-```json
-{
-  "status": "fail",
-  "message": "错误描述信息"
-}
-```
+### Complete Social Share Task
 
-### 服务器错误 (500)
+- **POST** `/api/social/share-task/complete`
+- **Purpose**: Allows a user to mark a social sharing task as completed.
+- **Authentication**: Bearer Token required.
+- **Request Body**:
+  ```json
+  {
+    "taskId": "task-social-share-uuid",
+    "platform": "X" // e.g., "X", "Facebook"
+  }
+  ```
+- **Response (200 OK)**:
+  ```json
+  {
+    "status": "success",
+    "message": "Social share task status updated.",
+    "data": {
+      "taskId": "task-social-share-uuid",
+      "status": "COMPLETED", // Or "PENDING_VERIFICATION"
+      "reward": "50积分已发放" // If applicable
+    }
+  }
+  ```
 
-```json
-{
-  "status": "error",
-  "message": "服务器错误",
-  "error": "详细错误信息（仅在开发环境中返回）"
-}
-```
+### Get Social Share Task Status
 
-## 状态码说明
+- **GET** `/api/social/share-task/status/{taskId}`
+- **Purpose**: Query the completion status of a specific social sharing task.
+- **Authentication**: Bearer Token required.
+- **Path Parameters**:
+    - `taskId`: The ID of the task to query.
+- **Response (200 OK)**:
+  ```json
+  {
+    "status": "success",
+    "data": {
+      "taskId": "task-social-share-uuid",
+      "status": "COMPLETED", // "PENDING", "COMPLETED", "FAILED_VERIFICATION"
+      "platform": "X",
+      "sharedAt": "2023-07-15T12:00:00.000Z" // If completed
+    }
+  }
+  ```
 
-- `200 OK`: 请求成功
-- `201 Created`: 资源创建成功
-- `400 Bad Request`: 请求参数错误
-- `401 Unauthorized`: 未授权（未登录）
-- `403 Forbidden`: 权限不足
-- `404 Not Found`: 资源不存在
-- `500 Internal Server Error`: 服务器内部错误
+## 7. X API
+
+### Create X Post (Via Application)
+
+- **POST** `/api/x/post`
+- **Purpose**: Post an X message on behalf of the user via the application. Requires user authorization for the app to access their X account.
+- **Authentication**: Bearer Token required (containing X access credentials).
+- **Request Body**:
+  ```json
+  {
+    "content": "这是通过Data Dance发布的帖子！#DataDance"
+  }
+  ```
+- **Response (201 Created)**:
+  ```json
+  {
+    "status": "success",
+    "message": "X post created successfully.",
+    "data": {
+      "postId": "x-post-id-from-platform", // Post ID returned by X platform
+      "postUrl": "https://x.com/user/status/x-post-id-from-platform"
+    }
+  }
+  ```
+- **Error Response**: May fail due to X API limits or authentication issues.
+
+### Verify User's X Post
+
+- **POST** `/api/x/post/verify`
+- **Purpose**: User submits their X post URL for verification (e.g., for task completion).
+- **Authentication**: Bearer Token required.
+- **Request Body**:
+  ```json
+  {
+    "postUrl": "https://x.com/username/status/1234567890"
+    // "taskId": "optional-task-id" // Optional, associate with a specific task
+  }
+  ```
+- **Response (200 OK)**:
+  ```json
+  {
+    "status": "success",
+    "message": "X post verification request received, processing.",
+    // Or "X post successfully verified." if instant verification is possible
+    "data": {
+      "verificationStatus": "PENDING" // Or "VERIFIED", "FAILED"
+      // "reward": "任务奖励已发放" // If verification is successful and a task is associated
+    }
+  }
+  ```
+- **Note**:
+    - The backend will asynchronously verify if the post content meets requirements (e.g., includes specific tags or mentions).
+    - Verification results may be delayed.
+
+### Get User's X Post List (Created via App or Verified)
+
+- **GET** `/api/x/user-posts`
+- **Purpose**: Get a list of X posts associated with the current user (created via the app or submitted for verification).
+- **Authentication**: Bearer Token required.
+- **Query Parameters**:
+    - `status`: (Optional) Filter post status, e.g., `PENDING`, `VERIFIED`, `FAILED`.
+- **Response (200 OK)**:
+  ```json
+  {
+    "status": "success",
+    "data": {
+      "posts": [
+        {
+          "id": "db-post-record-id",
+          "xPostId": "x-post-id-from-platform",
+          "postUrl": "https://x.com/user/status/x-post-id-from-platform",
+          "contentSnippet": "这是通过Data Dance发布的帖子...",
+          "status": "VERIFIED", // "PENDING", "VERIFIED", "FAILED", "CREATED_BY_APP"
+          "createdAt": "2023-07-15T10:30:00.000Z",
+          "verifiedAt": "2023-07-15T10:35:00.000Z"
+        }
+      ]
+    }
+  }
+  ```

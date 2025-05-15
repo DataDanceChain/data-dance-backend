@@ -35,6 +35,14 @@ model User {
   description    String?            // 组织描述
   logo           String?            // 组织标志（可以与avatar共用）
   
+  // X (Twitter) 相关字段
+  xid               String?         @unique // X (Twitter) User ID
+  xAccessToken      String?       // Encrypt this if stored
+  xRefreshToken     String?       // Encrypt this if stored
+  
+  // 邀请码
+  inviteCode      String           @unique @default(dbgenerated("substring(md5(random()::text), 1, 8)"))
+  
   // 关系
   createdAt      DateTime           @default(now())
   updatedAt      DateTime           @updatedAt
@@ -46,7 +54,6 @@ model User {
   notifications  Notification[]
   transactions   AssetTransaction[]
   roles          UserRole[]
- inviteCode String  @unique @default(uuid())
   
   // 原来从Organization迁移过来的关系
   createdActivities Activity[]      // 创建的活动
@@ -371,6 +378,7 @@ model Task {
   icon          String?     // Optional icon name
   picture       String?     // Optional image URL
   url           String?     // Optional action link
+  metadata      Json?       @default("{}") // Optional metadata (e.g., for social tasks)
   createdAt     DateTime    @default(now())
   updatedAt     DateTime    @default(now())
   UserTasks     UserTask[]
@@ -400,4 +408,12 @@ model Referral {
   inviteeId  String   @unique
   code       String   @unique
   createdAt  DateTime @default(now())
+}
+
+// Add persistent cache for X post engagement data
+model XPostCache {
+  key       String   @id        // e.g. 'retweets:<postId>' or 'quotes:<query>'
+  data      Json               // stored API response data
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }

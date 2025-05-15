@@ -37,19 +37,37 @@ async function getUserAwards(userId) {
     const tasks = await getTasksByAward(userId, award.id);
     const total = tasks.length;
     const claimedCount = tasks.filter(t => t.claimed).length;
-    // weighted progress: sum of each task's progress divided by total tasks
-    const progress = total > 0 ? tasks.reduce((sum, t) => sum + (t.progress || 0), 0) / total : 0;
+    const completedCount = tasks.filter(t => t.finalStatus === 'COMPLETED').length;
+    
+    // Calculate progress based on requirements
+    let progress;
+    if (total === 1) {
+      // If only one task, use its progress directly
+      progress = tasks[0].progress || 0;
+    } else {
+      // For multiple tasks, use completed tasks / total tasks
+      progress = total > 0 ? completedCount / total : 0;
+    }
+
     // find userAward record
     const ua = userAwards.find(u => u.awardId === award.id) || { status: 'LOCKED', claimed: false };
-    // compute finalStatus per award
+    
+    // compute finalStatus per award based on task statuses
     let finalStatus;
-    if (ua.claimed) finalStatus = 'CLAIMED';
-    else if (award.status === 'INVALID') finalStatus = 'INVALID';
-    else if (award.status === 'LIVE' && ua.status === 'LOCKED') finalStatus = 'PARTICIPATE';
-    else if (award.status === 'LOCKED' && ua.status === 'LOCKED') finalStatus = 'COMING_SOON';
-    else if (ua.status === 'LIVE') {
-      finalStatus = progress >= 1 ? 'COMPLETED' : 'IN_PROGRESS';
-    } else finalStatus = 'COMING_SOON';
+    if (claimedCount === total && total > 0) {
+      finalStatus = 'CLAIMED';
+    } else if (completedCount === total && total > 0) {
+      finalStatus = 'COMPLETED';
+    } else if (completedCount > 0 || claimedCount > 0) {
+      finalStatus = 'IN_PROGRESS';
+    } else if (award.status === 'LIVE' && ua.status === 'LOCKED') {
+      finalStatus = 'PARTICIPATE';
+    } else if (award.status === 'LOCKED') {
+      finalStatus = 'COMING_SOON';
+    } else {
+      finalStatus = 'PARTICIPATE';
+    }
+
     result.push({
       awardId: award.id,
       title: award.title,

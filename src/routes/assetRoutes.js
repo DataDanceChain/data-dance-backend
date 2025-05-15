@@ -1,5 +1,5 @@
 const express = require('express');
-const { getAssetOverview, getPoints, getBadges, getBadgeDetail, getTransactions, collectBadge } = require('../controllers/assetController');
+const { getAssetOverview, getPoints, getBadges, getBadgeDetail, getTransactions, collectBadge, getUserDDCBalance } = require('../controllers/assetController');
 const { protect } = require('../middlewares/authMiddleware');
 const router = express.Router();
 
@@ -24,4 +24,7 @@ router.get('/transactions', getTransactions);
 // 收集勋章
 router.post('/badges/:id/collect', collectBadge);
 
-module.exports = router; 
+// 获取用户DDC余额
+router.get('/ddc-balance', getUserDDCBalance);
+
+module.exports = router;

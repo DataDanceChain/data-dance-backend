@@ -2,6 +2,8 @@ const express = require('express');
 const cors = require('cors');
 const morgan = require('morgan');
 const { errorHandler } = require('./middlewares/errorMiddleware');
+const xPostRoutes = require('./routes/xPostRoutes');
+const { createLogger } = require('./utils/logger');
 
 // 导入路由
 const authRoutes = require('./routes/authRoutes');
@@ -21,6 +23,10 @@ app.use(cors());
 app.use(express.json());
 app.use(morgan('dev'));
 
+// Add request logging
+const logger = createLogger('app');
+app.use(logger.requestLogger);
+
 // 路由
 app.use('/api/auth', authRoutes);
 app.use('/api/users', userRoutes);
@@ -32,8 +38,12 @@ app.use('/api/auth', web3AuthRoutes);
 // 调整 awardRoutes 和 taskRoutes 的挂载路径
 app.use('/api', awardRoutes);
 app.use('/api', taskRoutes);
+app.use('/api/x', xPostRoutes);
 
 // 错误处理中间件
 app.use(errorHandler);
+
+// Add error logging
+app.use(logger.errorLogger);
 
 module.exports = app;

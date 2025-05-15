@@ -26,11 +26,15 @@ exports.recordTaskProgress = async (req, res) => {
 
 exports.claimTask = async (req, res) => {
   const { taskId } = req.params;
-  try {
-    const result = await claimTask(req.user.id, taskId);
-    return res.json({ status: 'success', data: { taskId, claimedAt: result.claimedAt, points: result.points } });
-  } catch (error) {
-    console.error(error);
-    return res.status(400).json({ status: 'fail', message: error.message });
+  // Call service
+  const serviceResult = await claimTask(req.user.id, taskId);
+  if (serviceResult.status !== 'success') {
+    // Return error response with appropriate status code
+    return res
+      .status(serviceResult.status)
+      .json({ status: 'fail', message: serviceResult.error.message });
   }
+  // Successful claim
+  const { taskId: id, claimedAt, points } = serviceResult.data;
+  return res.json({ status: 'success', data: { taskId: id, claimedAt, points } });
 };

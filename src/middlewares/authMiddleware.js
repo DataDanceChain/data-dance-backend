@@ -66,4 +66,19 @@ exports.isOrganization = (req, res, next) => {
   }
   
   next();
+};
+
+/**
+ * 只允许特定角色访问
+ */
+exports.restrictTo = (...roles) => {
+  return (req, res, next) => {
+    if (!req.user || !roles.includes(req.user.role)) {
+      return res.status(403).json({
+        status: 'fail',
+        message: '没有权限访问此资源'
+      });
+    }
+    next();
+  };
 }; 

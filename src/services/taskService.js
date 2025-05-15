@@ -1,5 +1,8 @@
 const prisma = require('../utils/prisma');
 const assetService = require('./assetService');
+const xClient = require('../utils/xClient');
+const { createLogger } = require('../utils/logger');
+const logger = createLogger('taskService');
 
 // Strategy map for award-specific unlock and progress logic
 const awardStrategies = {
@@ -65,22 +68,45 @@ const awardStrategies = {
     }
   },
   'ddc-holdings': {
-    unlock: async (userId) => { const bal = await assetService.getDDCBalance(userId);
-      [50,100,200,500,1000].forEach(async t => bal>=t && await recordTaskProgress(userId, `ddc-${t}`,1));
+    prepare: async (userId) => {
+      const ddcBalance = await assetService.getDDCBalance(userId);
+      return { ddcBalance };
     },
-    prepare: async (userId) => ({ ddcBalance: await assetService.getDDCBalance(userId) }),
+    unlock: async (userId, { ddcBalance }) => {
+      // fetch all DDC tasks and mark those with requirementCount <= balance as unlocked
+      const tasks = await prisma.task.findMany({
+        where: { awardId: 'ddc-holdings', requirementCount: { not: null } },
+        select: { id: true, requirementCount: true }
+      });
+      for (const t of tasks) {
+        if (t.requirementCount != null && ddcBalance >= t.requirementCount) {
+          await recordTaskProgress(userId, t.id, 1);
+        }
+      }
+    },
     computeProgress: async (task, userId, { ddcBalance }) => {
-      const thresholds = [10, 50, 100, 200, 500, 1000, 2000, 5000];
-      const idx = parseInt(task.id.split('-')[1], 10) - 1;
-      const threshold = task.requirementCount ?? thresholds[idx] ?? (task.claimLimit || 1);
-      return threshold > 0 ? Math.min(ddcBalance / threshold, 1) : 0;
+      // Progress is ddcBalance relative to requirementCount
+      if (!task.requirementCount) return 0;
+      return Math.min(ddcBalance / task.requirementCount, 1);
+    }
+  },
+  'social-engagement': {
+    // ensure social tasks visible immediately
+    unlock: async (userId) => {
+      const tasks = await prisma.task.findMany({ where: { awardId: 'social-engagement' }, select: { id: true } });
+      for (const t of tasks) {
+        await recordTaskProgress(userId, t.id, 1);
+      }
     }
   }
 };
 
 async function getTasksByAward(userId, awardId) {
-  // Unlock tasks based on award-specific conditions
-  await updateProgressForAwardTasks(userId, awardId);
+  const strategy = awardStrategies[awardId] || {};
+  // Prepare context (e.g., ddcBalance) once
+  const context = strategy.prepare ? await strategy.prepare(userId) : {};
+  // Unlock tasks using context
+  if (strategy.unlock) await strategy.unlock(userId, context);
   // Fetch static tasks and userTask records
   const tasks = await prisma.task.findMany({
     where: { awardId },
@@ -91,13 +117,12 @@ async function getTasksByAward(userId, awardId) {
       points: true,
       claimLimit: true,
       requirementCount: true,
-      prerequisiteTaskId: true
+      prerequisiteTaskId: true,
+      picture: true,
+      metadata: true
     }
   });
   const userTasks = await prisma.userTask.findMany({ where: { userId } });
-  const strategy = awardStrategies[awardId] || {};
-  // Prepare shared context if needed
-  const context = strategy.prepare ? await strategy.prepare(userId) : {};
   // Compute progress and finalStatus for each task
   return Promise.all(tasks.map(async task => {
     const ut = userTasks.find(u => u.taskId === task.id);
@@ -117,8 +142,8 @@ async function getTasksByAward(userId, awardId) {
       finalStatus = 'CLAIMED';
     } else if (!prereqDone) {
       finalStatus = 'LOCKED';
-    } else if (awardId === 'referral-rewards' && progress >= 0 && progress < 1) {
-      // referral-rewards: always show IN_PROGRESS even at 0
+    } else if ((awardId === 'referral-rewards' || awardId === 'social-engagement') && progress >= 0 && progress < 1) {
+      // referral and social tasks: always show IN_PROGRESS even at 0
       finalStatus = 'IN_PROGRESS';
     } else if (progress > 0 && progress < 1) {
       finalStatus = 'IN_PROGRESS';
@@ -158,15 +183,19 @@ async function getTasksByAward(userId, awardId) {
     return {
       id: task.id,
       title: task.title,
-      description: task.description,
+      // always include core fields
       points: task.points,
-      claimLimit: task.claimLimit,
-      requirementCount: task.requirementCount,
       doneCount,
       claimRecords,
       claimed,
       progress,
-      finalStatus
+      finalStatus,
+      // include optional fields only when they have content
+      ...(task.description ? { description: task.description } : {}),
+      ...(task.claimLimit != null ? { claimLimit: task.claimLimit } : {}),
+      ...(task.requirementCount != null ? { requirementCount: task.requirementCount } : {}),
+      ...(task.picture ? { picture: task.picture } : {}),
+      ...(task.metadata && Object.keys(task.metadata).length > 0 ? { metadata: task.metadata } : {})
     };
   }));
 }
@@ -186,54 +215,161 @@ async function recordTaskProgress(userId, taskId, delta) {
 }
 
 async function claimTask(userId, taskId) {
-  // fetch userTask with claimRecords and claimed flag
-  const ut = await prisma.userTask.findUnique({
-    where: { userId_taskId: { userId, taskId } },
-    select: {
-      claimRecords: true,
-      claimed: true,
-      status: true,
-      task: { select: { claimLimit: true, points: true } }
-    }
-  });
-  // only allow claim if live, not already claimed, and below limit
-  // treat null claimLimit as unlimited
-  const limit = ut.task.claimLimit != null ? ut.task.claimLimit : Infinity;
-  if (!ut || ut.status !== 'LIVE' || ut.claimed || ut.claimRecords.length >= limit) {
-    throw new Error('Task not claimable');
-  }
-  const now = new Date();
-  // append claim timestamp and set claimed flag; if last claim, mark invalid
-  const newCount = ut.claimRecords.length + 1;
-  // only finalize if claimLimit is defined
-  const isFinal = ut.task.claimLimit != null && newCount >= ut.task.claimLimit;
-  await prisma.userTask.update({
-    where: { userId_taskId: { userId, taskId } },
-    data: {
-      claimRecords: { push: now },
-      claimed: true,
-      ...(isFinal ? { status: 'INVALID' } : {})
-    }
-  });
+  try {
+    const result = await prisma.$transaction(async (tx) => {
+      // 1. Check task status (and include userTasks for claimed check)
+      const task = await tx.task.findUnique({
+        where: { id: taskId },
+        include: { UserTasks: { where: { userId } } }
+      });
+      logger.info('Loaded task for claim', { userId, taskId, metadata: task?.metadata });
+      if (!task) {
+        logger.error('Task not found during claim', { userId, taskId });
+        throw new Error("Task not found");
+      }
+      if (task.UserTasks[0]?.claimed) {
+        logger.error('Task already claimed', { userId, taskId });
+        throw new Error("Task already claimed");
+      }
+      
+      // 2. For social engagement (X repost) tasks, check if the user has reposted (or quoted) the target post.
+      if (task.metadata?.type === "X_RETWEET") {
+        logger.info('Processing social engagement task', { userId, taskId, metadata: task.metadata });
+        // Get bound X ID
+        const user = await tx.user.findUnique({ where: { id: userId }, select: { xid: true } });
+        if (!user?.xid) {
+          logger.error('X account not bound', { userId });
+          throw new Error("X account not bound");
+        }
+        const targetPostId = task.metadata.targetPostId;
+        logger.info('Retrieved targetPostId', { targetPostId, xid: user.xid });
+        if (!targetPostId) {
+          logger.error('Target post ID missing in metadata', { metadata: task.metadata });
+          throw new Error("Target post ID not defined");
+        }
+        // Check for repost
+        let reposts;
+        try {
+          reposts = await xClient.postRetweetedBy(targetPostId);
+          logger.info('Repost check response', { targetPostId, repostsData: reposts?.data });
+        } catch (e) {
+          logger.error('X API repost error', { postId: targetPostId, error: e });
+        }
+        // Check repost list
+        const reposted = Array.isArray(reposts?.data) && reposts.data.some(u => {
+          logger.info('Checking repost user', { repostUserId: u.id, userXid: user.xid });
+          return u.id === user.xid;
+        });
+        logger.info('Repost check result', { reposted, xid: user.xid });
+        
+        if (!reposted) {
+          logger.info('User not in repost list, performing quote search');
+          // Perform quote search
+          let quoteSearch;
+          try {
+            quoteSearch = await xClient.search(
+              `from:${user.xid} is:quote`,
+              { 'tweet.fields': 'referenced_tweets' }
+            );
+            logger.info('Quote search response', { 
+              xid: user.xid, 
+              quotesFound: quoteSearch?.data?.length,
+              quotes: quoteSearch?.data?.map(t => ({ 
+                id: t.id, 
+                refs: t.referenced_tweets
+              }))
+            });
+          } catch (e) {
+            logger.error('X API quote error', { xid: user.xid, error: e });
+          }
+          const quoted = Array.isArray(quoteSearch?.data) && quoteSearch.data.some(tweet => {
+            const hasQuote = tweet.referenced_tweets?.some(ref => {
+              const isQuote = ref.type === 'quoted' && ref.id === targetPostId;
+              logger.info('Checking quote reference', { 
+                tweetId: tweet.id,
+                refType: ref.type,
+                refId: ref.id,
+                targetId: targetPostId,
+                isQuote
+              });
+              return isQuote;
+            });
+            logger.info('Quote check result', { tweetId: tweet.id, hasQuote });
+            return hasQuote;
+          });
+          
+          if (!quoted) {
+            logger.error('User failed public repost verification', { userId, xid: user.xid, targetPostId });
+            throw new Error('Public repost not detected');
+          } else {
+            logger.info('User passed quote verification', { userId, xid: user.xid, targetPostId });
+          }
+        } else {
+          logger.info('User passed repost verification', { userId, xid: user.xid, targetPostId });
+        }
+      }
+      // Log that social engagement check passed or was skipped
+      logger.info('Social engagement verification passed', { userId, taskId, type: task.metadata?.type });
 
-  // award points
-  await prisma.point.create({ data: { userId, amount: ut.task.points, source: 'TASK_CLAIM', sourceId: taskId } });
-  // unlock dependent tasks whose prerequisite is this task
-  const dependents = await prisma.task.findMany({ where: { prerequisiteTaskId: taskId }, select: { id: true } });
-  for (const dt of dependents) {
-    await recordTaskProgress(userId, dt.id, 1);
-  }
-  // If all tasks under this award are now claimed, mark the UserAward as claimed and invalid
-  const { awardId } = await prisma.task.findUnique({ where: { id: taskId }, select: { awardId: true } });
-  const totalTasks = await prisma.task.count({ where: { awardId } });
-  const claimedTasks = await prisma.userTask.count({ where: { userId, task: { awardId }, claimed: true } });
-  if (claimedTasks >= totalTasks) {
-    await prisma.userAward.update({
-      where: { userId_awardId: { userId, awardId } },
-      data: { claimed: true, status: 'INVALID' }
+      // 3. Update userTask with claimRecords and claimed flag, then userAward and points
+      logger.info('Processing claimRecords for task', { userId, taskId, claimLimit: task.claimLimit });
+      const existingUserTask = await tx.userTask.findUnique({
+        where: { userId_taskId: { userId, taskId } },
+        select: { claimRecords: true }
+      });
+      const now = new Date();
+      const newClaimRecords = [...(existingUserTask?.claimRecords || []), now];
+      // For continuous tasks, flip claimed when reach limit; for one-time default to true
+      const isClaimedFlag = task.claimLimit != null ? newClaimRecords.length >= task.claimLimit : true;
+      logger.info('New claimRecords and computed claimed flag', { userId, taskId, newClaimRecords, claimed: isClaimedFlag });
+
+      let updatedUserTask;
+      if (existingUserTask) {
+        updatedUserTask = await tx.userTask.update({
+          where: { userId_taskId: { userId, taskId } },
+          data: { claimRecords: newClaimRecords, claimed: isClaimedFlag }
+        });
+      } else {
+        updatedUserTask = await tx.userTask.create({
+          data: { userId, taskId, claimRecords: newClaimRecords, claimed: isClaimedFlag }
+        });
+      }
+
+      // Upsert userAward
+      const updatedUserAward = await tx.userAward.upsert({
+        where: { userId_awardId: { userId, awardId: task.awardId } },
+        update: {},
+        create: { userId, awardId: task.awardId }
+      });
+
+      // 发放积分流水
+      await tx.point.create({ data: {
+        userId,
+        amount: task.points,
+        source: 'TASK_CLAIM',
+        sourceId: taskId
+      }});
+
+      // Return enriched response with claimedAt and points
+      return { success: true, data: { taskId, claimedAt: updatedUserTask.updatedAt, points: task.points } };
     });
+    // Log successful claim or validation result
+    logger.info('claimTask result', { userId, taskId, result: result.data });
+    return { status: "success", data: result.data };
+  } catch (error) {
+    // Log error details for failed claim (e.g., X repost check failure)
+    logger.error('claimTask error', { userId, taskId, message: error.message, stack: error.stack });
+    const { status, message } = handleClaimError(error);
+    return { status, error: { code: error.code || "UNKNOWN", message, details: error } };
   }
-  return { claimedAt: now, points: ut.task.points };
+}
+
+function handleClaimError(error) {
+  if (error.code === "P2025") { return { status: 404, message: "Task not found" }; }
+  if (error.code === "P2002") { return { status: 409, message: "Task already claimed" }; }
+  if (error.message === "X account not bound") { return { status: 400, message: "X account not bound" }; }
+  if (error.message === "Public repost not detected") { return { status: 400, message: "Public repost not detected" }; }
+  return { status: 500, message: "Internal server error" };
 }
 
 module.exports = { getTasksByAward, recordTaskProgress, claimTask };

@@ -14,6 +14,7 @@ services:
       - ./public:/app/public
       - ./package.json:/app/package.json
       - ./package-lock.json:/app/package-lock.json
+      - ./config:/app/config
     command: npm run dev  # 使用 nodemon 启动，使代码更新无需重建镜像即可生效
     networks:
       - backend_network

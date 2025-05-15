@@ -1,6 +1,7 @@
 const bcrypt = require('bcryptjs');
 const { generateToken } = require('../utils/jwtUtils');
 const prisma = require('../utils/prisma');
+const { nanoid } = require('nanoid');
 
 /**
  * 用户注册
@@ -27,6 +28,9 @@ exports.register = async (req, res) => {
     const salt = await bcrypt.genSalt(10);
     const hashedPassword = await bcrypt.hash(password, salt);
 
+    // 生成短邀请码
+    const inviteCode = nanoid(8);
+
     // 创建用户
     const user = await prisma.user.create({
       data: {
@@ -36,6 +40,7 @@ exports.register = async (req, res) => {
         isOrganization: isOrganization || false,
         userType: isOrganization ? 'organization' : 'regular',
         authType: 'traditional',
+        inviteCode,  // 使用 nanoid 生成的短码
         profile: {
           create: {
             language: 'zh'

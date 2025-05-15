@@ -422,12 +422,12 @@ exports.importWallet = async (req, res) => {
  */
 exports.getInviteCode = async (req, res) => {
   try {
-    // 查找当前用户作为邀请人生成的推荐码
-    const referral = await prisma.referral.findFirst({ where: { inviterId: req.user.id }, select: { code: true } });
-    if (!referral) {
+    // 从用户表读取 inviteCode
+    const user = await prisma.user.findUnique({ where: { id: req.user.id }, select: { inviteCode: true } });
+    if (!user?.inviteCode) {
       return res.status(404).json({ status: 'fail', message: '邀请码不存在' });
     }
-    res.status(200).json({ status: 'success', data: { code: referral.code } });
+    res.status(200).json({ status: 'success', data: { code: user.inviteCode } });
   } catch (error) {
     res.status(500).json({ status: 'error', message: '服务器错误', error: error.message });
   }

@@ -8,7 +8,7 @@ const { generateToken } = require('../utils/jwtUtils');
  */
 exports.web3authLogin = async (req, res) => {
   try {
-    const { userInfo, walletAddress } = req.body;
+    const { userInfo, walletAddress, xid, xAccessToken, xRefreshToken } = req.body;
 
     // 验证钱包地址格式（如果提供）
     if (walletAddress && !/^0x[a-fA-F0-9]{40}$/.test(walletAddress)) {
@@ -25,6 +25,19 @@ exports.web3authLogin = async (req, res) => {
       });
 
       if (userByWallet) {
+        // 更新 X 相关字段（如果提供）
+        if (xid || xAccessToken || xRefreshToken) {
+          await prisma.user.update({
+            where: { id: userByWallet.id },
+            data: {
+              ...(xid && { xid }),
+              ...(xAccessToken && { xAccessToken }),
+              ...(xRefreshToken && { xRefreshToken }),
+              authType: 'web3auth'
+            }
+          });
+        }
+
         // 找到了用户，直接登录
         if (userByWallet.userType === 'organization' || userByWallet.isOrganization) {
           return res.status(403).json({
@@ -37,7 +50,7 @@ exports.web3authLogin = async (req, res) => {
         const token = generateToken(userByWallet.id);
         
         // 移除敏感信息
-        const { password, privateKey, ...userWithoutSensitive } = userByWallet;
+        const { password, privateKey, ...userWithoutSensitive } = await prisma.user.findUnique({ where: { id: userByWallet.id } });
 
         return res.status(200).json({
           status: 'success',
@@ -91,7 +104,10 @@ exports.web3authLogin = async (req, res) => {
               name: userInfo.name || user.name,
               avatar: userInfo.profileImage || user.avatar,
               walletAddress,
-              authType: 'web3auth'
+              authType: 'web3auth',
+              ...(xid && { xid }),
+              ...(xAccessToken && { xAccessToken }),
+              ...(xRefreshToken && { xRefreshToken })
             }
           });
         } else {
@@ -101,7 +117,10 @@ exports.web3authLogin = async (req, res) => {
             data: {
               name: userInfo.name || user.name,
               avatar: userInfo.profileImage || user.avatar,
-              authType: 'web3auth'
+              authType: 'web3auth',
+              ...(xid && { xid }),
+              ...(xAccessToken && { xAccessToken }),
+              ...(xRefreshToken && { xRefreshToken })
             }
           });
         }
@@ -135,6 +154,9 @@ exports.web3authLogin = async (req, res) => {
             walletAddress,
             authType: 'web3auth',
             userType: 'regular',
+            ...(xid && { xid }),
+            ...(xAccessToken && { xAccessToken }),
+            ...(xRefreshToken && { xRefreshToken }),
             profile: {
               create: {
                 language: 'zh'
