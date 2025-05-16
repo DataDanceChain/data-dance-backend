@@ -2,7 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const morgan = require('morgan');
 const { errorHandler } = require('./middlewares/errorMiddleware');
-const xPostRoutes = require('./routes/xPostRoutes');
+const xRoutes = require('./routes/xRoutes'); // Updated import
 const { createLogger } = require('./utils/logger');
 
 // 导入路由
@@ -15,6 +15,7 @@ const dataDanceIdRoutes = require('./routes/dataDanceIdRoutes');
 const web3AuthRoutes = require('./routes/web3AuthRoutes');
 const awardRoutes = require('./routes/awardRoutes');
 const taskRoutes = require('./routes/taskRoutes');
+const referralRoutes = require('./routes/referralRoutes');
 
 const app = express();
 
@@ -38,7 +39,8 @@ app.use('/api/auth', web3AuthRoutes);
 // 调整 awardRoutes 和 taskRoutes 的挂载路径
 app.use('/api', awardRoutes);
 app.use('/api', taskRoutes);
-app.use('/api/x', xPostRoutes);
+app.use('/api/referrals', referralRoutes);
+app.use('/api/x', xRoutes); // Updated usage
 
 // 错误处理中间件
 app.use(errorHandler);

@@ -34,7 +34,9 @@ exports.getMe = async (req, res) => {
       isOrganization: user.isOrganization || user.userType === 'organization',
       userType: user.userType,
       authType: user.authType,
-      totalPoints: user.totalPoints
+      totalPoints: user.totalPoints,
+      xid: user.xid,
+      xUsername: user.xUsername
     };
 
     res.status(200).json({
@@ -422,12 +424,12 @@ exports.importWallet = async (req, res) => {
  */
 exports.getInviteCode = async (req, res) => {
   try {
-    // 从用户表读取 inviteCode
-    const user = await prisma.user.findUnique({ where: { id: req.user.id }, select: { inviteCode: true } });
-    if (!user?.inviteCode) {
+    // 从用户表读取 referralCode
+    const user = await prisma.user.findUnique({ where: { id: req.user.id }, select: { referralCode: true } });
+    if (!user?.referralCode) {
       return res.status(404).json({ status: 'fail', message: '邀请码不存在' });
     }
-    res.status(200).json({ status: 'success', data: { code: user.inviteCode } });
+    res.status(200).json({ status: 'success', data: { code: user.referralCode } });
   } catch (error) {
     res.status(500).json({ status: 'error', message: '服务器错误', error: error.message });
   }
@@ -444,5 +446,37 @@ exports.getRegistrationTime = async (req, res) => {
     res.status(200).json({ status: 'success', data: { registeredAt: user.createdAt } });
   } catch (error) {
     res.status(500).json({ status: 'error', message: '服务器错误', error: error.message });
+  }
+};
+
+/**
+ * Get current user's referral code
+ * @route GET /api/users/referral-code
+ * @access Private
+ */
+exports.getReferralCode = async (req, res) => {
+  try {
+    const user = await prisma.user.findUnique({
+      where: { id: req.user.id },
+      select: { referralCode: true }
+    });
+
+    if (!user) {
+      return res.status(404).json({
+        status: 'fail',
+        message: 'User not found'
+      });
+    }
+
+    res.status(200).json({
+      status: 'success',
+      data: { code: user.referralCode }
+    });
+  } catch (error) {
+    console.error('Error getting referral code:', error);
+    res.status(500).json({
+      status: 'error',
+      message: 'Error retrieving referral code'
+    });
   }
 };

@@ -1,6 +1,6 @@
 const prisma = require('../utils/prisma');
 const assetService = require('./assetService');
-const xClient = require('../utils/xClient');
+const xService = require('./xService'); // New: use xService
 const { createLogger } = require('../utils/logger');
 const logger = createLogger('taskService');
 
@@ -232,84 +232,28 @@ async function claimTask(userId, taskId) {
         throw new Error("Task already claimed");
       }
       
-      // 2. For social engagement (X repost) tasks, check if the user has reposted (or quoted) the target post.
+      // 2. For social engagement (X repost/quote) tasks, verify engagement using xService
       if (task.metadata?.type === "X_RETWEET") {
-        logger.info('Processing social engagement task', { userId, taskId, metadata: task.metadata });
-        // Get bound X ID
-        const user = await tx.user.findUnique({ where: { id: userId }, select: { xid: true } });
-        if (!user?.xid) {
-          logger.error('X account not bound', { userId });
-          throw new Error("X account not bound");
-        }
+        logger.info('Processing X_RETWEET social engagement task', { userId, taskId, metadata: task.metadata });
         const targetPostId = task.metadata.targetPostId;
-        logger.info('Retrieved targetPostId', { targetPostId, xid: user.xid });
-        if (!targetPostId) {
-          logger.error('Target post ID missing in metadata', { metadata: task.metadata });
-          throw new Error("Target post ID not defined");
-        }
-        // Check for repost
-        let reposts;
+
         try {
-          reposts = await xClient.postRetweetedBy(targetPostId);
-          logger.info('Repost check response', { targetPostId, repostsData: reposts?.data });
-        } catch (e) {
-          logger.error('X API repost error', { postId: targetPostId, error: e });
-        }
-        // Check repost list
-        const reposted = Array.isArray(reposts?.data) && reposts.data.some(u => {
-          logger.info('Checking repost user', { repostUserId: u.id, userXid: user.xid });
-          return u.id === user.xid;
-        });
-        logger.info('Repost check result', { reposted, xid: user.xid });
-        
-        if (!reposted) {
-          logger.info('User not in repost list, performing quote search');
-          // Perform quote search
-          let quoteSearch;
-          try {
-            quoteSearch = await xClient.search(
-              `from:${user.xid} is:quote`,
-              { 'tweet.fields': 'referenced_tweets' }
-            );
-            logger.info('Quote search response', { 
-              xid: user.xid, 
-              quotesFound: quoteSearch?.data?.length,
-              quotes: quoteSearch?.data?.map(t => ({ 
-                id: t.id, 
-                refs: t.referenced_tweets
-              }))
-            });
-          } catch (e) {
-            logger.error('X API quote error', { xid: user.xid, error: e });
+          const isEngaged = await xService.verifyUserEngagement(userId, targetPostId);
+          if (!isEngaged) {
+            logger.warn('User X engagement verification failed (via xService)', { userId, targetPostId });
+            throw new Error('Public X engagement (retweet or quote) not detected');
           }
-          const quoted = Array.isArray(quoteSearch?.data) && quoteSearch.data.some(tweet => {
-            const hasQuote = tweet.referenced_tweets?.some(ref => {
-              const isQuote = ref.type === 'quoted' && ref.id === targetPostId;
-              logger.info('Checking quote reference', { 
-                tweetId: tweet.id,
-                refType: ref.type,
-                refId: ref.id,
-                targetId: targetPostId,
-                isQuote
-              });
-              return isQuote;
-            });
-            logger.info('Quote check result', { tweetId: tweet.id, hasQuote });
-            return hasQuote;
-          });
-          
-          if (!quoted) {
-            logger.error('User failed public repost verification', { userId, xid: user.xid, targetPostId });
-            throw new Error('Public repost not detected');
-          } else {
-            logger.info('User passed quote verification', { userId, xid: user.xid, targetPostId });
-          }
-        } else {
-          logger.info('User passed repost verification', { userId, xid: user.xid, targetPostId });
+          logger.info('User X engagement verified successfully (via xService)', { userId, targetPostId });
+        } catch (error) {
+          // Errors from xService.verifyUserEngagement (e.g., X account not bound, targetPostId missing, or X API client errors)
+          logger.error('Error during X engagement verification (via xService)', { userId, targetPostId, error: error.message });
+          // Re-throw to be caught by the main try-catch of claimTask
+          // Ensure the error message is one that handleClaimError can interpret or pass a generic one.
+          throw new Error(error.message || 'X engagement verification failed'); 
         }
       }
       // Log that social engagement check passed or was skipped
-      logger.info('Social engagement verification passed', { userId, taskId, type: task.metadata?.type });
+      logger.info('Social engagement verification passed or not applicable', { userId, taskId, type: task.metadata?.type });
 
       // 3. Update userTask with claimRecords and claimed flag, then userAward and points
       logger.info('Processing claimRecords for task', { userId, taskId, claimLimit: task.claimLimit });
@@ -360,7 +304,7 @@ async function claimTask(userId, taskId) {
     // Log error details for failed claim (e.g., X repost check failure)
     logger.error('claimTask error', { userId, taskId, message: error.message, stack: error.stack });
     const { status, message } = handleClaimError(error);
-    return { status, error: { code: error.code || "UNKNOWN", message, details: error } };
+    return { status, error: { code: error.code || "UNKNOWN", message, details: error.message } }; // Pass error.message to details
   }
 }
 
@@ -368,8 +312,12 @@ function handleClaimError(error) {
   if (error.code === "P2025") { return { status: 404, message: "Task not found" }; }
   if (error.code === "P2002") { return { status: 409, message: "Task already claimed" }; }
   if (error.message === "X account not bound") { return { status: 400, message: "X account not bound" }; }
-  if (error.message === "Public repost not detected") { return { status: 400, message: "Public repost not detected" }; }
-  return { status: 500, message: "Internal server error" };
+  // Updated error message check for a more generic engagement failure from xService
+  if (error.message === "Public X engagement (retweet or quote) not detected" || error.message === 'X engagement verification failed') { 
+    return { status: 400, message: "Public X engagement (retweet or quote) not detected" }; 
+  }
+  if (error.message === "Target post ID not defined") { return { status: 400, message: "Target post ID not defined for X task"}; }
+  return { status: 500, message: error.message || "Internal server error" }; // Return the actual error message if not one of the above
 }
 
 module.exports = { getTasksByAward, recordTaskProgress, claimTask };

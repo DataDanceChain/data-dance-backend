@@ -66,11 +66,6 @@ function cachePost(postId, data) {
   });
 }
 
-// Helper function to clear cache
-function clearCache(postId) {
-  cache.delete(postId);
-}
-
 // Extend cache usage for retweets and quote searches
 // Composite cache keys: `retweets:${postId}`, `quotes:${query}`
 // Reuse existing cache Map and TTL
@@ -171,7 +166,6 @@ async function getPostDetails(postId, ip) {
 // Export functions
 module.exports = {
   getPostDetails,
-  clearCache,
   postRetweetedBy: async (postId) => {
     const cacheKey = `retweets:${postId}`;
     // Try persistent cache first

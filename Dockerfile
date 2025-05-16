@@ -22,11 +22,16 @@ FROM base AS runner
 
 RUN apt-get update && apt-get install -y build-essential python3 libssl-dev ca-certificates
 WORKDIR /app
-COPY --from=deps /app/node_modules ./node_modules
-COPY --from=deps /app .
-ENV NODE_ENV=production
 
+# Copy source first
+COPY . .
+# Then copy node_modules from deps stage to ensure we don't overwrite them
+COPY --from=deps /app/node_modules ./node_modules
+# Copy the generated Prisma client
+COPY --from=deps /app/node_modules/.prisma ./node_modules/.prisma
+
+ENV NODE_ENV=production
 ENV PORT 3000
 ENV HOSTNAME 0.0.0.0
 
-CMD ["node", "src/server.js"]
+CMD ["npm", "run", "dev"]

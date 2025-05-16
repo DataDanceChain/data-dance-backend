@@ -9,10 +9,10 @@ const {
   generateWallet, 
   importWallet, 
   rewardPoints, 
-  getInviteCode, 
+  getReferralCode, 
   getRegistrationTime
 } = require('../controllers/userController');
-const { getReferralOverview, claimReferralRewards, processReferral } = require('../controllers/referralController');
+const { getReferralOverview, claimReferralRewards, useReferralCode } = require('../controllers/referralController');
 const { protect } = require('../middlewares/authMiddleware');
 const router = express.Router();
 
@@ -43,8 +43,8 @@ router.post('/wallet/generate', generateWallet);
 // 导入钱包
 router.post('/wallet/import', importWallet);
 
-// 获取当前用户邀请码
-router.get('/invite-code', getInviteCode);
+// Get user's referral code
+router.get('/referral-code', getReferralCode);
 
 // 获取邀请概览
 router.get('/referrals', getReferralOverview);
@@ -55,7 +55,7 @@ router.get('/registered-at', getRegistrationTime);
 // 领取邀请奖励
 router.post('/referrals/claim', claimReferralRewards);
 
-// 处理新邀请
-router.post('/referrals/process', processReferral);
+// 使用邀请码
+router.post('/referrals/use-code', useReferralCode);
 
 module.exports = router;

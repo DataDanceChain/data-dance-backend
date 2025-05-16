@@ -13,8 +13,8 @@
 3. [活动 API](#活动-api)
 4. [资产 API](#资产-api)
 5. [通知 API](#通知-api)
-6. [Award System API](#6-award-system-api)
-7. [X API](#7-x-api)
+6. [Award System API](#award-system-api)
+7. [X API](#x-api)
 
 ## 认证 API
 
@@ -130,8 +130,8 @@ POST /api/auth/web3auth-login
   },
   "walletAddress": "0x123abc...",
   "xid": "user@example.com",         // X 返回的 verifierId
-  "xAccessToken": "access-token",   // X 返回的 Access Token
-  "xRefreshToken": "refresh-token"  // X 返回的 Refresh Token
+  "xAccessToken": "access-token",   // X 返回的 Access Token (可选, 当前后端不存储)
+  "xRefreshToken": "refresh-token"  // X 返回的 Refresh Token (可选, 当前后端不存储)
 }
 ```
 
@@ -153,9 +153,8 @@ POST /api/auth/web3auth-login
       "walletAddress": "0x123abc...",
       "userType": "regular",
       "authType": "web3auth",
-      "xid": "user@example.com",
-      "xAccessToken": "access-token",
-      "xRefreshToken": "refresh-token",
+      "xid": "user@example.com", // 用户绑定的 X ID
+      "xUsername": "twitter_handle",
       "isOrganization": false
     }
   }
@@ -175,12 +174,44 @@ POST /api/auth/web3auth-login
       "walletAddress": "0x123abc...",
       "userType": "regular",
       "authType": "web3auth",
-      "xid": "user@example.com",
-      "xAccessToken": "access-token",
-      "xRefreshToken": "refresh-token",
+      "xid": "user@example.com", // 用户绑定的 X ID
+      "xUsername": "twitter_handle",
       "isOrganization": false
     }
   }
+}
+```
+
+**Error Responses**
+
+400 Bad Request - missing authentication credential:
+```json
+{
+  "status": "fail",
+  "code": "MISSING_CREDENTIAL",
+  "message": "Missing authentication credential"
+}
+```
+
+409 Conflict - X account already bound to another user:
+```json
+{
+  "status": "error",
+  "code": "X_ACCOUNT_ALREADY_BOUND",
+  "message": "This X account is already bound to another user",
+  "details": {
+    "toUserId": "conflicting-user-id",
+    "boundAt": "2025-05-16T..."
+  }
+}
+```
+
+500 Internal Server Error - generic server error:
+```json
+{
+  "status": "error",
+  "code": "SERVER_ERROR",
+  "message": "Internal server error"
 }
 ```
 
@@ -208,7 +239,9 @@ Authorization: Bearer <token>
       "name": "User Name",
       "avatar": "/assets/avatars/default.png",
       "isOrganization": false,
-      "walletAddress": "0x1234567890abcdef1234567890abcdef12345678"
+      "walletAddress": "0x1234567890abcdef1234567890abcdef12345678",
+      "xid": "1234567890", // X (Twitter) User ID, 可为null
+      "xUsername": "twitter_handle" // X (Twitter) username, 可为null
     }
   }
 }
@@ -413,22 +446,22 @@ Authorization: Bearer <token>
 }
 ```
 
-### 获取当前用户邀请码
+### Get User's Referral Code
 
 ```
-GET /api/users/invite-code
+GET /api/users/referral-code
 ```
 
-**请求头**:
+**Request Headers**:
 ```
 Authorization: Bearer <token>
 ```
 
-**响应** (200 OK):
+**Response** (200 OK):
 ```json
 {
   "status": "success",
-  "data": { "code": "INVITE12345" }
+  "data": { "code": "REF-ABCD1234" }
 }
 ```
 
@@ -448,6 +481,262 @@ Authorization: Bearer <token>
 {
   "status": "success",
   "data": { "registeredAt": "2025-01-15T08:30:00.000Z" }
+}
+```
+
+## Referral System API
+
+### Use Referral Code
+
+```
+POST /api/referrals/use-code
+```
+
+**Request Headers**:
+```
+Authorization: Bearer <token>
+```
+
+**Request Body**:
+```json
+{
+  "code": "REF-ABCD1234"
+}
+```
+
+**Response** (200 OK):
+```json
+{
+  "status": "success",
+  "message": "Referral code used successfully",
+  "data": {
+    "referrerId": "referrer-user-id",
+    "refereeId": "current-user-id",
+    "code": "REF-ABCD1234"
+  }
+}
+```
+
+**Error Responses**:
+
+400 Bad Request - Missing code:
+```json
+{
+  "status": "fail",
+  "code": "MISSING_CODE",
+  "message": "Please provide a referral code"
+}
+```
+
+409 Conflict - Already referred:
+```json
+{
+  "status": "fail",
+  "code": "ALREADY_REFERRED",
+  "message": "You have already been referred and cannot use another code",
+  "data": {
+    "referrerId": "existing-referrer-id",
+    "code": "REF-ABCD1234",
+    "createdAt": "2025-05-16T..."
+  }
+}
+```
+
+404 Not Found - Invalid code:
+```json
+{
+  "status": "fail",
+  "code": "INVALID_CODE",
+  "message": "Invalid referral code"
+}
+```
+
+400 Bad Request - Self referral:
+```json
+{
+  "status": "fail",
+  "code": "SELF_REFERRAL_NOT_ALLOWED",
+  "message": "Cannot use your own referral code"
+}
+```
+
+### Get Referral Status
+
+Gets the detailed status of a user's referral relationships.
+
+**URL** : `/api/referrals/status`
+
+**Method** : `GET`
+
+**Auth required** : Yes
+
+**Permissions required** : None
+
+#### Success Response
+
+**Code** : `200 OK`
+
+**Response examples**
+
+For a user who has been invited and has invited others:
+
+```json
+{
+  "status": "success",
+  "data": {
+    "hasBeenInvited": true,
+    "inviterInfo": {
+      "id": "user123",
+      "name": "John Doe",
+      "code": "REF-ABC123",
+      "inviteTime": "2025-05-17T10:30:00Z"
+    },
+    "ownReferralCode": "REF-XYZ789",
+    "invitedUsers": [
+      {
+        "id": "user456",
+        "name": "Jane Smith",
+        "inviteTime": "2025-05-16T15:45:00Z"
+      }
+    ]
+  }
+}
+```
+
+For a user who hasn't been invited:
+
+```json
+{
+  "status": "success",
+  "data": {
+    "hasBeenInvited": false,
+    "inviterInfo": null,
+    "ownReferralCode": "REF-XYZ789",
+    "invitedUsers": []
+  }
+}
+```
+
+#### Error Responses
+
+**Code** : `500 INTERNAL SERVER ERROR`
+
+```json
+{
+  "status": "error",
+  "code": "SERVER_ERROR",
+  "message": "Error getting referral status"
+}
+```
+
+### Get Referral Overview
+
+```
+GET /api/referrals/overview
+```
+
+**Request Headers**:
+```
+Authorization: Bearer <token>
+```
+
+**Response** (200 OK):
+```json
+{
+  "status": "success",
+  "data": {
+    "referrals": [
+      {
+        "id": "user-id",
+        "email": "user@example.com",
+        "nickname": "User Name",
+        "level": 1,
+        "theirPoints": 100,
+        "yourReward": 5,
+        "referrals": [
+          {
+            "id": "referee-id",
+            "email": "referee@example.com",
+            "nickname": "Referee Name",
+            "level": 2,
+            "theirPoints": 50,
+            "yourReward": 3,
+            "referrals": []
+          }
+        ]
+      }
+    ],
+    "levelCounts": {
+      "1": 3,  // Direct referrals
+      "2": 2,  // Second-level referrals
+      "3": 1,  // Third-level referrals
+      "4": 0   // Fourth-level referrals
+    },
+    "earnedByLevel": [
+      150,  // Points earned from level 1 referrals
+      100,  // Points earned from level 2 referrals
+      50,   // Points earned from level 3 referrals
+      0     // Points earned from level 4 referrals
+    ],
+    "totalReferralPoints": 300,       // Total points earned from all levels
+    "unclaimReferralAwards": 50,      // Points available to claim
+    "networkActivity": 450            // Total network activity score
+  }
+}
+```
+
+**Response Details**:
+
+- **referrals**: Nested tree structure of referrals up to 4 levels deep
+  - **theirPoints**: Points earned by direct referees (50 points per direct referral)
+  - **yourReward**: Commission earned from this referee's referrals (5/3/1 points per referral for levels 1/2/3)
+
+- **levelCounts**: Number of referrals at each level (1-4)
+
+- **earnedByLevel**: Points earned at each level, including both claimed and unclaimed points
+
+- **totalReferralPoints**: Sum of all earned points across all levels
+
+- **unclaimReferralAwards**: Points that are available but not yet claimed
+
+- **networkActivity**: Overall network activity score, calculated as:
+  - Total referral points
+  - Plus additional activity points from level 2-4 referrals (50 points each)
+
+**Commission Rates**:
+- Level 1 (Direct): 5 points per referral
+- Level 2: 3 points per referral
+- Level 3: 1 point per referral
+- Level 4: 0 points (tracking only)
+
+### Claim Referral Rewards
+
+```
+POST /api/referrals/claim-rewards
+```
+
+**Request Headers**:
+```
+Authorization: Bearer <token>
+```
+
+**Response** (200 OK):
+```json
+{
+  "status": "success",
+  "data": {
+    "claimedAt": "2025-05-16T...",
+    "totalPoints": 100,
+    "count": 2
+  }
+}
+```
+
+**Error Response** (400 Bad Request):
+```json
+{
+  "status": "fail",
+  "message": "No referral rewards to claim"
 }
 ```
 
@@ -1124,7 +1413,10 @@ Authorization: Bearer <token>
 }
 ```
 
-## 6. Award System API
+
+
+
+## 7. Award System API
 
 ### Get User Reward List
 
@@ -1139,8 +1431,8 @@ Authorization: Bearer <token>
       "rewards": [
         {
           "id": "reward-uuid",
-          "name": "早鸟奖励",
-          "description": "感谢您早期参与！",
+          "name": "Early Bird Reward",
+          "description": "Thank you for your early participation!",
           "type": "POINTS",
           "value": 100,
           "isClaimed": false,
@@ -1166,7 +1458,7 @@ Authorization: Bearer <token>
     "data": {
       "reward": {
         "id": "reward-uuid",
-        "name": "早鸟奖励",
+        "name": "Early Bird Reward",
         "isClaimed": true,
         "claimedAt": "2023-07-15T10:00:00.000Z"
       },
@@ -1182,182 +1474,222 @@ Authorization: Bearer <token>
   }
   ```
 
-### Use Invitation Code
+### Use Referral Code
 
-- **POST** `/api/invite/use`
-- **Purpose**: Allows a user to use an invitation code, typically after registration or under specific conditions.
-- **Authentication**: Bearer Token required.
-- **Request Body**:
-  ```json
-  {
-    "code": "INVITE123"
+```
+POST /api/referrals/use-code
+```
+
+**Request Headers**:
+```
+Authorization: Bearer <token>
+```
+
+**Request Body**:
+```json
+{
+  "code": "REF-ABCD1234"
+}
+```
+
+**Response** (200 OK):
+```json
+{
+  "status": "success",
+  "message": "Referral code used successfully",
+  "data": {
+    "referrerId": "referrer-user-id",
+    "refereeId": "current-user-id",
+    "code": "REF-ABCD1234"
   }
-  ```
-- **Response (200 OK)**:
-  ```json
-  {
-    "status": "success",
-    "message": "Invitation code used successfully.",
-    "data": {
-      "inviterId": "inviter-user-uuid",
-      "inviteeId": "current-user-uuid",
-      "reward": "100积分已发放" // Reward description
-    }
+}
+```
+
+**Error Responses**:
+
+400 Bad Request - Missing code:
+```json
+{
+  "status": "fail",
+  "code": "MISSING_CODE",
+  "message": "Please provide a referral code"
+}
+```
+
+409 Conflict - Already referred:
+```json
+{
+  "status": "fail",
+  "code": "ALREADY_REFERRED",
+  "message": "You have already been referred and cannot use another code",
+  "data": {
+    "referrerId": "existing-referrer-id",
+    "code": "REF-ABCD1234",
+    "createdAt": "2025-05-16T..."
   }
-  ```
-- **Error Response (400 Bad Request)**: Invalid or expired invitation code.
-  ```json
-  {
-    "status": "error",
-    "message": "Invalid or expired invitation code."
+}
+```
+
+404 Not Found - Invalid code:
+```json
+{
+  "status": "fail",
+  "code": "INVALID_CODE",
+  "message": "Invalid referral code"
+}
+```
+
+400 Bad Request - Self referral:
+```json
+{
+  "status": "fail",
+  "code": "SELF_REFERRAL_NOT_ALLOWED",
+  "message": "Cannot use your own referral code"
+}
+```
+
+### Get Referral Status
+
+```
+GET /api/referrals/status
+```
+
+**Request Headers**:
+```
+Authorization: Bearer <token>
+```
+
+**Response** (200 OK):
+```json
+{
+  "status": "success",
+  "data": {
+    "referralCount": 5,
+    "rewardsEarned": 250,
+    "referredBy": {
+      "userId": "referrer-id",
+      "name": "Referrer Name",
+      "code": "REF-ABCD1234",
+      "referredAt": "2025-05-16T..."
+    },
+    "referees": [
+      {
+        "userId": "referee-id",
+        "name": "Referee Name",
+        "referredAt": "2025-05-16T..."
+      }
+    ]
   }
-  ```
+}
+```
 
-### Get Invitation Status
+### Get Referral Overview
 
-- **GET** `/api/invite/status`
-- **Purpose**: Get the current user's invitation status, such as the number of invited users and rewards earned.
-- **Authentication**: Bearer Token required.
-- **Response (200 OK)**:
-  ```json
-  {
-    "status": "success",
-    "data": {
-      "invitedCount": 5,
-      "rewardsEarned": 500, // Total rewards, can be points or other
-      "invitees": [
-        {
-          "userId": "invitee1-uuid",
-          "name": "被邀请者1",
-          "rewardReceived": "100积分"
-        }
-      ]
-    }
+```
+GET /api/referrals/overview
+```
+
+**Request Headers**:
+```
+Authorization: Bearer <token>
+```
+
+**Response** (200 OK):
+```json
+{
+  "status": "success",
+  "data": {
+    "referrals": [
+      {
+        "id": "user-id",
+        "email": "user@example.com",
+        "nickname": "User Name",
+        "level": 1,
+        "theirPoints": 100,
+        "yourReward": 5,
+        "referrals": [
+          {
+            "id": "referee-id",
+            "email": "referee@example.com",
+            "nickname": "Referee Name",
+            "level": 2,
+            "theirPoints": 50,
+            "yourReward": 3,
+            "referrals": []
+          }
+        ]
+      }
+    ],
+    "levelCounts": {
+      "1": 3,  // Direct referrals
+      "2": 2,  // Second-level referrals 
+      "3": 1,  // Third-level referrals
+      "4": 0   // Fourth-level referrals
+    },
+    "earnedByLevel": [
+      150,  // Points earned from level 1 referrals
+      100,  // Points earned from level 2 referrals
+      50,   // Points earned from level 3 referrals
+      0     // Points earned from level 4 referrals
+    ],
+    "totalReferralPoints": 300,       // Total points earned from all levels
+    "unclaimReferralAwards": 50,      // Points available to claim
+    "networkActivity": 450            // Total network activity score
   }
-  ```
+}
+```
 
-### Complete Social Share Task
+**Response Details**:
 
-- **POST** `/api/social/share-task/complete`
-- **Purpose**: Allows a user to mark a social sharing task as completed.
-- **Authentication**: Bearer Token required.
-- **Request Body**:
-  ```json
-  {
-    "taskId": "task-social-share-uuid",
-    "platform": "X" // e.g., "X", "Facebook"
+- **referrals**: Nested tree structure of referrals up to 4 levels deep
+  - **theirPoints**: Points earned by direct referees (50 points per direct referral)  
+  - **yourReward**: Commission earned from this referee's referrals (5/3/1 points per referral for levels 1/2/3)
+
+- **levelCounts**: Number of referrals at each level (1-4)
+
+- **earnedByLevel**: Points earned at each level, including both claimed and unclaimed points
+
+- **totalReferralPoints**: Sum of all earned points across all levels
+
+- **unclaimReferralAwards**: Points that are available but not yet claimed 
+
+- **networkActivity**: Overall network activity score, calculated as:
+  - Total referral points
+  - Plus additional activity points from level 2-4 referrals (50 points each)
+
+**Commission Rates**:
+- Level 1 (Direct): 5 points per referral
+- Level 2: 3 points per referral  
+- Level 3: 1 point per referral
+- Level 4: 0 points (tracking only)
+
+### Claim Referral Rewards
+
+```
+POST /api/referrals/claim-rewards
+```
+
+**Request Headers**:
+```
+Authorization: Bearer <token>
+```
+
+**Response** (200 OK):
+```json
+{
+  "status": "success",
+  "data": {
+    "claimedAt": "2025-05-16T...",
+    "totalPoints": 100,
+    "count": 2
   }
-  ```
-- **Response (200 OK)**:
-  ```json
-  {
-    "status": "success",
-    "message": "Social share task status updated.",
-    "data": {
-      "taskId": "task-social-share-uuid",
-      "status": "COMPLETED", // Or "PENDING_VERIFICATION"
-      "reward": "50积分已发放" // If applicable
-    }
-  }
-  ```
+}
+```
 
-### Get Social Share Task Status
-
-- **GET** `/api/social/share-task/status/{taskId}`
-- **Purpose**: Query the completion status of a specific social sharing task.
-- **Authentication**: Bearer Token required.
-- **Path Parameters**:
-    - `taskId`: The ID of the task to query.
-- **Response (200 OK)**:
-  ```json
-  {
-    "status": "success",
-    "data": {
-      "taskId": "task-social-share-uuid",
-      "status": "COMPLETED", // "PENDING", "COMPLETED", "FAILED_VERIFICATION"
-      "platform": "X",
-      "sharedAt": "2023-07-15T12:00:00.000Z" // If completed
-    }
-  }
-  ```
-
-## 7. X API
-
-### Create X Post (Via Application)
-
-- **POST** `/api/x/post`
-- **Purpose**: Post an X message on behalf of the user via the application. Requires user authorization for the app to access their X account.
-- **Authentication**: Bearer Token required (containing X access credentials).
-- **Request Body**:
-  ```json
-  {
-    "content": "这是通过Data Dance发布的帖子！#DataDance"
-  }
-  ```
-- **Response (201 Created)**:
-  ```json
-  {
-    "status": "success",
-    "message": "X post created successfully.",
-    "data": {
-      "postId": "x-post-id-from-platform", // Post ID returned by X platform
-      "postUrl": "https://x.com/user/status/x-post-id-from-platform"
-    }
-  }
-  ```
-- **Error Response**: May fail due to X API limits or authentication issues.
-
-### Verify User's X Post
-
-- **POST** `/api/x/post/verify`
-- **Purpose**: User submits their X post URL for verification (e.g., for task completion).
-- **Authentication**: Bearer Token required.
-- **Request Body**:
-  ```json
-  {
-    "postUrl": "https://x.com/username/status/1234567890"
-    // "taskId": "optional-task-id" // Optional, associate with a specific task
-  }
-  ```
-- **Response (200 OK)**:
-  ```json
-  {
-    "status": "success",
-    "message": "X post verification request received, processing.",
-    // Or "X post successfully verified." if instant verification is possible
-    "data": {
-      "verificationStatus": "PENDING" // Or "VERIFIED", "FAILED"
-      // "reward": "任务奖励已发放" // If verification is successful and a task is associated
-    }
-  }
-  ```
-- **Note**:
-    - The backend will asynchronously verify if the post content meets requirements (e.g., includes specific tags or mentions).
-    - Verification results may be delayed.
-
-### Get User's X Post List (Created via App or Verified)
-
-- **GET** `/api/x/user-posts`
-- **Purpose**: Get a list of X posts associated with the current user (created via the app or submitted for verification).
-- **Authentication**: Bearer Token required.
-- **Query Parameters**:
-    - `status`: (Optional) Filter post status, e.g., `PENDING`, `VERIFIED`, `FAILED`.
-- **Response (200 OK)**:
-  ```json
-  {
-    "status": "success",
-    "data": {
-      "posts": [
-        {
-          "id": "db-post-record-id",
-          "xPostId": "x-post-id-from-platform",
-          "postUrl": "https://x.com/user/status/x-post-id-from-platform",
-          "contentSnippet": "这是通过Data Dance发布的帖子...",
-          "status": "VERIFIED", // "PENDING", "VERIFIED", "FAILED", "CREATED_BY_APP"
-          "createdAt": "2023-07-15T10:30:00.000Z",
-          "verifiedAt": "2023-07-15T10:35:00.000Z"
-        }
-      ]
-    }
-  }
-  ```
+**Error Response** (400 Bad Request):
+```json
+{
+  "status": "fail", 
+  "message": "No referral rewards to claim"
+}
+```

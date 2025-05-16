@@ -137,10 +137,7 @@ async function claimReferralRewards(userId) {
  * @param {string} newUserId - the invitee user ID
  * @param {string} inviterId - the direct inviter user ID
  */
-async function processReferral(newUserId, inviterId) {
-  // create direct referral record
-  await prisma.referral.create({ data: { inviterId, inviteeId: newUserId } });
-
+async function processReferral(newUserId, inviterId, referralCode) {
   // record direct referral task (50 points) to be claimed later
   await recordTaskProgress(inviterId, 'referral-1', 1);
   
@@ -154,4 +151,148 @@ async function processReferral(newUserId, inviterId) {
   }
 }
 
-module.exports = { getReferralOverview, claimReferralRewards, processReferral };
+/**
+ * Get user's referral status including invitation info
+ * @param {string} userId - The user ID to get status for
+ */
+async function getReferralStatus(userId) {
+  // Check if user has been invited by someone
+  const asInvitee = await prisma.referral.findUnique({
+    where: { inviteeId: userId },
+    include: {
+      inviter: {
+        select: {
+          id: true,
+          name: true,
+          referralCode: true
+        }
+      }
+    }
+  });
+
+  // Get information about people this user has invited
+  const asInviter = await prisma.referral.findMany({
+    where: { inviterId: userId },
+    select: {
+      inviteeId: true,
+      createdAt: true,
+      invitee: {
+        select: {
+          id: true,
+          name: true
+        }
+      }
+    }
+  });
+
+  // Get user's own referral code
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { 
+      referralCode: true,
+      name: true
+    }
+  });
+
+  if (!user) {
+    throw new Error('User not found');
+  }
+
+  return {
+    hasBeenInvited: !!asInvitee,
+    inviterInfo: asInvitee && asInvitee.inviter ? {
+      id: asInvitee.inviter.id,
+      name: asInvitee.inviter.name,
+      code: asInvitee.inviter.referralCode,
+      inviteTime: asInvitee.createdAt
+    } : null,
+    ownReferralCode: user.referralCode,
+    invitedUsers: asInviter.map(ref => ({
+      id: ref.inviteeId,
+      name: ref.invitee?.name || 'Unknown',
+      inviteTime: ref.createdAt
+    }))
+  };
+}
+
+/**
+ * Use a referral code
+ * @param {string} userId - The user ID who is using the code
+ * @param {string} code - The referral code to use
+ * @throws {Error} with code property for specific error cases
+ */
+async function useReferralCode(userId, code) {
+  // Check if user has already been referred
+  const existingReferral = await prisma.referral.findUnique({
+    where: { inviteeId: userId },
+    include: { inviter: { select: { id: true, name: true } } }
+  });
+
+  if (existingReferral) {
+    const error = new Error('User has already been referred');
+    error.code = 'ALREADY_REFERRED';
+    error.data = {
+      inviterId: existingReferral.inviterId,
+      inviterName: existingReferral.inviter?.name,
+      code: existingReferral.code,
+      createdAt: existingReferral.createdAt
+    };
+    throw error;
+  }
+
+  // Find inviter
+  const inviter = await prisma.user.findUnique({
+    where: { referralCode: code },
+    select: { id: true, name: true, referralCode: true }
+  });
+
+  if (!inviter) {
+    const error = new Error('Invalid referral code');
+    error.code = 'INVALID_CODE';
+    throw error;
+  }
+
+  // Prevent self-referral
+  if (inviter.id === userId) {
+    const error = new Error('Cannot use your own referral code');
+    error.code = 'SELF_REFERRAL_NOT_ALLOWED';
+    throw error;
+  }
+
+  try {
+    // Create referral relationship and process rewards in a transaction
+    const referralData = await prisma.$transaction(async (tx) => {
+      // Create the referral record
+      const ref = await tx.referral.create({
+        data: {
+          inviterId: inviter.id,
+          inviteeId: userId,
+          code: code  // Store the code used for the referral
+        }
+      });
+      
+      // Process multi-level rewards within the same transaction
+      await processReferral(userId, inviter.id, code);
+      
+      return ref;
+    });
+
+    return {
+      inviterId: inviter.id,
+      inviterName: inviter.name,
+      inviteeId: userId,
+      code: code,
+      createdAt: referral.createdAt
+    };
+  } catch (error) {
+    console.error('Transaction error in useReferralCode:', error);
+    if (error.code === 'P2002') {
+      const err = new Error('User has already been referred');
+      err.code = 'ALREADY_REFERRED';
+      throw err;
+    }
+    throw error;
+  }
+}
+
+module.exports = { getReferralOverview, claimReferralRewards, processReferral, getReferralStatus, useReferralCode };

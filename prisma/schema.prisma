@@ -37,11 +37,12 @@ model User {
   
   // X (Twitter) 相关字段
   xid               String?         @unique // X (Twitter) User ID
+  xUsername         String?         // X (Twitter) Username
   xAccessToken      String?       // Encrypt this if stored
   xRefreshToken     String?       // Encrypt this if stored
   
-  // 邀请码
-  inviteCode      String           @unique @default(dbgenerated("substring(md5(random()::text), 1, 8)"))
+  // 邀请码 - 使用应用生成的 referralCode
+  referralCode    String             @unique // 每个用户自己的推荐码，由应用生成
   
   // 关系
   createdAt      DateTime           @default(now())
@@ -406,7 +407,7 @@ model Referral {
   inviterId  String
   invitee    User     @relation("InvitesReceived", fields: [inviteeId], references: [id])
   inviteeId  String   @unique
-  code       String   @unique
+  code       String   // 实际使用的邀请码字符串，移除非必须的 @unique 约束
   createdAt  DateTime @default(now())
 }
 
