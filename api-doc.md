@@ -13,8 +13,11 @@
 3. [活动 API](#活动-api)
 4. [资产 API](#资产-api)
 5. [通知 API](#通知-api)
-6. [Award System API](#award-system-api)
-7. [X API](#x-api)
+6. [Data Dance ID API](#data-dance-id-api)
+7. [Award System API](#award-system-api)
+    * [Referral System API](#referral-system-api)
+    * [Task API](#task-api)
+8. [X API](#x-api)
 
 ## 认证 API
 
@@ -111,7 +114,7 @@ POST /api/auth/register-with-wallet
 }
 ```
 
-### Web3Auth 登录/注册
+### Web3Auth 登录
 
 ```
 POST /api/auth/web3auth-login
@@ -123,60 +126,34 @@ POST /api/auth/web3auth-login
   "userInfo": {
     "email": "user@example.com",
     "name": "User Name",
-    "profileImage": "https://example.com/profile.jpg",
-    "verifier": "datadance-email-verifier",
-    "verifierId": "user@example.com",
-    "typeOfLogin": "jwt"
+    "profileImage": "https://example.com/avatar.jpg"
   },
-  "walletAddress": "0x123abc...",
-  "xid": "user@example.com",         // X 返回的 verifierId
-  "xAccessToken": "access-token",   // X 返回的 Access Token (可选, 当前后端不存储)
-  "xRefreshToken": "refresh-token"  // X 返回的 Refresh Token (可选, 当前后端不存储)
+  "walletAddress": "0x1234567890abcdef1234567890abcdef12345678", // 可选，钱包登录时必填
+  "xid": "123456789", // 可选，X 渠道登录时必填
+  "xUsername": "username", // 可选，X 渠道登录时通常会提供
+  "invitationCode": "REF-ABCD1234" // 可选，新用户注册时可提供邀请码
 }
 ```
 
-**登录场景**:
-1. 如果提供了钱包地址，系统会尝试通过钱包地址查找用户
-2. 如果提供了邮箱，系统会尝试通过邮箱查找用户
-3. 如果用户不存在且提供了足够信息，系统会创建新用户
-
-**响应** (200 OK - 登录成功):
+**响应** (200 OK):
 ```json
 {
   "status": "success",
   "data": {
-    "token": "jwt_token_here",
+    "token": "<jwt_token>",
     "user": {
-      "id": "user_id",
+      "id": "user-uuid",
       "email": "user@example.com",
       "name": "User Name",
-      "walletAddress": "0x123abc...",
-      "userType": "regular",
-      "authType": "web3auth",
-      "xid": "user@example.com", // 用户绑定的 X ID
-      "xUsername": "twitter_handle",
+      "walletAddress": "0x1234567890abcdef1234567890abcdef12345678",
+      "xid": "123456789",
+      "xUsername": "username",
       "isOrganization": false
-    }
-  }
-}
-```
-
-**响应** (201 Created - 注册成功):
-```json
-{
-  "status": "success",
-  "data": {
-    "token": "jwt_token_here",
-    "user": {
-      "id": "user_id",
-      "email": "user@example.com",
-      "name": "User Name",
-      "walletAddress": "0x123abc...",
-      "userType": "regular",
-      "authType": "web3auth",
-      "xid": "user@example.com", // 用户绑定的 X ID
-      "xUsername": "twitter_handle",
-      "isOrganization": false
+    },
+    "invitationStatus": {
+      "success": true,
+      "code": "REFERRAL_SUCCESSFUL",
+      "message": "邀请关系已成功记录。"
     }
   }
 }
@@ -411,41 +388,6 @@ Authorization: Bearer <token>
 }
 ```
 
-### 更新用户钱包地址
-
-```
-POST /api/auth/update-wallet
-```
-
-**请求头**:
-```
-Authorization: Bearer <token>
-```
-
-**请求体**:
-```json
-{
-  "walletAddress": "0x456def..."
-}
-```
-
-**响应** (200 OK):
-```json
-{
-  "status": "success",
-  "message": "钱包地址已更新",
-  "data": {
-    "user": {
-      "id": "user_id",
-      "email": "user@example.com",
-      "walletAddress": "0x456def...",
-      "userType": "regular",
-      "authType": "web3auth"
-    }
-  }
-}
-```
-
 ### Get User's Referral Code
 
 ```
@@ -481,262 +423,6 @@ Authorization: Bearer <token>
 {
   "status": "success",
   "data": { "registeredAt": "2025-01-15T08:30:00.000Z" }
-}
-```
-
-## Referral System API
-
-### Use Referral Code
-
-```
-POST /api/referrals/use-code
-```
-
-**Request Headers**:
-```
-Authorization: Bearer <token>
-```
-
-**Request Body**:
-```json
-{
-  "code": "REF-ABCD1234"
-}
-```
-
-**Response** (200 OK):
-```json
-{
-  "status": "success",
-  "message": "Referral code used successfully",
-  "data": {
-    "referrerId": "referrer-user-id",
-    "refereeId": "current-user-id",
-    "code": "REF-ABCD1234"
-  }
-}
-```
-
-**Error Responses**:
-
-400 Bad Request - Missing code:
-```json
-{
-  "status": "fail",
-  "code": "MISSING_CODE",
-  "message": "Please provide a referral code"
-}
-```
-
-409 Conflict - Already referred:
-```json
-{
-  "status": "fail",
-  "code": "ALREADY_REFERRED",
-  "message": "You have already been referred and cannot use another code",
-  "data": {
-    "referrerId": "existing-referrer-id",
-    "code": "REF-ABCD1234",
-    "createdAt": "2025-05-16T..."
-  }
-}
-```
-
-404 Not Found - Invalid code:
-```json
-{
-  "status": "fail",
-  "code": "INVALID_CODE",
-  "message": "Invalid referral code"
-}
-```
-
-400 Bad Request - Self referral:
-```json
-{
-  "status": "fail",
-  "code": "SELF_REFERRAL_NOT_ALLOWED",
-  "message": "Cannot use your own referral code"
-}
-```
-
-### Get Referral Status
-
-Gets the detailed status of a user's referral relationships.
-
-**URL** : `/api/referrals/status`
-
-**Method** : `GET`
-
-**Auth required** : Yes
-
-**Permissions required** : None
-
-#### Success Response
-
-**Code** : `200 OK`
-
-**Response examples**
-
-For a user who has been invited and has invited others:
-
-```json
-{
-  "status": "success",
-  "data": {
-    "hasBeenInvited": true,
-    "inviterInfo": {
-      "id": "user123",
-      "name": "John Doe",
-      "code": "REF-ABC123",
-      "inviteTime": "2025-05-17T10:30:00Z"
-    },
-    "ownReferralCode": "REF-XYZ789",
-    "invitedUsers": [
-      {
-        "id": "user456",
-        "name": "Jane Smith",
-        "inviteTime": "2025-05-16T15:45:00Z"
-      }
-    ]
-  }
-}
-```
-
-For a user who hasn't been invited:
-
-```json
-{
-  "status": "success",
-  "data": {
-    "hasBeenInvited": false,
-    "inviterInfo": null,
-    "ownReferralCode": "REF-XYZ789",
-    "invitedUsers": []
-  }
-}
-```
-
-#### Error Responses
-
-**Code** : `500 INTERNAL SERVER ERROR`
-
-```json
-{
-  "status": "error",
-  "code": "SERVER_ERROR",
-  "message": "Error getting referral status"
-}
-```
-
-### Get Referral Overview
-
-```
-GET /api/referrals/overview
-```
-
-**Request Headers**:
-```
-Authorization: Bearer <token>
-```
-
-**Response** (200 OK):
-```json
-{
-  "status": "success",
-  "data": {
-    "referrals": [
-      {
-        "id": "user-id",
-        "email": "user@example.com",
-        "nickname": "User Name",
-        "level": 1,
-        "theirPoints": 100,
-        "yourReward": 5,
-        "referrals": [
-          {
-            "id": "referee-id",
-            "email": "referee@example.com",
-            "nickname": "Referee Name",
-            "level": 2,
-            "theirPoints": 50,
-            "yourReward": 3,
-            "referrals": []
-          }
-        ]
-      }
-    ],
-    "levelCounts": {
-      "1": 3,  // Direct referrals
-      "2": 2,  // Second-level referrals
-      "3": 1,  // Third-level referrals
-      "4": 0   // Fourth-level referrals
-    },
-    "earnedByLevel": [
-      150,  // Points earned from level 1 referrals
-      100,  // Points earned from level 2 referrals
-      50,   // Points earned from level 3 referrals
-      0     // Points earned from level 4 referrals
-    ],
-    "totalReferralPoints": 300,       // Total points earned from all levels
-    "unclaimReferralAwards": 50,      // Points available to claim
-    "networkActivity": 450            // Total network activity score
-  }
-}
-```
-
-**Response Details**:
-
-- **referrals**: Nested tree structure of referrals up to 4 levels deep
-  - **theirPoints**: Points earned by direct referees (50 points per direct referral)
-  - **yourReward**: Commission earned from this referee's referrals (5/3/1 points per referral for levels 1/2/3)
-
-- **levelCounts**: Number of referrals at each level (1-4)
-
-- **earnedByLevel**: Points earned at each level, including both claimed and unclaimed points
-
-- **totalReferralPoints**: Sum of all earned points across all levels
-
-- **unclaimReferralAwards**: Points that are available but not yet claimed
-
-- **networkActivity**: Overall network activity score, calculated as:
-  - Total referral points
-  - Plus additional activity points from level 2-4 referrals (50 points each)
-
-**Commission Rates**:
-- Level 1 (Direct): 5 points per referral
-- Level 2: 3 points per referral
-- Level 3: 1 point per referral
-- Level 4: 0 points (tracking only)
-
-### Claim Referral Rewards
-
-```
-POST /api/referrals/claim-rewards
-```
-
-**Request Headers**:
-```
-Authorization: Bearer <token>
-```
-
-**Response** (200 OK):
-```json
-{
-  "status": "success",
-  "data": {
-    "claimedAt": "2025-05-16T...",
-    "totalPoints": 100,
-    "count": 2
-  }
-}
-```
-
-**Error Response** (400 Bad Request):
-```json
-{
-  "status": "fail",
-  "message": "No referral rewards to claim"
 }
 ```
 
@@ -1413,10 +1099,20 @@ Authorization: Bearer <token>
 }
 ```
 
+## Data Dance ID API
+<!-- TODO: Document routes from src/routes/dataDanceIdRoutes.js, mounted under /api/data-dance-ids -->
+<!-- Example: -->
+<!-- ### Get Data Dance ID Details -->
+<!-- ``` -->
+<!-- GET /api/data-dance-ids/{id} -->
+<!-- ``` -->
+<!-- Response (200 OK): -->
+<!-- { -->
+<!--   \"status\": \"success\", -->
+<!--   \"data\": { ... } -->
+<!-- } -->
 
-
-
-## 7. Award System API
+## Award System API
 
 ### Get User Reward List
 
@@ -1473,6 +1169,8 @@ Authorization: Bearer <token>
     "message": "Reward not found or already claimed."
   }
   ```
+
+### Referral System API
 
 ### Use Referral Code
 
@@ -1548,10 +1246,10 @@ Authorization: Bearer <token>
 }
 ```
 
-### Get Referral Status
+### Claim Referral Rewards
 
 ```
-GET /api/referrals/status
+POST /api/referrals/claim-rewards
 ```
 
 **Request Headers**:
@@ -1564,22 +1262,89 @@ Authorization: Bearer <token>
 {
   "status": "success",
   "data": {
-    "referralCount": 5,
-    "rewardsEarned": 250,
-    "referredBy": {
-      "userId": "referrer-id",
-      "name": "Referrer Name",
-      "code": "REF-ABCD1234",
-      "referredAt": "2025-05-16T..."
+    "claimedAt": "2025-05-17T12:00:00Z",
+    "totalPoints": 150,
+    "count": 3
+  }
+}
+```
+
+**Error Responses**:
+
+400 Bad Request - No rewards to claim:
+```json
+{
+  "status": "fail",
+  "message": "No referral rewards to claim"
+}
+```
+
+### Get Referral Status
+
+Gets the detailed status of a user\'s referral relationships.
+
+**URL** : `/api/referrals/status`
+
+**Method** : `GET`
+
+**Auth required** : Yes
+
+**Permissions required** : None
+
+#### Success Response
+
+**Code** : `200 OK`
+
+**Response examples**
+
+For a user who has been invited and has invited others:
+
+```json
+{
+  "status": "success",
+  "data": {
+    "hasBeenInvited": true,
+    "inviterInfo": {
+      "id": "user123",
+      "name": "John Doe",
+      "code": "REF-ABC123",
+      "inviteTime": "2025-05-17T10:30:00Z"
     },
-    "referees": [
+    "ownReferralCode": "REF-XYZ789",
+    "invitedUsers": [
       {
-        "userId": "referee-id",
-        "name": "Referee Name",
-        "referredAt": "2025-05-16T..."
+        "id": "user456",
+        "name": "Jane Smith",
+        "inviteTime": "2025-05-16T15:45:00Z"
       }
     ]
   }
+}
+```
+
+For a user who hasn\'t been invited:
+
+```json
+{
+  "status": "success",
+  "data": {
+    "hasBeenInvited": false,
+    "inviterInfo": null,
+    "ownReferralCode": "REF-XYZ789",
+    "invitedUsers": []
+  }
+}
+```
+
+#### Error Responses
+
+**Code** : `500 INTERNAL SERVER ERROR`
+
+```json
+{
+  "status": "error",
+  "code": "SERVER_ERROR",
+  "message": "Error getting referral status"
 }
 ```
 
@@ -1622,7 +1387,7 @@ Authorization: Bearer <token>
     ],
     "levelCounts": {
       "1": 3,  // Direct referrals
-      "2": 2,  // Second-level referrals 
+      "2": 2,  // Second-level referrals
       "3": 1,  // Third-level referrals
       "4": 0   // Fourth-level referrals
     },
@@ -1642,8 +1407,8 @@ Authorization: Bearer <token>
 **Response Details**:
 
 - **referrals**: Nested tree structure of referrals up to 4 levels deep
-  - **theirPoints**: Points earned by direct referees (50 points per direct referral)  
-  - **yourReward**: Commission earned from this referee's referrals (5/3/1 points per referral for levels 1/2/3)
+  - **theirPoints**: Points earned by direct referees (50 points per direct referral)
+  - **yourReward**: Commission earned from this referee\'s referrals (5/3/1 points per referral for levels 1/2/3)
 
 - **levelCounts**: Number of referrals at each level (1-4)
 
@@ -1651,7 +1416,7 @@ Authorization: Bearer <token>
 
 - **totalReferralPoints**: Sum of all earned points across all levels
 
-- **unclaimReferralAwards**: Points that are available but not yet claimed 
+- **unclaimReferralAwards**: Points that are available but not yet claimed
 
 - **networkActivity**: Overall network activity score, calculated as:
   - Total referral points
@@ -1659,37 +1424,269 @@ Authorization: Bearer <token>
 
 **Commission Rates**:
 - Level 1 (Direct): 5 points per referral
-- Level 2: 3 points per referral  
+- Level 2: 3 points per referral
 - Level 3: 1 point per referral
 - Level 4: 0 points (tracking only)
 
-### Claim Referral Rewards
+### Task API
+
+All Task API endpoints require authentication (Bearer Token). These routes are mounted under `/api`.
+
+#### Get Tasks by Award
+
+- **GET** `/api/awards/:awardId/tasks`
+- **Purpose**: Retrieves a list of tasks associated with a specific award.
+- **Authentication**: Bearer Token required.
+- **Path Parameters**:
+    - `awardId`: The ID of the award for which to fetch tasks.
+- **Response (200 OK)**:
+  ```json
+  {
+    "status": "success",
+    "data": {
+      "tasks": [
+        {
+          "id": "task-uuid-1",
+          "awardId": "award-uuid",
+          "name": "Complete Profile",
+          "description": "Fill out all sections of your user profile.",
+          "points": 50,
+          "type": "PROFILE_COMPLETION", // Example type
+          "status": "PENDING", // or COMPLETED, CLAIMED
+          "metadata": { "requiredFields": ["bio", "avatar"] }
+        }
+        // ... other tasks
+      ]
+    }
+  }
+  ```
+- **Error Response (404 Not Found)**: If the award ID is invalid or no tasks are found.
+  ```json
+  {
+    "status": "error",
+    "message": "Award not found or no tasks available for this award."
+  }
+  ```
+
+#### Record Task Progress
+
+- **POST** `/api/users/tasks/:taskId/progress`
+- **Purpose**: Records the progress made by a user on a specific task. This might be used for tasks that have multiple steps or require specific actions to be tracked.
+- **Authentication**: Bearer Token required.
+- **Path Parameters**:
+    - `taskId`: The ID of the task for which progress is being recorded.
+- **Request Body**:
+  ```json
+  {
+    "progress": {
+      // Task-specific progress data, e.g.:
+      "stepsCompleted": 2,
+      "dataVerified": true
+    }
+  }
+  ```
+- **Response (200 OK)**:
+  ```json
+  {
+    "status": "success",
+    "message": "Task progress recorded successfully.",
+    "data": {
+      "taskProgress": {
+        "taskId": "task-uuid-1",
+        "userId": "user-uuid",
+        "status": "IN_PROGRESS", // or COMPLETED
+        "progressData": {
+          "stepsCompleted": 2,
+          "dataVerified": true
+        },
+        "updatedAt": "2025-05-17T14:30:00.000Z"
+      }
+    }
+  }
+  ```
+- **Error Response (400 Bad Request)**: If the task ID is invalid or the progress data is malformed.
+  ```json
+  {
+    "status": "fail",
+    "message": "Invalid task ID or progress data."
+  }
+  ```
+
+#### Claim Task Reward
+
+- **POST** `/api/users/tasks/:taskId/claim`
+- **Purpose**: Allows a user to claim the reward for a completed task.
+- **Authentication**: Bearer Token required.
+- **Path Parameters**:
+    - `taskId`: The ID of the task to be claimed.
+- **Response (200 OK)**:
+  ```json
+  {
+    "status": "success",
+    "message": "Task reward claimed successfully.",
+    "data": {
+      "claimedTask": {
+        "id": "task-uuid-1",
+        "status": "CLAIMED",
+        "claimedAt": "2025-05-17T15:00:00.000Z"
+      },
+      "rewardDetails": { // Example: if points are awarded
+        "pointsAwarded": 50
+      }
+    }
+  }
+  ```
+- **Error Response (400 Bad Request)**: If the task is not yet completed, already claimed, or the task ID is invalid.
+  ```json
+  {
+    "status": "fail",
+    "message": "Task cannot be claimed. It might not be completed, already claimed, or the task ID is invalid."
+  }
+  ```
+
+## X API
+
+### 获取 X 帖子详情  
 
 ```
-POST /api/referrals/claim-rewards
+GET /api/x/posts/:postId
 ```
+
+**参数**:
+- `postId`: X 帖子 ID (必需)
+
+**响应** (200 OK):
+
+```json
+
+  {
+
+  "status": "success",
+
+  "data": {
+
+  "id" "1234567890",
+
+  "text": "Post content",
+  "author": {
+  "id": "123456",
+  "username": "author_username",
+  "name": "Author Name"
+  },
+  "created_at": "2025-05-17T10:00:00Z",
+  "metrics": {
+  "retweets": 10,
+  "likes": 20,
+  "replies": 5
+  }
+  }
+  }
+```
+
+### 1. X Account OAuth2 PKCE Binding Flow
+
+This flow uses OAuth 2.0 with PKCE (Proof Key for Code Exchange) to securely bind a user's X (Twitter) account.
+
+#### Step 1: Initiate Authorization
+
+```http
+GET /api/x/oauth2/authorize
+```
+
+**Description**:
+Starts the X OAuth2.0 PKCE authorization flow. The backend generates PKCE parameters, constructs the X authorization URL, and redirects the user to X for authorization. This endpoint must be called by an authenticated user.
 
 **Request Headers**:
 ```
 Authorization: Bearer <token>
 ```
 
-**Response** (200 OK):
+**Response**:
+- `302 Found`: Redirects the user to the X authorization page.
+  - `Location`: The X authorization URL.
+
+**Error Responses**:
+- `401 Unauthorized`: If the user is not authenticated.
+- `500 Internal Server Error`: If the authorization URL generation fails.
+  ```json
+  {
+    "status": "error",
+    "code": "X_OAUTH_START_FAILED",
+    "message": "Failed to start X OAuth2 authorization."
+  }
+  ```
+
+#### Step 2: Handle X Callback
+
+```http
+GET /api/x/oauth2/callback
+```
+
+**Description**:
+X redirects the user to this endpoint after they have authorized the application. The backend exchanges the received authorization `code` and `state` for an X access token and refresh token, retrieves the user's X profile information, and links the X account to the authenticated user in the system.
+
+**Query Parameters**:
+- `code`: The authorization code provided by X.
+- `state`: The state parameter originally sent by the backend to X, used for CSRF protection and linking the callback to the correct user session.
+
+**Response**:
+- `302 Found`: Redirects the user to a frontend URL (e.g., `process.env.X_OAUTH_CALLBACK_URL`) indicating the outcome of the binding process.
+  - `Location`: e.g., `https://yourfrontend.com/settings/connections?x_status=success` or `https://yourfrontend.com/settings/connections?x_status=error&code=STATE_INVALID`
+
+**Error Responses Handled by Redirect**:
+The endpoint typically redirects to the frontend with query parameters indicating success or failure. Common error scenarios include:
+- Invalid or missing `state` parameter (e.g., `x_status=error&code=STATE_INVALID`).
+- Invalid or missing `code` parameter (e.g., `x_status=error&code=CODE_INVALID`).
+- Failure to exchange code for token (e.g., `x_status=error&code=TOKEN_EXCHANGE_FAILED`).
+- Failure to fetch X user info (e.g., `x_status=error&code=USER_INFO_FETCH_FAILED`).
+- X account already linked to another user (e.g., `x_status=error&code=X_ACCOUNT_ALREADY_BOUND`).
+- Database update failure (e.g., `x_status=error&code=DATABASE_UPDATE_FAILED`).
+
+#### Step 3: Get X Account Binding Status
+
+```http
+GET /api/x/status
+```
+
+**Description**:
+Retrieves the X account binding status for the currently authenticated user.
+
+**Request Headers**:
+```
+Authorization: Bearer <token>
+```
+
+**Response** (200 OK - X Account Bound):
 ```json
 {
   "status": "success",
   "data": {
-    "claimedAt": "2025-05-16T...",
-    "totalPoints": 100,
-    "count": 2
+    "bound": true,
+    "xid": "1234567890123456789",
+    "xUsername": "twitterUser",
+    "xName": "Twitter User Name",
+    "xProfileImageUrl": "https://pbs.twimg.com/profile_images/..."
   }
 }
 ```
 
-**Error Response** (400 Bad Request):
+**Response** (200 OK - X Account Not Bound):
 ```json
 {
-  "status": "fail", 
-  "message": "No referral rewards to claim"
+  "status": "success",
+  "data": {
+    "bound": false
+  }
 }
 ```
+
+**Error Responses**:
+- `401 Unauthorized`: If the user is not authenticated.
+- `500 Internal Server Error`: If there's an issue fetching the status.
+  ```json
+  {
+    "status": "error",
+    "code": "STATUS_FETCH_FAILED",
+    "message": "Failed to fetch X binding status."
+  }
+  ```

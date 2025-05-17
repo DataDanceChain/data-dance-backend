@@ -12,7 +12,7 @@ const {
   getReferralCode, 
   getRegistrationTime
 } = require('../controllers/userController');
-const { getReferralOverview, claimReferralRewards, useReferralCode } = require('../controllers/referralController');
+// Referral endpoints are now centralized under /api/referrals via referralRoutes.js
 const { protect } = require('../middlewares/authMiddleware');
 const router = express.Router();
 
@@ -46,16 +46,8 @@ router.post('/wallet/import', importWallet);
 // Get user's referral code
 router.get('/referral-code', getReferralCode);
 
-// 获取邀请概览
-router.get('/referrals', getReferralOverview);
-
 // 获取当前用户注册时间
 router.get('/registered-at', getRegistrationTime);
 
-// 领取邀请奖励
-router.post('/referrals/claim', claimReferralRewards);
-
-// 使用邀请码
-router.post('/referrals/use-code', useReferralCode);
 
 module.exports = router;

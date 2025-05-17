@@ -7,8 +7,13 @@ const { xApiClient } = require('../utils/xClient');
 const logger = createLogger('authService');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key';
-const X_API_KEY = process.env.X_API_KEY;
-const X_API_SECRET_KEY = process.env.X_API_SECRET_KEY;
-const X_OAUTH_CALLBACK_URL = process.env.X_OAUTH_CALLBACK_URL;
+const {
+  X_API_KEY,
+  X_API_SECRET,
+  X_BEARER_TOKEN,
+  X_OAUTH_ACCESS_TOKEN,
+  X_OAUTH_ACCESS_TOKEN_SECRET,
+  X_OAUTH_CALLBACK_URL
+} = process.env;
 
 module.exports = {};

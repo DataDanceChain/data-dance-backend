@@ -1,3 +1,4 @@
+require('dotenv').config();
 const axios = require('axios');
 const { RateLimiterMemory } = require('rate-limiter-flexible');
 const { createLogger } = require('./logger');
@@ -17,16 +18,26 @@ const rateLimiter = new RateLimiterMemory({
   duration: 60, // Per minute
 });
 
-// X API client configuration (use OAuth2.0 Bearer Token)
-const BEARER_TOKEN = process.env.X_BEARER_TOKEN;
-if (!BEARER_TOKEN) {
+// X API credentials
+const {
+  X_CLIENT_ID,
+  X_CLIENT_SECRET,
+  X_BEARER_TOKEN,
+  X_OAUTH_ACCESS_TOKEN,
+  X_OAUTH_ACCESS_TOKEN_SECRET,
+  X_OAUTH_CALLBACK_URL
+} = process.env;
+
+if (!X_BEARER_TOKEN) {
   logger.error('Missing X_BEARER_TOKEN in environment');
 }
+
+// X API client with bearer token auth
 const xApiClient = axios.create({
   baseURL: 'https://api.twitter.com/2',
   timeout: 3000, // 3 seconds timeout
   headers: {
-    'Authorization': `Bearer ${BEARER_TOKEN}`,
+    'Authorization': `Bearer ${X_BEARER_TOKEN}`,
     'Accept': 'application/json'
   }
 });
