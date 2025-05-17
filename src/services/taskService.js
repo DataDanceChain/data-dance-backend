@@ -231,7 +231,18 @@ async function claimTask(userId, taskId) {
         logger.error('Task already claimed', { userId, taskId });
         throw new Error("Task already claimed");
       }
-      
+
+      // 1.5. 校验业务完成条件（progress >= 1）
+      const strategy = awardStrategies[task.awardId];
+      const context = strategy?.prepare ? await strategy.prepare(userId) : {};
+      const progress = strategy?.computeProgress
+        ? await strategy.computeProgress(task, userId, context)
+        : 1; // 默认为1，兼容无策略的任务
+      if (progress < 1) {
+        logger.error('Task not completed, cannot claim', { userId, taskId, progress });
+        throw new Error('Task not completed, cannot claim');
+      }
+
       // 2. For social engagement (X repost/quote) tasks, verify engagement using xService
       if (task.metadata?.type === "X_RETWEET") {
         logger.info('Processing X_RETWEET social engagement task', { userId, taskId, metadata: task.metadata });
