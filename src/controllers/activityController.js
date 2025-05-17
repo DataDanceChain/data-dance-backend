@@ -53,7 +53,7 @@ exports.getActivities = async (req, res) => {
         claims: {
           where: {
             userId: req.user.id
-          }
+        }
         },
         nftMarketOrders: true
       },
@@ -471,7 +471,7 @@ exports.getAllActivities = async (req, res) => {
         claims: {
           where: {
             userId: req.user.id
-          }
+        }
         },
         nftMarketOrders: true
       },

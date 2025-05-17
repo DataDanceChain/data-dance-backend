@@ -16,6 +16,7 @@
 6. [NFT 数据市场 API](#nft-数据市场-api)
 7. [Data NFT 快照与市场 API](#data-nft-快照与市场-api)
 8. [Promotions API](#promotions-api)
+9. [组织交易 API](#组织交易-api)
 
 ## 测试账号
 为了方便测试，我们提供了一个测试账号，可以使用账号密码登录：
@@ -248,6 +249,55 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
   }
 }
 ```
+
+### 更新用户密码
+
+```
+PUT /api/users/password
+```
+
+**请求头**:
+```
+Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+```
+
+**请求体**:
+```json
+{
+  "currentPassword": "oldPassword123",
+  "newPassword": "newPassword123"
+}
+```
+
+**响应** (200 OK):
+```json
+{
+  "status": "success",
+  "message": "密码已更新"
+}
+```
+
+**错误响应** (401 Unauthorized):
+```json
+{
+  "status": "fail",
+  "message": "当前密码不正确"
+}
+```
+
+**错误响应** (403 Forbidden):
+```json
+{
+  "status": "fail",
+  "message": "只有组织用户可以修改密码"
+}
+```
+
+**说明**:
+- 此接口仅限组织用户使用
+- 普通用户（regular user）使用 Web3Auth 登录，不需要也不应该使用密码
+- 需要提供当前密码以验证身份
+- 新密码会被加密存储
 
 ### 获取用户积分信息
 
@@ -942,7 +992,7 @@ Content-Type: multipart/form-data
 - `dataNfts` 字段为 JSON 字符串，格式如下：
 ```json
 [
-  {
+{
     "id": "data-nft-uuid",
     "isOwned": true
   },
@@ -950,7 +1000,7 @@ Content-Type: multipart/form-data
     "id": "data-nft-uuid-2",
     "isOwned": false,
     "quantity": 1
-  }
+}
 ]
 ```
 
@@ -959,18 +1009,18 @@ Content-Type: multipart/form-data
 {
   "status": "success",
   "data": {
-    "id": "activity-uuid",
-    "title": "Elite Yacht Club Membership NFT Limited Sale",
-    "description": "Elite Yacht Club membership benefits...",
+      "id": "activity-uuid",
+      "title": "Elite Yacht Club Membership NFT Limited Sale",
+      "description": "Elite Yacht Club membership benefits...",
     "logo": "/assets/logos/xxx.jpg",
     "nftImage": "/assets/nfts/xxx.jpg",
     "image": "/assets/banners/xxx.jpg",
-    "startDate": "2025-02-19T00:00:00.000Z",
-    "endDate": "2025-03-19T00:00:00.000Z",
-    "type": "MEMBERSHIP",
-    "remaining": 100,
-    "total": 100,
-    "price": 0.1,
+      "startDate": "2025-02-19T00:00:00.000Z",
+      "endDate": "2025-03-19T00:00:00.000Z",
+      "type": "MEMBERSHIP",
+      "remaining": 100,
+      "total": 100,
+      "price": 0.1,
     "isPromoted": true,
     "promotionInfo": {
       "dataNfts": [
@@ -1309,7 +1359,7 @@ POST /assets/badges/{badgeId}/collect
 ### 获取交易记录
 
 ```
-GET /assets/transactions
+GET /api/assets/transactions
 ```
 
 **请求头**:
@@ -1339,6 +1389,16 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
   ]
 }
 ```
+
+**说明**:
+- 此接口返回用户的所有资产交易记录
+- 交易类型包括但不限于：
+  - `POINT_EARNED`: 积分获取
+  - `BADGE_ACQUIRED`: 徽章获取
+  - `NFT_PURCHASED`: NFT 购买
+  - `NFT_SOLD`: NFT 出售
+- 返回最近的 50 条交易记录
+- 按时间倒序排列
 
 ### 生成Apple Wallet Pass
 
@@ -1658,6 +1718,7 @@ Authorization: Bearer <token>
 
 **查询参数**:
 - `tag` (可选): 标签筛选
+- `search` (可选): 关键词搜索，支持 DataNFT 名称、简介、商家名称、标签名模糊匹配，结果按关联度排序
 
 **响应** (200 OK):
 ```json
@@ -1668,8 +1729,8 @@ Authorization: Bearer <token>
       "id": "nft-uuid",
       "title": "数据资产名称",
       "coverImage": "/assets/nfts/cover.png",
-      "image": "/assets/nfts/cover.png",
       "owner": "组织/商家名称",
+      "ownerId": "merchant-uuid",
       "ownerAvatar": "/assets/avatars/org.png",
       "size": 10000,
       "price": 2.5,
@@ -1678,6 +1739,11 @@ Authorization: Bearer <token>
   ]
 }
 ```
+
+**说明**:
+- 支持通过 `search` 参数对 DataNFT 名称、简介、商家名称、标签名进行模糊搜索。
+- 搜索结果会按关联度（命中字段优先级：名称 > 商家名称 > 简介 > 标签）降序排列。
+- 可与标签筛选（tag）同时使用。
 
 ### 获取市场 NFT 数据资产详情
 
@@ -1698,8 +1764,8 @@ Authorization: Bearer <token>
     "id": "nft-uuid",
     "title": "数据资产名称",
     "coverImage": "/assets/nfts/cover.png",
-    "image": "/assets/nfts/cover.png",
     "owner": "组织/商家名称",
+    "ownerId": "merchant-uuid",
     "ownerAvatar": "/assets/avatars/org.png",
     "size": 10000,
     "price": 2.5,
@@ -2068,13 +2134,47 @@ POST /api/data-nfts/{id}/unpublish
 ```
 POST /api/data-nfts/{id}/purchase
 ```
-**响应** (201 Created):
+**Request Headers:**
 ```
+Authorization: Bearer <token>
+```
+**Request Body:**
+```json
 {
-  "status": "success",
-  "data": { ... }
+  "quantity": 3 // Optional, default is 1. Number of DataNFTs to purchase in this order.
 }
 ```
+**Response** (201 Created):
+```json
+{
+  "status": "success",
+  "data": {
+    "id": "purchase-uuid",
+    "dataNFTId": "data-nft-uuid",
+    "buyerId": "user-uuid",
+    "quantity": 3,
+    "createdAt": "2024-03-20T12:00:00.000Z",
+    "dataNFT": {
+      "id": "data-nft-uuid",
+      "name": "Data Asset Bundle Name",
+      "description": "Data asset description",
+      "price": 2.5,
+      "image": "/assets/nfts/cover.png",
+      "snapshots": [...],
+      "tags": [...]
+    },
+    "purchaseCount": 1
+  }
+}
+```
+**Notes:**
+- You can purchase multiple DataNFTs in a single order by specifying the `quantity` field in the request body.
+- The purchase record and transaction records will reflect the quantity.
+- Transaction amount = price * quantity.
+- After a successful purchase, transaction records are automatically generated.
+- If the buyer is an organization user, an expense (WITHDRAW) transaction will be created.
+- The seller (merchant) will receive an income (DEPOSIT) transaction.
+- `purchaseCount` indicates how many times the current user has purchased this DataNFT (across all orders).
 
 #### 按商家获取 DataNFT
 ```
@@ -2511,3 +2611,231 @@ Authorization: Bearer <token>
 - `403 Forbidden`: 权限不足
 - `404 Not Found`: 资源不存在
 - `500 Internal Server Error`: 服务器内部错误
+
+## 组织交易 API
+
+### 获取组织交易记录
+
+```
+GET /api/organization/transactions
+```
+
+**Request Headers:**
+```
+Authorization: Bearer <token>
+```
+**Query Parameters:**
+- `page`: Page number (default 1)
+- `limit`: Items per page (default 10)
+- `type`: Transaction type (DEPOSIT/WITHDRAW)
+- `status`: Transaction status (PENDING/COMPLETED/FAILED)
+- `startDate`: Start date
+- `endDate`: End date
+**Response** (200 OK):
+```json
+{
+  "status": "success",
+  "data": {
+    "transactions": [
+      {
+        "id": "transaction-uuid",
+        "amount": 7.5,
+        "type": "DEPOSIT",
+        "status": "COMPLETED",
+        "description": "DataNFT sale: Data Asset Bundle Name (Purchase #1, quantity: 3)",
+        "userId": "org-uuid",
+        "metadata": {
+          "dataNFTId": "data-nft-uuid",
+          "buyerId": "buyer-uuid",
+          "purchaseCount": 1,
+          "quantity": 3
+        },
+        "createdAt": "2024-03-20T12:00:00.000Z",
+        "updatedAt": "2024-03-20T12:00:00.000Z"
+      }
+    ],
+    "pagination": {
+      "total": 20,
+      "page": 1,
+      "limit": 10,
+      "pages": 2
+    }
+  }
+}
+```
+
+**Notes:**
+- All transaction records use the `userId` field to indicate the organization (must be a user with `isOrganization: true`).
+- Transaction types include:
+  - `DEPOSIT`: Deposit (from system to organization)
+  - `WITHDRAW`: Withdraw (from organization to system)
+- Transaction status includes:
+  - `PENDING`: Pending
+  - `COMPLETED`: Completed
+  - `FAILED`: Failed
+- Only organization users can access these APIs
+- The system will automatically verify if the balance is sufficient
+- All transactions are recorded on-chain, and if available, `txHash` is stored in metadata
+- When purchasing a DataNFT, transaction records are automatically generated, including:
+  - Seller (merchant) DEPOSIT record (amount = price * quantity, metadata includes quantity)
+  - Buyer (if organization user) WITHDRAW record (amount = price * quantity, metadata includes quantity)
+
+### 创建充值交易
+
+```
+POST /api/organization/transactions/deposit
+```
+
+**请求头**:
+```
+Authorization: Bearer <token>
+```
+
+**请求体**:
+```json
+{
+  "amount": 1000.000000,
+  "description": "Deposit from bank",
+  "metadata": {
+    "txHash": "0x...",
+    "note": "Deposit note"
+  }
+}
+```
+
+**响应** (201 Created):
+```json
+{
+  "status": "success",
+  "data": {
+    "id": "transaction-uuid",
+    "amount": 1000.000000,
+    "type": "DEPOSIT",
+    "status": "PENDING",
+    "description": "Deposit from bank",
+    "userId": "org-uuid",
+    "metadata": {
+      "txHash": "0x...",
+      "note": "Deposit note"
+    },
+    "createdAt": "2024-03-20T12:00:00.000Z",
+    "updatedAt": "2024-03-20T12:00:00.000Z"
+  }
+}
+```
+
+### 创建提现交易
+
+```
+POST /api/organization/transactions/withdraw
+```
+
+**请求头**:
+```
+Authorization: Bearer <token>
+```
+
+**请求体**:
+```json
+{
+  "amount": 500.000000,
+  "description": "Withdraw to bank account",
+  "metadata": {
+    "walletAddress": "0x...",
+    "note": "Withdraw note"
+  }
+}
+```
+
+**响应** (201 Created):
+```json
+{
+  "status": "success",
+  "data": {
+    "id": "transaction-uuid",
+    "amount": 500.000000,
+    "type": "WITHDRAW",
+    "status": "PENDING",
+    "description": "Withdraw to bank account",
+    "userId": "org-uuid",
+    "metadata": {
+      "walletAddress": "0x...",
+      "note": "Withdraw note"
+    },
+    "createdAt": "2024-03-20T12:00:00.000Z",
+    "updatedAt": "2024-03-20T12:00:00.000Z"
+  }
+}
+```
+
+### 获取组织余额
+
+```
+GET /api/organization/balance
+```
+
+**请求头**:
+```
+Authorization: Bearer <token>
+```
+
+**响应** (200 OK):
+```json
+{
+  "status": "success",
+  "data": {
+    "balance": 1000.000000,
+    "currency": "USDT",
+    "lastUpdated": "2024-03-20T12:00:00.000Z"
+  }
+}
+```
+
+### 更新交易状态
+
+```
+PATCH /api/organization/transactions/{id}/status
+```
+
+**请求头**:
+```
+Authorization: Bearer <token>
+```
+
+**请求体**:
+```json
+{
+  "status": "COMPLETED",
+  "metadata": {
+    "note": "Transaction completed note"
+  }
+}
+```
+
+**响应** (200 OK):
+```json
+{
+  "status": "success",
+  "data": {
+    "id": "transaction-uuid",
+    "status": "COMPLETED",
+    "updatedAt": "2024-03-20T12:00:00.000Z"
+  }
+}
+```
+
+**说明**:
+- 所有交易记录使用 `userId` 字段标识组织（必须是 `isOrganization: true` 的用户）
+- 交易类型包括：
+  - `DEPOSIT`: 充值（从系统到组织）
+  - `WITHDRAW`: 提现（从组织到系统）
+- 交易状态包括：
+  - `PENDING`: 待处理
+  - `COMPLETED`: 已完成
+  - `FAILED`: 失败
+- 只有组织用户可以访问这些 API
+- 系统会自动验证余额是否充足
+- 所有交易都会记录在链上，如果有 txHash 会存储在 metadata 中
+- DataNFT 购买时会自动生成交易记录，包括：
+  - 卖家（商家）的 DEPOSIT 记录
+  - 买家（如果是组织用户）的 WITHDRAW 记录

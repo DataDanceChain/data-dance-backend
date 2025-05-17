@@ -8,41 +8,42 @@ datasource db {
 }
 
 model User {
-  id                String             @id @default(uuid())
-  email             String             @unique
-  password          String?
-  name              String?
-  avatar            String?
-  createdAt         DateTime           @default(now())
-  updatedAt         DateTime           @updatedAt
-  organizationId    String?
-  description       String?
-  isOrganization    Boolean            @default(false)
-  logo              String?
-  chainId           Int?
-  totalPoints       Float              @default(0)
-  walletAddress     String?            @unique
-  privateKey        String?
-  authType          String             @default("traditional")
-  userType          String             @default("regular")
-  createdActivities Activity[]
-  activityClaims    ActivityClaim[]
-  transactions      AssetTransaction[]
-  createdBadges     Badge[]
-  dataDanceIDs      DataDanceID[]
-  dataAssets        NFTDataAsset[]
-  notifications     Notification[]
-  points            Point[]
-  organization      User?              @relation("OrganizationMembers", fields: [organizationId], references: [id])
-  members           User[]             @relation("OrganizationMembers")
-  badges            UserBadge[]
-  profile           UserProfile?
-  roles             UserRole[]
-  passes            Pass[]
-  nftMarketOrders   NftMarketOrder[]
-  snapshots         Snapshot[]
-  dataNFTs          DataNFT[]
-  dataNFTPurchases  DataNFTPurchase[]
+  id                       String                    @id @default(uuid())
+  email                    String                    @unique
+  password                 String?
+  name                     String?
+  avatar                   String?
+  createdAt                DateTime                  @default(now())
+  updatedAt                DateTime                  @updatedAt
+  organizationId           String?
+  description              String?
+  isOrganization           Boolean                   @default(false)
+  logo                     String?
+  chainId                  Int?
+  totalPoints              Float                     @default(0)
+  walletAddress            String?                   @unique
+  privateKey               String?
+  authType                 String                    @default("traditional")
+  userType                 String                    @default("regular")
+  createdActivities        Activity[]
+  activityClaims           ActivityClaim[]
+  transactions             AssetTransaction[]
+  createdBadges            Badge[]
+  dataDanceIDs             DataDanceID[]
+  dataNFTs                 DataNFT[]
+  dataNFTPurchases         DataNFTPurchase[]
+  dataAssets               NFTDataAsset[]
+  nftMarketOrders          NftMarketOrder[]
+  notifications            Notification[]
+  organizationTransactions OrganizationTransaction[]
+  passes                   Pass[]
+  points                   Point[]
+  snapshots                Snapshot[]
+  organization             User?                     @relation("OrganizationMembers", fields: [organizationId], references: [id])
+  members                  User[]                    @relation("OrganizationMembers")
+  badges                   UserBadge[]
+  profile                  UserProfile?
+  roles                    UserRole[]
 }
 
 model UserProfile {
@@ -193,14 +194,14 @@ model Activity {
   chainId            Int?
   tokenStandard      String?
   isPromoted         Boolean            @default(false)
-  promotionInfo      Json?              // 存储推广活动相关的信息，如 selectedDataNfts
+  promotionInfo      Json?
   creator            User               @relation(fields: [creatorId], references: [id])
   claims             ActivityClaim[]
   dataDanceIDs       DataDanceID[]
-  categories         ActivityCategory[] @relation("ActivityToActivityCategory")
-  tags               Tag[]              @relation("ActivityToTag")
   nftMarketOrders    NftMarketOrder[]
   snapshots          Snapshot[]
+  categories         ActivityCategory[] @relation("ActivityToActivityCategory")
+  tags               Tag[]              @relation("ActivityToTag")
 }
 
 model ActivityCategory {
@@ -217,8 +218,8 @@ model Tag {
   createdAt  DateTime   @default(now())
   updatedAt  DateTime   @updatedAt
   activities Activity[] @relation("ActivityToTag")
-  snapshots  Snapshot[] @relation("SnapshotToTag")
   dataNFTs   DataNFT[]  @relation("DataNFTToTag")
+  snapshots  Snapshot[] @relation("SnapshotToTag")
 }
 
 model ActivityClaim {
@@ -286,26 +287,26 @@ model DataDanceID {
 }
 
 model Pass {
-  id                String   @id @default(uuid())
-  creatorId         String
-  creatorName       String
-  creatorLogo       String
-  userId            String
-  userName          String
-  userWalletAddress String
-  passUrl           String?
-  status            String   @default("active")
-  createdAt         DateTime @default(now())
-  expiresAt         DateTime
-  serialNumber      String?  @unique
-  pushToken         String?
-  updatedAt         DateTime @updatedAt
-  passTypeIdentifier String  @default("pass.ai.datadance.app")
-  platform          String   @default("apple")
-  googleObjectId    String?
-  googleClassId     String?
-  googleAddUrl      String?
-  user              User     @relation(fields: [userId], references: [id])
+  id                 String   @id @default(uuid())
+  creatorId          String
+  creatorName        String
+  creatorLogo        String
+  userId             String
+  userName           String
+  userWalletAddress  String
+  passUrl            String?
+  status             String   @default("active")
+  createdAt          DateTime @default(now())
+  expiresAt          DateTime
+  pushToken          String?
+  serialNumber       String?  @unique
+  updatedAt          DateTime @updatedAt
+  passTypeIdentifier String   @default("pass.ai.datadance.app")
+  platform           String   @default("apple")
+  googleObjectId     String?
+  googleClassId      String?
+  googleAddUrl       String?
+  user               User     @relation(fields: [userId], references: [id])
 
   @@unique([userId, creatorId, platform])
   @@index([creatorId])
@@ -320,50 +321,67 @@ model NftMarketOrder {
   price       Float
   total       Float
   purchasedAt DateTime @default(now())
-  user        User     @relation(fields: [userId], references: [id])
   activity    Activity @relation(fields: [activityId], references: [id])
+  user        User     @relation(fields: [userId], references: [id])
+
   @@index([userId])
   @@index([activityId])
 }
 
 model Snapshot {
-  id          String   @id @default(uuid())
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  id          String    @id @default(uuid())
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
   name        String
   description String?
   activityId  String
-  activity    Activity @relation(fields: [activityId], references: [id])
   merchantId  String
-  merchant    User     @relation(fields: [merchantId], references: [id])
-  dataNFTs    DataNFT[]
+  claims      Json?
+  activity    Activity  @relation(fields: [activityId], references: [id])
+  merchant    User      @relation(fields: [merchantId], references: [id])
+  dataNFTs    DataNFT[] @relation("DataNFTToSnapshot")
   tags        Tag[]     @relation("SnapshotToTag")
-  claims      Json?     // 存储创建时的 claims 信息
 }
 
 model DataNFT {
-  id          String   @id @default(uuid())
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-  name        String
-  description String?
-  price       Float
-  isPublished Boolean  @default(false)
-  maxSales    Int      @default(1)
-  currentSales Int     @default(0)
-  merchantId  String
-  merchant    User     @relation(fields: [merchantId], references: [id])
-  snapshots   Snapshot[]
-  tags        Tag[]     @relation("DataNFTToTag")
-  purchases   DataNFTPurchase[]
-  image       String?
+  id           String            @id @default(uuid())
+  createdAt    DateTime          @default(now())
+  updatedAt    DateTime          @updatedAt
+  name         String
+  description  String?
+  price        Float
+  isPublished  Boolean           @default(false)
+  maxSales     Int               @default(1)
+  currentSales Int               @default(0)
+  merchantId   String
+  image        String?
+  merchant     User              @relation(fields: [merchantId], references: [id])
+  purchases    DataNFTPurchase[]
+  snapshots    Snapshot[]        @relation("DataNFTToSnapshot")
+  tags         Tag[]             @relation("DataNFTToTag")
 }
 
 model DataNFTPurchase {
   id        String   @id @default(uuid())
   createdAt DateTime @default(now())
   dataNFTId String
-  dataNFT   DataNFT  @relation(fields: [dataNFTId], references: [id])
   buyerId   String
+  quantity  Int      @default(1)
   buyer     User     @relation(fields: [buyerId], references: [id])
+  dataNFT   DataNFT  @relation(fields: [dataNFTId], references: [id])
+
+  @@index([dataNFTId, buyerId])
+}
+
+model OrganizationTransaction {
+  id          String   @id @default(uuid())
+  amount      Float
+  type        String
+  status      String
+  description String?
+  metadata    Json?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  userId      String
+  user        User     @relation(fields: [userId], references: [id])
 }

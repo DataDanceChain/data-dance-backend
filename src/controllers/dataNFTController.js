@@ -339,8 +339,17 @@ const unpublishDataNFT = async (req, res) => {
 // Purchase a DataNFT
 const purchaseDataNFT = async (req, res) => {
   try {
+    console.log('=== Starting DataNFT Purchase Process ===');
     const { id } = req.params;
     const buyerId = req.user.id;
+    const quantity = Math.max(1, Number(req.body.quantity) || 1);
+    
+    console.log('Initial request data:', {
+      nftId: id,
+      buyerId: buyerId,
+      user: req.user,
+      quantity
+    });
 
     const dataNFT = await prisma.dataNFT.findUnique({
       where: { id },
@@ -349,37 +358,49 @@ const purchaseDataNFT = async (req, res) => {
       }
     });
 
+    console.log('Found DataNFT:', {
+      id: dataNFT?.id,
+      name: dataNFT?.name,
+      merchantId: dataNFT?.merchantId,
+      isPublished: dataNFT?.isPublished,
+      price: dataNFT?.price
+    });
+
     if (!dataNFT) {
+      console.log('Error: DataNFT not found');
       return res.status(404).json({ error: 'DataNFT not found' });
     }
 
     if (!dataNFT.isPublished) {
+      console.log('Error: DataNFT is not published');
       return res.status(400).json({ error: 'DataNFT is not published' });
     }
 
     if (dataNFT.merchantId === buyerId) {
-      return res.status(400).json({ error: 'Cannot purchase your own DataNFT' });
+      console.log('Error: Attempting to purchase own DataNFT', {
+        merchantId: dataNFT.merchantId,
+        buyerId: buyerId
+      });
+      return res.status(403).json({ error: 'Cannot purchase your own DataNFT' });
     }
 
-    // Check if already purchased
-    const existingPurchase = await prisma.dataNFTPurchase.findFirst({
+    // 获取用户已购买次数（仅用于记录）
+    const purchaseCount = await prisma.dataNFTPurchase.count({
       where: {
         dataNFTId: id,
-        buyerId
+        buyerId: buyerId
       }
     });
 
-    if (existingPurchase) {
-      return res.status(400).json({ error: 'Already purchased this DataNFT' });
-    }
+    console.log('Current purchase count:', purchaseCount);
 
-    // Create purchase record
+    // Create purchase record (with quantity)
+    console.log('Creating purchase record...');
     const purchase = await prisma.dataNFTPurchase.create({
       data: {
         dataNFTId: id,
         buyerId,
-        sellerId: dataNFT.merchantId,
-        price: dataNFT.price
+        quantity
       },
       include: {
         dataNFT: {
@@ -390,10 +411,108 @@ const purchaseDataNFT = async (req, res) => {
         }
       }
     });
+    console.log('Purchase record created:', { purchaseId: purchase.id, quantity });
 
-    res.status(201).json(purchase);
+    // --- 新增：自动生成交易流水 ---
+    console.log('=== Starting Transaction Generation ===');
+    const totalAmount = dataNFT.price * quantity;
+    // 1. 生成商家收入流水
+    console.log('Creating merchant transaction...');
+    try {
+      const merchantTransaction = await prisma.organizationTransaction.create({
+        data: {
+          amount: totalAmount,
+          type: 'DEPOSIT',
+          status: 'COMPLETED',
+          description: `DataNFT sale: ${dataNFT.name} (Purchase #${purchaseCount + 1}, quantity: ${quantity})`,
+          userId: dataNFT.merchantId,
+          metadata: { 
+            dataNFTId: dataNFT.id, 
+            buyerId,
+            purchaseCount: purchaseCount + 1,
+            quantity
+          }
+        }
+      });
+      console.log('Merchant transaction created:', {
+        id: merchantTransaction.id,
+        amount: merchantTransaction.amount,
+        type: merchantTransaction.type
+      });
+    } catch (merchantTxError) {
+      console.error('Error creating merchant transaction:', {
+        error: merchantTxError.message,
+        code: merchantTxError.code,
+        stack: merchantTxError.stack
+      });
+    }
+
+    // 2. 检查买家信息并生成买家支出流水
+    console.log('Checking buyer info...');
+    try {
+      const buyer = await prisma.user.findUnique({ 
+        where: { id: buyerId },
+        select: {
+          id: true,
+          email: true,
+          isOrganization: true,
+          userType: true
+        }
+      });
+      
+      console.log('Buyer details:', {
+        id: buyer?.id,
+        email: buyer?.email,
+        isOrganization: buyer?.isOrganization,
+        userType: buyer?.userType
+      });
+
+      if (buyer && (buyer.isOrganization || buyer.userType === 'organization')) {
+        console.log('Creating buyer transaction...');
+        const buyerTransaction = await prisma.organizationTransaction.create({
+          data: {
+            amount: totalAmount,
+            type: 'WITHDRAW',
+            status: 'COMPLETED',
+            description: `Purchase DataNFT: ${dataNFT.name} (Purchase #${purchaseCount + 1}, quantity: ${quantity})`,
+            userId: buyerId,
+            metadata: { 
+              dataNFTId: dataNFT.id, 
+              merchantId: dataNFT.merchantId,
+              purchaseCount: purchaseCount + 1,
+              quantity
+            }
+          }
+        });
+        console.log('Buyer transaction created:', {
+          id: buyerTransaction.id,
+          amount: buyerTransaction.amount,
+          type: buyerTransaction.type
+        });
+      } else {
+        console.log('Skipping buyer transaction - not an organization user');
+      }
+    } catch (buyerTxError) {
+      console.error('Error processing buyer transaction:', {
+        error: buyerTxError.message,
+        code: buyerTxError.code,
+        stack: buyerTxError.stack
+      });
+    }
+    // --- end ---
+
+    console.log('=== Purchase Process Completed ===');
+    res.status(201).json({
+      ...purchase,
+      purchaseCount: purchaseCount + 1,
+      quantity
+    });
   } catch (error) {
-    console.error('Error purchasing DataNFT:', error);
+    console.error('Error in purchaseDataNFT:', {
+      message: error.message,
+      code: error.code,
+      stack: error.stack
+    });
     res.status(500).json({ error: 'Failed to purchase DataNFT' });
   }
 };

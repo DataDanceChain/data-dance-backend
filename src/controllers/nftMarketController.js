@@ -4,12 +4,20 @@ const prisma = new PrismaClient();
 // 获取市场 NFT 数据资产列表
 exports.getMarketList = async (req, res) => {
   try {
-    const { tag } = req.query;
+    const { tag, search } = req.query;
     const where = {
       isPublished: true
     };
     if (tag) {
       where.tags = { some: { name: tag } };
+    }
+    if (search) {
+      where.OR = [
+        { name: { contains: search, mode: 'insensitive' } },
+        { description: { contains: search, mode: 'insensitive' } },
+        { merchant: { name: { contains: search, mode: 'insensitive' } } },
+        { tags: { some: { name: { contains: search, mode: 'insensitive' } } } }
+      ];
     }
     const dataNFTs = await prisma.dataNFT.findMany({
       where,
@@ -22,23 +30,39 @@ exports.getMarketList = async (req, res) => {
           }
         }
       },
-      orderBy: { createdAt: 'desc' }
+      orderBy: search ? undefined : { createdAt: 'desc' }
     });
-    const data = dataNFTs.map(nft => {
+    let data = dataNFTs.map(nft => {
       const userIds = nft.snapshots.map(s => s.userId).filter(Boolean);
       const size = new Set(userIds).size;
+      // 计算关联度分数
+      let score = 0;
+      if (search) {
+        const s = search.toLowerCase();
+        if (nft.name?.toLowerCase().includes(s)) score += 3;
+        if (nft.merchant?.name?.toLowerCase().includes(s)) score += 2;
+        if (nft.description?.toLowerCase().includes(s)) score += 1;
+        if (nft.tags?.some(t => t.name?.toLowerCase().includes(s))) score += 0.5;
+      }
       return {
         id: nft.id,
         title: nft.name,
         coverImage: nft.image,
         owner: nft.merchant?.name,
+        ownerId: nft.merchant?.id,
         ownerAvatar: nft.merchant?.avatar,
         size,
         price: nft.price,
         description: nft.description,
-        tags: nft.tags.map(t => t.name)
+        tags: nft.tags.map(t => t.name),
+        _score: score
       };
     });
+    if (search) {
+      data = data.sort((a, b) => b._score - a._score);
+    }
+    // 移除 _score 字段
+    data = data.map(({ _score, ...rest }) => rest);
     res.status(200).json({ status: 'success', data });
   } catch (error) {
     res.status(500).json({ status: 'error', message: 'Server error', error: error.message });
@@ -79,6 +103,7 @@ exports.getMarketDetail = async (req, res) => {
         title: dataNFT.name,
         coverImage: dataNFT.image,
         owner: dataNFT.merchant?.name,
+        ownerId: dataNFT.merchant?.id,
         ownerAvatar: dataNFT.merchant?.avatar,
         size,
         price: dataNFT.price,
