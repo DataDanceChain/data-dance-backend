@@ -468,6 +468,23 @@ const purchaseDataNFT = async (req, res) => {
       });
 
       if (buyer && (buyer.isOrganization || buyer.userType === 'organization')) {
+        // 新增：检查组织用户余额
+        const [depositSum, withdrawSum] = await Promise.all([
+          prisma.organizationTransaction.aggregate({
+            _sum: { amount: true },
+            where: { userId: buyerId, type: 'DEPOSIT', status: 'COMPLETED' }
+          }),
+          prisma.organizationTransaction.aggregate({
+            _sum: { amount: true },
+            where: { userId: buyerId, type: 'WITHDRAW', status: 'COMPLETED' }
+          })
+        ]);
+        const balance = (depositSum._sum.amount || 0) - (withdrawSum._sum.amount || 0);
+        console.log('Organization user balance:', balance, 'totalAmount:', totalAmount);
+        if (balance < totalAmount) {
+          return res.status(400).json({ error: 'Insufficient balance to complete this purchase.' });
+        }
+        // 余额充足才生成流水
         console.log('Creating buyer transaction...');
         const buyerTransaction = await prisma.organizationTransaction.create({
           data: {
