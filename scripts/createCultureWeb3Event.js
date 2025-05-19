@@ -1,5 +1,6 @@
 const prisma = require('../src/utils/prisma');
 const bcrypt = require('bcryptjs');
+const { generateReferralCode } = require('../src/utils/referralUtils');
 
 /**
  * 创建文化娱乐和Web3香港闭门交流会活动
@@ -29,7 +30,8 @@ async function createCultureWeb3Event() {
           isOrganization: true,
           description: "Official organization for DataDance platform",
           logo: "/assets/logos/datadance-logo.png",
-          avatar: "/assets/logos/datadance-logo.png"
+          avatar: "/assets/logos/datadance-logo.png",
+          referralCode: generateReferralCode()
         }
       });
       

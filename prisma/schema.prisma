@@ -35,10 +35,7 @@ model User {
   xUsername      String?            // X (Twitter) Username
   xAccessToken   String?            // Encrypt this if stored
   xRefreshToken  String?            // Encrypt this if stored
-  
-  // 邀请码 - 使用应用生成的 referralCode
-  referralCode   String             @unique // 每个用户自己的推荐码，由应用生成
-  
+
   // 时间戳
   createdAt      DateTime           @default(now())
   updatedAt      DateTime           @updatedAt
@@ -75,11 +72,12 @@ model User {
   // 奖励和任务相关
   UserAwards      UserAward[]
   UserTasks       UserTask[]
-  
-  // 邀请关系
+
+  // 邀请关系 - 使用应用生成的 referralCode
+  referralCode   String             @unique // 每个用户自己的推荐码，由应用生成
   invitesSent     Referral[]        @relation("InvitesSent")
   invitesReceived Referral?         @relation("InvitesReceived")
-  
+
   // Wallet Pass 关系
   passes          Pass[]
 }

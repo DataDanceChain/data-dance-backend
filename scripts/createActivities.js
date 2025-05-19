@@ -1,5 +1,6 @@
 const bcrypt = require('bcryptjs');
 const prisma = require('../src/utils/prisma');
+const { generateReferralCode } = require('../src/utils/referralUtils');
 
 // 活动类型枚举
 const ActivityType = {
@@ -1488,7 +1489,8 @@ async function createActivity(activityData) {
           isOrganization: true,
           description: `Official organization for ${organizerName}`,
           logo: activityData.organizer.avatar,
-          avatar: activityData.organizer.avatar
+          avatar: activityData.organizer.avatar,
+          referralCode: generateReferralCode()
         }
       });
       

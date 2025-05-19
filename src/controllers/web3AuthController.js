@@ -3,6 +3,7 @@ const { generateToken } = require('../utils/jwtUtils');
 const { createLogger } = require('../utils/logger');
 const userService = require('../services/userService');
 const referralService = require('../services/referralService');
+const { generateReferralCode } = require('../utils/referralUtils');
 
 const logger = createLogger('web3AuthController');
 
@@ -13,7 +14,7 @@ const logger = createLogger('web3AuthController');
  */
 exports.web3authLogin = async (req, res) => {
   try {
-    const { userInfo, walletAddress, xid, xUsername, xAccessToken, xRefreshToken, inviteCode } = req.body;
+    const { userInfo, walletAddress, xid, xUsername, xAccessToken, xRefreshToken, referralCode } = req.body;
     // Determine login channel
     const isXLogin = Boolean(xid);
     const isWalletLogin = Boolean(walletAddress && !isXLogin);
@@ -23,7 +24,7 @@ exports.web3authLogin = async (req, res) => {
       email: userInfo?.email,
       walletAddress,
       xid,
-      hasInviteCode: Boolean(inviteCode)
+      hasReferralCode: Boolean(referralCode)
     });
 
     // Validate wallet address format if provided
@@ -74,6 +75,7 @@ exports.web3authLogin = async (req, res) => {
       }
       // If still not found, create new user for X login
       if (!user) {
+        const referralCode = generateReferralCode();
         user = await prisma.user.create({
           data: {
             email: userInfo?.email,
@@ -85,6 +87,7 @@ exports.web3authLogin = async (req, res) => {
             ...(xRefreshToken && { xRefreshToken }),
             authType: 'web3auth',
             userType: 'regular',
+            referralCode,
             profile: { create: { language: 'en' } }
           }
         });
@@ -192,35 +195,35 @@ exports.web3authLogin = async (req, res) => {
 
       // Registration path: require walletAddress
       if (walletAddress) {
-        // Validate invite code if provided
+        // Validate referral code if provided
         let referrerId = null;
-        if (inviteCode) {
+        if (referralCode) {
           try {
-            const inviteData = await validateInviteCode(inviteCode);
-            if (!inviteData.valid) {
-              logger.warn('Invalid invite code used', { inviteCode });
+            const referralData = await validateReferralCode(referralCode);
+            if (!referralData.valid) {
+              logger.warn('Invalid referral code used', { referralCode });
               return res.status(400).json({
                 status: 'fail',
-                code: 'INVALID_INVITE_CODE',
-                message: 'The invite code is invalid or has expired'
+                code: 'INVALID_REFERRAL_CODE',
+                message: 'The referral code is invalid or has expired'
               });
             }
-            referrerId = inviteData.referrerId;
+            referrerId = referralData.referrerId;
           } catch (error) {
-            logger.error('Error validating invite code', { 
-              inviteCode,
+            logger.error('Error validating referral code', { 
+              referralCode,
               error: error.message 
             });
             return res.status(500).json({
               status: 'error',
-              code: 'INVITE_VALIDATION_ERROR',
-              message: 'Failed to validate invite code'
+              code: 'REFERRAL_VALIDATION_ERROR',
+              message: 'Failed to validate referral code'
             });
           }
         }
 
-        // Generate invite code for the new user
-        const userInviteCode = generateInviteCode();
+        // Generate referral code for the new user
+        const userReferralCode = generateReferralCode();
         
         // Create new user with referral data
         const newUser = await prisma.user.create({
@@ -231,7 +234,7 @@ exports.web3authLogin = async (req, res) => {
             walletAddress,
             authType: 'web3auth',
             userType: 'regular',
-            inviteCode: userInviteCode,
+            referralCode: userReferralCode,
             ...(xid && { xid }),
             ...(xAccessToken && { xAccessToken }),
             ...(xRefreshToken && { xRefreshToken }),
@@ -263,7 +266,7 @@ exports.web3authLogin = async (req, res) => {
           userId: newUser.id,
           email: newUser.email,
           referrerId: referrerId,
-          inviteCode: userInviteCode
+          referralCode: userReferralCode
         });
 
         return res.status(201).json({
@@ -274,10 +277,10 @@ exports.web3authLogin = async (req, res) => {
               ...userWithoutSensitive,
               isOrganization: false
             },
-            invitationStatus: referrerId ? {
+            referralStatus: referrerId ? {
               success: true,
               code: 'REFERRAL_SUCCESSFUL',
-              message: 'Successfully registered with invite code'
+              message: 'Successfully registered with referral code'
             } : undefined
           }
         });

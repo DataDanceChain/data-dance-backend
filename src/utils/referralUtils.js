@@ -2,36 +2,36 @@ const { init: initCuid } = require('@paralleldrive/cuid2');
 const prisma = require('./prisma');
 const { createLogger } = require('./logger');
 
-const logger = createLogger('inviteUtils');
+const logger = createLogger('referralUtils');
 
 // Initialize cuid generator with custom configuration
 const createId = initCuid({
-  length: 8  // Shorter length for invite codes
+  length: 8  // Shorter length for referral codes
 });
 
 /**
- * Generate a unique invite code for a new user
- * @returns {string} A unique invite code
+ * Generate a unique referral code for a new user
+ * @returns {string} A unique referral code
  */
-function generateInviteCode() {
+function generateReferralCode() {
   return `DD-${createId()}`;
 }
 
 /**
- * Validate an invite code and return the referrer's information
- * @param {string} code - The invite code to validate
+ * Validate a referral code and return the referrer's information
+ * @param {string} code - The referral code to validate
  * @returns {Promise<{valid: boolean, referrerId?: string, error?: string}>}
  */
-async function validateInviteCode(code) {
+async function validateReferralCode(code) {
   try {
     if (!code) {
-      logger.warn('No invite code provided');
-      return { valid: false, error: 'No invite code provided' };
+      logger.warn('No referral code provided');
+      return { valid: false, error: 'No referral code provided' };
     }
 
-    // Find user with this invite code
+    // Find user with this referral code
     const referrer = await prisma.user.findFirst({
-      where: { inviteCode: code },
+      where: { referralCode: code },
       select: {
         id: true,
         email: true,
@@ -40,8 +40,8 @@ async function validateInviteCode(code) {
     });
 
     if (!referrer) {
-      logger.warn('Invalid invite code', { code });
-      return { valid: false, error: 'Invalid invite code' };
+      logger.warn('Invalid referral code', { code });
+      return { valid: false, error: 'Invalid referral code' };
     }
 
     // Check if referrer has reached their limit (if any limit exists)
@@ -57,7 +57,7 @@ async function validateInviteCode(code) {
     }
     */
 
-    logger.info('Valid invite code used', {
+    logger.info('Valid referral code used', {
       code,
       referrerId: referrer.id,
       referralCount: referrer.referralCount
@@ -69,18 +69,18 @@ async function validateInviteCode(code) {
     };
 
   } catch (error) {
-    logger.error('Error validating invite code', {
+    logger.error('Error validating referral code', {
       code,
       error: error.message
     });
     return {
       valid: false,
-      error: 'Error validating invite code'
+      error: 'Error validating referral code'
     };
   }
 }
 
 module.exports = {
-  generateInviteCode,
-  validateInviteCode
+  generateReferralCode,
+  validateReferralCode
 };

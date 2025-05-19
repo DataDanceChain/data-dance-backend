@@ -1,5 +1,6 @@
 const prisma = require('../src/utils/prisma');
 const bcrypt = require('bcryptjs');
+const { generateReferralCode } = require('../src/utils/referralUtils');
 
 async function createOffGridEvent() {
   try {
@@ -25,7 +26,8 @@ async function createOffGridEvent() {
           isOrganization: true,
           description: "OFF GRID is a community-first entertainment movement, co-creating the future of music and artist IP through real-life experiences and Web3 technology.",
           logo: "/assets/logos/off-grid-logo.jpg",
-          avatar: "/assets/logos/off-grid-logo.jpg"
+          avatar: "/assets/logos/off-grid-logo.jpg",
+          referralCode: generateReferralCode()
         }
       });
       

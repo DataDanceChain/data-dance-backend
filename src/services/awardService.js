@@ -1,12 +1,15 @@
 const prisma = require('../utils/prisma');
 const { getTasksByAward } = require('./taskService');
 const { getReferralOverview } = require('./referralService');
+const { awards: awardConfig } = require('../../config/awards.json');
 
 /**
  * Fetch platform award definitions (id, title, description, icon, color, status, metadata)
+ * Returns awards in the same order as defined in awards.json
  */
 async function getAwardDefinitions() {
-  return prisma.award.findMany({
+  // First get all awards from database
+  const awards = await prisma.award.findMany({
     select: {
       id: true,
       title: true,
@@ -17,6 +20,12 @@ async function getAwardDefinitions() {
       metadata: true
     }
   });
+
+  // Create a map for quick lookup
+  const awardMap = new Map(awards.map(award => [award.id, award]));
+
+  // Return awards in the order defined in awards.json
+  return awardConfig.map(config => awardMap.get(config.id));
 }
 
 /**
@@ -30,10 +39,24 @@ async function getUserAwards(userId) {
   const referralOverview = await getReferralOverview(userId);
 
   // fetch all awards and user's awards
-  const awardsRaw = await prisma.award.findMany({ select: { id: true, title: true, description: true, icon: true, color: true, metadata: true, status: true } });
-  const userAwards = await prisma.userAward.findMany({ where: { userId }, select: { awardId: true, status: true, claimed: true } });
+  const awardsRaw = await prisma.award.findMany({ 
+    select: { id: true, title: true, description: true, icon: true, color: true, metadata: true, status: true } 
+  });
+  const userAwards = await prisma.userAward.findMany({ 
+    where: { userId }, 
+    select: { awardId: true, status: true, claimed: true } 
+  });
+
+  // Create a map for quick lookup
+  const awardMap = new Map(awardsRaw.map(award => [award.id, award]));
+  const userAwardMap = new Map(userAwards.map(ua => [ua.awardId, ua]));
+
+  // Process awards in the order defined in awards.json
   const result = [];
-  for (const award of awardsRaw) {
+  for (const config of awardConfig) {
+    const award = awardMap.get(config.id);
+    if (!award) continue; // Skip if award not found in database
+
     const tasks = await getTasksByAward(userId, award.id);
     const total = tasks.length;
     const claimedCount = tasks.filter(t => t.claimed).length;
@@ -50,7 +73,7 @@ async function getUserAwards(userId) {
     }
 
     // find userAward record
-    const ua = userAwards.find(u => u.awardId === award.id) || { status: 'LOCKED', claimed: false };
+    const ua = userAwardMap.get(award.id) || { status: 'LOCKED', claimed: false };
     
     // compute finalStatus per award based on task statuses
     let finalStatus;

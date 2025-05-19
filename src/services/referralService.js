@@ -263,7 +263,7 @@ async function useReferralCode(userId, code) {
     // Create referral relationship and process rewards in a transaction
     const referralData = await prisma.$transaction(async (tx) => {
       // Create the referral record
-      const ref = await tx.referral.create({
+      const referral = await tx.referral.create({
         data: {
           inviterId: inviter.id,
           inviteeId: userId,
@@ -274,7 +274,7 @@ async function useReferralCode(userId, code) {
       // Process multi-level rewards within the same transaction
       await processReferral(userId, inviter.id, code);
       
-      return ref;
+      return referral;
     });
 
     return {
@@ -282,7 +282,7 @@ async function useReferralCode(userId, code) {
       inviterName: inviter.name,
       inviteeId: userId,
       code: code,
-      createdAt: referral.createdAt
+      createdAt: referralData.createdAt
     };
   } catch (error) {
     console.error('Transaction error in useReferralCode:', error);

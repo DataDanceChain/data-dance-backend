@@ -1,5 +1,5 @@
 const prisma = require('../utils/prisma');
-const { getReferralOverview, claimReferralRewards, processReferral, getReferralStatus } = require('../services/referralService');
+const { getReferralOverview, claimReferralRewards, processReferral, getReferralStatus, useReferralCode } = require('../services/referralService');
 
 /**
  * Use referral code (previously invitation code)

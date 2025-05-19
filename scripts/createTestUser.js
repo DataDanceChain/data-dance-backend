@@ -1,5 +1,6 @@
 const { PrismaClient } = require('@prisma/client');
 const bcrypt = require('bcryptjs');
+const { generateReferralCode } = require('../src/utils/referralUtils');
 
 const prisma = new PrismaClient();
 
@@ -28,6 +29,7 @@ async function createTestUser() {
         isOrganization: false,
         userType: 'regular',
         authType: 'traditional',
+        referralCode: generateReferralCode(),
         profile: {
           create: {
             language: 'zh'

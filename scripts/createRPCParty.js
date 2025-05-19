@@ -1,5 +1,6 @@
 const prisma = require('../src/utils/prisma');
 const bcrypt = require('bcryptjs');
+const { generateReferralCode } = require('../src/utils/referralUtils');
 
 /**
  * 创建 RPC Club Party 活动
@@ -29,7 +30,8 @@ async function createRPCParty() {
           isOrganization: true,
           description: "Ready Player Club DAO - A Web3 Community",
           logo: "/assets/logos/rpc-dao.png",
-          avatar: "/assets/logos/rpc-dao.png"
+          avatar: "/assets/logos/rpc-dao.png",
+          referralCode: generateReferralCode()
         }
       });
       

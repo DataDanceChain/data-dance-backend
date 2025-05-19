@@ -3,6 +3,7 @@ require('dotenv').config();
 const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
 const { recordTaskProgress } = require('../src/services/taskService');
+const { generateReferralCode } = require('../src/utils/referralUtils');
 
 /**
  * Seed test users, referral relationships, UserAward, and UserTask data.
@@ -22,8 +23,17 @@ async function main() {
   const userMap = {};
   const mainUser = await prisma.user.upsert({
     where: { email: mainEmail },
-    update: { name: mainEmail.split('@')[0] },
-    create: { email: mainEmail, name: mainEmail.split('@')[0], password: defaultHash, profile: { create: { language: 'en' } } }
+    update: { 
+      name: mainEmail.split('@')[0],
+      referralCode: generateReferralCode()
+    },
+    create: { 
+      email: mainEmail, 
+      name: mainEmail.split('@')[0], 
+      password: defaultHash, 
+      referralCode: generateReferralCode(),
+      profile: { create: { language: 'en' } } 
+    }
   });
   userMap[mainEmail] = mainUser;
   console.log(`[seedTestUserData] Upserted main test user: ${mainEmail}`);
@@ -34,12 +44,12 @@ async function main() {
   const referralPairs = [];
   for (let lvl = 1; lvl <= 4; lvl++) {
     const current = [];
-    for (const { email: inviterEmail, path } of levels[lvl-1]) {
+    for (const { email: referrerEmail, path } of levels[lvl-1]) {
       const count = Math.floor(Math.random() * 5) + 1;
       for (let i = 1; i <= count; i++) {
         const newPath = path ? `${path}_${i}` : `${i}`;
-        const childEmail = `test_user_${newPath}@example.com`;
-        referralPairs.push([inviterEmail, childEmail]);
+        const childEmail = `test.user.${newPath}.${lvl}@example.com`;
+        referralPairs.push([referrerEmail, childEmail]);
         current.push({ email: childEmail, path: newPath });
       }
     }
@@ -51,8 +61,18 @@ async function main() {
     const path = levels.flat().find(o => o.email === childEmail)?.path;
     const name = path ? `Test_user_${path}` : childEmail.split('@')[0];
     const user = await prisma.user.upsert({
-      where: { email: childEmail }, update: { name },
-      create: { email: childEmail, name, password: defaultHash, profile: { create: { language: 'en' } } }
+      where: { email: childEmail }, 
+      update: { 
+        name,
+        referralCode: generateReferralCode()
+      },
+      create: { 
+        email: childEmail, 
+        name, 
+        password: defaultHash, 
+        referralCode: generateReferralCode(),
+        profile: { create: { language: 'en' } } 
+      }
     });
     userMap[childEmail] = user;
     emails.push(childEmail);
@@ -62,26 +82,34 @@ async function main() {
   const allPairs = referralPairs;
 
   // Batch create referral relations
-  await Promise.all(allPairs.map(async ([invEmail, invrEmail]) => {
-    const inviter = userMap[invEmail];
-    const invitee = userMap[invrEmail];
-    const code = crypto.randomBytes(4).toString('hex');
+  await Promise.all(allPairs.map(async ([refEmail, refereeEmail]) => {
+    const referrer = userMap[refEmail];
+    const referee = userMap[refereeEmail];
+    const code = referrer.referralCode;
+
     await prisma.referral.upsert({
-      where: { inviteeId: invitee.id },
-      update: { code },
-      create: { inviterId: inviter.id, inviteeId: invitee.id, code }
+      where: { inviteeId: referee.id },
+      update: {
+        inviterId: referrer.id,
+        code
+      },
+      create: { 
+        inviterId: referrer.id, 
+        inviteeId: referee.id, 
+        code 
+      }
     });
   }));
   console.log(`[seedTestUserData] Created ${allPairs.length} referral relationships`);
 
   // Prefill referral task progress for referral levels 1–4
   const parentMap = {};
-  allPairs.forEach(([invEmail, inviteeEmail]) => { parentMap[inviteeEmail] = invEmail; });
+  allPairs.forEach(([refEmail, refereeEmail]) => { parentMap[refereeEmail] = refEmail; });
   for (let lvl = 1; lvl <= 4; lvl++) {
     const taskId = `referral-${lvl}`;
     for (const { email } of levels[lvl]) {
-      const inviterId = userMap[parentMap[email]].id;
-      await recordTaskProgress(inviterId, taskId, 1);
+      const referrerId = userMap[parentMap[email]].id;
+      await recordTaskProgress(referrerId, taskId, 1);
     }
   }
   console.log('[seedTestUserData] Prefilled referral task progress for levels 1-4');

@@ -1,5 +1,6 @@
 const prisma = require('../src/utils/prisma');
 const bcrypt = require('bcryptjs');
+const { generateReferralCode } = require('../src/utils/referralUtils');
 
 /**
  * 创建 GCC X Ethpanda X DDC 活动
@@ -29,7 +30,8 @@ async function createGCCEvent() {
           isOrganization: true,
           description: "Official organization for DataDance platform",
           logo: "/assets/logos/datadance-logo.png",
-          avatar: "/assets/logos/datadance-logo.png"
+          avatar: "/assets/logos/datadance-logo.png",
+          referralCode: generateReferralCode()
         }
       });
       
