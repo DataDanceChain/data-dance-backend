@@ -1,6 +1,6 @@
 const { PrismaClient } = require('@prisma/client');
 const crypto = require('crypto');
-
+const { createActivityNFTContract } = require('../utils/web3Utils');
 const prisma = new PrismaClient();
 
 /**
@@ -15,7 +15,7 @@ exports.getActivities = async (req, res) => {
 
     // 构建查询条件
     const where = {};
-    
+
     // 如果有分类筛选
     if (category) {
       where.categories = {
@@ -24,7 +24,7 @@ exports.getActivities = async (req, res) => {
         }
       };
     }
-    
+
     // 如果有搜索关键词
     if (search) {
       where.OR = [
@@ -37,7 +37,7 @@ exports.getActivities = async (req, res) => {
     if (isPromoted !== undefined) {
       where.isPromoted = isPromoted === 'true';
     }
-    
+
     // 只获取当前和未来的活动
     where.endDate = {
       gte: new Date()
@@ -53,7 +53,7 @@ exports.getActivities = async (req, res) => {
         claims: {
           where: {
             userId: req.user.id
-        }
+          }
         },
         nftMarketOrders: true
       },
@@ -256,7 +256,7 @@ exports.claimActivity = async (req, res) => {
 
       // 生成 DataDanceID
       const identifier = generateIdentifier(userId, id);
-      
+
       const dataDanceID = await prisma.dataDanceID.create({
         data: {
           identifier,
@@ -315,9 +315,9 @@ exports.getRecommendedActivities = async (req, res) => {
         }
       }
     });
-    
+
     const categoryIds = userClaimedCategories.map(c => c.id);
-    
+
     // 根据用户已领取的活动类别推荐活动
     const recommendedActivities = await prisma.activity.findMany({
       where: {
@@ -341,7 +341,7 @@ exports.getRecommendedActivities = async (req, res) => {
         claims: {
           where: {
             userId: req.user.id
-        }
+          }
         },
         nftMarketOrders: true
       },
@@ -350,7 +350,7 @@ exports.getRecommendedActivities = async (req, res) => {
         createdAt: 'desc'
       }
     });
-    
+
     // 格式化返回数据
     const formattedActivities = recommendedActivities.map(activity => ({
       id: activity.id,
@@ -380,7 +380,7 @@ exports.getRecommendedActivities = async (req, res) => {
       isClaimed: activity.claims.length > 0,
       showInExplore: activity.showInExplore
     }));
-    
+
     res.status(200).json({
       success: true,
       data: formattedActivities
@@ -430,12 +430,12 @@ exports.getAllActivities = async (req, res) => {
 
     // 构建查询条件
     const where = {};
-    
+
     // 如果不是查询推广活动，则只显示 showInExplore 为 true 的活动
     if (isPromoted === undefined || isPromoted === 'false') {
       where.showInExplore = true;
     }
-    
+
     // 如果有分类筛选
     if (category) {
       where.categories = {
@@ -444,7 +444,7 @@ exports.getAllActivities = async (req, res) => {
         }
       };
     }
-    
+
     // 如果有搜索关键词
     if (search) {
       where.OR = [
@@ -471,7 +471,7 @@ exports.getAllActivities = async (req, res) => {
         claims: {
           where: {
             userId: req.user.id
-        }
+          }
         },
         nftMarketOrders: true
       },
@@ -651,7 +651,7 @@ exports.getFeaturedActivities = async (req, res) => {
         claims: {
           where: {
             userId: req.user.id
-        }
+          }
         },
         nftMarketOrders: true
       },
@@ -659,7 +659,7 @@ exports.getFeaturedActivities = async (req, res) => {
         createdAt: 'desc'
       }
     });
-    
+
     // 格式化返回数据
     const formattedActivities = activities.map(activity => ({
       id: activity.id,
@@ -692,7 +692,7 @@ exports.getFeaturedActivities = async (req, res) => {
       isClaimed: activity.claims.length > 0,
       showInExplore: activity.showInExplore,
     }));
-    
+
     res.status(200).json({
       success: true,
       data: formattedActivities
@@ -715,7 +715,7 @@ exports.getClaimedActivities = async (req, res) => {
   try {
     // 获取用户领取的活动
     const claims = await prisma.activityClaim.findMany({
-      where: { 
+      where: {
         userId: req.user.id
       },
       include: {
@@ -811,7 +811,7 @@ exports.getUserClaimedActivities = async (req, res) => {
         claims: {
           where: {
             userId: req.user.id
-        }
+          }
         },
         nftMarketOrders: true
       },
@@ -949,7 +949,7 @@ exports.updateActivityContract = async (req, res) => {
 exports.deployActivityContract = async (req, res) => {
   try {
     const { id } = req.params;
-    
+
     // 检查活动是否存在
     const activity = await prisma.activity.findUnique({
       where: { id }
@@ -1025,10 +1025,10 @@ function generateIdentifier(userId, activityId) {
   // 使用用户ID、活动ID和时间戳生成唯一标识符
   const baseString = `${userId}-${activityId}-${Date.now()}`;
   const hash = crypto.createHash('sha256').update(baseString).digest('hex');
-  
+
   // 返回前12位，格式为 DDID-XXXX-XXXX
   return `DDID-${hash.substring(0, 4)}-${hash.substring(4, 8)}`;
-} 
+}
 
 /**
  * 获取商家创建的活动
@@ -1222,12 +1222,18 @@ exports.createActivity = async (req, res) => {
     const parsedEquityDetails = JSON.parse(equityDetails || '[]');
     const parsedExternalLinks = JSON.parse(externalLinks || '[]');
 
+    // 创建活动NFT合约
+    const user = await prisma.user.findUnique({ where: { id: req.user.id } });
+    const activityNFTContract = await createActivityNFTContract(req.user.id, user.walletAddress);
+
+
     // 准备活动数据
     const activityData = {
       title,
       description,
       startDate: new Date(startDate),
       endDate: new Date(endDate),
+      // contractAddress: activityNFTContract.address,
       type,
       categories: {
         connect: parsedCategories.map(id => ({ id }))
