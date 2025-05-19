@@ -1,9 +1,6 @@
 -- CreateEnum
 CREATE TYPE "AwardStatus" AS ENUM ('LOCKED', 'LIVE', 'INVALID');
 
--- CreateEnum
-CREATE TYPE "TaskType" AS ENUM ('ONE_TIME', 'CONTINUOUS');
-
 -- CreateTable
 CREATE TABLE "User" (
     "id" TEXT NOT NULL,
@@ -19,10 +16,14 @@ CREATE TABLE "User" (
     "isOrganization" BOOLEAN NOT NULL DEFAULT false,
     "description" TEXT,
     "logo" TEXT,
+    "xid" TEXT,
+    "xUsername" TEXT,
+    "xAccessToken" TEXT,
+    "xRefreshToken" TEXT,
+    "referralCode" TEXT NOT NULL,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
     "totalPoints" DOUBLE PRECISION NOT NULL DEFAULT 0,
-    "inviteCode" TEXT NOT NULL,
     "organizationId" TEXT,
 
     CONSTRAINT "User_pkey" PRIMARY KEY ("id")
@@ -47,7 +48,7 @@ CREATE TABLE "Role" (
     "name" TEXT NOT NULL,
     "description" TEXT,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
 
     CONSTRAINT "Role_pkey" PRIMARY KEY ("id")
 );
@@ -58,7 +59,7 @@ CREATE TABLE "Permission" (
     "name" TEXT NOT NULL,
     "description" TEXT,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
 
     CONSTRAINT "Permission_pkey" PRIMARY KEY ("id")
 );
@@ -68,7 +69,7 @@ CREATE TABLE "UserRole" (
     "userId" TEXT NOT NULL,
     "roleId" TEXT NOT NULL,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
 
     CONSTRAINT "UserRole_pkey" PRIMARY KEY ("userId","roleId")
 );
@@ -81,7 +82,7 @@ CREATE TABLE "Point" (
     "source" TEXT NOT NULL,
     "sourceId" TEXT,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
 
     CONSTRAINT "Point_pkey" PRIMARY KEY ("id")
 );
@@ -133,7 +134,7 @@ CREATE TABLE "Authorization" (
     "validFrom" TIMESTAMP(3) NOT NULL,
     "validTo" TIMESTAMP(3),
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
 
     CONSTRAINT "Authorization_pkey" PRIMARY KEY ("id")
 );
@@ -147,7 +148,7 @@ CREATE TABLE "AssetTransaction" (
     "assetId" TEXT,
     "description" TEXT,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
 
     CONSTRAINT "AssetTransaction_pkey" PRIMARY KEY ("id")
 );
@@ -164,28 +165,28 @@ CREATE TABLE "Activity" (
     "budget" DOUBLE PRECISION,
     "bidStrategy" JSONB,
     "shareLink" TEXT,
-    "type" TEXT NOT NULL DEFAULT 'MEMBERSHIP',
-    "remaining" INTEGER,
-    "total" INTEGER,
-    "statusNote" TEXT,
-    "equityTitle" TEXT,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
     "equityDetails" TEXT[],
-    "externalLinksTitle" TEXT,
+    "equityTitle" TEXT,
     "externalLinks" JSONB,
-    "nftName" TEXT,
+    "externalLinksTitle" TEXT,
     "nftDescription" TEXT,
     "nftImage" TEXT,
-    "nftTotalSupply" INTEGER,
+    "nftName" TEXT,
     "nftPrice" DOUBLE PRECISION,
-    "nftValidityStart" TIMESTAMP(3),
-    "nftValidityEnd" TIMESTAMP(3),
+    "nftTotalSupply" INTEGER,
     "nftUsageRules" TEXT,
+    "nftValidityEnd" TIMESTAMP(3),
+    "nftValidityStart" TIMESTAMP(3),
+    "remaining" INTEGER,
+    "showInExplore" BOOLEAN NOT NULL DEFAULT true,
+    "statusNote" TEXT,
+    "total" INTEGER,
+    "type" TEXT NOT NULL DEFAULT 'MEMBERSHIP',
     "contractAddress" TEXT,
     "chainId" INTEGER,
     "tokenStandard" TEXT,
-    "showInExplore" BOOLEAN NOT NULL DEFAULT true,
-    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "updatedAt" TIMESTAMP(3) NOT NULL,
 
     CONSTRAINT "Activity_pkey" PRIMARY KEY ("id")
 );
@@ -195,7 +196,7 @@ CREATE TABLE "ActivityCategory" (
     "id" TEXT NOT NULL,
     "name" TEXT NOT NULL,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
 
     CONSTRAINT "ActivityCategory_pkey" PRIMARY KEY ("id")
 );
@@ -205,7 +206,7 @@ CREATE TABLE "ActivityTag" (
     "id" TEXT NOT NULL,
     "name" TEXT NOT NULL,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
 
     CONSTRAINT "ActivityTag_pkey" PRIMARY KEY ("id")
 );
@@ -231,7 +232,7 @@ CREATE TABLE "Listing" (
     "currency" TEXT NOT NULL DEFAULT 'USD',
     "status" TEXT NOT NULL,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
 
     CONSTRAINT "Listing_pkey" PRIMARY KEY ("id")
 );
@@ -244,7 +245,7 @@ CREATE TABLE "Order" (
     "status" TEXT NOT NULL,
     "amount" DOUBLE PRECISION NOT NULL,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
 
     CONSTRAINT "Order_pkey" PRIMARY KEY ("id")
 );
@@ -258,7 +259,7 @@ CREATE TABLE "Notification" (
     "type" TEXT NOT NULL,
     "isRead" BOOLEAN NOT NULL DEFAULT false,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
 
     CONSTRAINT "Notification_pkey" PRIMARY KEY ("id")
 );
@@ -287,7 +288,7 @@ CREATE TABLE "Award" (
     "status" "AwardStatus" NOT NULL DEFAULT 'LOCKED',
     "metadata" JSONB DEFAULT '{}',
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
 
     CONSTRAINT "Award_pkey" PRIMARY KEY ("id")
 );
@@ -300,6 +301,7 @@ CREATE TABLE "UserAward" (
     "status" "AwardStatus" NOT NULL DEFAULT 'LOCKED',
     "claimed" BOOLEAN NOT NULL DEFAULT false,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
 
     CONSTRAINT "UserAward_pkey" PRIMARY KEY ("id")
 );
@@ -310,16 +312,17 @@ CREATE TABLE "Task" (
     "awardId" TEXT NOT NULL,
     "title" TEXT NOT NULL,
     "description" TEXT,
-    "type" "TaskType" NOT NULL,
+    "status" "AwardStatus" NOT NULL DEFAULT 'LOCKED',
     "prerequisiteTaskId" TEXT,
     "claimLimit" INTEGER,
+    "requirementCount" INTEGER,
     "points" INTEGER NOT NULL,
     "icon" TEXT,
     "picture" TEXT,
     "url" TEXT,
-    "status" "AwardStatus" NOT NULL DEFAULT 'LOCKED',
+    "metadata" JSONB DEFAULT '{}',
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
 
     CONSTRAINT "Task_pkey" PRIMARY KEY ("id")
 );
@@ -331,8 +334,9 @@ CREATE TABLE "UserTask" (
     "taskId" TEXT NOT NULL,
     "status" "AwardStatus" NOT NULL DEFAULT 'LOCKED',
     "claimRecords" TIMESTAMP(3)[] DEFAULT ARRAY[]::TIMESTAMP(3)[],
+    "claimed" BOOLEAN NOT NULL DEFAULT false,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
 
     CONSTRAINT "UserTask_pkey" PRIMARY KEY ("id")
 );
@@ -344,8 +348,44 @@ CREATE TABLE "Referral" (
     "inviteeId" TEXT NOT NULL,
     "code" TEXT NOT NULL,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
 
     CONSTRAINT "Referral_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
+CREATE TABLE "XPostCache" (
+    "key" TEXT NOT NULL,
+    "data" JSONB NOT NULL,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
+
+    CONSTRAINT "XPostCache_pkey" PRIMARY KEY ("key")
+);
+
+-- CreateTable
+CREATE TABLE "Pass" (
+    "id" TEXT NOT NULL,
+    "creatorId" TEXT NOT NULL,
+    "creatorName" TEXT NOT NULL,
+    "creatorLogo" TEXT NOT NULL,
+    "userId" TEXT NOT NULL,
+    "userName" TEXT NOT NULL,
+    "userWalletAddress" TEXT NOT NULL,
+    "passUrl" TEXT,
+    "status" TEXT NOT NULL DEFAULT 'active',
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "expiresAt" TIMESTAMP(3) NOT NULL,
+    "serialNumber" TEXT,
+    "pushToken" TEXT,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
+    "passTypeIdentifier" TEXT NOT NULL DEFAULT 'pass.ai.datadance.app',
+    "platform" TEXT NOT NULL DEFAULT 'apple',
+    "googleObjectId" TEXT,
+    "googleClassId" TEXT,
+    "googleAddUrl" TEXT,
+
+    CONSTRAINT "Pass_pkey" PRIMARY KEY ("id")
 );
 
 -- CreateTable
@@ -373,7 +413,10 @@ CREATE UNIQUE INDEX "User_email_key" ON "User"("email");
 CREATE UNIQUE INDEX "User_walletAddress_key" ON "User"("walletAddress");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "User_inviteCode_key" ON "User"("inviteCode");
+CREATE UNIQUE INDEX "User_xid_key" ON "User"("xid");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "User_referralCode_key" ON "User"("referralCode");
 
 -- CreateIndex
 CREATE UNIQUE INDEX "UserProfile_userId_key" ON "UserProfile"("userId");
@@ -400,7 +443,16 @@ CREATE UNIQUE INDEX "UserTask_userId_taskId_key" ON "UserTask"("userId", "taskId
 CREATE UNIQUE INDEX "Referral_inviteeId_key" ON "Referral"("inviteeId");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "Referral_code_key" ON "Referral"("code");
+CREATE UNIQUE INDEX "Pass_serialNumber_key" ON "Pass"("serialNumber");
+
+-- CreateIndex
+CREATE INDEX "Pass_creatorId_idx" ON "Pass"("creatorId");
+
+-- CreateIndex
+CREATE INDEX "Pass_userId_idx" ON "Pass"("userId");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "Pass_userId_creatorId_platform_key" ON "Pass"("userId", "creatorId", "platform");
 
 -- CreateIndex
 CREATE UNIQUE INDEX "_PermissionToRole_AB_unique" ON "_PermissionToRole"("A", "B");
@@ -427,10 +479,10 @@ ALTER TABLE "User" ADD CONSTRAINT "User_organizationId_fkey" FOREIGN KEY ("organ
 ALTER TABLE "UserProfile" ADD CONSTRAINT "UserProfile_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "UserRole" ADD CONSTRAINT "UserRole_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "UserRole" ADD CONSTRAINT "UserRole_roleId_fkey" FOREIGN KEY ("roleId") REFERENCES "Role"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "UserRole" ADD CONSTRAINT "UserRole_roleId_fkey" FOREIGN KEY ("roleId") REFERENCES "Role"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "UserRole" ADD CONSTRAINT "UserRole_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "Point" ADD CONSTRAINT "Point_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
@@ -439,10 +491,10 @@ ALTER TABLE "Point" ADD CONSTRAINT "Point_userId_fkey" FOREIGN KEY ("userId") RE
 ALTER TABLE "Badge" ADD CONSTRAINT "Badge_creatorId_fkey" FOREIGN KEY ("creatorId") REFERENCES "User"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "UserBadge" ADD CONSTRAINT "UserBadge_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "UserBadge" ADD CONSTRAINT "UserBadge_badgeId_fkey" FOREIGN KEY ("badgeId") REFERENCES "Badge"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "UserBadge" ADD CONSTRAINT "UserBadge_badgeId_fkey" FOREIGN KEY ("badgeId") REFERENCES "Badge"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "UserBadge" ADD CONSTRAINT "UserBadge_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "NFTDataAsset" ADD CONSTRAINT "NFTDataAsset_ownerId_fkey" FOREIGN KEY ("ownerId") REFERENCES "User"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
@@ -457,10 +509,10 @@ ALTER TABLE "AssetTransaction" ADD CONSTRAINT "AssetTransaction_userId_fkey" FOR
 ALTER TABLE "Activity" ADD CONSTRAINT "Activity_creatorId_fkey" FOREIGN KEY ("creatorId") REFERENCES "User"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "ActivityClaim" ADD CONSTRAINT "ActivityClaim_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "ActivityClaim" ADD CONSTRAINT "ActivityClaim_activityId_fkey" FOREIGN KEY ("activityId") REFERENCES "Activity"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "ActivityClaim" ADD CONSTRAINT "ActivityClaim_activityId_fkey" FOREIGN KEY ("activityId") REFERENCES "Activity"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "ActivityClaim" ADD CONSTRAINT "ActivityClaim_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "Listing" ADD CONSTRAINT "Listing_assetId_fkey" FOREIGN KEY ("assetId") REFERENCES "NFTDataAsset"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
@@ -472,10 +524,10 @@ ALTER TABLE "Order" ADD CONSTRAINT "Order_listingId_fkey" FOREIGN KEY ("listingI
 ALTER TABLE "Notification" ADD CONSTRAINT "Notification_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "DataDanceID" ADD CONSTRAINT "DataDanceID_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "DataDanceID" ADD CONSTRAINT "DataDanceID_activityId_fkey" FOREIGN KEY ("activityId") REFERENCES "Activity"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "DataDanceID" ADD CONSTRAINT "DataDanceID_activityId_fkey" FOREIGN KEY ("activityId") REFERENCES "Activity"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "DataDanceID" ADD CONSTRAINT "DataDanceID_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "UserAward" ADD CONSTRAINT "UserAward_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
@@ -500,6 +552,9 @@ ALTER TABLE "Referral" ADD CONSTRAINT "Referral_inviterId_fkey" FOREIGN KEY ("in
 
 -- AddForeignKey
 ALTER TABLE "Referral" ADD CONSTRAINT "Referral_inviteeId_fkey" FOREIGN KEY ("inviteeId") REFERENCES "User"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "Pass" ADD CONSTRAINT "Pass_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "_PermissionToRole" ADD CONSTRAINT "_PermissionToRole_A_fkey" FOREIGN KEY ("A") REFERENCES "Permission"("id") ON DELETE CASCADE ON UPDATE CASCADE;

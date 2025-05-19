@@ -18,6 +18,14 @@
     * [Referral System API](#referral-system-api)
     * [Task API](#task-api)
 8. [X API](#x-api)
+9. [Pass API](#pass-api)
+
+## 测试账号
+为了方便测试，我们提供了一个测试账号，可以使用账号密码登录：
+- 邮箱：test@example.com
+- 密码：password123
+
+该账号可以绕过 Web3Auth 的限制，直接使用账号密码登录，并返回 token。
 
 ## 认证 API
 
@@ -1009,6 +1017,219 @@ Authorization: Bearer <token>
 }
 ```
 
+### 生成Apple Wallet Pass
+
+```
+POST /assets/passes/generate
+```
+
+**请求头**:
+```
+Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+```
+
+**请求体**:
+```json
+{
+  "creatorId": "creator-uuid",
+  "creatorName": "Creator Name",
+  "creatorLogo": "/assets/logos/creator-logo.png",
+  "userId": "user-uuid",
+  "userName": "User Name",
+  "userWalletAddress": "0x1234567890abcdef1234567890abcdef12345678"
+}
+```
+
+**响应** (200 OK):
+```json
+{
+  "status": "success",
+  "data": {
+    "passUrl": "https://api.datadance.app/assets/passes/1234567890.pkpass",
+    "expiresAt": "2024-12-31T23:59:59.000Z"
+  }
+}
+```
+
+**Pass 显示说明**:
+1. Pass 背景图片（strip）会显示用户在该创作者下拥有的 NFT：
+   - 单个 NFT：完整显示
+   - 两个 NFT：左右平分显示
+   - 三个及以上 NFT：显示最新的三个，平均分配空间
+2. Pass 正面显示：
+   - 创作者名称
+   - 会员状态
+   - 会员姓名
+   - 钱包地址（简略形式）
+   - NFT 总数
+   - 最后铸造日期
+3. Pass 背面显示：
+   - 创作者名称
+   - 完整钱包地址
+   - NFT 列表（包含名称、类型、标签、铸造日期）
+   - 有效期
+
+**错误响应**:
+
+**响应** (400 Bad Request):
+```json
+{
+  "status": "fail",
+  "message": "Invalid request parameters"
+}
+```
+
+**响应** (500 Internal Server Error):
+```json
+{
+  "status": "error",
+  "message": "Failed to generate pass",
+  "error": "Error details (only in development)"
+}
+```
+
+**注意事项**:
+1. Pass 有效期默认为生成日期起一年
+2. NFT 图片会自动调整大小以适应显示区域
+3. 所有图片资源（NFT图片、创作者logo等）必须可以通过提供的URL访问
+
+### 获取用户的所有Pass
+
+```
+GET /assets/passes
+```
+
+**请求头**:
+```
+Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+```
+
+**响应** (200 OK):
+```json
+{
+  "status": "success",
+  "data": {
+    "passes": [
+      {
+        "id": "pass-uuid",
+        "creatorId": "creator-uuid",
+        "creatorName": "Creator Name",
+        "creatorLogo": "/assets/logos/creator-logo.png",
+        "passUrl": "https://api.datadance.app/assets/passes/1234567890.pkpass",
+        "createdAt": "2024-03-20T12:00:00.000Z",
+        "expiresAt": "2024-12-31T23:59:59.000Z"
+      }
+    ]
+  }
+}
+```
+
+### 获取单个Pass详情
+
+```
+GET /assets/passes/{passId}
+```
+
+**请求头**:
+```
+Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+```
+
+**响应** (200 OK):
+```json
+{
+  "status": "success",
+  "data": {
+    "id": "pass-uuid",
+    "creatorId": "creator-uuid",
+    "creatorName": "Creator Name",
+    "creatorLogo": "/assets/logos/creator-logo.png",
+    "passUrl": "https://api.datadance.app/assets/passes/1234567890.pkpass",
+    "createdAt": "2024-03-20T12:00:00.000Z",
+    "expiresAt": "2024-12-31T23:59:59.000Z",
+    "status": "active"
+  }
+}
+```
+
+### 更新Pass状态
+
+```
+PATCH /assets/passes/{passId}/status
+```
+
+**请求头**:
+```
+Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+```
+
+**请求体**:
+```json
+{
+  "status": "revoked" // 可选值: "active", "revoked", "expired"
+}
+```
+
+**响应** (200 OK):
+```json
+{
+  "status": "success",
+  "data": {
+    "id": "pass-uuid",
+    "status": "revoked"
+  }
+}
+```
+
+### 生成 Google Wallet Pass
+
+```
+POST /assets/passes/generate
+```
+
+**请求头**:
+```
+Authorization: Bearer <token>
+```
+
+**请求体**:
+```json
+{
+  "creatorId": "creator-uuid",
+  "creatorName": "Creator Name",
+  "creatorLogo": "/assets/logos/creator-logo.png",
+  "userId": "user-uuid",
+  "userName": "User Name",
+  "userWalletAddress": "0x1234567890abcdef1234567890abcdef12345678",
+  "platform": "google" // 指定为 google 即生成 Google Wallet Pass
+}
+```
+
+**响应** (200 OK):
+```json
+{
+  "status": "success",
+  "data": {
+    "passUrl": "https://pay.google.com/gp/v/save/eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9...",
+    "expiresAt": "2024-12-31T23:59:59.000Z",
+    "googleObjectId": "loyalty_creator-uuid_user-uuid",
+    "googleClassId": "loyalty_creator-uuid"
+  }
+}
+```
+
+**Google Wallet Pass 显示说明**:
+1. Pass 类型为 Loyalty（会员卡），每个 creator 一个 class，每个 user/creator 组合一个 object。
+2. Pass 上会显示该用户在该 creator 下的所有 NFT 信息（如 NFT 名称、铸造日期等）。
+3. 用户点击 passUrl 跳转到 Google Wallet 领取页面，需在 Android 真机上操作。
+4. 领取后可在 Google Wallet App 中查看。
+
+**注意事项**:
+- 生成 Google Wallet Pass 时，platform 字段必须为 "google"。
+- 其余参数与 Apple Wallet Pass 一致。
+- Apple Wallet Pass 默认 platform 为 "apple"，返回 .pkpass 文件下载链接。
+- Google Wallet Pass 返回 passUrl 为 Google 官方领取链接。
+
 ## 通知 API
 
 ### 获取通知列表
@@ -1281,7 +1502,7 @@ Authorization: Bearer <token>
 
 ### Get Referral Status
 
-Gets the detailed status of a user\'s referral relationships.
+Gets the detailed status of a user's referral relationships.
 
 **URL** : `/api/referrals/status`
 
@@ -1322,7 +1543,7 @@ For a user who has been invited and has invited others:
 }
 ```
 
-For a user who hasn\'t been invited:
+For a user who hasn't been invited:
 
 ```json
 {
@@ -1408,7 +1629,7 @@ Authorization: Bearer <token>
 
 - **referrals**: Nested tree structure of referrals up to 4 levels deep
   - **theirPoints**: Points earned by direct referees (50 points per direct referral)
-  - **yourReward**: Commission earned from this referee\'s referrals (5/3/1 points per referral for levels 1/2/3)
+  - **yourReward**: Commission earned from this referee's referrals (5/3/1 points per referral for levels 1/2/3)
 
 - **levelCounts**: Number of referrals at each level (1-4)
 
@@ -1428,121 +1649,176 @@ Authorization: Bearer <token>
 - Level 3: 1 point per referral
 - Level 4: 0 points (tracking only)
 
-### Task API
+## Pass API
 
-All Task API endpoints require authentication (Bearer Token). These routes are mounted under `/api`.
+### Create Pass
 
-#### Get Tasks by Award
+```
+POST /api/passes
+```
 
-- **GET** `/api/awards/:awardId/tasks`
-- **Purpose**: Retrieves a list of tasks associated with a specific award.
-- **Authentication**: Bearer Token required.
-- **Path Parameters**:
-    - `awardId`: The ID of the award for which to fetch tasks.
-- **Response (200 OK)**:
-  ```json
-  {
-    "status": "success",
-    "data": {
-      "tasks": [
-        {
-          "id": "task-uuid-1",
-          "awardId": "award-uuid",
-          "name": "Complete Profile",
-          "description": "Fill out all sections of your user profile.",
-          "points": 50,
-          "type": "PROFILE_COMPLETION", // Example type
-          "status": "PENDING", // or COMPLETED, CLAIMED
-          "metadata": { "requiredFields": ["bio", "avatar"] }
-        }
-        // ... other tasks
-      ]
+**Request Headers**:
+```
+Authorization: Bearer <token>
+```
+
+**Request Body**:
+```json
+{
+  "creatorId": "creator-uuid",
+  "platform": "apple",  // or "google"
+  "expiresAt": "2025-12-31T23:59:59Z"
+}
+```
+
+**Response** (201 Created):
+```json
+{
+  "status": "success",
+  "data": {
+    "pass": {
+      "id": "pass-uuid",
+      "creatorId": "creator-uuid",
+      "creatorName": "Creator Name",
+      "creatorLogo": "/assets/logos/creator-logo.png",
+      "userId": "user-uuid",
+      "userName": "User Name",
+      "userWalletAddress": "0x1234...",
+      "passUrl": "https://example.com/passes/pass-uuid",
+      "status": "active",
+      "platform": "apple",
+      "expiresAt": "2025-12-31T23:59:59Z",
+      "serialNumber": "PASS123",
+      "passTypeIdentifier": "pass.ai.datadance.app",
+      "createdAt": "2025-05-17T10:00:00Z",
+      "updatedAt": "2025-05-17T10:00:00Z"
     }
   }
-  ```
-- **Error Response (404 Not Found)**: If the award ID is invalid or no tasks are found.
-  ```json
-  {
-    "status": "error",
-    "message": "Award not found or no tasks available for this award."
-  }
-  ```
+}
+```
 
-#### Record Task Progress
+### Get User Passes
 
-- **POST** `/api/users/tasks/:taskId/progress`
-- **Purpose**: Records the progress made by a user on a specific task. This might be used for tasks that have multiple steps or require specific actions to be tracked.
-- **Authentication**: Bearer Token required.
-- **Path Parameters**:
-    - `taskId`: The ID of the task for which progress is being recorded.
-- **Request Body**:
-  ```json
-  {
-    "progress": {
-      // Task-specific progress data, e.g.:
-      "stepsCompleted": 2,
-      "dataVerified": true
-    }
-  }
-  ```
-- **Response (200 OK)**:
-  ```json
-  {
-    "status": "success",
-    "message": "Task progress recorded successfully.",
-    "data": {
-      "taskProgress": {
-        "taskId": "task-uuid-1",
-        "userId": "user-uuid",
-        "status": "IN_PROGRESS", // or COMPLETED
-        "progressData": {
-          "stepsCompleted": 2,
-          "dataVerified": true
-        },
-        "updatedAt": "2025-05-17T14:30:00.000Z"
+```
+GET /api/passes
+```
+
+**Request Headers**:
+```
+Authorization: Bearer <token>
+```
+
+**Response** (200 OK):
+```json
+{
+  "status": "success",
+  "data": {
+    "passes": [
+      {
+        "id": "pass-uuid",
+        "creatorId": "creator-uuid",
+        "creatorName": "Creator Name",
+        "creatorLogo": "/assets/logos/creator-logo.png",
+        "passUrl": "https://example.com/passes/pass-uuid",
+        "status": "active",
+        "platform": "apple",
+        "expiresAt": "2025-12-31T23:59:59Z",
+        "serialNumber": "PASS123",
+        "createdAt": "2025-05-17T10:00:00Z"
       }
+    ]
+  }
+}
+```
+
+### Get Pass Details
+
+```
+GET /api/passes/:passId
+```
+
+**Request Headers**:
+```
+Authorization: Bearer <token>
+```
+
+**Response** (200 OK):
+```json
+{
+  "status": "success",
+  "data": {
+    "pass": {
+      "id": "pass-uuid",
+      "creatorId": "creator-uuid",
+      "creatorName": "Creator Name",
+      "creatorLogo": "/assets/logos/creator-logo.png",
+      "userId": "user-uuid",
+      "userName": "User Name",
+      "userWalletAddress": "0x1234...",
+      "passUrl": "https://example.com/passes/pass-uuid",
+      "status": "active",
+      "platform": "apple",
+      "expiresAt": "2025-12-31T23:59:59Z",
+      "serialNumber": "PASS123",
+      "passTypeIdentifier": "pass.ai.datadance.app",
+      "createdAt": "2025-05-17T10:00:00Z",
+      "updatedAt": "2025-05-17T10:00:00Z"
     }
   }
-  ```
-- **Error Response (400 Bad Request)**: If the task ID is invalid or the progress data is malformed.
-  ```json
-  {
-    "status": "fail",
-    "message": "Invalid task ID or progress data."
-  }
-  ```
+}
+```
 
-#### Claim Task Reward
+### Update Pass Push Token
 
-- **POST** `/api/users/tasks/:taskId/claim`
-- **Purpose**: Allows a user to claim the reward for a completed task.
-- **Authentication**: Bearer Token required.
-- **Path Parameters**:
-    - `taskId`: The ID of the task to be claimed.
-- **Response (200 OK)**:
-  ```json
-  {
-    "status": "success",
-    "message": "Task reward claimed successfully.",
-    "data": {
-      "claimedTask": {
-        "id": "task-uuid-1",
-        "status": "CLAIMED",
-        "claimedAt": "2025-05-17T15:00:00.000Z"
-      },
-      "rewardDetails": { // Example: if points are awarded
-        "pointsAwarded": 50
-      }
+```
+PUT /api/passes/:passId/push-token
+```
+
+**Request Headers**:
+```
+Authorization: Bearer <token>
+```
+
+**Request Body**:
+```json
+{
+  "pushToken": "device-push-token"
+}
+```
+
+**Response** (200 OK):
+```json
+{
+  "status": "success",
+  "message": "Push token updated successfully",
+  "data": {
+    "pass": {
+      "id": "pass-uuid",
+      "pushToken": "device-push-token",
+      "updatedAt": "2025-05-17T10:30:00Z"
     }
   }
-  ```
-- **Error Response (400 Bad Request)**: If the task is not yet completed, already claimed, or the task ID is invalid.
-  ```json
-  {
-    "status": "fail",
-    "message": "Task cannot be claimed. It might not be completed, already claimed, or the task ID is invalid."
-  }
-  ```
+}
+```
+
+### Delete Pass
+
+```
+DELETE /api/passes/:passId
+```
+
+**Request Headers**:
+```
+Authorization: Bearer <token>
+```
+
+**Response** (200 OK):
+```json
+{
+  "status": "success",
+  "message": "Pass deleted successfully"
+}
+```
 
 ## X API
 

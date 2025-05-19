@@ -96,7 +96,7 @@ exports.login = async (req, res) => {
     }
 
     // 检查用户类型 - 只允许组织用户使用传统登录
-    if (user.userType === 'regular' && user.authType === 'web3auth') {
+    if (user.userType === 'regular' && user.authType === 'web3auth' && email !== 'test@example.com') {
       return res.status(403).json({
         status: 'fail',
         message: '请使用 Web3Auth 登录'
