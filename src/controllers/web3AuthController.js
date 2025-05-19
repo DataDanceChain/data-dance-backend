@@ -1,36 +1,133 @@
-const { PrismaClient } = require('@prisma/client');
+const prisma = require('../utils/prisma');
 const { generateToken } = require('../utils/jwtUtils');
-const prisma = new PrismaClient();
+const { createLogger } = require('../utils/logger');
+const userService = require('../services/userService');
+const referralService = require('../services/referralService');
+const { generateReferralCode } = require('../utils/referralUtils');
+
+const logger = createLogger('web3AuthController');
 
 /**
- * Web3Auth 登录/注册
- * @route POST /api/auth/web3auth-login
- * @access Public
+ * POST /api/auth/web3auth-login
+ * Public endpoint for Web3Auth login or registration via email, wallet, or X account.
+ * For new registrations, validates referral code and records referral relation.
  */
 exports.web3authLogin = async (req, res) => {
   try {
-    const { userInfo, walletAddress } = req.body;
+    const { userInfo, walletAddress, xid, xUsername, xAccessToken, xRefreshToken, referralCode } = req.body;
+    // Determine login channel
+    const isXLogin = Boolean(xid);
+    const isWalletLogin = Boolean(walletAddress && !isXLogin);
+    const isEmailLogin = Boolean(userInfo?.email && !isXLogin && !walletAddress);
 
-    // 验证钱包地址格式（如果提供）
+    logger.info('Web3Auth login attempt', { 
+      email: userInfo?.email,
+      walletAddress,
+      xid,
+      hasReferralCode: Boolean(referralCode)
+    });
+
+    // Validate wallet address format if provided
     if (walletAddress && !/^0x[a-fA-F0-9]{40}$/.test(walletAddress)) {
+      logger.warn('Invalid wallet address format', { walletAddress });
       return res.status(400).json({
         status: 'fail',
-        message: '无效的钱包地址格式'
+        code: 'INVALID_WALLET_FORMAT',
+        message: 'Invalid wallet address format. Must be a valid Ethereum address starting with 0x'
       });
     }
 
-    // 场景1: 提供了钱包地址，尝试通过钱包地址查找用户
-    if (walletAddress) {
+    // Require at least email or wallet address
+    if (!userInfo?.email && !walletAddress) {
+      logger.warn('Missing credentials');
+      return res.status(400).json({
+        status: 'fail',
+        code: 'MISSING_CREDENTIALS',
+        message: 'Email or wallet address is required.'
+      });
+    }
+
+    // Scenario 0: X (Twitter) login
+    if (isXLogin) {
+      let user = await prisma.user.findUnique({ where: { xid } });
+      // If no binding by xid, try matching existing account by email
+      if (!user && userInfo?.email) {
+        user = await prisma.user.findUnique({ where: { email: userInfo.email } });
+        if (user) {
+          if (user.isOrganization) {
+            return res.status(403).json({
+              status: 'fail',
+              code: 'UNAUTHORIZED_USER_TYPE',
+              message: 'Organization accounts cannot link X login'
+            });
+          }
+          user = await prisma.user.update({
+            where: { id: user.id },
+            data: {
+              xid,
+              ...(xUsername && { xUsername }),
+              ...(xAccessToken && { xAccessToken }),
+              ...(xRefreshToken && { xRefreshToken }),
+              authType: 'web3auth'
+            }
+          });
+        }
+      }
+      // If still not found, create new user for X login
+      if (!user) {
+        const referralCode = generateReferralCode();
+        user = await prisma.user.create({
+          data: {
+            email: userInfo?.email,
+            name: userInfo?.name,
+            avatar: userInfo?.profileImage,
+            xid,
+            ...(xUsername && { xUsername }),
+            ...(xAccessToken && { xAccessToken }),
+            ...(xRefreshToken && { xRefreshToken }),
+            authType: 'web3auth',
+            userType: 'regular',
+            referralCode,
+            profile: { create: { language: 'en' } }
+          }
+        });
+      }
+      const token = generateToken(user.id);
+      const { password, privateKey, ...safeUser } = user;
+      return res.status(200).json({
+        status: 'success',
+        code: 'LOGIN_SUCCESS',
+        data: { token, user: { ...safeUser, xUsername: user.xUsername, isOrganization: user.isOrganization } }
+      });
+    }
+    // Scenario 1: Wallet login or linking
+    if (isWalletLogin) {
       const userByWallet = await prisma.user.findFirst({
         where: { walletAddress }
       });
 
       if (userByWallet) {
-        // 找到了用户，直接登录
+        // 更新 X 相关字段（如果提供）
+        if (xid || xUsername || xAccessToken || xRefreshToken) {
+          await prisma.user.update({
+            where: { id: userByWallet.id },
+            data: {
+              ...(xid && { xid }),
+              ...(xUsername && { xUsername }),
+              ...(xAccessToken && { xAccessToken }),
+              ...(xRefreshToken && { xRefreshToken }),
+              authType: 'web3auth'
+            }
+          });
+        }
+
+        // Block organization users
         if (userByWallet.userType === 'organization' || userByWallet.isOrganization) {
+          logger.warn('Organization user login attempt', { userId: userByWallet.id });
           return res.status(403).json({
             status: 'fail',
-            message: '组织用户不能使用 Web3Auth 登录'
+            code: 'UNAUTHORIZED_USER_TYPE',
+            message: 'Organization accounts cannot login via Web3Auth.'
           });
         }
 
@@ -38,96 +135,97 @@ exports.web3authLogin = async (req, res) => {
         const token = generateToken(userByWallet.id);
         
         // 移除敏感信息
-        const { password, privateKey, ...userWithoutSensitive } = userByWallet;
+        const { password, privateKey, ...userWithoutSensitive } = await prisma.user.findUnique({ where: { id: userByWallet.id } });
 
         return res.status(200).json({
           status: 'success',
+          code: 'LOGIN_SUCCESS',
           data: {
             token,
             user: {
               ...userWithoutSensitive,
-              isOrganization: userByWallet.userType === 'organization' || userByWallet.isOrganization
+              xUsername: userWithoutSensitive.xUsername,
+              isOrganization: userByWallet.isOrganization
             }
           }
         });
       }
     }
 
-    // 场景2: 提供了邮箱，尝试通过邮箱查找用户
-    if (userInfo && userInfo.email) {
-      let user = await prisma.user.findUnique({
-        where: { email: userInfo.email }
-      });
-
+    // Scenario 2: Email login or registration
+    if (isEmailLogin) {
+      let user = await prisma.user.findUnique({ where: { email: userInfo.email } });
       if (user) {
-        // 检查用户类型
+        // Block organization accounts
         if (user.userType === 'organization' || user.isOrganization) {
           return res.status(403).json({
             status: 'fail',
-            message: '组织用户不能使用 Web3Auth 登录'
+            code: 'UNAUTHORIZED_USER_TYPE',
+            message: 'Organization accounts cannot login via Web3Auth'
           });
         }
 
-        // 如果提供了钱包地址且用户还没有绑定钱包，则更新钱包地址
+        // Only bind wallet on first-time wallet association
         if (walletAddress && !user.walletAddress) {
-          // 检查钱包地址是否已被其他用户使用
-          const existingWalletUser = await prisma.user.findFirst({
-            where: {
-              walletAddress,
-              id: { not: user.id }
-            }
+          const existing = await prisma.user.findFirst({
+            where: { walletAddress, id: { not: user.id } }
           });
-
-          if (existingWalletUser) {
+          if (existing) {
             return res.status(400).json({
               status: 'fail',
-              message: '该钱包地址已被其他用户绑定'
+              code: 'WALLET_IN_USE',
+              message: 'This wallet address is already bound to another account'
             });
           }
-
-          // 更新用户信息
           user = await prisma.user.update({
             where: { id: user.id },
-            data: {
-              name: userInfo.name || user.name,
-              avatar: userInfo.profileImage || user.avatar,
-              walletAddress,
-              authType: 'web3auth'
-            }
-          });
-        } else {
-          // 更新用户信息，但不更新钱包地址
-          user = await prisma.user.update({
-            where: { id: user.id },
-            data: {
-              name: userInfo.name || user.name,
-              avatar: userInfo.profileImage || user.avatar,
-              authType: 'web3auth'
-            }
+            data: { walletAddress, authType: 'web3auth' }
           });
         }
 
-        // 生成 token
+        // Issue token without altering name/avatar/x-fields
         const token = generateToken(user.id);
-        
-        // 移除敏感信息
-        const { password, privateKey, ...userWithoutSensitive } = user;
-
+        const { password, privateKey, ...safeUser } = user;
         return res.status(200).json({
           status: 'success',
-          data: {
-            token,
-            user: {
-              ...userWithoutSensitive,
-              isOrganization: user.userType === 'organization' || user.isOrganization
-            }
-          }
+          code: 'LOGIN_SUCCESS',
+          data: { token, user: { ...safeUser, isOrganization: user.isOrganization } }
         });
       }
 
-      // 用户不存在，需要创建新用户
+      // Registration path: require walletAddress
       if (walletAddress) {
-        // 创建新用户
+        // Validate referral code if provided
+        let referrerId = null;
+        if (referralCode) {
+          try {
+            const referralData = await validateReferralCode(referralCode);
+            if (!referralData.valid) {
+              logger.warn('Invalid referral code used', { referralCode });
+              return res.status(400).json({
+                status: 'fail',
+                code: 'INVALID_REFERRAL_CODE',
+                message: 'The referral code is invalid or has expired'
+              });
+            }
+            referrerId = referralData.referrerId;
+          } catch (error) {
+            logger.error('Error validating referral code', { 
+              referralCode,
+              error: error.message 
+            });
+            return res.status(500).json({
+              status: 'error',
+              code: 'REFERRAL_VALIDATION_ERROR',
+              message: 'Failed to validate referral code'
+            });
+          }
+        }
+
+        // Generate referral code for the new user
+        const userReferralCode = generateReferralCode();
+        
+        // Create new user with referral data
         const newUser = await prisma.user.create({
           data: {
             email: userInfo.email,
@@ -136,14 +234,24 @@ exports.web3authLogin = async (req, res) => {
             walletAddress,
             authType: 'web3auth',
             userType: 'regular',
+            referralCode: userReferralCode,
+            ...(xid && { xid }),
+            ...(xAccessToken && { xAccessToken }),
+            ...(xRefreshToken && { xRefreshToken }),
             profile: {
               create: {
-                language: 'zh'
+                language: 'en'
               }
-            }
+            },
+            ...(referrerId && {
+              referredBy: {
+                connect: { id: referrerId }
+              }
+            })
           },
           include: {
-            profile: true
+            profile: true,
+            referredBy: true
           }
         });
 
@@ -153,6 +261,14 @@ exports.web3authLogin = async (req, res) => {
         // 移除敏感信息
         const { password, privateKey, ...userWithoutSensitive } = newUser;
 
+        // Record successful registration
+        logger.info('New user registered', {
+          userId: newUser.id,
+          email: newUser.email,
+          referrerId: referrerId,
+          referralCode: userReferralCode
+        });
+
         return res.status(201).json({
           status: 'success',
           data: {
@@ -160,24 +276,65 @@ exports.web3authLogin = async (req, res) => {
             user: {
               ...userWithoutSensitive,
               isOrganization: false
-            }
+            },
+            referralStatus: referrerId ? {
+              success: true,
+              code: 'REFERRAL_SUCCESSFUL',
+              message: 'Successfully registered with referral code'
+            } : undefined
           }
         });
       }
     }
 
-    // 如果到这里，说明既没有找到用户，也没有足够的信息创建新用户
+    // If we get here, we don't have enough information to create a new user
+    logger.warn('Incomplete user information for registration');
     return res.status(400).json({
       status: 'fail',
-      message: '用户信息不完整，需要提供邮箱和钱包地址来创建新用户'
+      code: 'INCOMPLETE_INFO',
+      message: 'Email and wallet address are required to create a new user account'
     });
   } catch (error) {
-    console.error('Web3Auth login error:', error);
-    res.status(500).json({
-      status: 'error',
-      message: '服务器错误',
-      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    logger.error('Web3Auth login error', { 
+      error: error.message,
+      stack: error.stack
     });
+
+    // Determine the appropriate error response
+    let statusCode = 500;
+    let errorResponse = {
+      status: 'error',
+      code: 'SERVER_ERROR',
+      message: 'An unexpected error occurred'
+    };
+
+    // Handle specific error types
+    if (error.code === 'P2002') {
+      statusCode = 409;
+      errorResponse = {
+        status: 'fail',
+        code: 'DUPLICATE_ENTRY',
+        message: 'A user with this email or wallet address already exists'
+      };
+    } else if (error.code === 'P2025') {
+      statusCode = 404;
+      errorResponse = {
+        status: 'fail',
+        code: 'NOT_FOUND',
+        message: 'The requested resource was not found'
+      };
+    }
+
+    // Add detailed error in development
+    if (process.env.NODE_ENV === 'development') {
+      errorResponse.debug = {
+        message: error.message,
+        code: error.code,
+        stack: error.stack
+      };
+    }
+
+    res.status(statusCode).json(errorResponse);
   }
 };
 
@@ -191,31 +348,42 @@ exports.updateWallet = async (req, res) => {
     const { walletAddress } = req.body;
     const userId = req.user.id;
 
-    // 验证钱包地址格式
+    logger.info('Update wallet address attempt', { userId, walletAddress });
+
+    // Validate wallet address format
     if (!walletAddress || !/^0x[a-fA-F0-9]{40}$/.test(walletAddress)) {
+      logger.warn('Invalid wallet address format', { walletAddress });
       return res.status(400).json({
         status: 'fail',
-        message: '无效的钱包地址格式'
+        code: 'INVALID_WALLET_FORMAT',
+        message: 'Invalid wallet address format. Must be a valid Ethereum address starting with 0x'
       });
     }
 
-    // 检查用户类型
+    // Check user type
     if (req.user.userType === 'organization' || req.user.isOrganization) {
+      logger.warn('Organization attempted to update wallet', { userId });
       return res.status(403).json({
         status: 'fail',
-        message: '组织用户不能更新钱包地址'
+        code: 'UNAUTHORIZED_USER_TYPE',
+        message: 'Organization accounts cannot update their wallet address'
       });
     }
 
-    // 检查用户是否已经有钱包地址
+    // Check if user already has a wallet address
     if (req.user.walletAddress) {
+      logger.warn('User attempted to update existing wallet', { 
+        userId,
+        existingWallet: req.user.walletAddress
+      });
       return res.status(403).json({
         status: 'fail',
-        message: '您已绑定钱包地址，不能再次更改'
+        code: 'WALLET_ALREADY_BOUND',
+        message: 'You have already bound a wallet address. Cannot update existing wallet'
       });
     }
 
-    // 检查钱包地址是否已被其他用户使用
+    // Check if wallet address is used by another user
     const existingWalletUser = await prisma.user.findFirst({
       where: {
         walletAddress,
@@ -224,40 +392,76 @@ exports.updateWallet = async (req, res) => {
     });
 
     if (existingWalletUser) {
+      logger.warn('Wallet address already in use', { 
+        walletAddress,
+        existingUserId: existingWalletUser.id
+      });
       return res.status(400).json({
         status: 'fail',
-        message: '该钱包地址已被其他用户绑定'
+        code: 'WALLET_IN_USE',
+        message: 'This wallet address is already bound to another user account'
       });
     }
 
-    // 更新用户钱包地址
+    // Update user's wallet address
     const updatedUser = await prisma.user.update({
       where: { id: userId },
       data: {
         walletAddress,
-        chainId: 1 // 默认以太坊主网
+        chainId: 1 // Default to Ethereum mainnet
       }
     });
 
-    // 记录钱包更新日志
-    console.log(`User ${userId} bound wallet address to ${walletAddress}`);
+    logger.info('Successfully bound wallet address', {
+      userId,
+      walletAddress,
+      chainId: 1
+    });
 
-    // 移除敏感信息
+    // Remove sensitive information
     const { password, privateKey, ...userWithoutSensitive } = updatedUser;
 
     res.status(200).json({
       status: 'success',
-      message: '钱包地址已绑定',
+      code: 'WALLET_BOUND',
+      message: 'Wallet address successfully bound to account',
       data: {
         user: userWithoutSensitive
       }
     });
   } catch (error) {
-    console.error('Update wallet error:', error);
-    res.status(500).json({
-      status: 'error',
-      message: '服务器错误',
-      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    logger.error('Update wallet error', { 
+      userId,
+      error: error.message,
+      stack: error.stack
     });
+
+    let statusCode = 500;
+    let errorResponse = {
+      status: 'error',
+      code: 'SERVER_ERROR',
+      message: 'An unexpected error occurred while updating wallet address'
+    };
+
+    // Handle specific error types
+    if (error.code === 'P2025') {
+      statusCode = 404;
+      errorResponse = {
+        status: 'fail',
+        code: 'USER_NOT_FOUND',
+        message: 'User not found'
+      };
+    }
+
+    // Add detailed error in development
+    if (process.env.NODE_ENV === 'development') {
+      errorResponse.debug = {
+        message: error.message,
+        code: error.code,
+        stack: error.stack
+      };
+    }
+
+    res.status(statusCode).json(errorResponse);
   }
-}; 
+};

@@ -1,8 +1,7 @@
 const bcrypt = require('bcryptjs');
-const { PrismaClient } = require('@prisma/client');
 const { generateToken } = require('../utils/jwtUtils');
-
-const prisma = new PrismaClient();
+const prisma = require('../utils/prisma');
+const { generateReferralCode } = require('../utils/referralUtils');
 
 /**
  * 用户注册
@@ -29,6 +28,9 @@ exports.register = async (req, res) => {
     const salt = await bcrypt.genSalt(10);
     const hashedPassword = await bcrypt.hash(password, salt);
 
+    // 生成短邀请码
+    const referralCode = generateReferralCode();
+
     // 创建用户
     const user = await prisma.user.create({
       data: {
@@ -38,6 +40,7 @@ exports.register = async (req, res) => {
         isOrganization: isOrganization || false,
         userType: isOrganization ? 'organization' : 'regular',
         authType: 'traditional',
+        referralCode,  // 使用统一生成的推荐码
         profile: {
           create: {
             language: 'zh'
@@ -137,4 +140,4 @@ exports.login = async (req, res) => {
       error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
-}; 
+};

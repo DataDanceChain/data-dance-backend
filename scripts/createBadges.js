@@ -1,8 +1,8 @@
-const { PrismaClient } = require('@prisma/client');
+const prisma = require('../src/utils/prisma');
 const fs = require('fs');
 const path = require('path');
 const bcrypt = require('bcryptjs');
-const prisma = new PrismaClient();
+const { generateReferralCode } = require('../src/utils/referralUtils');
 
 /**
  * 确保角色存在
@@ -83,7 +83,8 @@ async function createOrganizationAndBadge(logoFileName) {
           isOrganization: true,
           description: `Official organization for ${organizationName}`,
           logo: `/assets/logos/${logoFileName}`,
-          avatar: `/assets/logos/${logoFileName}`
+          avatar: `/assets/logos/${logoFileName}`,
+          referralCode: generateReferralCode()
         }
       });
       

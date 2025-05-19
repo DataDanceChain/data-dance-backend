@@ -1,7 +1,6 @@
-const { PrismaClient } = require('@prisma/client');
+const prisma = require('../utils/prisma');
 const bcrypt = require('bcryptjs');
-
-const prisma = new PrismaClient();
+const { generateReferralCode } = require('./referralUtils');
 
 async function seedData() {
   try {
@@ -27,6 +26,7 @@ async function seedData() {
         email: 'test@example.com',
         password: hashedPassword,
         name: '测试用户',
+        referralCode: generateReferralCode(),
         profile: {
           create: {
             language: 'zh'
@@ -142,4 +142,4 @@ async function seedData() {
   }
 }
 
-seedData(); 
+seedData();

@@ -1,7 +1,5 @@
-const { PrismaClient } = require('@prisma/client');
 const crypto = require('crypto');
-
-const prisma = new PrismaClient();
+const prisma = require('../utils/prisma');
 
 /**
  * 获取活动列表
@@ -1038,4 +1036,4 @@ function generateIdentifier(userId, activityId) {
   
   // 返回前12位，格式为 DDID-XXXX-XXXX
   return `DDID-${hash.substring(0, 4)}-${hash.substring(4, 8)}`;
-} 
+}

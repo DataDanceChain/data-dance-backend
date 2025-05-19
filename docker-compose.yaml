@@ -1,12 +1,21 @@
-version: '3.8'
-
 services:
   ddc-backend-api:
-    image: registry.magipop.xyz/ddc/ddc-backend-js:latest
+    platform: linux/arm64/v8
+    build: .                # 用本地 Dockerfile 构建镜像
     ports:
       - "127.0.0.1:10000:3000"
     env_file:
-      - backend.env
+      - .env
+    volumes:
+      - ./src:/app/src      # 挂载本地 src 目录到容器
+      - ./prisma:/app/prisma
+      - ./keys:/app/keys
+      - ./scripts:/app/scripts
+      - ./public:/app/public
+      - ./package.json:/app/package.json
+      - ./package-lock.json:/app/package-lock.json
+      - ./config:/app/config
+    command: npm run dev  # 使用 nodemon 启动，使代码更新无需重建镜像即可生效
     networks:
       - backend_network
     restart: always

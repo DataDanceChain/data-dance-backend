@@ -1,6 +1,5 @@
-const { PrismaClient } = require('@prisma/client');
-const prisma = new PrismaClient();
 const crypto = require('crypto');
+const prisma = require('../utils/prisma');
 
 /**
  * 生成唯一的 DataDanceID 标识符
@@ -316,10 +315,11 @@ exports.verifyDataDanceID = async (req, res) => {
     });
   } catch (error) {
     console.error('Error verifying DataDanceID:', error);
+    console.error('Error verifying DataDanceID:', error);
     res.status(500).json({
       status: 'error',
       message: '服务器错误',
       error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
-}; 
+};

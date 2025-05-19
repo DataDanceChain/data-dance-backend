@@ -3,6 +3,8 @@ const cors = require('cors');
 const morgan = require('morgan');
 const path = require('path');
 const { errorHandler } = require('./middlewares/errorMiddleware');
+const xRoutes = require('./routes/xRoutes'); // Updated import
+const { createLogger } = require('./utils/logger');
 
 // 导入路由
 const authRoutes = require('./routes/authRoutes');
@@ -12,19 +14,32 @@ const activityRoutes = require('./routes/activityRoutes');
 const notificationRoutes = require('./routes/notificationRoutes');
 const dataDanceIdRoutes = require('./routes/dataDanceIdRoutes');
 const web3AuthRoutes = require('./routes/web3AuthRoutes');
+const awardRoutes = require('./routes/awardRoutes');
+const taskRoutes = require('./routes/taskRoutes');
+const referralRoutes = require('./routes/referralRoutes');
 const passRoutes = require('./routes/passRoutes');
 const passWebServiceRoutes = require('./routes/passWebServiceRoutes');
 const googleWalletRoutes = require('./routes/googleWalletRoutes');
 
 const app = express();
 
-// CORS 配置
-app.use(cors({
-  origin: '*', // 允许所有来源访问
+// CORS configuration
+const corsOptions = {
+  origin: process.env.FRONTEND_URL || 'http://localhost:8100',
+  credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
-  credentials: true
-}));
+  exposedHeaders: ['Content-Range', 'X-Content-Range']
+};
+
+// 中间件
+app.use(cors(corsOptions));
+app.use(express.json());
+app.use(morgan('dev'));
+
+// Add request logging
+const logger = createLogger('app');
+app.use(logger.requestLogger);
 
 // 设置请求超时时间为 5 分钟
 app.use((req, res, next) => {
@@ -32,10 +47,6 @@ app.use((req, res, next) => {
   res.setTimeout(300000); // 5分钟
   next();
 });
-
-// 中间件
-app.use(express.json());
-app.use(morgan('dev'));
 
 // 配置 MIME 类型
 express.static.mime.define({'application/vnd.apple.pkpass': ['pkpass']});
@@ -57,6 +68,11 @@ app.use('/api/activities', activityRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/data-dance-ids', dataDanceIdRoutes);
 app.use('/api/auth', web3AuthRoutes);
+// 调整 awardRoutes 和 taskRoutes 的挂载路径
+app.use('/api', awardRoutes);
+app.use('/api', taskRoutes);
+app.use('/api/referrals', referralRoutes);
+app.use('/api/x', xRoutes);
 app.use('/api/assets/passes', passRoutes);
 app.use('/v1', passWebServiceRoutes);
 app.use('/api/google-wallet', googleWalletRoutes);
@@ -64,4 +80,7 @@ app.use('/api/google-wallet', googleWalletRoutes);
 // 错误处理中间件
 app.use(errorHandler);
 
-module.exports = app; 
+// Add error logging
+app.use(logger.errorLogger);
+
+module.exports = app;

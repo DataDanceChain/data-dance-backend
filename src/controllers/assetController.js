@@ -1,13 +1,12 @@
-const { PrismaClient } = require('@prisma/client');
-
-const prisma = new PrismaClient();
+const prisma = require('../utils/prisma');
+const assetService = require('../services/assetService');
 
 /**
  * 获取用户资产总览
  * @route GET /api/assets
  * @access Private
  */
-exports.getAssetOverview = async (req, res) => {
+exports.getAssetOverview = async function (req, res) {
   try {
     // 获取用户积分总额
     const pointsSum = await prisma.point.aggregate({
@@ -41,7 +40,7 @@ exports.getAssetOverview = async (req, res) => {
  * @route GET /api/assets/points
  * @access Private
  */
-exports.getPoints = async (req, res) => {
+exports.getPoints = async function (req, res) {
   try {
     // 获取用户积分总额
     const pointsSum = await prisma.point.aggregate({
@@ -77,7 +76,7 @@ exports.getPoints = async (req, res) => {
  * @route GET /api/assets/badges
  * @access Private
  */
-exports.getBadges = async (req, res) => {
+exports.getBadges = async function (req, res) {
   try {
     // 获取用户已收集的勋章
     const userBadges = await prisma.userBadge.findMany({
@@ -144,7 +143,7 @@ exports.getBadges = async (req, res) => {
  * @route GET /api/assets/transactions
  * @access Private
  */
-exports.getTransactions = async (req, res) => {
+exports.getTransactions = async function (req, res) {
   try {
     const transactions = await prisma.assetTransaction.findMany({
       where: { userId: req.user.id },
@@ -170,7 +169,7 @@ exports.getTransactions = async (req, res) => {
  * @route GET /api/assets/badges/:id
  * @access Private
  */
-exports.getBadgeDetail = async (req, res) => {
+exports.getBadgeDetail = async function (req, res) {
   try {
     const { id } = req.params;
     
@@ -229,7 +228,7 @@ exports.getBadgeDetail = async (req, res) => {
  * @route POST /api/assets/badges/:id/collect
  * @access Private
  */
-exports.collectBadge = async (req, res) => {
+exports.collectBadge = async function (req, res) {
   try {
     const { id } = req.params;
     
@@ -340,7 +339,7 @@ exports.collectBadge = async (req, res) => {
  * @route POST /api/assets/create
  * @access Private (Organization Only)
  */
-exports.createAsset = async (req, res) => {
+exports.createAsset = async function (req, res) {
   try {
     const { name, description, metadata, type } = req.body;
     
@@ -374,5 +373,18 @@ exports.createAsset = async (req, res) => {
       message: '创建资产失败',
       error: error.message
     });
+  }
+};
+
+/**
+ * Get DDC token balance for logged-in user
+ */
+exports.getUserDDCBalance = async function (req, res, next) {
+  try {
+    const userId = req.user.id;
+    const balance = await assetService.getDDCBalance(userId);
+    res.json({ status: 'success', data: { ddcBalance: balance } });
+  } catch (err) {
+    next(err);
   }
 };

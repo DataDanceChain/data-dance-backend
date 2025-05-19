@@ -1,7 +1,5 @@
 const bcrypt = require('bcryptjs');
-const { PrismaClient } = require('@prisma/client');
-
-const prisma = new PrismaClient();
+const prisma = require('../utils/prisma');
 
 /**
  * 获取当前用户信息
@@ -36,7 +34,9 @@ exports.getMe = async (req, res) => {
       isOrganization: user.isOrganization || user.userType === 'organization',
       userType: user.userType,
       authType: user.authType,
-      totalPoints: user.totalPoints
+      totalPoints: user.totalPoints,
+      xid: user.xid,
+      xUsername: user.xUsername
     };
 
     res.status(200).json({
@@ -415,4 +415,68 @@ exports.importWallet = async (req, res) => {
       error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
-}; 
+};
+
+/**
+ * 获取当前用户的邀请码
+ * @route GET /api/users/invite-code
+ * @access Private
+ */
+exports.getInviteCode = async (req, res) => {
+  try {
+    // 从用户表读取 referralCode
+    const user = await prisma.user.findUnique({ where: { id: req.user.id }, select: { referralCode: true } });
+    if (!user?.referralCode) {
+      return res.status(404).json({ status: 'fail', message: '邀请码不存在' });
+    }
+    res.status(200).json({ status: 'success', data: { code: user.referralCode } });
+  } catch (error) {
+    res.status(500).json({ status: 'error', message: '服务器错误', error: error.message });
+  }
+};
+
+/**
+ * 获取当前用户注册时间
+ * @route GET /api/users/registered-at
+ * @access Private
+ */
+exports.getRegistrationTime = async (req, res) => {
+  try {
+    const user = await prisma.user.findUnique({ where: { id: req.user.id }, select: { createdAt: true } });
+    res.status(200).json({ status: 'success', data: { registeredAt: user.createdAt } });
+  } catch (error) {
+    res.status(500).json({ status: 'error', message: '服务器错误', error: error.message });
+  }
+};
+
+/**
+ * Get current user's referral code
+ * @route GET /api/users/referral-code
+ * @access Private
+ */
+exports.getReferralCode = async (req, res) => {
+  try {
+    const user = await prisma.user.findUnique({
+      where: { id: req.user.id },
+      select: { referralCode: true }
+    });
+
+    if (!user) {
+      return res.status(404).json({
+        status: 'fail',
+        message: 'User not found'
+      });
+    }
+
+    res.status(200).json({
+      status: 'success',
+      data: { code: user.referralCode }
+    });
+  } catch (error) {
+    console.error('Error getting referral code:', error);
+    res.status(500).json({
+      status: 'error',
+      message: 'Error retrieving referral code'
+    });
+  }
+};

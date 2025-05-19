@@ -1,5 +1,18 @@
 const express = require('express');
-const { getMe, updateMe, updateLanguage, updatePassword, getUserPoints, updateWalletAddress, generateWallet, importWallet } = require('../controllers/userController');
+const { 
+  getMe, 
+  updateMe, 
+  updateLanguage, 
+  updatePassword, 
+  getUserPoints, 
+  updateWalletAddress, 
+  generateWallet, 
+  importWallet, 
+  rewardPoints, 
+  getReferralCode, 
+  getRegistrationTime
+} = require('../controllers/userController');
+// Referral endpoints are now centralized under /api/referrals via referralRoutes.js
 const { protect } = require('../middlewares/authMiddleware');
 const router = express.Router();
 
@@ -30,4 +43,11 @@ router.post('/wallet/generate', generateWallet);
 // 导入钱包
 router.post('/wallet/import', importWallet);
 
-module.exports = router; 
+// Get user's referral code
+router.get('/referral-code', getReferralCode);
+
+// 获取当前用户注册时间
+router.get('/registered-at', getRegistrationTime);
+
+
+module.exports = router;

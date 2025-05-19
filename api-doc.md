@@ -13,6 +13,12 @@
 3. [活动 API](#活动-api)
 4. [资产 API](#资产-api)
 5. [通知 API](#通知-api)
+6. [Data Dance ID API](#data-dance-id-api)
+7. [Award System API](#award-system-api)
+    * [Referral System API](#referral-system-api)
+    * [Task API](#task-api)
+8. [X API](#x-api)
+9. [Pass API](#pass-api)
 
 ## 测试账号
 为了方便测试，我们提供了一个测试账号，可以使用账号密码登录：
@@ -26,7 +32,7 @@
 ### 用户注册
 
 ```
-POST /auth/register
+POST /api/auth/register
 ```
 
 **请求体**:
@@ -43,7 +49,7 @@ POST /auth/register
 {
   "status": "success",
   "data": {
-    "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+    "token": " <token>",
     "user": {
       "id": "user-uuid",
       "email": "user@example.com",
@@ -56,7 +62,7 @@ POST /auth/register
 ### 用户登录
 
 ```
-POST /auth/login
+POST /api/auth/login
 ```
 
 **请求体**:
@@ -72,7 +78,7 @@ POST /auth/login
 {
   "status": "success",
   "data": {
-    "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+    "token": " <token>",
     "user": {
       "id": "user-uuid",
       "email": "user@example.com",
@@ -104,7 +110,7 @@ POST /api/auth/register-with-wallet
 {
   "status": "success",
   "data": {
-    "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+    "token": " <token>",
     "user": {
       "id": "user-uuid",
       "email": "0x1234567890abcdef1234567890abcdef12345678@wallet.user",
@@ -116,7 +122,7 @@ POST /api/auth/register-with-wallet
 }
 ```
 
-### Web3Auth 登录/注册
+### Web3Auth 登录
 
 ```
 POST /api/auth/web3auth-login
@@ -128,55 +134,69 @@ POST /api/auth/web3auth-login
   "userInfo": {
     "email": "user@example.com",
     "name": "User Name",
-    "profileImage": "https://example.com/profile.jpg",
-    "verifier": "datadance-email-verifier",
-    "verifierId": "user@example.com",
-    "typeOfLogin": "jwt"
+    "profileImage": "https://example.com/avatar.jpg"
   },
-  "walletAddress": "0x123abc..."
+  "walletAddress": "0x1234567890abcdef1234567890abcdef12345678", // 可选，钱包登录时必填
+  "xid": "123456789", // 可选，X 渠道登录时必填
+  "xUsername": "username", // 可选，X 渠道登录时通常会提供
+  "invitationCode": "REF-ABCD1234" // 可选，新用户注册时可提供邀请码
 }
 ```
 
-**登录场景**:
-1. 如果提供了钱包地址，系统会尝试通过钱包地址查找用户
-2. 如果提供了邮箱，系统会尝试通过邮箱查找用户
-3. 如果用户不存在且提供了足够信息，系统会创建新用户
-
-**响应** (200 OK - 登录成功):
+**响应** (200 OK):
 ```json
 {
   "status": "success",
   "data": {
-    "token": "jwt_token_here",
+    "token": "<jwt_token>",
     "user": {
-      "id": "user_id",
+      "id": "user-uuid",
       "email": "user@example.com",
       "name": "User Name",
-      "walletAddress": "0x123abc...",
-      "userType": "regular",
-      "authType": "web3auth",
+      "walletAddress": "0x1234567890abcdef1234567890abcdef12345678",
+      "xid": "123456789",
+      "xUsername": "username",
       "isOrganization": false
+    },
+    "invitationStatus": {
+      "success": true,
+      "code": "REFERRAL_SUCCESSFUL",
+      "message": "邀请关系已成功记录。"
     }
   }
 }
 ```
 
-**响应** (201 Created - 注册成功):
+**Error Responses**
+
+400 Bad Request - missing authentication credential:
 ```json
 {
-  "status": "success",
-    "data": {
-    "token": "jwt_token_here",
-    "user": {
-      "id": "user_id",
-      "email": "user@example.com",
-      "name": "User Name",
-      "walletAddress": "0x123abc...",
-      "userType": "regular",
-      "authType": "web3auth",
-      "isOrganization": false
-    }
+  "status": "fail",
+  "code": "MISSING_CREDENTIAL",
+  "message": "Missing authentication credential"
+}
+```
+
+409 Conflict - X account already bound to another user:
+```json
+{
+  "status": "error",
+  "code": "X_ACCOUNT_ALREADY_BOUND",
+  "message": "This X account is already bound to another user",
+  "details": {
+    "toUserId": "conflicting-user-id",
+    "boundAt": "2025-05-16T..."
   }
+}
+```
+
+500 Internal Server Error - generic server error:
+```json
+{
+  "status": "error",
+  "code": "SERVER_ERROR",
+  "message": "Internal server error"
 }
 ```
 
@@ -185,12 +205,12 @@ POST /api/auth/web3auth-login
 ### 获取当前用户信息
 
 ```
-GET /users/me
+GET /api/users/me
 ```
 
 **请求头**:
 ```
-Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+Authorization: Bearer <token>
 ```
 
 **响应** (200 OK):
@@ -204,7 +224,9 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
       "name": "User Name",
       "avatar": "/assets/avatars/default.png",
       "isOrganization": false,
-      "walletAddress": "0x1234567890abcdef1234567890abcdef12345678"
+      "walletAddress": "0x1234567890abcdef1234567890abcdef12345678",
+      "xid": "1234567890", // X (Twitter) User ID, 可为null
+      "xUsername": "twitter_handle" // X (Twitter) username, 可为null
     }
   }
 }
@@ -213,12 +235,12 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 ### 更新用户信息
 
 ```
-PATCH /users/me
+PATCH /api/users/me
 ```
 
 **请求头**:
 ```
-Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+Authorization: Bearer <token>
 ```
 
 **请求体**:
@@ -254,7 +276,7 @@ GET /api/users/points
 
 **请求头**:
 ```
-Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+Authorization: Bearer <token>
 ```
 
 **响应** (200 OK):
@@ -283,7 +305,7 @@ PUT /api/users/wallet
 
 **请求头**:
 ```
-Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+Authorization: Bearer <token>
 ```
 
 **请求体**:
@@ -319,7 +341,7 @@ POST /api/users/wallet/generate
 
 **请求头**:
 ```
-Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+Authorization: Bearer <token>
 ```
 
 **响应** (200 OK):
@@ -347,7 +369,7 @@ POST /api/users/wallet/import
 
 **请求头**:
 ```
-Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+Authorization: Bearer <token>
 ```
 
 **请求体**:
@@ -374,38 +396,41 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 }
 ```
 
-### 更新用户钱包地址
+### Get User's Referral Code
 
 ```
-POST /api/auth/update-wallet
+GET /api/users/referral-code
+```
+
+**Request Headers**:
+```
+Authorization: Bearer <token>
+```
+
+**Response** (200 OK):
+```json
+{
+  "status": "success",
+  "data": { "code": "REF-ABCD1234" }
+}
+```
+
+### 获取当前用户注册时间
+
+```
+GET /api/users/registered-at
 ```
 
 **请求头**:
 ```
-Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
-```
-
-**请求体**:
-```json
-{
-  "walletAddress": "0x456def..."
-}
+Authorization: Bearer <token>
 ```
 
 **响应** (200 OK):
 ```json
 {
   "status": "success",
-  "message": "钱包地址已更新",
-  "data": {
-    "user": {
-      "id": "user_id",
-      "email": "user@example.com",
-      "walletAddress": "0x456def...",
-      "userType": "regular",
-      "authType": "web3auth"
-    }
-  }
+  "data": { "registeredAt": "2025-01-15T08:30:00.000Z" }
 }
 ```
 
@@ -419,7 +444,7 @@ GET /api/activities
 
 **请求头**:
 ```
-Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+Authorization: Bearer <token>
 ```
 
 **查询参数**:
@@ -490,7 +515,7 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 ### 获取单个活动详情
 
 ```
-GET /activities/{activityId}
+GET /api/activities/{activityId}
 ```
 
 **响应** (200 OK):
@@ -557,7 +582,7 @@ GET /activities/{activityId}
 ### 获取推荐活动
 
 ```
-GET /activities/featured
+GET /api/activities/featured
 ```
 
 **响应** (200 OK):
@@ -591,7 +616,7 @@ POST /api/activities/{activityId}/claim
 
 **请求头**:
 ```
-Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+Authorization: Bearer <token>
 ```
 
 **响应** (200 OK):
@@ -618,7 +643,7 @@ GET /api/activities/claimed
 
 **请求头**:
 ```
-Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+Authorization: Bearer <token>
 ```
 
 **响应** (200 OK):
@@ -670,7 +695,7 @@ GET /api/activities/user-claimed
 
 **请求头**:
 ```
-Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+Authorization: Bearer <token>
 ```
 
 **响应** (200 OK):
@@ -722,7 +747,7 @@ PATCH /api/activities/:id/contract
 
 **请求头**:
 ```
-Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+Authorization: Bearer <token>
 ```
 
 **请求体**:
@@ -759,7 +784,7 @@ POST /api/activities/:id/deploy-contract
 
 **请求头**:
 ```
-Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+Authorization: Bearer <token>
 ```
 
 **响应** (200 OK):
@@ -784,12 +809,12 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 ### 获取资产总览
 
 ```
-GET /assets
+GET /api/assets
 ```
 
 **请求头**:
 ```
-Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+Authorization: Bearer <token>
 ```
 
 **响应** (200 OK):
@@ -825,12 +850,12 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 ### 获取积分
 
 ```
-GET /assets/points
+GET /api/assets/points
 ```
 
 **请求头**:
 ```
-Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+Authorization: Bearer <token>
 ```
 
 **响应** (200 OK):
@@ -854,12 +879,12 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 ### 获取徽章列表
 
 ```
-GET /assets/badges
+GET /api/assets/badges
 ```
 
 **请求头**:
 ```
-Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+Authorization: Bearer <token>
 ```
 
 **响应** (200 OK):
@@ -901,11 +926,11 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 ### 获取徽章详情
 
 ```
-GET /assets/badges/{badgeId}
+GET /api/assets/badges/{badgeId}
 ```
 **请求头**:
 ```
-Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+Authorization: Bearer <token>
 ```
 
 **响应** (200 OK):
@@ -931,11 +956,11 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 ### 收集徽章
 
 ```
-POST /assets/badges/{badgeId}/collect
+POST /api/assets/badges/{badgeId}/collect
 ```
 
 **请求头**:
-```Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+```Authorization: Bearer <token>
 ```
 
 **响应** (200 OK):
@@ -961,12 +986,12 @@ POST /assets/badges/{badgeId}/collect
 ### 获取交易记录
 
 ```
-GET /assets/transactions
+GET /api/assets/transactions
 ```
 
 **请求头**:
 ```
-Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+Authorization: Bearer <token>
 ```
 
 **响应** (200 OK):
@@ -1210,12 +1235,12 @@ Authorization: Bearer <token>
 ### 获取通知列表
 
 ```
-GET /notifications
+GET /api/notifications
 ```
 
 **请求头**:
 ```
-Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+Authorization: Bearer <token>
 ```
 
 **查询参数**:
@@ -1252,12 +1277,12 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 ### 标记通知为已读
 
 ```
-PATCH /notifications/{notificationId}/read
+PATCH /api/notifications/{notificationId}/read
 ```
 
 **请求头**:
 ```
-Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+Authorization: Bearer <token>
 ```
 
 **响应** (200 OK):
@@ -1276,12 +1301,12 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 ### 标记所有通知为已读
 
 ```
-PATCH /notifications/read-all
+PATCH /api/notifications/read-all
 ```
 
 **请求头**:
 ```
-Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+Authorization: Bearer <token>
 ```
 
 **响应** (200 OK):
@@ -1295,35 +1320,746 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 }
 ```
 
-## 错误响应
+## Data Dance ID API
+<!-- TODO: Document routes from src/routes/dataDanceIdRoutes.js, mounted under /api/data-dance-ids -->
+<!-- Example: -->
+<!-- ### Get Data Dance ID Details -->
+<!-- ``` -->
+<!-- GET /api/data-dance-ids/{id} -->
+<!-- ``` -->
+<!-- Response (200 OK): -->
+<!-- { -->
+<!--   \"status\": \"success\", -->
+<!--   \"data\": { ... } -->
+<!-- } -->
 
-所有API在发生错误时会返回一致的错误格式：
+## Award System API
 
-### 客户端错误 (400, 401, 403, 404)
+### Get User Awards List
 
+```
+GET /api/awards
+```
+
+**Headers**:
+```
+Authorization: Bearer <token>
+```
+
+**Description**: Get all award information for the currently authenticated user, including award progress and task list.
+
+**Response** (200 OK):
 ```json
 {
-  "status": "fail",
-  "message": "错误描述信息"
+  "status": "success",
+  "data": {
+    "awards": [
+      {
+        "awardId": "award-uuid",
+        "title": "Early Bird Reward",
+        "description": "Thank you for your early participation!",
+        "icon": "starOutline",
+        "color": "#FFB86C",
+        "status": "LIVE",
+        "metadata": {},
+        "totalTasks": 3,
+        "claimedTasks": 1,
+        "progress": 0.33,
+        "finalStatus": "IN_PROGRESS",
+        "tasks": [
+          {
+            "id": "task-uuid",
+            "title": "Complete Profile",
+            "description": "Fill in your profile information including name, email, and profile picture to help us know you better",
+            "points": 100,
+            "claimLimit": 1,
+            "requirementCount": 3,
+            "doneCount": 2,
+            "claimed": false,
+            "progress": 0.66,
+            "finalStatus": "IN_PROGRESS"
+          }
+        ]
+      }
+    ],
+    "referralOverview": {
+      // See Referral System API below
+    }
+  }
 }
 ```
 
-### 服务器错误 (500)
+---
 
+### Claim Award
+
+```
+POST /api/awards/{awardId}/claim
+```
+
+**Headers**:
+```
+Authorization: Bearer <token>
+```
+
+**Path Parameters**:
+- `awardId`: ID of the award to claim
+
+**Response** (200 OK):
+```json
+{
+  "status": "success",
+  "message": "Reward claimed successfully.",
+  "data": {
+    "award": {
+      "awardId": "award-uuid",
+      "title": "Early Bird Reward",
+      "isClaimed": true,
+      "claimedAt": "2023-07-15T10:00:00.000Z"
+    },
+    "pointsAwarded": 100
+  }
+}
+```
+
+**Error Response**:
+- 404 Not Found: Award does not exist or has already been claimed
 ```json
 {
   "status": "error",
-  "message": "服务器错误",
-  "error": "详细错误信息（仅在开发环境中返回）"
+  "message": "Reward not found or already claimed."
 }
 ```
 
-## 状态码说明
+---
 
-- `200 OK`: 请求成功
-- `201 Created`: 资源创建成功
-- `400 Bad Request`: 请求参数错误
-- `401 Unauthorized`: 未授权（未登录）
-- `403 Forbidden`: 权限不足
-- `404 Not Found`: 资源不存在
-- `500 Internal Server Error`: 服务器内部错误
+### Get Award Tasks List
+
+```
+GET /api/awards/:awardId/tasks
+```
+
+**Headers**:
+```
+Authorization: Bearer <token>
+```
+
+**Path Parameters**:
+- `awardId`: Award ID
+
+**Response** (200 OK):
+```json
+{
+  "status": "success",
+  "data": {
+    "tasks": [
+      {
+        "id": "task-uuid",
+        "title": "Complete Profile",
+        "description": "Fill in your profile information including name, email, and profile picture to help us know you better",
+        "points": 100,
+        "claimLimit": 1,
+        "requirementCount": 3,
+        "doneCount": 2,
+        "claimed": false,
+        "progress": 0.66,
+        "finalStatus": "IN_PROGRESS"
+      }
+    ]
+  }
+}
+```
+
+---
+
+### Record Task Progress
+
+```
+POST /api/awards/tasks/:taskId/progress
+```
+
+**Headers**:
+```
+Authorization: Bearer <token>
+```
+
+**Path Parameters**:
+- `taskId`: Task ID
+
+**Request Body**:
+```json
+{
+  "delta": 1 // Progress increment
+}
+```
+
+**Response** (200 OK):
+```json
+{
+  "status": "success",
+  "data": {
+    "taskId": "task-uuid",
+    "status": "IN_PROGRESS"
+  }
+}
+```
+
+---
+
+### Claim Task Reward
+
+```
+POST /api/awards/tasks/:taskId/claim
+```
+
+**Headers**:
+```
+Authorization: Bearer <token>
+```
+
+**Path Parameters**:
+- `taskId`: Task ID
+
+**Response** (200 OK):
+```json
+{
+  "status": "success",
+  "data": {
+    "taskId": "task-uuid",
+    "claimedAt": "2023-07-15T10:00:00.000Z",
+    "points": 100
+  }
+}
+```
+
+**Error Response**:
+- 400 Bad Request: Task not completed or already claimed
+```json
+{
+  "status": "fail",
+  "message": "Task not completed or already claimed."
+}
+```
+
+---
+
+### Referral System API
+
+#### Use Referral Code
+
+```
+POST /api/referrals/use-code
+```
+
+**Headers**:
+```
+Authorization: Bearer <token>
+```
+
+**Request Body**:
+```json
+{
+  "code": "DD-ABCD1234"
+}
+```
+
+**Response** (200 OK):
+```json
+{
+  "status": "success",
+  "message": "Referral code used successfully",
+  "data": {
+    "inviterId": "inviter-user-id",
+    "inviterName": "Inviter Name",
+    "inviteeId": "current-user-id",
+    "code": "DD-ABCD1234",
+    "createdAt": "2025-05-19T13:11:27.758Z"
+  }
+}
+```
+
+**Error Responses**:
+- 400 Bad Request: Missing referral code
+```json
+{
+  "status": "fail",
+  "code": "MISSING_CODE",
+  "message": "Please provide a referral code"
+}
+```
+
+- 409 Conflict: Already invited
+```json
+{
+  "status": "fail",
+  "code": "ALREADY_REFERRED",
+  "message": "User has already been referred",
+  "data": {
+    "inviterId": "previous-inviter-id",
+    "inviterName": "Previous Inviter",
+    "code": "DD-PREV1234",
+    "createdAt": "2025-05-19T13:00:00.000Z"
+  }
+}
+```
+
+- 404 Not Found: Invalid referral code
+```json
+{
+  "status": "fail",
+  "code": "INVALID_CODE",
+  "message": "Invalid referral code"
+}
+```
+
+- 400 Bad Request: Self-referral not allowed
+```json
+{
+  "status": "fail",
+  "code": "SELF_REFERRAL_NOT_ALLOWED",
+  "message": "Cannot use your own referral code"
+}
+```
+
+- 500 Internal Server Error: Server error
+```json
+{
+  "status": "error",
+  "message": "Server error",
+  "error": "Error message in development mode only"
+}
+```
+
+---
+
+#### Claim Referral Rewards
+
+```
+POST /api/referrals/claim-rewards
+```
+
+**Headers**:
+```
+Authorization: Bearer <token>
+```
+
+**Response** (200 OK):
+```json
+{
+  "status": "success",
+  "data": {
+    "claimedAt": "2025-05-17T12:00:00Z",
+    "totalPoints": 150,
+    "count": 3
+  }
+}
+```
+
+**Error Response**:
+- 400 Bad Request: No rewards available to claim
+
+---
+
+#### Get Referral Status
+
+```
+GET /api/referrals/status
+```
+
+**Headers**:
+```
+Authorization: Bearer <token>
+```
+
+**Response** (200 OK):
+```json
+{
+  "status": "success",
+  "data": {
+    "hasBeenInvited": true,
+    "inviterInfo": {
+      "id": "user123",
+      "name": "John Doe",
+      "code": "REF-ABC123",
+      "inviteTime": "2025-05-17T10:30:00Z"
+    },
+    "ownReferralCode": "REF-XYZ789",
+    "invitedUsers": [
+      {
+        "id": "user456",
+        "name": "Jane Smith",
+        "inviteTime": "2025-05-16T15:45:00Z"
+      }
+    ]
+  }
+}
+```
+
+---
+
+#### Get Referral Network Overview
+
+```
+GET /api/referrals/overview
+```
+
+**Headers**:
+```
+Authorization: Bearer <token>
+```
+
+**Response** (200 OK):
+```json
+{
+  "status": "success",
+  "data": {
+    "referrals": [
+      {
+        "id": "user-id",
+        "email": "user@example.com",
+        "nickname": "User Name",
+        "level": 1,
+        "theirPoints": 100,
+        "yourReward": 5,
+        "referrals": [
+          {
+            "id": "referee-id",
+            "email": "referee@example.com",
+            "nickname": "Referee Name",
+            "level": 2,
+            "theirPoints": 50,
+            "yourReward": 3,
+            "referrals": []
+          }
+        ]
+      }
+    ],
+    "levelCounts": {
+      "1": 3,
+      "2": 2,
+      "3": 1,
+      "4": 0
+    },
+    "earnedByLevel": [150, 100, 50, 0],
+    "totalReferralPoints": 300,
+    "unclaimReferralAwards": 50,
+    "networkActivity": 450
+  }
+}
+```
+
+## Pass API
+
+### Create Pass
+
+```
+POST /api/passes
+```
+
+**Request Headers**:
+```
+Authorization: Bearer <token>
+```
+
+**Request Body**:
+```json
+{
+  "creatorId": "creator-uuid",
+  "platform": "apple",  // or "google"
+  "expiresAt": "2025-12-31T23:59:59Z"
+}
+```
+
+**Response** (201 Created):
+```json
+{
+  "status": "success",
+  "data": {
+    "pass": {
+      "id": "pass-uuid",
+      "creatorId": "creator-uuid",
+      "creatorName": "Creator Name",
+      "creatorLogo": "/assets/logos/creator-logo.png",
+      "userId": "user-uuid",
+      "userName": "User Name",
+      "userWalletAddress": "0x1234...",
+      "passUrl": "https://example.com/passes/pass-uuid",
+      "status": "active",
+      "platform": "apple",
+      "expiresAt": "2025-12-31T23:59:59Z",
+      "serialNumber": "PASS123",
+      "passTypeIdentifier": "pass.ai.datadance.app",
+      "createdAt": "2025-05-17T10:00:00Z",
+      "updatedAt": "2025-05-17T10:00:00Z"
+    }
+  }
+}
+```
+
+### Get User Passes
+
+```
+GET /api/passes
+```
+
+**Request Headers**:
+```
+Authorization: Bearer <token>
+```
+
+**Response** (200 OK):
+```json
+{
+  "status": "success",
+  "data": {
+    "passes": [
+      {
+        "id": "pass-uuid",
+        "creatorId": "creator-uuid",
+        "creatorName": "Creator Name",
+        "creatorLogo": "/assets/logos/creator-logo.png",
+        "passUrl": "https://example.com/passes/pass-uuid",
+        "status": "active",
+        "platform": "apple",
+        "expiresAt": "2025-12-31T23:59:59Z",
+        "serialNumber": "PASS123",
+        "createdAt": "2025-05-17T10:00:00Z"
+      }
+    ]
+  }
+}
+```
+
+### Get Pass Details
+
+```
+GET /api/passes/:passId
+```
+
+**Request Headers**:
+```
+Authorization: Bearer <token>
+```
+
+**Response** (200 OK):
+```json
+{
+  "status": "success",
+  "data": {
+    "pass": {
+      "id": "pass-uuid",
+      "creatorId": "creator-uuid",
+      "creatorName": "Creator Name",
+      "creatorLogo": "/assets/logos/creator-logo.png",
+      "userId": "user-uuid",
+      "userName": "User Name",
+      "userWalletAddress": "0x1234...",
+      "passUrl": "https://example.com/passes/pass-uuid",
+      "status": "active",
+      "platform": "apple",
+      "expiresAt": "2025-12-31T23:59:59Z",
+      "serialNumber": "PASS123",
+      "passTypeIdentifier": "pass.ai.datadance.app",
+      "createdAt": "2025-05-17T10:00:00Z",
+      "updatedAt": "2025-05-17T10:00:00Z"
+    }
+  }
+}
+```
+
+### Update Pass Push Token
+
+```
+PUT /api/passes/:passId/push-token
+```
+
+**Request Headers**:
+```
+Authorization: Bearer <token>
+```
+
+**Request Body**:
+```json
+{
+  "pushToken": "device-push-token"
+}
+```
+
+**Response** (200 OK):
+```json
+{
+  "status": "success",
+  "message": "Push token updated successfully",
+  "data": {
+    "pass": {
+      "id": "pass-uuid",
+      "pushToken": "device-push-token",
+      "updatedAt": "2025-05-17T10:30:00Z"
+    }
+  }
+}
+```
+
+### Delete Pass
+
+```
+DELETE /api/passes/:passId
+```
+
+**Request Headers**:
+```
+Authorization: Bearer <token>
+```
+
+**Response** (200 OK):
+```json
+{
+  "status": "success",
+  "message": "Pass deleted successfully"
+}
+```
+
+## X API
+
+### Get X Post Details
+
+```
+GET /api/x/posts/:postId
+```
+
+**Path Parameters**:
+- `postId`: X post ID (required)
+
+**Headers**:
+```
+Authorization: Bearer <token>
+```
+
+**Response** (200 OK):
+```json
+{
+  "status": "success",
+  "data": {
+    "id": "1234567890",
+    "text": "Post content",
+    "author": {
+      "id": "123456",
+      "username": "author_username",
+      "name": "Author Name"
+    },
+    "created_at": "2025-05-17T10:00:00Z",
+    "metrics": {
+      "retweets": 10,
+      "likes": 20,
+      "replies": 5
+    }
+  }
+}
+```
+
+---
+
+### X Account OAuth2 PKCE Binding Flow
+
+#### Step 1: Initiate Authorization
+
+```
+GET /api/x/oauth2/authorize
+```
+
+**Description**: Start the X OAuth2.0 PKCE authorization flow. The backend generates PKCE parameters and constructs the X authorization URL, redirecting the user to X for authorization. Login required.
+
+**Headers**:
+```
+Authorization: Bearer <token>
+```
+
+**Response**:
+- `302 Found`: Redirect to X authorization page
+  - `Location`: X authorization URL
+
+**Error Response**:
+- 401 Unauthorized: Not authenticated
+- 500 Internal Server Error: Failed to generate authorization URL
+```json
+{
+  "status": "error",
+  "code": "X_OAUTH_START_FAILED",
+  "message": "Failed to start X OAuth2 authorization."
+}
+```
+
+---
+
+#### Step 2: Handle X Callback
+
+```
+GET /api/x/oauth2/callback
+```
+
+**Description**: X callback endpoint after authorization. The backend exchanges code and state for access token and refresh token, retrieves X user information and binds the account.
+
+**Query Parameters**:
+- `code`: X authorization code
+- `state`: CSRF prevention state
+
+**Response**:
+- `302 Found`: Redirect to frontend URL with binding result parameters
+  - `Location`: e.g., `https://yourfrontend.com/settings/connections?x_status=success` or `x_status=error&code=STATE_INVALID`
+
+**Error Response**:
+- Returned via redirect parameters, common errors:
+  - Missing/invalid state (`x_status=error&code=STATE_INVALID`)
+  - Missing/invalid code (`x_status=error&code=CODE_INVALID`)
+  - Token exchange failed (`x_status=error&code=TOKEN_EXCHANGE_FAILED`)
+  - Failed to fetch user info (`x_status=error&code=USER_INFO_FETCH_FAILED`)
+  - Account already bound (`x_status=error&code=X_ACCOUNT_ALREADY_BOUND`)
+  - Database update failed (`x_status=error&code=DATABASE_UPDATE_FAILED`)
+
+---
+
+#### Step 3: Get X Account Binding Status
+
+```
+GET /api/x/status
+```
+
+**Headers**:
+```
+Authorization: Bearer <token>
+```
+
+**Response** (200 OK - Bound):
+```json
+{
+  "status": "success",
+  "data": {
+    "bound": true,
+    "xid": "1234567890123456789",
+    "xUsername": "twitterUser",
+    "xName": "Twitter User Name",
+    "xProfileImageUrl": "https://pbs.twimg.com/profile_images/..."
+  }
+}
+```
+
+**Response** (200 OK - Not Bound):
+```json
+{
+  "status": "success",
+  "data": {
+    "bound": false
+  }
+}
+```
+
+**Error Response**:
+- 401 Unauthorized: Not authenticated
+- 500 Internal Server Error: Failed to fetch status
+```json
+{
+  "status": "error",
+  "code": "STATUS_FETCH_FAILED",
+  "message": "Failed to fetch X binding status."
+}
+```

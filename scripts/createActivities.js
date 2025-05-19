@@ -1,6 +1,6 @@
-const { PrismaClient } = require('@prisma/client');
 const bcrypt = require('bcryptjs');
-const prisma = new PrismaClient();
+const prisma = require('../src/utils/prisma');
+const { generateReferralCode } = require('../src/utils/referralUtils');
 
 // 活动类型枚举
 const ActivityType = {
@@ -1358,6 +1358,15 @@ const activities = [
  * 格式化活动数据
  */
 function formatActivityData(data) {
+  // 设置默认值
+  data.tokenStandard = data.nft.tokenStandard || 'ERC721'; // 默认使用 ERC721 标准
+
+  // 从 basicInfo.duration 提取开始和结束日期
+  if (data.basicInfo && data.basicInfo.duration) {
+    data.startDate = new Date(data.basicInfo.duration.start);
+    data.endDate = new Date(data.basicInfo.duration.end);
+  }
+
   // 确保 externalLinks 是 JSON 字符串
   if (data.externalLinks && typeof data.externalLinks !== 'string') {
     data.externalLinks = JSON.stringify(data.externalLinks);
@@ -1372,13 +1381,6 @@ function formatActivityData(data) {
   if (data.nft && data.nft.contractAddress) {
     data.contractAddress = data.nft.contractAddress;
     data.chainId = data.nft.chainId || 1; // 默认使用以太坊主网
-    data.tokenStandard = data.nft.tokenStandard || 'ERC721'; // 默认使用 ERC721 标准
-  }
-  
-  // 从 basicInfo.duration 提取开始和结束日期
-  if (data.basicInfo && data.basicInfo.duration) {
-    data.startDate = new Date(data.basicInfo.duration.start);
-    data.endDate = new Date(data.basicInfo.duration.end);
   }
 
   // 从 NFT 数据中提取相关字段
@@ -1419,7 +1421,7 @@ function formatActivityData(data) {
   
   // 移除不需要的字段
   const { claimed, basicInfo, nft, organizer, coverImage, status, equity, ...formattedData } = data;
-  
+
   return formattedData;
 }
 
@@ -1487,7 +1489,8 @@ async function createActivity(activityData) {
           isOrganization: true,
           description: `Official organization for ${organizerName}`,
           logo: activityData.organizer.avatar,
-          avatar: activityData.organizer.avatar
+          avatar: activityData.organizer.avatar,
+          referralCode: generateReferralCode()
         }
       });
       
@@ -1590,4 +1593,4 @@ async function createAllActivities() {
 // 运行脚本
 createAllActivities()
   .then(() => console.log('Script completed successfully'))
-  .catch(error => console.error('Script failed:', error)); 
+  .catch(error => console.error('Script failed:', error));
