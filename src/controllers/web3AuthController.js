@@ -20,7 +20,9 @@ exports.web3authLogin = async (req, res) => {
       email: userInfo?.email,
       walletAddress,
       xid,
-      hasReferralCode: Boolean(referralCode)
+      xUsername,
+      hasAccessToken: Boolean(xAccessToken),
+      hasRefreshToken: Boolean(xRefreshToken)
     });
 
     // 1. 基础验证
@@ -40,14 +42,14 @@ exports.web3authLogin = async (req, res) => {
       });
     }
 
-    // 2. 查找用户
+    // 2. 查找用户 - 优先通过邮箱查找，因为这是最可靠的标识符
     let user = null;
-    if (xid) {
+    if (userInfo?.email) {
+      user = await prisma.user.findUnique({ where: { email: userInfo.email } });
+    } else if (xid) {
       user = await prisma.user.findUnique({ where: { xid } });
     } else if (walletAddress) {
       user = await prisma.user.findFirst({ where: { walletAddress } });
-    } else if (userInfo?.email) {
-      user = await prisma.user.findUnique({ where: { email: userInfo.email } });
     }
 
     // 3. 处理现有用户登录
@@ -61,13 +63,17 @@ exports.web3authLogin = async (req, res) => {
         });
       }
 
-      // 更新用户信息
+      // 更新用户信息，包括新的社交账号信息
       const updateData = {
         authType: 'web3auth',
-        ...(xid && { xid }),
-        ...(xUsername && { xUsername }),
-        ...(xAccessToken && { xAccessToken }),
-        ...(xRefreshToken && { xRefreshToken })
+        // 只有在用户信息为空时才更新
+        ...(userInfo?.name && !user.name && { name: userInfo.name }),
+        ...(userInfo?.profileImage && !user.avatar && { avatar: userInfo.profileImage }),
+        // 如果还没有 X 账号信息，则添加
+        ...(xid && !user.xid && { xid }),
+        ...(xUsername && !user.xUsername && { xUsername }),
+        ...(xAccessToken && !user.xAccessToken && { xAccessToken }),
+        ...(xRefreshToken && !user.xRefreshToken && { xRefreshToken })
       };
 
       // 如果是首次绑定钱包
@@ -85,6 +91,7 @@ exports.web3authLogin = async (req, res) => {
         updateData.walletAddress = walletAddress;
       }
 
+      // 更新用户信息
       user = await prisma.user.update({
         where: { id: user.id },
         data: updateData
@@ -92,6 +99,15 @@ exports.web3authLogin = async (req, res) => {
 
       const token = generateToken(user.id);
       const { password, privateKey, ...safeUser } = user;
+      
+      logger.info('User logged in successfully', {
+        userId: user.id,
+        email: user.email,
+        authType: user.authType,
+        hasXAccount: Boolean(user.xid),
+        hasWallet: Boolean(user.walletAddress)
+      });
+
       return res.status(200).json({
         status: 'success',
         data: { token, user: safeUser }
