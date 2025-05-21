@@ -74,13 +74,32 @@ async function exchangeCodeForToken(code, codeVerifier) {
     code,
     code_verifier: codeVerifier
   });
-  const resp = await axios.post(tokenUrl, payload, {
-    headers: {
-      'Content-Type': 'application/x-www-form-urlencoded',
-      Authorization: `Basic ${authHeader}`
-    }
+
+  logger.info('Exchanging code for token', {
+    tokenUrl,
+    redirectUri: process.env.X_OAUTH_CALLBACK_URL,
+    hasCode: Boolean(code),
+    hasCodeVerifier: Boolean(codeVerifier)
   });
-  return resp.data; // { access_token, refresh_token, expires_in, scope }
+
+  try {
+    const resp = await axios.post(tokenUrl, payload, {
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        Authorization: `Basic ${authHeader}`
+      }
+    });
+    logger.info('Successfully exchanged code for token');
+    return resp.data;
+  } catch (error) {
+    logger.error('Failed to exchange code for token', {
+      status: error.response?.status,
+      data: error.response?.data,
+      message: error.message,
+      code: error.code
+    });
+    throw error;
+  }
 }
 
 /**

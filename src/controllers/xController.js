@@ -68,8 +68,13 @@ exports.oauth2AuthorizeUrl = async (req, res) => {
   try {
     const userId = req.user.id;
     const { state, codeVerifier, codeChallenge } = xService.generatePKCE(userId);
-    const redirectUri = `${req.protocol}://${req.get('host')}/api/x/oauth2/callback`;
-    const authUrl = xService.generateAuthUrl(state, codeChallenge, redirectUri);
+    const authUrl = xService.generateAuthUrl(state, codeChallenge, process.env.X_OAUTH_CALLBACK_URL);
+    
+    logger.info('Generated X auth URL', {
+      userId,
+      state,
+      callbackUrl: process.env.X_OAUTH_CALLBACK_URL
+    });
     
     return res.json({
       status: 'success',
@@ -96,8 +101,14 @@ exports.oauth2Authorize = async (req, res) => {
   try {
     const userId = req.user.id;
     const { state, codeVerifier, codeChallenge } = xService.generatePKCE(userId);
-    const redirectUri = `${req.protocol}://${req.get('host')}/api/x/oauth2/callback`;
-    const authUrl = xService.generateAuthUrl(state, codeChallenge, redirectUri);
+    const authUrl = xService.generateAuthUrl(state, codeChallenge, process.env.X_OAUTH_CALLBACK_URL);
+    
+    logger.info('Redirecting to X auth URL', {
+      userId,
+      state,
+      callbackUrl: process.env.X_OAUTH_CALLBACK_URL
+    });
+    
     return res.redirect(authUrl);
   } catch (error) {
     logger.error('Error in oauth2Authorize', { error: error.message });

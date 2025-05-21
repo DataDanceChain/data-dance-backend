@@ -278,11 +278,19 @@ exports.updateWalletAddress = async (req, res) => {
 };
 
 /**
- * 生成钱包
+ * 生成钱包 - 已禁用
  * @route POST /api/users/wallet/generate
  * @access Private
+ * @deprecated 此功能已被禁用，请使用 Web3Auth 或其他安全的钱包生成方式
  */
 exports.generateWallet = async (req, res) => {
+  return res.status(403).json({
+    status: 'fail',
+    code: 'FEATURE_DISABLED',
+    message: '此功能已被禁用，请使用 Web3Auth 或其他安全的钱包生成方式'
+  });
+
+  /* 原实现已禁用
   try {
     // 检查用户类型
     if (req.user.userType === 'organization' || req.user.isOrganization) {
@@ -333,6 +341,7 @@ exports.generateWallet = async (req, res) => {
       error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
+  */
 };
 
 /**

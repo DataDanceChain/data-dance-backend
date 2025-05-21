@@ -139,9 +139,15 @@ POST /api/auth/web3auth-login
   "walletAddress": "0x1234567890abcdef1234567890abcdef12345678", // 可选，钱包登录时必填
   "xid": "123456789", // 可选，X 渠道登录时必填
   "xUsername": "username", // 可选，X 渠道登录时通常会提供
+  "xAccessToken": "access_token", // 可选，X 渠道登录时如果有 token 可以传入
+  "xRefreshToken": "refresh_token", // 可选，X 渠道登录时如果有 refresh token 可以传入
   "invitationCode": "REF-ABCD1234" // 可选，新用户注册时可提供邀请码
 }
 ```
+
+**说明**:
+- `invitationCode`: 用于记录谁邀请了新用户，而不是生成新用户的邀请码。每个用户都会由后端自动生成一个唯一的邀请码（格式为 `DD-{cuid}`）。
+- `xAccessToken` 和 `xRefreshToken`: 这两个字段是可选的，用于存储 X 账号的访问令牌。如果前端在 X 登录时获取到这些令牌，可以传入；如果没有，可以不传，后端会正常处理。
 
 **响应** (200 OK):
 ```json
@@ -321,34 +327,6 @@ Authorization: Bearer <token>
 {
   "status": "success",
   "message": "钱包地址已更新",
-  "data": {
-    "user": {
-      "id": "user-uuid",
-      "email": "user@example.com",
-      "name": "User Name",
-      "walletAddress": "0x1234567890abcdef1234567890abcdef12345678",
-      "chainId": 1
-    }
-  }
-}
-```
-
-### 生成钱包
-
-```
-POST /api/users/wallet/generate
-```
-
-**请求头**:
-```
-Authorization: Bearer <token>
-```
-
-**响应** (200 OK):
-```json
-{
-  "status": "success",
-  "message": "钱包已生成",
   "data": {
     "user": {
       "id": "user-uuid",
