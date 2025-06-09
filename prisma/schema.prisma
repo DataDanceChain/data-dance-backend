@@ -8,82 +8,48 @@ datasource db {
 }
 
 model User {
-  id             String             @id @default(uuid())
-  
-  // 基本信息
-  email          String             @unique
-  password       String?            // 现在密码可以为空，因为Web3Auth用户不需要密码
-  name           String?
-  avatar         String?
-  
-  // 区块链相关字段
-  walletAddress  String?            @unique  // 用户的区块链钱包地址
-  chainId        Int?               // 链 ID，例如以太坊主网是 1，Polygon 是 137
-  privateKey     String?            // 钱包私钥，用于后端托管钱包
-  
-  // 认证和用户类型
-  authType       String             @default("traditional") // "web3auth" 或 "traditional"
-  userType       String             @default("regular")     // "regular" 或 "organization"
-  
-  // 组织相关字段
-  isOrganization Boolean            @default(false)
-  description    String?            // 组织描述
-  logo           String?            // 组织标志（可以与avatar共用）
-  
-  // X (Twitter) 相关字段
-  xid            String?            @unique // X (Twitter) User ID
-  xUsername      String?            // X (Twitter) Username
-  xAccessToken   String?            // Encrypt this if stored
-  xRefreshToken  String?            // Encrypt this if stored
-
-  // 时间戳
-  createdAt      DateTime           @default(now())
-  updatedAt      DateTime           @updatedAt
-  
-  // 积分相关
-  totalPoints    Float              @default(0)
-  points         Point[]
-  
-  // 组织关系
-  organizationId String?
-  organization   User?              @relation("OrganizationMembers", fields: [organizationId], references: [id])
-  members        User[]             @relation("OrganizationMembers")
-  
-  // 用户资料和角色
-  profile        UserProfile?
-  roles          UserRole[]
-  
-  // 活动和资产相关
-  createdActivities Activity[]      // 创建的活动
+  id                String             @id @default(uuid())
+  email             String             @unique
+  password          String?
+  name              String?
+  avatar            String?
+  walletAddress     String?            @unique
+  chainId           Int?
+  privateKey        String?
+  authType          String             @default("traditional")
+  userType          String             @default("regular")
+  isOrganization    Boolean            @default(false)
+  description       String?
+  logo              String?
+  xid               String?            @unique
+  xUsername         String?
+  xAccessToken      String?
+  xRefreshToken     String?
+  referralCode      String             @unique
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+  totalPoints       Float              @default(0)
+  organizationId    String?
+  createdActivities Activity[]
   activityClaims    ActivityClaim[]
-  dataAssets        NFTDataAsset[]  // 拥有的数据资产
   transactions      AssetTransaction[]
-  
-  // 徽章相关
-  createdBadges   Badge[]           // 创建的徽章
-  badges          UserBadge[]
-  
-  // 通知
-  notifications   Notification[]
-  
-  // DataDance ID
-  dataDanceIDs    DataDanceID[]
-  
-  // 奖励和任务相关
-  UserAwards      UserAward[]
-  UserTasks       UserTask[]
-
-  // 爬虫相关
-  crawlerTasks    CrawlerTask[]
-  crawlerData     CrawlerData[]
-
-  // 邀请关系 - 使用应用生成的 referralCode
-  referralCode   String             @unique // 每个用户自己的推荐码，由应用生成
-  invitesSent     Referral[]        @relation("InvitesSent")
-  invitesReceived Referral?         @relation("InvitesReceived")
-
-  // Wallet Pass 关系
-  passes          Pass[]
+  createdBadges     Badge[]
+  crawlerData       CrawlerData[]
+  crawlerTasks      CrawlerTask[]
+  dataDanceIDs      DataDanceID[]
+  dataAssets        NFTDataAsset[]
+  notifications     Notification[]
+  passes            Pass[]
+  points            Point[]
+  invitesReceived   Referral?          @relation("InvitesReceived")
+  invitesSent       Referral[]         @relation("InvitesSent")
+  organization      User?              @relation("OrganizationMembers", fields: [organizationId], references: [id])
+  members           User[]             @relation("OrganizationMembers")
+  UserAwards        UserAward[]
+  badges            UserBadge[]
+  profile           UserProfile?
+  roles             UserRole[]
+  UserTasks         UserTask[]
 }
 
 model UserProfile {
@@ -139,15 +105,15 @@ model Point {
 }
 
 model Badge {
-  id             String       @id @default(uuid())
-  name           String
-  description    String?
-  image          String
-  creator        User         @relation(fields: [creatorId], references: [id])
-  creatorId      String
-  userBadges     UserBadge[]
-  createdAt      DateTime     @default(now())
-  updatedAt      DateTime     @default(now())
+  id          String      @id @default(uuid())
+  name        String
+  description String?
+  image       String
+  creatorId   String
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @default(now())
+  creator     User        @relation(fields: [creatorId], references: [id])
+  userBadges  UserBadge[]
 }
 
 model UserBadge {
@@ -320,168 +286,153 @@ model DataDanceID {
   @@unique([userId, activityId])
 }
 
-// Crawler 相关模型
 model CrawlerTask {
   id          String        @id @default(uuid())
   title       String
   description String?
-  source      String        // 'amazon' | 'luma'
-  status      String        @default("pending") // 'pending' | 'running' | 'done' | 'error'
+  source      String
+  status      String        @default("pending")
   recordCount Int           @default(0)
   dataUrl     String?
   log         String?
   userId      String
   createdAt   DateTime      @default(now())
   updatedAt   DateTime      @updatedAt
-  
-  user        User          @relation(fields: [userId], references: [id])
   data        CrawlerData[]
+  user        User          @relation(fields: [userId], references: [id])
 }
 
 model CrawlerData {
-  id        String      @id @default(uuid())
-  source    String      // 'amazon' | 'luma'
-  type      String      // 'product' | 'price' | 'review' | 'event' | 'task' | 'custom'
-  timestamp DateTime
-  metadata  Json        // DataItem.metadata structure
-  payload   Json        // DataItem.payload structure
-  taskId    String
-  userId    String      // for easier querying and statistics
-  createdAt DateTime    @default(now())
-  updatedAt DateTime    @updatedAt
-  
-  task      CrawlerTask @relation(fields: [taskId], references: [id])
-  user      User        @relation(fields: [userId], references: [id])
-}
-
-// Award相关模型
-model Award {
-  id          String      @id @default(uuid()) // 奖励唯一标识
-  title       String      // 奖励标题
-  description String      // 奖励描述
-  icon        String?     // 前端图标名
-  color       String?     // 前端展示颜色
-  status      AwardStatus @default(LOCKED) // 全局奖励状态：LOCKED/ LIVE/ INVALID
-  metadata    Json?       @default("{}") // 可选元数据
-  tasks       Task[]      // 子任务列表
-  UserAwards  UserAward[] // 用户奖励关联表
+  id          String      @id @default(uuid())
+  source      String
+  type        String
+  timestamp   DateTime
+  metadata    Json
+  payload     Json
+  taskId      String
+  userId      String
   createdAt   DateTime    @default(now())
   updatedAt   DateTime    @updatedAt
+  contentHash String      @unique
+  sourceId    String?
+  task        CrawlerTask @relation(fields: [taskId], references: [id])
+  user        User        @relation(fields: [userId], references: [id])
+
+  @@index([userId, createdAt])
 }
 
-// 用户奖励状态和领取记录
+model Award {
+  id          String      @id @default(uuid())
+  title       String
+  description String
+  icon        String?
+  color       String?
+  status      AwardStatus @default(LOCKED)
+  metadata    Json?       @default("{}")
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+  tasks       Task[]
+  UserAwards  UserAward[]
+}
+
 model UserAward {
-  id        String      @id @default(uuid()) // 记录唯一标识
-  userId    String      // 用户 ID
-  awardId   String      // 奖励 ID
-  status    AwardStatus @default(LOCKED) // 此用户此奖励的状态
-  claimed   Boolean     @default(false)  // 是否已领取过
-  createdAt DateTime    @default(now())  // 记录创建时间
+  id        String      @id @default(uuid())
+  userId    String
+  awardId   String
+  status    AwardStatus @default(LOCKED)
+  claimed   Boolean     @default(false)
+  createdAt DateTime    @default(now())
   updatedAt DateTime    @updatedAt
-  
-  User      User        @relation(fields: [userId], references: [id])
   Award     Award       @relation(fields: [awardId], references: [id])
-  
+  User      User        @relation(fields: [userId], references: [id])
+
   @@unique([userId, awardId])
 }
 
-// 全局奖励三态：锁定、开放、失效
-enum AwardStatus {
-  LOCKED   // 未发布或前置未达成
-  LIVE     // 正常开放
-  INVALID  // 已过期或灰度外
-}
-
-// Global status states for awards and tasks
-// LOCKED: not available; LIVE: active; INVALID: expired or inaccessible
-// Reuse AwardStatus enum for tasks as well
-
 model Task {
-  id                String      @id @default(uuid())
-  award             Award       @relation(fields: [awardId], references: [id])
-  awardId           String
-  title             String      // Task title
-  description       String?     // Task description
-  status            AwardStatus @default(LOCKED) // Task status: LOCKED/LIVE/INVALID
-  prerequisiteTaskId String?    // Optional ID of a prerequisite task for unlocking this one
-  prerequisiteTask   Task?      @relation("TaskPrerequisite", fields: [prerequisiteTaskId], references: [id])
-  claimLimit        Int?        // Max claims for CONTINUOUS tasks, null = unlimited
-  requirementCount  Int?        // Optional numeric requirement for progress
-  points            Int         // Reward points per completion
-  icon              String?     // Optional icon name
-  picture           String?     // Optional image URL
-  url               String?     // Optional action link
-  metadata          Json?       @default("{}") // Optional metadata
-  createdAt         DateTime    @default(now())
-  updatedAt         DateTime    @updatedAt
-  
-  UserTasks         UserTask[]
-  dependentTasks    Task[]      @relation("TaskPrerequisite")
+  id                 String      @id @default(uuid())
+  awardId            String
+  title              String
+  description        String?
+  status             AwardStatus @default(LOCKED)
+  prerequisiteTaskId String?
+  claimLimit         Int?
+  requirementCount   Int?
+  points             Int
+  icon               String?
+  picture            String?
+  url                String?
+  metadata           Json?       @default("{}")
+  createdAt          DateTime    @default(now())
+  updatedAt          DateTime    @updatedAt
+  award              Award       @relation(fields: [awardId], references: [id])
+  prerequisiteTask   Task?       @relation("TaskPrerequisite", fields: [prerequisiteTaskId], references: [id])
+  dependentTasks     Task[]      @relation("TaskPrerequisite")
+  UserTasks          UserTask[]
 }
 
 model UserTask {
-  id            String      @id @default(uuid())
-  userId        String
-  taskId        String
-  status        AwardStatus @default(LOCKED) // User task status: LOCKED/LIVE/INVALID
-  claimRecords  DateTime[]  @default([]) // Timestamps of each claim
-  claimed       Boolean     @default(false)  // whether user has claimed reward
-  createdAt     DateTime    @default(now())
-  updatedAt     DateTime    @updatedAt
-  
-  user          User        @relation(fields: [userId], references: [id])
-  task          Task        @relation(fields: [taskId], references: [id])
-  
+  id           String      @id @default(uuid())
+  userId       String
+  taskId       String
+  status       AwardStatus @default(LOCKED)
+  claimRecords DateTime[]  @default(dbgenerated("(ARRAY[]::timestamp without time zone[])::timestamp(3) without time zone[]"))
+  claimed      Boolean     @default(false)
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+  task         Task        @relation(fields: [taskId], references: [id])
+  user         User        @relation(fields: [userId], references: [id])
+
   @@unique([userId, taskId])
 }
 
-// 多级邀请关系表
 model Referral {
-  id         String   @id @default(uuid())
-  inviterId  String
-  inviteeId  String   @unique
-  code       String   // 实际使用的邀请码字符串
-  createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
-  
-  inviter    User     @relation("InvitesSent", fields: [inviterId], references: [id])
-  invitee    User     @relation("InvitesReceived", fields: [inviteeId], references: [id])
+  id        String   @id @default(uuid())
+  inviterId String
+  inviteeId String   @unique
+  code      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  invitee   User     @relation("InvitesReceived", fields: [inviteeId], references: [id])
+  inviter   User     @relation("InvitesSent", fields: [inviterId], references: [id])
 }
 
-// Add persistent cache for X post engagement data
 model XPostCache {
-  key       String   @id        // e.g. 'retweets:<postId>' or 'quotes:<query>'
-  data      Json               // stored API response data
+  key       String   @id
+  data      Json
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }
 
-// Wallet Pass模型
 model Pass {
-  id                String   @id @default(uuid())
-  creatorId         String
-  creatorName       String
-  creatorLogo       String
-  userId            String
-  userName          String
-  userWalletAddress String
-  passUrl           String?
-  status            String   @default("active")
-  createdAt         DateTime @default(now())
-  expiresAt         DateTime
-  serialNumber      String?  @unique
-  pushToken         String?
-  updatedAt         DateTime @updatedAt
-  passTypeIdentifier String  @default("pass.ai.datadance.app")
-  platform          String   @default("apple")
-  googleObjectId    String?
-  googleClassId     String?
-  googleAddUrl      String?
-  
-  // 关系
-  user              User     @relation(fields: [userId], references: [id])
+  id                 String   @id @default(uuid())
+  creatorId          String
+  creatorName        String
+  creatorLogo        String
+  userId             String
+  userName           String
+  userWalletAddress  String
+  passUrl            String?
+  status             String   @default("active")
+  createdAt          DateTime @default(now())
+  expiresAt          DateTime
+  serialNumber       String?  @unique
+  pushToken          String?
+  updatedAt          DateTime @updatedAt
+  passTypeIdentifier String   @default("pass.ai.datadance.app")
+  platform           String   @default("apple")
+  googleObjectId     String?
+  googleClassId      String?
+  googleAddUrl       String?
+  user               User     @relation(fields: [userId], references: [id])
 
   @@unique([userId, creatorId, platform])
   @@index([creatorId])
   @@index([userId])
+}
+
+enum AwardStatus {
+  LOCKED
+  LIVE
+  INVALID
 }

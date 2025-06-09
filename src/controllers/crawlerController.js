@@ -186,32 +186,19 @@ async function uploadData(req, res) {
       });
     }
 
-    // Group by source and process
-    const sourceGroups = validItems.reduce((groups, item) => {
-      if (!groups[item.source]) groups[item.source] = [];
-      groups[item.source].push(item);
-      return groups;
-    }, {});
+    // Upload all data at once - the service will handle source grouping internally
+    const result = await crawlerService.uploadCrawlerData(validItems, userId);
 
-    let totalUploaded = 0;
-    let totalPointsEarned = 0;
-
-    for (const [source, items] of Object.entries(sourceGroups)) {
-      // Get or create task for this source
-      const task = await crawlerService.getOrCreateCrawlerTask(userId, source);
-      
-      // Upload data for this source
-      const result = await crawlerService.uploadCrawlerData(userId, task.id, items);
-      totalUploaded += result.uploadedCount;
-      totalPointsEarned += result.pointsEarned;
-    }
-
-    // Simple response as per original spec
+    // Enhanced response with detailed information
     res.json({
       status: 'success',
       data: {
-        uploadedCount: totalUploaded,
-        pointsEarned: totalPointsEarned
+        uploadedCount: result.uploadedCount,
+        pointsEarned: result.pointsEarned,
+        duplicatesCount: result.duplicatesCount || 0,
+        duplicateDetails: result.duplicateDetails || [],
+        qualityReports: result.qualityReports || [],
+        message: result.message || `成功上传 ${result.uploadedCount} 条数据`
       }
     });
 

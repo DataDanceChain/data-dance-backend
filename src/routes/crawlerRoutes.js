@@ -1,7 +1,13 @@
 const express = require('express');
 const {
   getCrawlerTasks,
-  uploadData
+  createCrawlerTask,
+  uploadData,
+  getCrawlerData,
+  getCrawlerStats,
+  getUploadLimits,
+  updateTaskStatus,
+  deleteCrawlerTask
 } = require('../controllers/crawlerController');
 const { protect } = require('../middlewares/authMiddleware');
 
@@ -12,6 +18,16 @@ router.use(protect);
 
 // Core endpoints matching original specification
 router.get('/crawler-tasks', getCrawlerTasks);
+router.post('/crawler-tasks', createCrawlerTask);
 router.post('/upload', uploadData);
+
+// Task management endpoints
+router.get('/crawler-tasks/:taskId/data', getCrawlerData);
+router.put('/crawler-tasks/:taskId/status', updateTaskStatus);
+router.delete('/crawler-tasks/:taskId', deleteCrawlerTask);
+
+// Statistics and limits endpoints
+router.get('/crawler/stats', getCrawlerStats);
+router.get('/crawler/limits', getUploadLimits);
 
 module.exports = router; 
