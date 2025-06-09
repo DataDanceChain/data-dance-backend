@@ -2045,27 +2045,29 @@ Authorization: Bearer <token>
 
 ## Crawler API
 
-### Get Crawler Tasks
+### 核心功能
+
+#### 1. 获取爬虫任务列表
 
 ```
 GET /api/crawler-tasks
 ```
 
-**Description**: Get crawler tasks for the authenticated user with filtering and pagination.
+**描述**: 获取用户的爬虫任务列表，支持过滤和分页。
 
-**Headers**:
+**请求头**:
 ```
 Authorization: Bearer <token>
 ```
 
-**Query Parameters**:
-- `source`: Filter by source ('amazon' | 'luma') (optional)
-- `status`: Filter by status ('pending' | 'running' | 'done' | 'error') (optional)
-- `search`: Search in title and description (optional)
-- `page`: Page number (default: 1) (optional)
-- `limit`: Items per page (default: 10, max: 100) (optional)
+**查询参数**:
+- `source`: 数据源过滤 ('amazon' | 'luma') (可选)
+- `status`: 状态过滤 ('pending' | 'running' | 'done' | 'error') (可选)
+- `search`: 关键词搜索 (可选)
+- `page`: 页码 (默认: 1) (可选)
+- `limit`: 每页条数 (默认: 10, 最大: 100) (可选)
 
-**Response** (200 OK):
+**响应** (200 OK):
 ```json
 {
   "status": "success",
@@ -2076,8 +2078,10 @@ Authorization: Bearer <token>
         "title": "Amazon Order History",
         "description": "Crawl your Amazon order history to earn rewards",
         "source": "amazon",
-        "status": "pending",
-        "recordCount": 0,
+        "status": "running",
+        "recordCount": 150,
+        "dataUrl": null,
+        "log": null,
         "createdAt": "2025-06-01T09:00:00.000Z",
         "updatedAt": "2025-06-01T09:30:00.000Z",
         "tags": [
@@ -2096,328 +2100,137 @@ Authorization: Bearer <token>
 }
 ```
 
-### Create Crawler Task
+#### 2. 获取单个任务详情
 
 ```
-POST /api/crawler-tasks
+GET /api/crawler-tasks/{taskId}
 ```
 
-**Description**: Create a new crawler task for the authenticated user.
+**描述**: 获取指定爬虫任务的详细信息。
 
-**Headers**:
+**请求头**:
 ```
 Authorization: Bearer <token>
 ```
 
-**Request Body**:
-```json
-{
-  "source": "amazon"
-}
-```
+**路径参数**:
+- `taskId`: 任务ID (必需)
 
-**Response** (201 Created):
+**响应** (200 OK):
 ```json
 {
-  "status": "success",
+  "success": true,
   "data": {
-    "task": {
-      "id": "task-uuid",
-      "title": "Amazon Order History",
-      "description": "Crawl your Amazon order history to earn rewards",
-      "source": "amazon",
-      "status": "pending",
-      "recordCount": 0,
-      "createdAt": "2025-06-09T06:21:57.000Z",
-      "updatedAt": "2025-06-09T06:21:57.000Z"
+    "id": "task-amz-20250601-xyz",
+    "title": "Amazon Order History",
+    "description": "Crawl your Amazon order history to earn rewards",
+    "source": "amazon",
+    "status": "running",
+    "createdAt": "2025-06-01T09:00:00.000Z",
+    "updatedAt": "2025-06-01T09:30:00.000Z",
+    "recordCount": 100,
+    "dataUrl": null,
+    "log": "Fetched 100 records. No errors.",
+    "payloadPreview": [
+      {
+        "asin": "B09X123456",
+        "title": "Wireless Bluetooth Headphones",
+        "price": 129.99,
+        "rating": 4.6
+      }
+    ],
+    "tags": [
+      { "id": "amazon", "name": "Amazon" },
+      { "id": "orders", "name": "Orders" }
+    ],
+    "triggeredBy": {
+      "id": "user-uuid",
+      "name": "John Smith",
+      "email": "john@example.com"
     }
   }
 }
 ```
 
-**Error Responses**:
-- 400 Bad Request: Invalid source
-- 409 Conflict: User already has a running task
-
-### Upload Crawler Data
+#### 3. 上传爬虫数据
 
 ```
 POST /api/upload
 ```
 
-**Description**: Upload crawler data for a specific task with validation and reward calculation.
+**描述**: 上传爬虫数据，系统自动验证、计算积分并管理上传限制。
 
-**Headers**:
+**请求头**:
 ```
 Authorization: Bearer <token>
 ```
 
-**Request Body**:
-```json
-{
-  "taskId": "task-amz-20250601-xyz",
-  "data": {
+**请求体格式** (支持三种):
+```javascript
+// 1. 直接数组格式
+[
+  {
     "source": "amazon",
     "type": "product",
     "timestamp": "2025-06-02T11:58:00Z",
     "metadata": {
       "sourceUrl": "https://www.amazon.com/dp/B09X123456",
       "category": "Electronics",
-      "language": "en-US",
-      "region": "US",
-      "tags": ["bestseller"]
+      "region": "US"
     },
     "payload": {
       "asin": "B09X123456",
       "title": "Wireless Bluetooth Headphones",
-      "brand": "Sony",
       "price": 129.99,
-      "currency": "USD",
-      "rating": 4.6,
-      "reviewCount": 2034,
-      "availability": "In Stock"
+      "rating": 4.6
     }
   }
+]
+
+// 2. 单个对象格式
+{
+  "source": "luma",
+  "type": "task",
+  "timestamp": "2025-06-02T11:59:00Z",
+  "payload": {
+    "taskId": "task-abc",
+    "title": "Fix onboarding flow bug",
+    "status": "in_progress"
+  }
+}
+
+// 3. 包装格式 (兼容)
+{
+  "data": [DataItem, ...]
 }
 ```
 
-**Note**: The `data` field can also be an array of data items for batch upload.
-
-**Response** (200 OK):
+**响应** (200 OK):
 ```json
 {
   "status": "success",
   "data": {
-    "uploadedCount": 1,
-    "pointsEarned": 0,
-    "dailyProgress": {
-      "count": 1,
-      "limit": 1000,
-      "remaining": 999
-    },
-    "monthlyProgress": {
-      "count": 1,
-      "limit": 10000,
-      "remaining": 9999
-    }
+    "uploadedCount": 10,     // 本次上传成功条数
+    "pointsEarned": 100      // 本次获得积分 (每10条获得100积分)
   }
 }
 ```
 
-**Error Responses**:
-- 400 Bad Request: Validation failed
-- 404 Not Found: Task not found
-- 429 Too Many Requests: Upload limit reached
+**错误响应**:
+- 400 Bad Request: 数据格式验证失败
+- 401 Unauthorized: 认证失败
+- 429 Too Many Requests: 超出上传限制 (日限1000条/月限10000条)
 
-### Get Crawler Data
+---
 
-```
-GET /api/crawler-tasks/:taskId/data
-```
+### 数据格式规范
 
-**Description**: Get crawler data for a specific task with pagination.
-
-**Headers**:
-```
-Authorization: Bearer <token>
-```
-
-**Path Parameters**:
-- `taskId`: Task ID (required)
-
-**Query Parameters**:
-- `page`: Page number (default: 1) (optional)
-- `limit`: Items per page (default: 50, max: 100) (optional)
-
-**Response** (200 OK):
-```json
-{
-  "status": "success",
-  "data": {
-    "data": [
-      {
-        "id": "data-uuid",
-        "source": "amazon",
-        "type": "product",
-        "timestamp": "2025-06-02T11:58:00.000Z",
-        "metadata": {
-          "sourceUrl": "https://www.amazon.com/dp/B09X123456",
-          "category": "Electronics"
-        },
-        "payload": {
-          "asin": "B09X123456",
-          "title": "Wireless Bluetooth Headphones",
-          "price": 129.99
-        },
-        "createdAt": "2025-06-09T06:21:57.000Z"
-      }
-    ],
-    "pagination": {
-      "page": 1,
-      "limit": 50,
-      "total": 1,
-      "pages": 1
-    }
-  }
-}
-```
-
-### Get Crawler Statistics
-
-```
-GET /api/crawler/stats
-```
-
-**Description**: Get crawler statistics for the authenticated user.
-
-**Headers**:
-```
-Authorization: Bearer <token>
-```
-
-**Response** (200 OK):
-```json
-{
-  "status": "success",
-  "data": {
-    "totalUploaded": 150,
-    "totalPoints": 1500,
-    "dailyProgress": {
-      "count": 50,
-      "limit": 1000,
-      "remaining": 950
-    },
-    "monthlyProgress": {
-      "count": 150,
-      "limit": 10000,
-      "remaining": 9850
-    },
-    "taskStats": {
-      "pending": 1,
-      "running": 1,
-      "done": 3,
-      "error": 0
-    }
-  }
-}
-```
-
-### Get Upload Limits
-
-```
-GET /api/crawler/limits
-```
-
-**Description**: Get upload limits for the authenticated user.
-
-**Headers**:
-```
-Authorization: Bearer <token>
-```
-
-**Response** (200 OK):
-```json
-{
-  "status": "success",
-  "data": {
-    "daily": {
-      "count": 50,
-      "limit": 1000,
-      "remaining": 950
-    },
-    "monthly": {
-      "count": 150,
-      "limit": 10000,
-      "remaining": 9850
-    }
-  }
-}
-```
-
-### Update Task Status
-
-```
-PUT /api/crawler-tasks/:taskId/status
-```
-
-**Description**: Update crawler task status.
-
-**Headers**:
-```
-Authorization: Bearer <token>
-```
-
-**Path Parameters**:
-- `taskId`: Task ID (required)
-
-**Request Body**:
-```json
-{
-  "status": "done"
-}
-```
-
-**Response** (200 OK):
-```json
-{
-  "status": "success",
-  "data": {
-    "task": {
-      "id": "task-uuid",
-      "title": "Amazon Order History",
-      "description": "Crawl your Amazon order history to earn rewards",
-      "source": "amazon",
-      "status": "done",
-      "recordCount": 150,
-      "createdAt": "2025-06-09T06:21:57.000Z",
-      "updatedAt": "2025-06-09T08:30:00.000Z"
-    }
-  }
-}
-```
-
-### Delete Crawler Task
-
-```
-DELETE /api/crawler-tasks/:taskId
-```
-
-**Description**: Delete a crawler task and its associated data.
-
-**Headers**:
-```
-Authorization: Bearer <token>
-```
-
-**Path Parameters**:
-- `taskId`: Task ID (required)
-
-**Response** (200 OK):
-```json
-{
-  "status": "success",
-  "message": "Task deleted successfully"
-}
-```
-
-## Data Item Schema
-
-### Supported Data Types
-
-- `product`: Product information (requires: title, price)
-- `price`: Price information (requires: price, currency)
-- `review`: Review information (requires: rating, content)
-- `event`: Event information (requires: title, date)
-- `task`: Task information (requires: title, status)
-- `custom`: Custom data (no required fields)
-
-### Data Item Structure
-
+#### DataItem 结构
 ```typescript
 interface DataItem {
   source: 'amazon' | 'luma';
   type: 'product' | 'price' | 'review' | 'event' | 'task' | 'custom';
-  timestamp: string;  // ISO8601 format
+  timestamp: string;  // ISO8601格式
   metadata?: {
     sourceUrl?: string;
     category?: string;
@@ -2425,13 +2238,79 @@ interface DataItem {
     region?: string;
     tags?: string[];
   };
-  payload: Record<string, any>;
+  payload: Record<string, any>;  // 根据type有不同的必需字段
 }
 ```
 
-### Reward System
+#### 积分奖励机制
+- **计算方式**: 累计上传数据每满10条获得100积分
+- **上传限制**: 日限1000条，月限10000条数据
+- **积分上限**: 日最多10,000积分，月最多100,000积分
+- **自动任务**: 首次访问自动为用户创建Amazon和Luma任务
 
-- **Points Calculation**: 100 points per 10 valid data records
-- **Daily Limit**: 1000 data records (10,000 points)
-- **Monthly Limit**: 10,000 data records (100,000 points)
-- **Task Limit**: Only one running task per user at a time
+---
+
+### 扩展功能 (非必需)
+
+这些接口为高级用户或特殊场景提供额外功能，基础使用不需要。
+
+#### 创建爬虫任务 (通常自动创建)
+
+```
+POST /api/crawler-tasks
+```
+
+系统会在用户首次访问时自动创建默认任务，一般无需手动创建。
+
+#### 获取任务数据详情
+
+```
+GET /api/crawler-tasks/:taskId/data
+```
+
+查看指定任务下的具体数据记录，支持分页。
+
+#### 获取爬虫统计信息
+
+```
+GET /api/crawler/stats
+```
+
+获取用户的完整爬虫统计数据，包括总数、积分、任务状态分布等。
+
+#### 获取上传限制信息
+
+```
+GET /api/crawler/limits
+```
+
+查看当前的日/月上传限制和剩余额度。
+
+#### 更新任务状态
+
+```
+PUT /api/crawler-tasks/:taskId/status
+```
+
+手动更新任务状态（通常由系统自动管理）。
+
+#### 删除爬虫任务
+
+```
+DELETE /api/crawler-tasks/:taskId
+```
+
+删除任务及其关联数据（谨慎操作）。
+
+---
+
+### 支持的数据类型
+
+| Type | 必需字段 | 说明 |
+|------|----------|------|
+| product | title, price | 商品信息 |
+| price | price, currency | 价格信息 |
+| review | rating, content | 评论信息 |
+| event | title, date | 事件信息 |
+| task | title, status | 任务信息 |
+| custom | - | 自定义数据 |
