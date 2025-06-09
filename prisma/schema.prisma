@@ -318,6 +318,7 @@ model CrawlerData {
   task        CrawlerTask @relation(fields: [taskId], references: [id])
   user        User        @relation(fields: [userId], references: [id])
 
+  @@unique([userId, source, sourceId])
   @@index([userId, createdAt])
 }
 

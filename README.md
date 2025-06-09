@@ -1,76 +1,199 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Data Dance Backend
 
-## Getting Started
+一个基于Node.js的Web3数字身份和活动管理平台后端服务。
 
-First, run the development server:
+## 🚀 快速开始
 
+### 环境要求
+- Docker & Docker Compose
+- Node.js 18+ (开发环境)
+- PostgreSQL 17 (已通过Docker提供)
+
+### 启动服务
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+# 克隆仓库
+git clone <repository-url>
+cd data-dance-backend
+
+# 启动所有服务
+docker compose up -d
+
+# 查看服务状态
+docker compose ps
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+服务启动后：
+- **API服务**: http://localhost:10000
+- **数据库**: localhost:15432 (PostgreSQL)
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## 📁 项目结构
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
-
-## Seed 数据脚本运行方式
-
-### 方法一：在 Docker 容器内执行（推荐）
-
-如果后端以 Docker Compose 方式运行，容器内部的数据库地址不需要修改，直接在容器内运行脚本：
-
-```bash
-# 假设后端服务在 docker-compose.yml 中名称为 api
-# 执行全部 seed 脚本
-docker-compose exec api npm run seed:all
-# 或仅执行测试用户 seed 脚本
-docker-compose exec api npm run seed:testusers
+```
+data-dance-backend/
+├── src/                      # 源代码
+│   ├── controllers/          # 控制器层
+│   ├── services/            # 业务逻辑层
+│   ├── middlewares/         # 中间件
+│   ├── routes/              # 路由定义
+│   └── utils/               # 工具函数
+├── scripts/                 # 工具脚本
+├── docs/                    # 文档
+├── prisma/                  # 数据库模式
+├── config/                  # 配置文件
+└── docker-compose.yaml      # Docker配置
 ```
 
-这样直接在容器环境读取 `.env` 中的 `DATABASE_URL=postgresql://ddc:ddc@ddc-backend-db:5432/ddc` 即可。
+## 🎯 核心功能
 
-### 方法二：在本机（Host）执行
+### 1. 用户身份管理
+- 传统账号注册/登录
+- Web3钱包连接
+- 用户资料管理
+- 推荐系统
 
-如果你在 macOS 主机上直接运行 Node 脚本，需要将 `.env` 中的 `DATABASE_URL` 改为容器映射到主机的端口，例如：
+### 2. 活动和NFT管理
+- 活动创建和管理
+- NFT铸造和分发
+- 数字徽章系统
+- 积分奖励机制
 
-```dotenv
-# 修改为本地转发端口 15432
-DATABASE_URL=postgresql://ddc:ddc@localhost:15432/ddc
-```
+### 3. **爬虫数据系统** 🆕
+- **Amazon订单数据收集** (使用orderid)
+- **Luma事件数据管理** (使用eventId/taskId)
+- 智能去重检测
+- 数据质量评分
+- 积分奖励机制
 
-然后在项目根目录执行：
 
+
+## 📚 文档
+
+- [API接口文档](api-doc.md) - 完整的API接口说明
+- [爬虫系统概述](docs/crawler-system-overview.md) - 数据收集系统架构
+
+
+## 🛠 开发环境
+
+### 本地开发
 ```bash
+# 安装依赖
 npm install
-node scripts/createAwards.js
-node scripts/seedTestUserData.js
+
+# 环境配置
+cp env.example .env
+
+# 数据库迁移
+npx prisma migrate dev
+
+# 启动开发服务
+npm run dev
 ```
 
-### 一键执行所有 Seed 脚本
-在容器内运行以下命令，一次性执行所有数据创建和测试数据脚本：
-
+### Docker开发
 ```bash
-docker-compose exec ddc-backend-api npm run seed:all
+# 构建和启动
+docker compose up --build
+
+# 查看日志
+docker compose logs -f ddc-backend-api
+
+# 进入容器
+docker compose exec ddc-backend-api bash
 ```
 
-## Learn More
+## 🔧 核心技术栈
 
-To learn more about Next.js, take a look at the following resources:
+- **运行时**: Node.js 22
+- **框架**: Express.js
+- **数据库**: PostgreSQL 17 + Prisma ORM
+- **认证**: JWT + Web3签名验证
+- **容器化**: Docker + Docker Compose
+- **API文档**: 自定义格式
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## 🔍 爬虫系统亮点
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+### Amazon数据处理
+- **唯一标识**: 使用`orderid`代替ASIN
+- **用户级去重**: 同用户不能重复，不同用户可共享
+- **数据验证**: 严格的订单号格式检查
+- **质量评分**: 基于字段完整性的智能评分
 
-## Deploy on Vercel
+### Luma事件管理
+- **标识符优先级**: `eventId` > `taskId` > `id`
+- **事件类型支持**: events, tasks
+- **灵活验证**: 建议性而非强制性字段
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+### 查重机制
+```
+全局内容哈希去重 (防刷数据)
+        +
+用户级sourceId去重 (防重复上传)
+        =
+智能且用户友好的去重系统
+```
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+## 🚦 API状态
+
+| 模块 | 状态 | 说明 |
+|------|------|------|
+| 用户认证 | ✅ 稳定 | 支持传统和Web3登录 |
+| 活动管理 | ✅ 稳定 | NFT和活动完整流程 |
+| **爬虫系统** | ✅ **最新** | **Amazon orderid + Luma事件** |
+| 推送通知 | ✅ 稳定 | APNs集成 |
+| 文件上传 | ✅ 稳定 | 多种存储后端 |
+
+## 💡 使用示例
+
+### 上传Amazon订单
+```bash
+curl -X POST http://localhost:10000/api/crawler/upload \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '[{
+    "source": "amazon",
+    "type": "order", 
+    "payload": {
+      "orderid": "113-1234567-7890123",
+      "title": "iPhone 15 Pro",
+      "price": "999.99",
+      "currency": "USD"
+    }
+  }]'
+```
+
+### 上传Luma事件
+```bash
+curl -X POST http://localhost:10000/api/crawler/upload \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '[{
+    "source": "luma",
+    "type": "event",
+    "payload": {
+      "eventId": "evt_123456",
+      "title": "Tech Conference 2024", 
+      "date": "2024-12-20T10:00:00Z"
+    }
+  }]'
+```
+
+## 🤝 贡献指南
+
+1. Fork项目
+2. 创建功能分支 (`git checkout -b feature/AmazingFeature`)
+3. 运行测试确保功能正常
+4. 提交更改 (`git commit -m 'Add some AmazingFeature'`)
+5. 推送到分支 (`git push origin feature/AmazingFeature`)
+6. 开启Pull Request
+
+## 📄 许可证
+
+本项目采用 MIT 许可证 - 查看 [LICENSE](LICENSE) 文件了解详情。
+
+## 🆘 支持
+
+如遇问题：
+1. 查看 [API文档](api-doc.md)
+2. 运行测试脚本诊断问题
+3. 检查Docker日志
+4. 提交Issue

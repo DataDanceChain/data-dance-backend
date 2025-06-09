@@ -19,7 +19,7 @@ router.use(protect);
 // Core endpoints matching original specification
 router.get('/crawler-tasks', getCrawlerTasks);
 router.post('/crawler-tasks', createCrawlerTask);
-router.post('/upload', uploadData);
+router.post('/crawler/upload', uploadData);
 
 // Task management endpoints
 router.get('/crawler-tasks/:taskId/data', getCrawlerData);

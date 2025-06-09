@@ -215,20 +215,23 @@ function validateDataItem(item) {
 
   // Amazon特定验证
   if (item.source === 'amazon') {
-    if (!item.payload.asin && !item.payload.productId) {
-      warnings.push('建议包含Amazon ASIN或产品ID以提高数据质量');
+    // 现在要求orderid作为必需字段
+    if (!item.payload.orderid && !item.payload.orderId) {
+      errors.push('Amazon数据必须包含orderid字段');
     }
     
-    if (item.payload.asin && !/^[A-Z0-9]{10}$/.test(item.payload.asin)) {
-      errors.push('ASIN格式无效，应为10位字母数字组合');
+    // 验证orderid格式（Amazon订单号通常格式为：123-1234567-1234567）
+    const orderid = item.payload.orderid || item.payload.orderId;
+    if (orderid && !/^\d{3}-\d{7}-\d{7}$/.test(orderid)) {
+      warnings.push('Amazon订单号格式建议为：123-1234567-1234567');
     }
 
-    if (item.type === 'product') {
+    if (item.type === 'order' || item.type === 'product') {
       if (!item.payload.title) {
-        errors.push('Amazon产品必须包含标题');
+        warnings.push('建议包含商品标题');
       }
       if (!item.payload.price) {
-        errors.push('Amazon产品必须包含价格');
+        warnings.push('建议包含价格信息');
       }
       if (item.payload.price && !item.payload.currency) {
         warnings.push('建议包含货币代码（如USD、EUR）');
@@ -593,13 +596,8 @@ function normalizeObject(obj) {
  */
 function extractSourceId(source, payload) {
   if (source === 'amazon') {
-    // Amazon标识符优先级：ASIN > productId > UPC > EAN
-    return payload.asin || 
-           payload.productId || 
-           payload.upc || 
-           payload.ean || 
-           payload.isbn ||
-           null;
+    // Amazon现在只使用orderid作为唯一标识符
+    return payload.orderid || payload.orderId || null;
   } else if (source === 'luma') {
     // Luma标识符优先级：eventId > taskId > id
     return payload.eventId || 
@@ -711,6 +709,7 @@ async function checkDuplicates(items, userId) {
 
     const existingBySourceId = sourceIds.length > 0 ? await prisma.crawlerData.findMany({
       where: {
+        userId: userId, // 只在当前用户的数据中查找重复的sourceId
         OR: sourceIds.map(({ source, sourceId }) => ({
           source: source,
           sourceId: sourceId
@@ -751,7 +750,7 @@ async function checkDuplicates(items, userId) {
           duplicates.push({
             index: item.originalIndex,
             reason: 'source_id_duplicate',
-            reasonText: `${item.source === 'amazon' ? 'Amazon产品ID' : 'Luma事件ID'}已存在`,
+            reasonText: `您已经上传过相同的${item.source === 'amazon' ? 'Amazon订单' : 'Luma事件'}`,
             existingUserId: sourceIdDuplicate.userId,
             existingDate: sourceIdDuplicate.createdAt
           });
@@ -790,7 +789,7 @@ function calculateDataQuality(item) {
 
   // 官方标识符 (40分)
   if (item.source === 'amazon') {
-    if (item.payload.asin || item.payload.productId) {
+    if (item.payload.orderid || item.payload.orderId) {
       score += 40;
       details.hasOfficialId = true;
     }
@@ -834,21 +833,7 @@ function calculateDataQuality(item) {
 
 // 智能重复检测算法
 function detectSimilarity(item1, item2) {
-  // 1. 官方标识符完全匹配（最高优先级）
-  if (item1.source === item2.source) {
-    const id1 = extractSourceId(item1.source, item1.payload);
-    const id2 = extractSourceId(item2.source, item2.payload);
-    
-    if (id1 && id2 && id1 === id2) {
-      return {
-        similarity: 1.0,
-        reason: 'official_id_match',
-        details: `官方标识符匹配: ${id1}`
-      };
-    }
-  }
-
-  // 2. 内容哈希匹配（高优先级）
+  // 1. 内容哈希匹配（最高优先级）- 防止完全相同的内容
   if (item1.contentHash === item2.contentHash) {
     return {
       similarity: 1.0,
@@ -857,7 +842,10 @@ function detectSimilarity(item1, item2) {
     };
   }
 
-  // 3. 标题和关键字段相似性检测（中优先级）
+  // 注意：移除了官方标识符匹配检测，允许同一批次中有相同的ASIN
+  // 这样不同用户可以上传同一商品的不同体验数据
+
+  // 2. 标题和关键字段相似性检测（中优先级）
   if (item1.source === item2.source && item1.type === item2.type) {
     const title1 = item1.payload.title?.toLowerCase().trim();
     const title2 = item2.payload.title?.toLowerCase().trim();

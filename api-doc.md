@@ -2133,7 +2133,7 @@ Authorization: Bearer <token>
     "log": "Fetched 100 records. No errors.",
     "payloadPreview": [
       {
-        "asin": "B09X123456",
+        "orderid": "113-1234567-7890123",
         "title": "Wireless Bluetooth Headphones",
         "price": 129.99,
         "rating": 4.6
@@ -2155,7 +2155,7 @@ Authorization: Bearer <token>
 #### 3. 上传爬虫数据
 
 ```
-POST /api/upload
+POST /api/crawler/upload
 ```
 
 **描述**: 上传爬虫数据，系统自动验证、计算积分并管理上传限制。
@@ -2171,18 +2171,18 @@ Authorization: Bearer <token>
 [
   {
     "source": "amazon",
-    "type": "product",
+    "type": "order",
     "timestamp": "2025-06-02T11:58:00Z",
     "metadata": {
-      "sourceUrl": "https://www.amazon.com/dp/B09X123456",
+      "sourceUrl": "https://amazon.com/orders",
       "category": "Electronics",
       "region": "US"
     },
     "payload": {
-      "asin": "B09X123456",
+      "orderid": "113-1234567-7890123",
       "title": "Wireless Bluetooth Headphones",
       "price": 129.99,
-      "rating": 4.6
+      "currency": "USD"
     }
   }
 ]
@@ -2229,7 +2229,7 @@ Authorization: Bearer <token>
 ```typescript
 interface DataItem {
   source: 'amazon' | 'luma';
-  type: 'product' | 'price' | 'review' | 'event' | 'task' | 'custom';
+  type: 'order' | 'product' | 'price' | 'review' | 'event' | 'task' | 'custom';
   timestamp: string;  // ISO8601格式
   metadata?: {
     sourceUrl?: string;
@@ -2238,7 +2238,7 @@ interface DataItem {
     region?: string;
     tags?: string[];
   };
-  payload: Record<string, any>;  // 根据type有不同的必需字段
+  payload: Record<string, any>;  // 根据source和type有不同的必需字段
 }
 ```
 
@@ -2308,9 +2308,21 @@ DELETE /api/crawler-tasks/:taskId
 
 | Type | 必需字段 | 说明 |
 |------|----------|------|
+| order | orderid (Amazon) | Amazon订单数据 |
 | product | title, price | 商品信息 |
 | price | price, currency | 价格信息 |
 | review | rating, content | 评论信息 |
-| event | title, date | 事件信息 |
+| event | eventId (Luma) | Luma事件数据 |
 | task | title, status | 任务信息 |
 | custom | - | 自定义数据 |
+
+### 数据源特殊要求
+
+#### Amazon数据
+- **必需字段**: `orderid` (订单号，格式：123-1234567-1234567)
+- **建议字段**: `title`, `price`, `currency`
+- **类型**: 主要使用 `order` 类型
+
+#### Luma数据
+- **建议字段**: `eventId`, `taskId` 或 `id` (按优先级)
+- **类型**: 主要使用 `event` 和 `task` 类型
