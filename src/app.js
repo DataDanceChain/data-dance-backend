@@ -20,6 +20,7 @@ const referralRoutes = require('./routes/referralRoutes');
 const passRoutes = require('./routes/passRoutes');
 const passWebServiceRoutes = require('./routes/passWebServiceRoutes');
 const googleWalletRoutes = require('./routes/googleWalletRoutes');
+const crawlerRoutes = require('./routes/crawlerRoutes');
 
 const app = express();
 
@@ -76,6 +77,7 @@ app.use('/api/x', xRoutes);
 app.use('/api/assets/passes', passRoutes);
 app.use('/v1', passWebServiceRoutes);
 app.use('/api/google-wallet', googleWalletRoutes);
+app.use('/api', crawlerRoutes);
 
 // 错误处理中间件
 app.use(errorHandler);

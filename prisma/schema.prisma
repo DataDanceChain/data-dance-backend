@@ -73,6 +73,10 @@ model User {
   UserAwards      UserAward[]
   UserTasks       UserTask[]
 
+  // 爬虫相关
+  crawlerTasks    CrawlerTask[]
+  crawlerData     CrawlerData[]
+
   // 邀请关系 - 使用应用生成的 referralCode
   referralCode   String             @unique // 每个用户自己的推荐码，由应用生成
   invitesSent     Referral[]        @relation("InvitesSent")
@@ -314,6 +318,40 @@ model DataDanceID {
   user       User     @relation(fields: [userId], references: [id])
 
   @@unique([userId, activityId])
+}
+
+// Crawler 相关模型
+model CrawlerTask {
+  id          String        @id @default(uuid())
+  title       String
+  description String?
+  source      String        // 'amazon' | 'luma'
+  status      String        @default("pending") // 'pending' | 'running' | 'done' | 'error'
+  recordCount Int           @default(0)
+  dataUrl     String?
+  log         String?
+  userId      String
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+  
+  user        User          @relation(fields: [userId], references: [id])
+  data        CrawlerData[]
+}
+
+model CrawlerData {
+  id        String      @id @default(uuid())
+  source    String      // 'amazon' | 'luma'
+  type      String      // 'product' | 'price' | 'review' | 'event' | 'task' | 'custom'
+  timestamp DateTime
+  metadata  Json        // DataItem.metadata structure
+  payload   Json        // DataItem.payload structure
+  taskId    String
+  userId    String      // for easier querying and statistics
+  createdAt DateTime    @default(now())
+  updatedAt DateTime    @updatedAt
+  
+  task      CrawlerTask @relation(fields: [taskId], references: [id])
+  user      User        @relation(fields: [userId], references: [id])
 }
 
 // Award相关模型

@@ -19,6 +19,7 @@
     * [Task API](#task-api)
 8. [X API](#x-api)
 9. [Pass API](#pass-api)
+10. [Crawler API](#crawler-api)
 
 ## 测试账号
 为了方便测试，我们提供了一个测试账号，可以使用账号密码登录：
@@ -2041,3 +2042,396 @@ Authorization: Bearer <token>
   "message": "Failed to fetch X binding status."
 }
 ```
+
+## Crawler API
+
+### Get Crawler Tasks
+
+```
+GET /api/crawler-tasks
+```
+
+**Description**: Get crawler tasks for the authenticated user with filtering and pagination.
+
+**Headers**:
+```
+Authorization: Bearer <token>
+```
+
+**Query Parameters**:
+- `source`: Filter by source ('amazon' | 'luma') (optional)
+- `status`: Filter by status ('pending' | 'running' | 'done' | 'error') (optional)
+- `search`: Search in title and description (optional)
+- `page`: Page number (default: 1) (optional)
+- `limit`: Items per page (default: 10, max: 100) (optional)
+
+**Response** (200 OK):
+```json
+{
+  "status": "success",
+  "data": {
+    "tasks": [
+      {
+        "id": "task-amz-20250601-xyz",
+        "title": "Amazon Order History",
+        "description": "Crawl your Amazon order history to earn rewards",
+        "source": "amazon",
+        "status": "pending",
+        "recordCount": 0,
+        "createdAt": "2025-06-01T09:00:00.000Z",
+        "updatedAt": "2025-06-01T09:30:00.000Z",
+        "tags": [
+          { "id": "amazon", "name": "Amazon" },
+          { "id": "orders", "name": "Orders" }
+        ]
+      }
+    ],
+    "pagination": {
+      "page": 1,
+      "limit": 10,
+      "total": 2,
+      "pages": 1
+    }
+  }
+}
+```
+
+### Create Crawler Task
+
+```
+POST /api/crawler-tasks
+```
+
+**Description**: Create a new crawler task for the authenticated user.
+
+**Headers**:
+```
+Authorization: Bearer <token>
+```
+
+**Request Body**:
+```json
+{
+  "source": "amazon"
+}
+```
+
+**Response** (201 Created):
+```json
+{
+  "status": "success",
+  "data": {
+    "task": {
+      "id": "task-uuid",
+      "title": "Amazon Order History",
+      "description": "Crawl your Amazon order history to earn rewards",
+      "source": "amazon",
+      "status": "pending",
+      "recordCount": 0,
+      "createdAt": "2025-06-09T06:21:57.000Z",
+      "updatedAt": "2025-06-09T06:21:57.000Z"
+    }
+  }
+}
+```
+
+**Error Responses**:
+- 400 Bad Request: Invalid source
+- 409 Conflict: User already has a running task
+
+### Upload Crawler Data
+
+```
+POST /api/upload
+```
+
+**Description**: Upload crawler data for a specific task with validation and reward calculation.
+
+**Headers**:
+```
+Authorization: Bearer <token>
+```
+
+**Request Body**:
+```json
+{
+  "taskId": "task-amz-20250601-xyz",
+  "data": {
+    "source": "amazon",
+    "type": "product",
+    "timestamp": "2025-06-02T11:58:00Z",
+    "metadata": {
+      "sourceUrl": "https://www.amazon.com/dp/B09X123456",
+      "category": "Electronics",
+      "language": "en-US",
+      "region": "US",
+      "tags": ["bestseller"]
+    },
+    "payload": {
+      "asin": "B09X123456",
+      "title": "Wireless Bluetooth Headphones",
+      "brand": "Sony",
+      "price": 129.99,
+      "currency": "USD",
+      "rating": 4.6,
+      "reviewCount": 2034,
+      "availability": "In Stock"
+    }
+  }
+}
+```
+
+**Note**: The `data` field can also be an array of data items for batch upload.
+
+**Response** (200 OK):
+```json
+{
+  "status": "success",
+  "data": {
+    "uploadedCount": 1,
+    "pointsEarned": 0,
+    "dailyProgress": {
+      "count": 1,
+      "limit": 1000,
+      "remaining": 999
+    },
+    "monthlyProgress": {
+      "count": 1,
+      "limit": 10000,
+      "remaining": 9999
+    }
+  }
+}
+```
+
+**Error Responses**:
+- 400 Bad Request: Validation failed
+- 404 Not Found: Task not found
+- 429 Too Many Requests: Upload limit reached
+
+### Get Crawler Data
+
+```
+GET /api/crawler-tasks/:taskId/data
+```
+
+**Description**: Get crawler data for a specific task with pagination.
+
+**Headers**:
+```
+Authorization: Bearer <token>
+```
+
+**Path Parameters**:
+- `taskId`: Task ID (required)
+
+**Query Parameters**:
+- `page`: Page number (default: 1) (optional)
+- `limit`: Items per page (default: 50, max: 100) (optional)
+
+**Response** (200 OK):
+```json
+{
+  "status": "success",
+  "data": {
+    "data": [
+      {
+        "id": "data-uuid",
+        "source": "amazon",
+        "type": "product",
+        "timestamp": "2025-06-02T11:58:00.000Z",
+        "metadata": {
+          "sourceUrl": "https://www.amazon.com/dp/B09X123456",
+          "category": "Electronics"
+        },
+        "payload": {
+          "asin": "B09X123456",
+          "title": "Wireless Bluetooth Headphones",
+          "price": 129.99
+        },
+        "createdAt": "2025-06-09T06:21:57.000Z"
+      }
+    ],
+    "pagination": {
+      "page": 1,
+      "limit": 50,
+      "total": 1,
+      "pages": 1
+    }
+  }
+}
+```
+
+### Get Crawler Statistics
+
+```
+GET /api/crawler/stats
+```
+
+**Description**: Get crawler statistics for the authenticated user.
+
+**Headers**:
+```
+Authorization: Bearer <token>
+```
+
+**Response** (200 OK):
+```json
+{
+  "status": "success",
+  "data": {
+    "totalUploaded": 150,
+    "totalPoints": 1500,
+    "dailyProgress": {
+      "count": 50,
+      "limit": 1000,
+      "remaining": 950
+    },
+    "monthlyProgress": {
+      "count": 150,
+      "limit": 10000,
+      "remaining": 9850
+    },
+    "taskStats": {
+      "pending": 1,
+      "running": 1,
+      "done": 3,
+      "error": 0
+    }
+  }
+}
+```
+
+### Get Upload Limits
+
+```
+GET /api/crawler/limits
+```
+
+**Description**: Get upload limits for the authenticated user.
+
+**Headers**:
+```
+Authorization: Bearer <token>
+```
+
+**Response** (200 OK):
+```json
+{
+  "status": "success",
+  "data": {
+    "daily": {
+      "count": 50,
+      "limit": 1000,
+      "remaining": 950
+    },
+    "monthly": {
+      "count": 150,
+      "limit": 10000,
+      "remaining": 9850
+    }
+  }
+}
+```
+
+### Update Task Status
+
+```
+PUT /api/crawler-tasks/:taskId/status
+```
+
+**Description**: Update crawler task status.
+
+**Headers**:
+```
+Authorization: Bearer <token>
+```
+
+**Path Parameters**:
+- `taskId`: Task ID (required)
+
+**Request Body**:
+```json
+{
+  "status": "done"
+}
+```
+
+**Response** (200 OK):
+```json
+{
+  "status": "success",
+  "data": {
+    "task": {
+      "id": "task-uuid",
+      "title": "Amazon Order History",
+      "description": "Crawl your Amazon order history to earn rewards",
+      "source": "amazon",
+      "status": "done",
+      "recordCount": 150,
+      "createdAt": "2025-06-09T06:21:57.000Z",
+      "updatedAt": "2025-06-09T08:30:00.000Z"
+    }
+  }
+}
+```
+
+### Delete Crawler Task
+
+```
+DELETE /api/crawler-tasks/:taskId
+```
+
+**Description**: Delete a crawler task and its associated data.
+
+**Headers**:
+```
+Authorization: Bearer <token>
+```
+
+**Path Parameters**:
+- `taskId`: Task ID (required)
+
+**Response** (200 OK):
+```json
+{
+  "status": "success",
+  "message": "Task deleted successfully"
+}
+```
+
+## Data Item Schema
+
+### Supported Data Types
+
+- `product`: Product information (requires: title, price)
+- `price`: Price information (requires: price, currency)
+- `review`: Review information (requires: rating, content)
+- `event`: Event information (requires: title, date)
+- `task`: Task information (requires: title, status)
+- `custom`: Custom data (no required fields)
+
+### Data Item Structure
+
+```typescript
+interface DataItem {
+  source: 'amazon' | 'luma';
+  type: 'product' | 'price' | 'review' | 'event' | 'task' | 'custom';
+  timestamp: string;  // ISO8601 format
+  metadata?: {
+    sourceUrl?: string;
+    category?: string;
+    language?: string;
+    region?: string;
+    tags?: string[];
+  };
+  payload: Record<string, any>;
+}
+```
+
+### Reward System
+
+- **Points Calculation**: 100 points per 10 valid data records
+- **Daily Limit**: 1000 data records (10,000 points)
+- **Monthly Limit**: 10,000 data records (100,000 points)
+- **Task Limit**: Only one running task per user at a time

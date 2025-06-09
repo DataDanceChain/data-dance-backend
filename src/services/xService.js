@@ -83,12 +83,12 @@ async function exchangeCodeForToken(code, codeVerifier) {
   });
 
   try {
-    const resp = await axios.post(tokenUrl, payload, {
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-        Authorization: `Basic ${authHeader}`
-      }
-    });
+  const resp = await axios.post(tokenUrl, payload, {
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+      Authorization: `Basic ${authHeader}`
+    }
+  });
     logger.info('Successfully exchanged code for token');
     return resp.data;
   } catch (error) {
