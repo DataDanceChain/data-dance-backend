@@ -8,48 +8,53 @@ datasource db {
 }
 
 model User {
-  id                String             @id @default(uuid())
-  email             String             @unique
-  password          String?
-  name              String?
-  avatar            String?
-  walletAddress     String?            @unique
-  chainId           Int?
-  privateKey        String?
-  authType          String             @default("traditional")
-  userType          String             @default("regular")
-  isOrganization    Boolean            @default(false)
-  description       String?
-  logo              String?
-  xid               String?            @unique
-  xUsername         String?
-  xAccessToken      String?
-  xRefreshToken     String?
-  referralCode      String             @unique
-  createdAt         DateTime           @default(now())
-  updatedAt         DateTime           @updatedAt
-  totalPoints       Float              @default(0)
-  organizationId    String?
-  createdActivities Activity[]
-  activityClaims    ActivityClaim[]
-  transactions      AssetTransaction[]
-  createdBadges     Badge[]
-  crawlerData       CrawlerData[]
-  crawlerTasks      CrawlerTask[]
-  dataDanceIDs      DataDanceID[]
-  dataAssets        NFTDataAsset[]
-  notifications     Notification[]
-  passes            Pass[]
-  points            Point[]
-  invitesReceived   Referral?          @relation("InvitesReceived")
-  invitesSent       Referral[]         @relation("InvitesSent")
-  organization      User?              @relation("OrganizationMembers", fields: [organizationId], references: [id])
-  members           User[]             @relation("OrganizationMembers")
-  UserAwards        UserAward[]
-  badges            UserBadge[]
-  profile           UserProfile?
-  roles             UserRole[]
-  UserTasks         UserTask[]
+  id                       String                    @id @default(uuid())
+  email                    String                    @unique
+  password                 String?
+  name                     String?
+  avatar                   String?
+  walletAddress            String?                   @unique
+  chainId                  Int?
+  privateKey               String?
+  authType                 String                    @default("traditional")
+  userType                 String                    @default("regular")
+  isOrganization           Boolean                   @default(false)
+  description              String?
+  logo                     String?
+  xid                      String?                   @unique
+  xUsername                String?
+  xAccessToken             String?
+  xRefreshToken            String?
+  referralCode             String                    @unique
+  createdAt                DateTime                  @default(now())
+  updatedAt                DateTime                  @updatedAt
+  totalPoints              Float                     @default(0)
+  organizationId           String?
+  createdActivities        Activity[]
+  activityClaims           ActivityClaim[]
+  transactions             AssetTransaction[]
+  createdBadges            Badge[]
+  crawlerData              CrawlerData[]
+  crawlerTasks             CrawlerTask[]
+  dataDanceIDs             DataDanceID[]
+  dataNFTs                 DataNFT[]
+  dataNFTPurchases         DataNFTPurchase[]
+  dataAssets               NFTDataAsset[]
+  nftMarketOrders          NftMarketOrder[]
+  notifications            Notification[]
+  organizationTransactions OrganizationTransaction[]
+  passes                   Pass[]
+  points                   Point[]
+  snapshots                Snapshot[]
+  invitesReceived          Referral?                 @relation("InvitesReceived")
+  invitesSent              Referral[]                @relation("InvitesSent")
+  organization             User?                     @relation("OrganizationMembers", fields: [organizationId], references: [id])
+  members                  User[]                    @relation("OrganizationMembers")
+  UserAwards               UserAward[]
+  badges                   UserBadge[]
+  profile                  UserProfile?
+  roles                    UserRole[]
+  UserTasks                UserTask[]
 }
 
 model UserProfile {
@@ -199,11 +204,15 @@ model Activity {
   contractAddress    String?
   chainId            Int?
   tokenStandard      String?
+  isPromoted         Boolean            @default(false)
+  promotionInfo      Json?
   creator            User               @relation(fields: [creatorId], references: [id])
   claims             ActivityClaim[]
   dataDanceIDs       DataDanceID[]
+  nftMarketOrders    NftMarketOrder[]
+  snapshots          Snapshot[]
   categories         ActivityCategory[] @relation("ActivityToActivityCategory")
-  tags               ActivityTag[]      @relation("ActivityToActivityTag")
+  tags               Tag[]              @relation("ActivityToTag")
 }
 
 model ActivityCategory {
@@ -214,12 +223,14 @@ model ActivityCategory {
   activities Activity[] @relation("ActivityToActivityCategory")
 }
 
-model ActivityTag {
+model Tag {
   id         String     @id @default(uuid())
   name       String
   createdAt  DateTime   @default(now())
   updatedAt  DateTime   @updatedAt
-  activities Activity[] @relation("ActivityToActivityTag")
+  activities Activity[] @relation("ActivityToTag")
+  dataNFTs   DataNFT[]  @relation("DataNFTToTag")
+  snapshots  Snapshot[] @relation("SnapshotToTag")
 }
 
 model ActivityClaim {
@@ -417,8 +428,8 @@ model Pass {
   status             String   @default("active")
   createdAt          DateTime @default(now())
   expiresAt          DateTime
-  serialNumber       String?  @unique
   pushToken          String?
+  serialNumber       String?  @unique
   updatedAt          DateTime @updatedAt
   passTypeIdentifier String   @default("pass.ai.datadance.app")
   platform           String   @default("apple")
@@ -436,4 +447,77 @@ enum AwardStatus {
   LOCKED
   LIVE
   INVALID
+}
+
+model NftMarketOrder {
+  id          String   @id @default(uuid())
+  userId      String
+  activityId  String
+  quantity    Int
+  price       Float
+  total       Float
+  purchasedAt DateTime @default(now())
+  activity    Activity @relation(fields: [activityId], references: [id])
+  user        User     @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@index([activityId])
+}
+
+model Snapshot {
+  id          String    @id @default(uuid())
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  name        String
+  description String?
+  activityId  String
+  merchantId  String
+  claims      Json?
+  activity    Activity  @relation(fields: [activityId], references: [id])
+  merchant    User      @relation(fields: [merchantId], references: [id])
+  dataNFTs    DataNFT[] @relation("DataNFTToSnapshot")
+  tags        Tag[]     @relation("SnapshotToTag")
+}
+
+model DataNFT {
+  id           String            @id @default(uuid())
+  createdAt    DateTime          @default(now())
+  updatedAt    DateTime          @updatedAt
+  name         String
+  description  String?
+  price        Float
+  isPublished  Boolean           @default(false)
+  maxSales     Int               @default(1)
+  currentSales Int               @default(0)
+  merchantId   String
+  image        String?
+  merchant     User              @relation(fields: [merchantId], references: [id])
+  purchases    DataNFTPurchase[]
+  snapshots    Snapshot[]        @relation("DataNFTToSnapshot")
+  tags         Tag[]             @relation("DataNFTToTag")
+}
+
+model DataNFTPurchase {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+  dataNFTId String
+  buyerId   String
+  quantity  Int      @default(1)
+  buyer     User     @relation(fields: [buyerId], references: [id])
+  dataNFT   DataNFT  @relation(fields: [dataNFTId], references: [id])
+
+  @@index([dataNFTId, buyerId])
+}
+
+model OrganizationTransaction {
+  id          String   @id @default(uuid())
+  amount      Float
+  type        String
+  status      String
+  description String?
+  metadata    Json?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  userId      String
+  user        User     @relation(fields: [userId], references: [id])
 }

@@ -60,4 +60,18 @@ exports.authenticate = async (req, res, next) => {
       error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
+};
+
+exports.isOrganization = (req, res, next) => {
+  if (req.user && (req.user.isOrganization || req.user.userType === 'organization')) {
+    console.log('req.user in isOrganization:', req.user);
+    return next();
+  }
+  return res.status(403).json({
+    status: 'fail',
+    message: 'Only organization users are allowed.',
+    userId: req.user ? req.user.id : null,
+    userType: req.user ? req.user.userType : null,
+    isOrganization: req.user ? req.user.isOrganization : null
+  });
 }; 

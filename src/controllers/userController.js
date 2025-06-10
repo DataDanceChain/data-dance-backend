@@ -139,6 +139,14 @@ exports.updatePassword = async (req, res) => {
       });
     }
 
+    // 检查用户类型
+    if (req.user.userType !== 'organization' && !req.user.isOrganization) {
+      return res.status(403).json({
+        status: 'fail',
+        message: '只有组织用户可以修改密码'
+      });
+    }
+
     // 加密新密码
     const salt = await bcrypt.genSalt(10);
     const hashedPassword = await bcrypt.hash(newPassword, salt);

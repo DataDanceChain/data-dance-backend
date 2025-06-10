@@ -1402,6 +1402,14 @@ function formatActivityData(data) {
     data.statusNote = data.status.note;
   }
 
+  // 确保 remaining 和 total 字段存在且为数字
+  if (typeof data.remaining !== 'number') {
+    data.remaining = data.total || 0;
+  }
+  if (typeof data.total !== 'number') {
+    data.total = data.remaining || 0;
+  }
+
   // 处理权益字段
   if (data.equity) {
     data.equityTitle = data.equity.title;
