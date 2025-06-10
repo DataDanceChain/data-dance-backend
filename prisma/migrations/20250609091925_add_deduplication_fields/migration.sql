@@ -44,7 +44,7 @@ DO $$
 BEGIN
   -- Try to create contentHash unique constraint
   BEGIN
-    CREATE UNIQUE INDEX "CrawlerData_contentHash_key" ON "CrawlerData"("contentHash");
+CREATE UNIQUE INDEX "CrawlerData_contentHash_key" ON "CrawlerData"("contentHash");
   EXCEPTION WHEN unique_violation THEN
     -- If there are duplicates, create a regular index instead and log
     RAISE NOTICE 'Duplicate contentHash values found, creating regular index instead';

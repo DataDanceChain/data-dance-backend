@@ -23,6 +23,7 @@ router.post('/crawler/upload', uploadData);
 
 // Task management endpoints
 router.get('/crawler-tasks/:taskId/data', getCrawlerData);
+router.post('/crawler-tasks/:taskId/data', uploadData);
 router.put('/crawler-tasks/:taskId/status', updateTaskStatus);
 router.delete('/crawler-tasks/:taskId', deleteCrawlerTask);
 
