@@ -22,7 +22,7 @@
 - **建议字段**: `title`, `price`, `currency`
 
 ### Luma数据
-- **唯一标识符**: `eventId` | `taskId` | `id` (优先级递减)
+- **标识符**: `eventId` | `taskId` | `id` (优先级递减)
 - **数据类型**: 主要使用 `event` 和 `task` 类型
 - **建议字段**: `title`, `date`/`dueDate`
 
@@ -184,9 +184,27 @@ const pointsEarned = Math.floor(validItems.length / 10) * 100;
 4. **格式规范 (10分)**
    - 有效 `timestamp` = 10分
 
-## API接口
+## API接口概述
 
-### 上传数据
+> 完整的API接口规范请参考：`api-doc.md#crawler-api`
+
+### 核心接口
+
+#### 1. 获取爬虫任务列表
+```http
+GET /api/crawler-tasks
+Authorization: Bearer <token>
+```
+支持按数据源、状态筛选，分页查询用户的爬虫任务。
+
+#### 2. 获取单个任务详情
+```http
+GET /api/crawler-tasks/{taskId}
+Authorization: Bearer <token>
+```
+获取指定任务的详细信息，包括数据预览、统计信息等。
+
+#### 3. 上传爬虫数据
 ```http
 POST /api/crawler/upload
 Authorization: Bearer <token>
@@ -211,16 +229,38 @@ Content-Type: application/json
 ]
 ```
 
-### 响应格式
+### 响应格式详解
 ```json
 {
-  "uploadedCount": 1,
-  "duplicatesCount": 0,
-  "duplicateDetails": [],
-  "qualityReports": [...],
-  "pointsEarned": 100,
+  "uploadedCount": 1,        // 成功上传的数据条数
+  "duplicatesCount": 0,      // 重复数据条数
+  "duplicateDetails": [],    // 重复数据详情
+  "qualityReports": [...],   // 数据质量评分报告
+  "pointsEarned": 100,       // 本次获得的积分
   "message": "数据上传成功"
 }
+```
+
+### 扩展接口
+
+#### 统计信息
+```http
+GET /api/crawler/stats
+```
+获取用户的完整统计数据，包括总数据量、积分统计、任务状态分布等。
+
+#### 上传限制查询
+```http
+GET /api/crawler/limits
+```
+查看当前用户的日/月上传限制和剩余额度。
+
+#### 任务管理
+```http
+POST /api/crawler-tasks      # 创建新任务
+PUT /api/crawler-tasks/:id/status  # 更新任务状态
+DELETE /api/crawler-tasks/:id      # 删除任务
+```
 ```
 
 ## 错误处理
@@ -264,30 +304,3 @@ model CrawlerData {
   @@index([userId, source])
 }
 ```
-
-## 系统特性
-
-### ✅ 优势
-1. **用户友好的去重策略**: 不同用户可以分享同产品体验
-2. **多层数据验证**: 确保数据质量
-3. **灵活的积分机制**: 激励用户上传优质数据
-4. **智能相似性检测**: 防止批次内重复
-5. **完整的错误处理**: 清晰的错误信息
-
-### 🔧 技术栈
-- **后端**: Node.js + Express
-- **数据库**: PostgreSQL + Prisma ORM
-- **验证**: 自定义验证规则
-- **去重**: 多层检测算法
-- **部署**: Docker + Docker Compose
-
-## 系统验证
-
-系统具备完整的数据验证和处理能力：
-- 数据格式验证
-- 智能去重检测
-- 积分计算机制
-- 错误处理机制
-- 性能优化
-
-系统稳定性经过充分验证，确保可靠性。 

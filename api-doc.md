@@ -13,17 +13,14 @@
 3. [活动 API](#活动-api)
 4. [资产 API](#资产-api)
 5. [通知 API](#通知-api)
-6. [Data Dance ID API](#data-dance-id-api)
-7. [Award System API](#award-system-api)
-    * [Referral System API](#referral-system-api)
-    * [Task API](#task-api)
-8. [X API](#x-api)
-9. [Pass API](#pass-api)
-10. [Crawler API](#crawler-api)
-11. [NFT 数据市场 API](#nft-数据市场-api)
-12. [Data NFT 快照与市场 API](#data-nft-快照与市场-api)
-13. [Promotions API](#promotions-api)
-14. [组织交易 API](#组织交易-api)
+6. [NFT 数据市场 API](#nft-数据市场-api)
+7. [Data NFT 快照与市场 API（新版）](#data-nft-快照与市场-api)
+8. [Promotions API](#promotions-api)
+9. [Award System API](#award-system-api)
+10. [组织交易 API](#组织交易-api)
+11. [Pass API](#pass-api)
+12. [X API](#x-api)
+13. [Crawler API](#crawler-api)
 
 ## 测试账号
 为了方便测试，我们提供了一个测试账号，可以使用账号密码登录：
@@ -1707,20 +1704,6 @@ Authorization: Bearer <token>
 }
 ```
 
-<<<<<<< HEAD
-## Data Dance ID API
-<!-- TODO: Document routes from src/routes/dataDanceIdRoutes.js, mounted under /api/data-dance-ids -->
-<!-- Example: -->
-<!-- ### Get Data Dance ID Details -->
-<!-- ``` -->
-<!-- GET /api/data-dance-ids/{id} -->
-<!-- ``` -->
-<!-- Response (200 OK): -->
-<!-- { -->
-<!--   \"status\": \"success\", -->
-<!--   \"data\": { ... } -->
-<!-- } -->
-=======
 ## NFT 数据市场 API
 
 ### 获取市场 NFT 数据资产列表
@@ -2598,7 +2581,6 @@ Authorization: Bearer <token>
 - `usageRules`: 使用规则
 
 ## 错误响应
->>>>>>> business
 
 ## Award System API
 
@@ -2700,22 +2682,6 @@ Authorization: Bearer <token>
 
 ---
 
-<<<<<<< HEAD
-### Get Award Tasks List
-
-```
-GET /api/awards/:awardId/tasks
-```
-
-**Headers**:
-```
-Authorization: Bearer <token>
-```
-
-**Path Parameters**:
-- `awardId`: Award ID
-
-=======
 - `200 OK`: 请求成功
 - `201 Created`: 资源创建成功
 - `400 Bad Request`: 请求参数错误
@@ -2743,13 +2709,50 @@ Authorization: Bearer <token>
 - `status`: Transaction status (PENDING/COMPLETED/FAILED)
 - `startDate`: Start date
 - `endDate`: End date
->>>>>>> business
+
+### Get Award Tasks List
+
+```
+GET /api/awards/:awardId/tasks
+```
+
+**Headers**:
+```
+Authorization: Bearer <token>
+```
+
+**Path Parameters**:
+- `awardId`: Award ID
+
 **Response** (200 OK):
 ```json
 {
   "status": "success",
   "data": {
-<<<<<<< HEAD
+    "transactions": [
+      {
+        "id": "transaction-uuid",
+        "amount": 7.5,
+        "type": "DEPOSIT",
+        "status": "COMPLETED",
+        "description": "DataNFT sale: Data Asset Bundle Name (Purchase #1, quantity: 3)",
+        "userId": "org-uuid",
+        "metadata": {
+          "dataNFTId": "data-nft-uuid",
+          "buyerId": "buyer-uuid",
+          "purchaseCount": 1,
+          "quantity": 3
+        },
+        "createdAt": "2024-03-20T12:00:00.000Z",
+        "updatedAt": "2024-03-20T12:00:00.000Z"
+      }
+    ],
+    "pagination": {
+      "total": 20,
+      "page": 1,
+      "limit": 10,
+      "pages": 2
+
     "tasks": [
       {
         "id": "task-uuid",
@@ -3364,15 +3367,15 @@ Authorization: Bearer <token>
 
 ## Crawler API
 
-### 核心功能
+> 详细的系统架构、去重逻辑、数据质量评分等说明请参考：`docs/crawler-system-overview.md`
 
-#### 1. 获取爬虫任务列表
+### 核心接口
+
+#### 获取爬虫任务列表
 
 ```
 GET /api/crawler-tasks
 ```
-
-**描述**: 获取用户的爬虫任务列表，支持过滤和分页。
 
 **请求头**:
 ```
@@ -3395,18 +3398,11 @@ Authorization: Bearer <token>
       {
         "id": "task-amz-20250601-xyz",
         "title": "Amazon Order History",
-        "description": "Crawl your Amazon order history to earn rewards",
         "source": "amazon",
         "status": "running",
         "recordCount": 150,
-        "dataUrl": null,
-        "log": null,
         "createdAt": "2025-06-01T09:00:00.000Z",
-        "updatedAt": "2025-06-01T09:30:00.000Z",
-        "tags": [
-          { "id": "amazon", "name": "Amazon" },
-          { "id": "orders", "name": "Orders" }
-        ]
+        "updatedAt": "2025-06-01T09:30:00.000Z"
       }
     ],
     "pagination": {
@@ -3414,234 +3410,52 @@ Authorization: Bearer <token>
       "limit": 10,
       "total": 2,
       "pages": 1
-=======
-    "transactions": [
-      {
-        "id": "transaction-uuid",
-        "amount": 7.5,
-        "type": "DEPOSIT",
-        "status": "COMPLETED",
-        "description": "DataNFT sale: Data Asset Bundle Name (Purchase #1, quantity: 3)",
-        "userId": "org-uuid",
-        "metadata": {
-          "dataNFTId": "data-nft-uuid",
-          "buyerId": "buyer-uuid",
-          "purchaseCount": 1,
-          "quantity": 3
-        },
-        "createdAt": "2024-03-20T12:00:00.000Z",
-        "updatedAt": "2024-03-20T12:00:00.000Z"
-      }
-    ],
-    "pagination": {
-      "total": 20,
-      "page": 1,
-      "limit": 10,
-      "pages": 2
->>>>>>> business
     }
   }
 }
 ```
 
-<<<<<<< HEAD
-#### 2. 获取单个任务详情
+#### 获取单个任务详情
 
 ```
 GET /api/crawler-tasks/{taskId}
 ```
 
-**描述**: 获取指定爬虫任务的详细信息。
-
-=======
-**Notes:**
-- All transaction records use the `userId` field to indicate the organization (must be a user with `isOrganization: true`).
-- Transaction types include:
-  - `DEPOSIT`: Deposit (from system to organization)
-  - `WITHDRAW`: Withdraw (from organization to system)
-- Transaction status includes:
-  - `PENDING`: Pending
-  - `COMPLETED`: Completed
-  - `FAILED`: Failed
-- Only organization users can access these APIs
-- The system will automatically verify if the balance is sufficient
-- All transactions are recorded on-chain, and if available, `txHash` is stored in metadata
-- When purchasing a DataNFT, transaction records are automatically generated, including:
-  - Seller (merchant) DEPOSIT record (amount = price * quantity, metadata includes quantity)
-  - Buyer (if organization user) WITHDRAW record (amount = price * quantity, metadata includes quantity)
-
-### 创建充值交易
-
-```
-POST /api/organization/transactions/deposit
-```
-
->>>>>>> business
 **请求头**:
 ```
 Authorization: Bearer <token>
 ```
 
-<<<<<<< HEAD
 **路径参数**:
 - `taskId`: 任务ID (必需)
-=======
-**请求体**:
-```json
-{
-  "amount": 1000.000000,
-  "description": "Deposit from bank",
-  "metadata": {
-    "txHash": "0x...",
-    "note": "Deposit note"
-  }
-}
-```
-
-**响应** (201 Created):
-```json
-{
-  "status": "success",
-  "data": {
-    "id": "transaction-uuid",
-    "amount": 1000.000000,
-    "type": "DEPOSIT",
-    "status": "PENDING",
-    "description": "Deposit from bank",
-    "userId": "org-uuid",
-    "metadata": {
-      "txHash": "0x...",
-      "note": "Deposit note"
-    },
-    "createdAt": "2024-03-20T12:00:00.000Z",
-    "updatedAt": "2024-03-20T12:00:00.000Z"
-  }
-}
-```
-
-### 创建提现交易
-
-```
-POST /api/organization/transactions/withdraw
-```
-
-**请求头**:
-```
-Authorization: Bearer <token>
-```
-
-**请求体**:
-```json
-{
-  "amount": 500.000000,
-  "description": "Withdraw to bank account",
-  "metadata": {
-    "walletAddress": "0x...",
-    "note": "Withdraw note"
-  }
-}
-```
-
-**响应** (201 Created):
-```json
-{
-  "status": "success",
-  "data": {
-    "id": "transaction-uuid",
-    "amount": 500.000000,
-    "type": "WITHDRAW",
-    "status": "PENDING",
-    "description": "Withdraw to bank account",
-    "userId": "org-uuid",
-    "metadata": {
-      "walletAddress": "0x...",
-      "note": "Withdraw note"
-    },
-    "createdAt": "2024-03-20T12:00:00.000Z",
-    "updatedAt": "2024-03-20T12:00:00.000Z"
-  }
-}
-```
-
-### 获取组织余额
-
-```
-GET /api/organization/balance
-```
-
-**请求头**:
-```
-Authorization: Bearer <token>
-```
->>>>>>> business
 
 **响应** (200 OK):
 ```json
 {
-<<<<<<< HEAD
-  "success": true,
+  "status": "success",
   "data": {
     "id": "task-amz-20250601-xyz",
     "title": "Amazon Order History",
-    "description": "Crawl your Amazon order history to earn rewards",
     "source": "amazon",
     "status": "running",
-    "createdAt": "2025-06-01T09:00:00.000Z",
-    "updatedAt": "2025-06-01T09:30:00.000Z",
     "recordCount": 100,
-    "dataUrl": null,
-    "log": "Fetched 100 records. No errors.",
-    "payloadPreview": [
-      {
-        "orderid": "113-1234567-7890123",
-        "title": "Wireless Bluetooth Headphones",
-        "price": 129.99,
-        "rating": 4.6
-      }
-    ],
-    "tags": [
-      { "id": "amazon", "name": "Amazon" },
-      { "id": "orders", "name": "Orders" }
-    ],
-    "triggeredBy": {
-      "id": "user-uuid",
-      "name": "John Smith",
-      "email": "john@example.com"
-    }
-=======
-  "status": "success",
-  "data": {
-    "balance": 1000.000000,
-    "currency": "USDT",
-    "lastUpdated": "2024-03-20T12:00:00.000Z"
->>>>>>> business
+    "createdAt": "2025-06-01T09:00:00.000Z",
+    "updatedAt": "2025-06-01T09:30:00.000Z"
   }
 }
 ```
 
-<<<<<<< HEAD
-#### 3. 上传爬虫数据
+#### 上传爬虫数据
 
 ```
 POST /api/crawler/upload
 ```
 
-**描述**: 上传爬虫数据，系统自动验证、计算积分并管理上传限制。
-
-=======
-### 更新交易状态
-
-```
-PATCH /api/organization/transactions/{id}/status
-```
-
->>>>>>> business
 **请求头**:
 ```
 Authorization: Bearer <token>
 ```
 
-<<<<<<< HEAD
 **请求体格式** (支持三种):
 ```javascript
 // 1. 直接数组格式
@@ -3650,16 +3464,15 @@ Authorization: Bearer <token>
     "source": "amazon",
     "type": "order",
     "timestamp": "2025-06-02T11:58:00Z",
-    "metadata": {
-      "sourceUrl": "https://amazon.com/orders",
-      "category": "Electronics",
-      "region": "US"
-    },
     "payload": {
       "orderid": "113-1234567-7890123",
       "title": "Wireless Bluetooth Headphones",
       "price": 129.99,
       "currency": "USD"
+    },
+    "metadata": {
+      "sourceUrl": "https://amazon.com/orders",
+      "category": "Electronics"
     }
   }
 ]
@@ -3667,12 +3480,11 @@ Authorization: Bearer <token>
 // 2. 单个对象格式
 {
   "source": "luma",
-  "type": "task",
+  "type": "event",
   "timestamp": "2025-06-02T11:59:00Z",
   "payload": {
-    "taskId": "task-abc",
-    "title": "Fix onboarding flow bug",
-    "status": "in_progress"
+    "eventId": "luma-evt-123",
+    "title": "Tech Conference 2024"
   }
 }
 
@@ -3680,16 +3492,6 @@ Authorization: Bearer <token>
 {
   "data": [DataItem, ...]
 }
-=======
-**请求体**:
-```json
-{
-  "status": "COMPLETED",
-  "metadata": {
-    "note": "Transaction completed note"
-  }
-}
->>>>>>> business
 ```
 
 **响应** (200 OK):
@@ -3697,143 +3499,63 @@ Authorization: Bearer <token>
 {
   "status": "success",
   "data": {
-<<<<<<< HEAD
-    "uploadedCount": 10,     // 本次上传成功条数
-    "pointsEarned": 100      // 本次获得积分 (每10条获得100积分)
-=======
-    "id": "transaction-uuid",
-    "status": "COMPLETED",
-    "updatedAt": "2024-03-20T12:00:00.000Z"
->>>>>>> business
+    "uploadedCount": 10,
+    "pointsEarned": 100,
+    "duplicatesCount": 2,
+    "message": "数据上传成功"
   }
 }
 ```
 
-<<<<<<< HEAD
 **错误响应**:
 - 400 Bad Request: 数据格式验证失败
 - 401 Unauthorized: 认证失败
-- 429 Too Many Requests: 超出上传限制 (日限1000条/月限10000条)
+- 429 Too Many Requests: 超出上传限制
 
----
-
-### 数据格式规范
+### 数据格式
 
 #### DataItem 结构
 ```typescript
 interface DataItem {
   source: 'amazon' | 'luma';
-  type: 'order' | 'product' | 'price' | 'review' | 'event' | 'task' | 'custom';
+  type: 'order' | 'product' | 'event' | 'task' | 'custom';
   timestamp: string;  // ISO8601格式
-  metadata?: {
+  payload: Record<string, any>;  // 数据内容
+  metadata?: {        // 可选元数据
     sourceUrl?: string;
     category?: string;
-    language?: string;
     region?: string;
-    tags?: string[];
   };
-  payload: Record<string, any>;  // 根据source和type有不同的必需字段
 }
 ```
 
-#### 积分奖励机制
-- **计算方式**: 累计上传数据每满10条获得100积分
-- **上传限制**: 日限1000条，月限10000条数据
-- **积分上限**: 日最多10,000积分，月最多100,000积分
-- **自动任务**: 首次访问自动为用户创建Amazon和Luma任务
+#### 数据源要求
+- **Amazon**: payload必须包含 `orderid` 字段
+- **Luma**: payload建议包含 `eventId`、`taskId` 或 `id` 字段
 
----
+### 扩展接口
 
-### 扩展功能 (非必需)
-
-这些接口为高级用户或特殊场景提供额外功能，基础使用不需要。
-
-#### 创建爬虫任务 (通常自动创建)
-
-```
-POST /api/crawler-tasks
-```
-
-系统会在用户首次访问时自动创建默认任务，一般无需手动创建。
-
-#### 获取任务数据详情
-
-```
-GET /api/crawler-tasks/:taskId/data
-```
-
-查看指定任务下的具体数据记录，支持分页。
-
-#### 获取爬虫统计信息
-
+#### 获取爬虫统计
 ```
 GET /api/crawler/stats
 ```
 
-获取用户的完整爬虫统计数据，包括总数、积分、任务状态分布等。
-
-#### 获取上传限制信息
-
+#### 获取上传限制
 ```
 GET /api/crawler/limits
 ```
 
-查看当前的日/月上传限制和剩余额度。
+#### 创建爬虫任务
+```
+POST /api/crawler-tasks
+```
 
 #### 更新任务状态
-
 ```
 PUT /api/crawler-tasks/:taskId/status
 ```
 
-手动更新任务状态（通常由系统自动管理）。
-
 #### 删除爬虫任务
-
 ```
 DELETE /api/crawler-tasks/:taskId
 ```
-
-删除任务及其关联数据（谨慎操作）。
-
----
-
-### 支持的数据类型
-
-| Type | 必需字段 | 说明 |
-|------|----------|------|
-| order | orderid (Amazon) | Amazon订单数据 |
-| product | title, price | 商品信息 |
-| price | price, currency | 价格信息 |
-| review | rating, content | 评论信息 |
-| event | eventId (Luma) | Luma事件数据 |
-| task | title, status | 任务信息 |
-| custom | - | 自定义数据 |
-
-### 数据源特殊要求
-
-#### Amazon数据
-- **必需字段**: `orderid` (订单号，格式：123-1234567-1234567)
-- **建议字段**: `title`, `price`, `currency`
-- **类型**: 主要使用 `order` 类型
-
-#### Luma数据
-- **建议字段**: `eventId`, `taskId` 或 `id` (按优先级)
-- **类型**: 主要使用 `event` 和 `task` 类型
-=======
-**说明**:
-- 所有交易记录使用 `userId` 字段标识组织（必须是 `isOrganization: true` 的用户）
-- 交易类型包括：
-  - `DEPOSIT`: 充值（从系统到组织）
-  - `WITHDRAW`: 提现（从组织到系统）
-- 交易状态包括：
-  - `PENDING`: 待处理
-  - `COMPLETED`: 已完成
-  - `FAILED`: 失败
-- 只有组织用户可以访问这些 API
-- 系统会自动验证余额是否充足
-- 所有交易都会记录在链上，如果有 txHash 会存储在 metadata 中
-- DataNFT 购买时会自动生成交易记录，包括：
-  - 卖家（商家）的 DEPOSIT 记录
-  - 买家（如果是组织用户）的 WITHDRAW 记录
->>>>>>> business
