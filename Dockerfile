@@ -20,10 +20,11 @@ RUN npx prisma generate
 
 FROM base AS runner
 
-RUN apt-get update && apt-get install -y build-essential python3 libssl-dev ca-certificates
+RUN apt-get update && apt-get install -y python3 libssl-dev ca-certificates
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY --from=deps /app .
+RUN npm install sharp
 ENV NODE_ENV=production
 
 ENV PORT 3000

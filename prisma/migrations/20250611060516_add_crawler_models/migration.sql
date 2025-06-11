@@ -13,11 +13,21 @@ CREATE TYPE "AwardStatus" AS ENUM ('LOCKED', 'LIVE', 'INVALID');
 ALTER TABLE "Badge" ALTER COLUMN "updatedAt" SET DEFAULT CURRENT_TIMESTAMP;
 
 -- AlterTable
-ALTER TABLE "User" ADD COLUMN     "referralCode" TEXT NOT NULL,
-ADD COLUMN     "xAccessToken" TEXT,
-ADD COLUMN     "xRefreshToken" TEXT,
-ADD COLUMN     "xUsername" TEXT,
-ADD COLUMN     "xid" TEXT;
+-- Step 1: Add nullable columns
+ALTER TABLE "User" 
+ADD COLUMN "referralCode" TEXT,
+ADD COLUMN "xAccessToken" TEXT,
+ADD COLUMN "xRefreshToken" TEXT,
+ADD COLUMN "xUsername" TEXT,
+ADD COLUMN "xid" TEXT;
+
+-- Step 2: Populate referralCode using id
+UPDATE "User"
+SET "referralCode" = 'REF-' || "id";
+
+-- Step 3: Set referralCode as NOT NULL
+ALTER TABLE "User"
+ALTER COLUMN "referralCode" SET NOT NULL;
 
 -- CreateTable
 CREATE TABLE "CrawlerTask" (
