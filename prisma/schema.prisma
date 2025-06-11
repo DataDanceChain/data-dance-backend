@@ -45,9 +45,9 @@ model User {
   organizationTransactions OrganizationTransaction[]
   passes                   Pass[]
   points                   Point[]
-  snapshots                Snapshot[]
   invitesReceived          Referral?                 @relation("InvitesReceived")
   invitesSent              Referral[]                @relation("InvitesSent")
+  snapshots                Snapshot[]
   organization             User?                     @relation("OrganizationMembers", fields: [organizationId], references: [id])
   members                  User[]                    @relation("OrganizationMembers")
   UserAwards               UserAward[]
@@ -443,12 +443,6 @@ model Pass {
   @@index([userId])
 }
 
-enum AwardStatus {
-  LOCKED
-  LIVE
-  INVALID
-}
-
 model NftMarketOrder {
   id          String   @id @default(uuid())
   userId      String
@@ -520,4 +514,10 @@ model OrganizationTransaction {
   updatedAt   DateTime @updatedAt
   userId      String
   user        User     @relation(fields: [userId], references: [id])
+}
+
+enum AwardStatus {
+  LOCKED
+  LIVE
+  INVALID
 }
