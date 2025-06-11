@@ -434,23 +434,7 @@ exports.importWallet = async (req, res) => {
   }
 };
 
-/**
- * 获取当前用户的邀请码
- * @route GET /api/users/invite-code
- * @access Private
- */
-exports.getInviteCode = async (req, res) => {
-  try {
-    // 从用户表读取 referralCode
-    const user = await prisma.user.findUnique({ where: { id: req.user.id }, select: { referralCode: true } });
-    if (!user?.referralCode) {
-      return res.status(404).json({ status: 'fail', message: '邀请码不存在' });
-    }
-    res.status(200).json({ status: 'success', data: { code: user.referralCode } });
-  } catch (error) {
-    res.status(500).json({ status: 'error', message: '服务器错误', error: error.message });
-  }
-};
+
 
 /**
  * 获取当前用户注册时间
