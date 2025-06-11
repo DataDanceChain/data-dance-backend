@@ -1,306 +1,178 @@
-# 爬虫系统完整概述
+# Crawler 系统技术文档
 
-## 系统架构
+本文档提供Crawler系统的技术概览，涵盖系统架构、核心概念、设计实现和API参考。
 
-爬虫系统是一个用于收集和管理Amazon订单数据和Luma事件数据的后端服务，具备数据验证、去重检测、积分奖励等功能。
+## 目录
 
-### 核心组件
+- [Crawler 系统技术文档](#crawler-系统技术文档)
+  - [目录](#目录)
+  - [1. 系统概述](#1-系统概述)
+    - [1.1. 系统目标](#11-系统目标)
+    - [1.2. 核心组件](#12-核心组件)
+  - [2. 核心概念](#2-核心概念)
+    - [2.1. 数据源与标识符](#21-数据源与标识符)
+      - [Amazon 数据](#amazon-数据)
+      - [Luma 数据](#luma-数据)
+    - [2.2. 数据质量分](#22-数据质量分)
+    - [2.3. 积分奖励](#23-积分奖励)
+  - [3. 系统设计](#3-系统设计)
+    - [3.1. 数据处理流程](#31-数据处理流程)
+    - [3.2. 去重策略](#32-去重策略)
+    - [3.3. 数据库设计](#33-数据库设计)
+  - [4. API 参考](#4-api-参考)
+    - [4.1. 核心接口](#41-核心接口)
+    - [4.2. 扩展接口](#42-扩展接口)
+    - [4.3. 数据格式 (`DataItem`)](#43-数据格式-dataitem)
+    - [4.4. 常见错误](#44-常见错误)
 
-1. **数据收集服务** (`crawlerService.js`)
-2. **数据验证模块**
-3. **去重检测系统**
-4. **积分奖励机制**
-5. **数据存储层** (PostgreSQL + Prisma)
+---
 
-## 数据源和唯一标识符
+## 1. 系统概述
 
-### Amazon数据
-- **唯一标识符**: `orderid` (订单号)
-- **格式要求**: `123-1234567-1234567` (标准Amazon订单号格式)
-- **数据类型**: 主要使用 `order` 类型
-- **必需字段**: `orderid`
-- **建议字段**: `title`, `price`, `currency`
+### 1.1. 系统目标
 
-### Luma数据
-- **标识符**: `eventId` | `taskId` | `id` (优先级递减)
-- **数据类型**: 主要使用 `event` 和 `task` 类型
-- **建议字段**: `title`, `date`/`dueDate`
+Crawler系统是一个用于收集、验证和管理用户提交数据（主要来自Amazon和Luma）的后端服务。系统包含数据验证、多层去重和积分奖励等功能。
 
-### 数据示例对比
+### 1.2. 核心组件
 
-#### Amazon订单数据示例
-```json
-{
-  "source": "amazon",
-  "type": "order",
-  "timestamp": "2024-12-09T12:00:00Z",
-  "payload": {
-    "orderid": "113-1234567-7890123",
-    "title": "iPhone 15 Pro",
-    "price": 999.99,
-    "currency": "USD"
-  },
-  "metadata": {
-    "sourceUrl": "https://amazon.com/orders",
-    "category": "electronics"
-  }
-}
+- **服务层 (`crawlerService.js`)**: 核心服务，负责协调整个数据处理流程。
+- **验证模块**: 确保数据格式的完整性和正确性。
+- **去重引擎**: 在全局和用户两个层级防止重复数据。
+- **积分服务**: 为有效的数据提交计算和发放积分。
+- **数据存储**: 使用PostgreSQL数据库和Prisma ORM。
+
+## 2. 核心概念
+
+### 2.1. 数据源与标识符
+
+系统处理多种数据源，每种数据源都有其唯一的标识逻辑。
+
+#### Amazon 数据
+- **主标识符**: `orderid` (例如: `113-1234567-7890123`)。
+- **数据类型**: `order`。
+- **关键字段**: `orderid` 是必需的。
+
+#### Luma 数据
+- **主标识符**: `eventId`、`taskId`或`id` (按此优先级)。
+- **数据类型**: `event`, `task`。
+
+### 2.2. 数据质量分
+
+为每条提交的数据计算一个0-100的分数，以评估其质量。
+
+| 分类 | 评分标准 | 分数 |
+| :--- | :--- | :--- |
+| **官方标识符** | Amazon: 有`orderid`。Luma: 有`eventId`/`taskId`/`id`。 | **40** |
+| **元数据** | 有`sourceUrl` (15), 有`category` (10)。 | **25** |
+| **标准字段** | Amazon: `title`+`price` (15), `currency` (10)。Luma: `title` (15), `date` (10)。 | **25** |
+| **格式规范** | 有效的`timestamp`。 | **10** |
+
+### 2.3. 积分奖励
+
+- **计算规则**: 每提交**10条**有效数据，用户获得**100积分**。
+- **上传限制**: 每日1,000条，每月10,000条。
+- **无效数据**: 重复或无效数据不计分。
+
+## 3. 系统设计
+
+### 3.1. 数据处理流程
+
+系统通过以下流水线处理数据：
+
+```mermaid
+graph TD
+    A[用户提交数据] --> B{1. 格式验证};
+    B --> C{2. 质量评分};
+    C --> D{3. 批次内去重};
+    D --> E{4. 数据库去重};
+    E --> F[5. 存储有效数据];
+    F --> G[6. 计算并授予积分];
+    G --> H[返回API响应];
 ```
 
-#### Luma事件数据示例
-```json
-{
-  "source": "luma",
-  "type": "event",
-  "timestamp": "2024-12-09T12:00:00Z",
-  "payload": {
-    "eventId": "LMA_EVT_001",
-    "title": "Tech Conference 2024",
-    "date": "2024-01-15"
-  },
-  "metadata": {
-    "sourceUrl": "https://luma.com/events",
-    "category": "conference"
-  }
-}
-```
+### 3.2. 去重策略
 
-## 系统运行流程
+采用三层防护机制来保证数据唯一性。
 
-### 1. 数据上传流程
+- **第1层：验证 (`validateDataItem`)**: 验证数据源、类型、`payload`和标识符格式。
+- **第2层：批次内检查**: 扫描同一次提交的数据，通过`contentHash`和标题相似度进行检查。
+- **第3层：数据库检查**:
+  - **全局去重**: `contentHash`全局唯一，防止任何用户提交完全相同的内容。
+  - **用户级去重**: `sourceId`在单个用户内唯一。不同用户可以提交相同的`sourceId`（如分享同一产品的体验），但同一用户不能重复提交。
 
-```
-用户提交数据 
-    ↓
-基础格式验证
-    ↓
-数据质量评分
-    ↓
-批次内重复检查
-    ↓
-数据库重复检查
-    ↓
-数据入库 + 积分计算
-    ↓
-返回结果
-```
+### 3.3. 数据库设计
 
-### 2. 详细处理步骤
+核心的 `CrawlerData` 表结构设计如下，以支持去重逻辑。
 
-#### 2.1 数据验证 (`validateDataItem`)
-- **基础验证**: source, type, payload 格式
-- **Amazon特定**: 必需 `orderid`，格式验证
-- **Luma特定**: 建议包含 `eventId`
-- **质量评分**: 0-100分，基于标识符、元数据、标准字段、格式规范
-
-#### 2.2 去重检测系统 (`checkDuplicates`)
-
-##### 三层防护机制：
-
-1. **数据验证层**
-   - 格式验证
-   - 必需字段检查
-   - 时间戳处理
-
-2. **批次内重复检查**
-   - 内容哈希匹配 (100%相似)
-   - 标题+价格相似性检测 (Amazon产品)
-   - 标题高度相似 (90%+)
-
-3. **数据库重复检查**
-   - **全局内容哈希去重**: 防止完全相同内容
-   - **用户级sourceId去重**: 防止同一用户重复上传相同订单/事件
-
-#### 2.3 唯一标识符提取 (`extractSourceId`)
-
-```javascript
-// Amazon: 仅使用orderid
-if (source === 'amazon') {
-  return payload.orderid || payload.orderId || null;
-}
-
-// Luma: 保持原有逻辑
-if (source === 'luma') {
-  return payload.eventId || payload.taskId || payload.id || null;
-}
-```
-
-### 3. 去重策略详解
-
-#### 3.1 用户级去重 vs 全局去重
-
-| 类型 | 策略 | 目的 |
-|------|------|------|
-| 内容哈希 | 全局去重 | 防止完全相同的数据内容 |
-| sourceId | 用户级去重 | 允许不同用户分享同产品体验 |
-
-#### 3.2 Amazon订单去重逻辑
-
-```sql
--- 用户级orderid唯一约束
-CREATE UNIQUE INDEX "CrawlerData_userId_source_sourceId_key" 
-ON "CrawlerData"("userId", "source", "sourceId") 
-WHERE "sourceId" IS NOT NULL;
-```
-
-- ✅ 用户A上传订单 `113-1234567-7890123`
-- ✅ 用户B也可以上传订单 `113-1234567-7890123` (不同用户体验)
-- ❌ 用户A重复上传订单 `113-1234567-7890123` (被拒绝)
-
-#### 3.3 Luma事件去重逻辑
-
-保持原有逻辑不变，使用 `eventId`/`taskId`/`id` 作为标识符。
-
-## 积分奖励机制
-
-### 计算规则
-- **基础规则**: 每10条有效数据 = 100积分
-- **上传限制**: 日限1000条，月限10000条
-- **重复数据**: 不计入积分
-
-### 示例
-```javascript
-const pointsEarned = Math.floor(validItems.length / 10) * 100;
-// 15条有效数据 → 100积分 (10条达标)
-// 25条有效数据 → 200积分 (20条达标)
-```
-
-## 数据质量评分
-
-### 评分标准 (总分100)
-
-1. **官方标识符 (40分)**
-   - Amazon: 有 `orderid` = 40分
-   - Luma: 有 `eventId`/`taskId`/`id` = 40分
-
-2. **元数据完整性 (25分)**
-   - 有 `sourceUrl` = 15分
-   - 有 `category` = 10分
-
-3. **标准字段 (25分)**
-   - Amazon: `title` + `price` = 15分, `currency` = 10分
-   - Luma: `title` = 15分, `date`/`dueDate` = 10分
-
-4. **格式规范 (10分)**
-   - 有效 `timestamp` = 10分
-
-## API接口概述
-
-> 完整的API接口规范请参考：`api-doc.md#crawler-api`
-
-### 核心接口
-
-#### 1. 获取爬虫任务列表
-```http
-GET /api/crawler-tasks
-Authorization: Bearer <token>
-```
-支持按数据源、状态筛选，分页查询用户的爬虫任务。
-
-#### 2. 获取单个任务详情
-```http
-GET /api/crawler-tasks/{taskId}
-Authorization: Bearer <token>
-```
-获取指定任务的详细信息，包括数据预览、统计信息等。
-
-#### 3. 上传爬虫数据
-```http
-POST /api/crawler/upload
-Authorization: Bearer <token>
-
-Content-Type: application/json
-[
-  {
-    "source": "amazon",
-    "type": "order",
-    "timestamp": "2024-12-09T12:00:00Z",
-    "payload": {
-      "orderid": "113-1234567-7890123",
-      "title": "iPhone 15 Pro",
-      "price": 999.99,
-      "currency": "USD"
-    },
-    "metadata": {
-      "sourceUrl": "https://amazon.com/orders",
-      "category": "electronics"
-    }
-  }
-]
-```
-
-### 响应格式详解
-```json
-{
-  "uploadedCount": 1,        // 成功上传的数据条数
-  "duplicatesCount": 0,      // 重复数据条数
-  "duplicateDetails": [],    // 重复数据详情
-  "qualityReports": [...],   // 数据质量评分报告
-  "pointsEarned": 100,       // 本次获得的积分
-  "message": "数据上传成功"
-}
-```
-
-### 扩展接口
-
-#### 统计信息
-```http
-GET /api/crawler/stats
-```
-获取用户的完整统计数据，包括总数据量、积分统计、任务状态分布等。
-
-#### 上传限制查询
-```http
-GET /api/crawler/limits
-```
-查看当前用户的日/月上传限制和剩余额度。
-
-#### 任务管理
-```http
-POST /api/crawler-tasks      # 创建新任务
-PUT /api/crawler-tasks/:id/status  # 更新任务状态
-DELETE /api/crawler-tasks/:id      # 删除任务
-```
-```
-
-## 错误处理
-
-### 常见错误类型
-
-1. **验证错误**
-   - `Amazon数据必须包含orderid字段`
-   - `数据源必须是 amazon 或 luma`
-   - `Amazon订单号格式建议为：123-1234567-1234567`
-
-2. **重复错误**
-   - `您已经上传过相同的Amazon订单`
-   - `数据内容与现有记录相同`
-
-3. **限制错误**
-   - `超出日上传限制`
-   - `超出月上传限制`
-
-## 数据库结构
-
-### CrawlerData表
-```sql
+```prisma
 model CrawlerData {
   id          String   @id @default(cuid())
-  source      String   // 'amazon' | 'luma'
-  type        String   // 'order' | 'product' | 'event'
+  source      String   // 'amazon' or 'luma'
+  type        String
   timestamp   DateTime
-  metadata    Json
   payload     Json
-  contentHash String   // 全局去重
-  sourceId    String?  // 用户级去重 (orderid/eventId)
-  taskId      String?
+  metadata    Json?
+  contentHash String   @unique // 全局去重哈希
+  sourceId    String?  // 用户级去重ID
   userId      String
   points      Int      @default(0)
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
 
-  @@unique([userId, source, sourceId], where: { sourceId: { not: null } })
-  @@index([contentHash])
+  // 用户、数据源和sourceId的组合必须唯一
+  @@unique([userId, source, sourceId])
   @@index([userId, source])
 }
 ```
+
+## 4. API 参考
+
+> 详细的请求/响应结构请参考 `api-doc.md#crawler-api`。
+
+### 4.1. 核心接口
+
+| 方法 | 端点 | 描述 |
+| :--- | :--- | :--- |
+| `POST` | `/api/crawler/upload` | **主接口**。提交一批数据进行处理。 |
+| `GET` | `/api/crawler-tasks` | 获取用户的爬虫任务列表及状态。 |
+| `GET` | `/api/crawler-tasks/{taskId}` | 获取单个爬虫任务的详情。 |
+
+### 4.2. 扩展接口
+
+用于管理和统计的辅助接口。
+
+| 方法 | 端点 | 描述 |
+| :--- | :--- | :--- |
+| `GET` | `/api/crawler/stats` | 获取用户的聚合统计数据。 |
+| `GET` | `/api/crawler/limits` | 查询当前的日/月上传限制。 |
+| `POST` | `/api/crawler-tasks` | 手动创建一个新的爬虫任务。 |
+| `PUT` | `/api/crawler-tasks/{id}/status`| 更新任务状态。 |
+| `DELETE` | `/api/crawler-tasks/{id}` | 删除一个任务及其关联数据。 |
+
+### 4.3. 数据格式 (`DataItem`)
+
+提交到 `/upload` 接口的每条数据的标准结构。
+
+```typescript
+interface DataItem {
+  source: 'amazon' | 'luma';
+  type: 'order' | 'product' | 'event' | 'task' | 'custom';
+  timestamp: string;  // ISO 8601 格式
+  payload: Record<string, any>; // 主要数据对象
+  metadata?: {
+    sourceUrl?: string;
+    category?: string;
+    region?: string;
+  };
+}
+```
+
+### 4.4. 常见错误
+
+- **验证错误**:
+  - `Amazon数据必须包含orderid字段`
+  - `数据源必须是 amazon 或 luma`
+- **重复错误**:
+  - `您已经上传过相同的Amazon订单`
+  - `数据内容与现有记录相同`
+- **限制错误**:
+  - `超出日上传限制`
+  - `超出月上传限制`
