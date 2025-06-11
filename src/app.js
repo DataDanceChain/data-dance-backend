@@ -57,7 +57,7 @@ const storage = multer.diskStorage({
 });
 
 // 创建 multer 实例
-const upload = multer({ 
+const upload = multer({
   storage: storage,
   limits: {
     fileSize: 5 * 1024 * 1024 // 限制5MB
@@ -68,16 +68,18 @@ const upload = multer({
 app.set('upload', upload);
 
 // CORS 配置
-const corsOptions = {
-  origin: process.env.FRONTEND_URL || 'http://localhost:8100',
-  credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
-  exposedHeaders: ['Content-Range', 'X-Content-Range']
-};
+if (process.env.NODE_ENV !== 'production') {
+  const corsOptions = {
+    origin: process.env.FRONTEND_URL || 'http://localhost:8100',
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
+    exposedHeaders: ['Content-Range', 'X-Content-Range']
+  };
 
-// 中间件
-app.use(cors(corsOptions));
+  // 中间件
+  app.use(cors(corsOptions));
+}
 app.use(express.json());
 app.use(morgan('dev'));
 
@@ -96,7 +98,7 @@ app.use((req, res, next) => {
 app.use(express.urlencoded({ extended: true }));
 
 // 配置 MIME 类型
-express.static.mime.define({'application/vnd.apple.pkpass': ['pkpass']});
+express.static.mime.define({ 'application/vnd.apple.pkpass': ['pkpass'] });
 
 // 静态文件服务
 app.use('/assets', express.static(path.join(__dirname, '../public/assets'), {
