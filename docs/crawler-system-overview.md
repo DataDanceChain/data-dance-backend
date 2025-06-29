@@ -21,6 +21,9 @@
     - [3.3. 数据库设计](#33-数据库设计)
   - [4. API 参考](#4-api-参考)
     - [4.1. 核心接口](#41-核心接口)
+      - [4.1.1. 上传爬虫数据](#411-上传爬虫数据)
+      - [4.1.2. 获取爬虫任务列表](#412-获取爬虫任务列表)
+      - [4.1.3. 获取单个任务详情](#413-获取单个任务详情)
     - [4.2. 扩展接口](#42-扩展接口)
     - [4.3. 数据格式 (`DataItem`)](#43-数据格式-dataitem)
     - [4.4. 常见错误](#44-常见错误)
@@ -125,15 +128,127 @@ model CrawlerData {
 
 ## 4. API 参考
 
-> 详细的请求/响应结构请参考 `api-doc.md#crawler-api`。
+本章节提供了所有Crawler相关API的详细说明，包括端点、参数和请求/响应示例。
 
 ### 4.1. 核心接口
 
-| 方法 | 端点 | 描述 |
-| :--- | :--- | :--- |
-| `POST` | `/api/crawler/upload` | **主接口**。提交一批数据进行处理。 |
-| `GET` | `/api/crawler-tasks` | 获取用户的爬虫任务列表及状态。 |
-| `GET` | `/api/crawler-tasks/{taskId}` | 获取单个爬虫任务的详情。 |
+#### 4.1.1. 上传爬虫数据
+
+这是系统的主要数据入口。
+
+| 方法 | 端点 |
+| :--- | :--- |
+| `POST` | `/api/crawler/upload` |
+
+**请求头**:
+```
+Authorization: Bearer <token>
+```
+
+**请求体格式** (支持三种形式):
+```javascript
+// 1. 数组形式 (推荐)
+[
+  {
+    "source": "amazon",
+    "type": "order",
+    "timestamp": "2025-06-02T11:58:00Z",
+    "payload": {
+      "orderid": "113-1234567-7890123",
+      "title": "Wireless Bluetooth Headphones"
+    },
+    "metadata": { "category": "Electronics" }
+  }
+]
+
+// 2. 单个对象形式
+{
+  "source": "luma",
+  "type": "event",
+  "payload": { "eventId": "luma-evt-123", "title": "Tech Conference" }
+}
+
+// 3. 包装对象形式
+{
+  "data": [ /* ...DataItem... */ ]
+}
+```
+
+**响应 (200 OK)**:
+```json
+{
+  "status": "success",
+  "data": {
+    "uploadedCount": 10,
+    "pointsEarned": 100,
+    "duplicatesCount": 2,
+    "message": "数据上传成功"
+  }
+}
+```
+
+#### 4.1.2. 获取爬虫任务列表
+
+| 方法 | 端点 |
+| :--- | :--- |
+| `GET` | `/api/crawler-tasks` |
+
+**查询参数**:
+- `source` (可选): 按数据源过滤 (`amazon` 或 `luma`)。
+- `status` (可选): 按状态过滤 (`pending`, `running`, `done`, `error`)。
+- `search` (可选): 关键词搜索。
+- `page` (可选): 页码，默认 `1`。
+- `limit` (可选): 每页数量，默认 `10`。
+
+**响应 (200 OK)**:
+```json
+{
+  "status": "success",
+  "data": {
+    "tasks": [
+      {
+        "id": "task-amz-20250601-xyz",
+        "title": "Amazon Order History",
+        "source": "amazon",
+        "status": "running",
+        "recordCount": 150,
+        "createdAt": "2025-06-01T09:00:00.000Z"
+      }
+    ],
+    "pagination": {
+      "page": 1,
+      "limit": 10,
+      "total": 1,
+      "pages": 1
+    }
+  }
+}
+```
+
+#### 4.1.3. 获取单个任务详情
+
+| 方法 | 端点 |
+| :--- | :--- |
+| `GET` | `/api/crawler-tasks/{taskId}` |
+
+**路径参数**:
+- `taskId` (必需): 任务的唯一ID。
+
+**响应 (200 OK)**:
+```json
+{
+  "status": "success",
+  "data": {
+    "id": "task-amz-20250601-xyz",
+    "title": "Amazon Order History",
+    "source": "amazon",
+    "status": "running",
+    "recordCount": 100,
+    "createdAt": "2025-06-01T09:00:00.000Z",
+    "updatedAt": "2025-06-01T09:30:00.000Z"
+  }
+}
+```
 
 ### 4.2. 扩展接口
 
@@ -164,6 +279,9 @@ interface DataItem {
   };
 }
 ```
+**数据源要求**:
+- **Amazon**: `payload` 中必须包含 `orderid` 字段。
+- **Luma**: `payload` 中建议包含 `eventId`、`taskId` 或 `id` 字段。
 
 ### 4.4. 常见错误
 

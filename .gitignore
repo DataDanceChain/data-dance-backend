@@ -1,10 +1,5 @@
-# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
-
-# data
-/db
-
-# dependencies
-/node_modules
+# Dependencies
+node_modules/
 /.pnp
 .pnp.*
 .yarn/*
@@ -12,75 +7,45 @@
 !.yarn/plugins
 !.yarn/releases
 !.yarn/versions
+.yarn/cache
+.yarn/unplugged
+.yarn/build-state.yml
+.yarn/install-state.gz
+jspm_packages/
+bower_components/
+.npm
 
-# testing
-/coverage
-
-# next.js
-/.next/
-/out/
-
-# production
+# Build outputs
 /build
+/dist
+/out
+/.next
+*.tsbuildinfo
+next-env.d.ts
 
-# misc
-.DS_Store
-*.pem
+# Database
+/db
 
-# debug
+# Environment variables
+.env*
+
+# Logs
+logs/
+*.log
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
 
-# env files (can opt-in for committing if needed)
-.env*
-
-# vercel
-.vercel
-
-# typescript
-*.tsbuildinfo
-next-env.d.ts
-
-# Node.js
-node_modules/
-npm-debug.log
-yarn-debug.log
-yarn-error.log
-.pnpm-debug.log
-.yarn/cache
-.yarn/unplugged
-.yarn/build-state.yml
-.yarn/install-state.gz
-
-# Environment variables
-.env
-.env.local
-.env.development.local
-.env.test.local
-.env.production.local
-
-# Prisma
-prisma/.env
-prisma/migrations/dev/
-prisma/migrations/shadow/
-
-# Build files
-dist/
-build/
-out/
-.next/
-
-# Logs
-logs/
-*.log
-
 # Testing
-coverage/
+/coverage
 .nyc_output/
 
-# Mac OS
+# Temporary files
+tmp/
+temp/
+
+# OS files
 .DS_Store
 .AppleDouble
 .LSOverride
@@ -89,69 +54,46 @@ Icon
 .Spotlight-V100
 .Trashes
 
-# IDE - VSCode
+# IDE files
 .vscode/*
 !.vscode/settings.json
 !.vscode/tasks.json
 !.vscode/launch.json
 !.vscode/extensions.json
-
-# IDE - JetBrains (WebStorm, IntelliJ, etc)
 .idea/
 *.iml
 *.iws
 *.ipr
 .idea_modules/
-
-# IDE - Sublime Text
 *.sublime-project
 *.sublime-workspace
-
-# Temporary files
-tmp/
-temp/
-
-# Debug files
-.debug/
 
 # Uploads
 uploads/
 public/uploads/
 
-# Dependency directories
-jspm_packages/
-bower_components/
-
-# Optional npm cache directory
-.npm
-
-# Optional eslint cache
+# Cache
 .eslintcache
-
-# Optional REPL history
 .node_repl_history
 
-# Output of 'npm pack'
+# Package files
 *.tgz
-
-# Yarn Integrity file
 .yarn-integrity
 
-# dotenv environment variable files
-.env.development
-.env.test
-.env.production
+# Prisma
+prisma/.env
+prisma/migrations/dev/
+prisma/migrations/shadow/
 
-# Pass resources
-keys/passes/**/*.pass/icon.png
-keys/passes/**/*.pass/icon@2x.png
-keys/passes/**/*.pass/icon@3x.png
-keys/passes/**/*.pass/logo.png
-keys/passes/**/*.pass/logo@2x.png
-keys/passes/**/*.pass/logo@3x.png
-keys/passes/**/*.pass/strip.png
-keys/passes/**/*.pass/strip@2x.png
-keys/passes/**/*.pass/strip@3x.png
+# Vercel
+.vercel
 
-# Generated passes
+# Pass resources and generated files
+keys/passes/**/*.pass/icon*.png
+keys/passes/**/*.pass/logo*.png
+keys/passes/**/*.pass/strip*.png
 public/assets/passes/*.pkpass
+
+# Miscellaneous
+*.pem
+.debug/
