@@ -11,12 +11,58 @@
   },
   "awards": [
     {
+      "id": "amazon-data-collection",
+      "title": "Amazon Data Collection",
+      "description": "Share Your Amazon order to earn rewards",
+      "icon": "businessOutline",
+      "color": "#FF9500",
+      "status": "LIVE",
+      "enabled": true,
+      "metadata": {
+        "source": "amazon",
+        "type": "data-collection",
+        "category": "data-sharing",
+        "logoUrl": "/assets/websites/amazon.png",
+        "actionUrl": "/user/crawl-tasks",
+        "buttonText": "提交数据"
+      },
+      "tasks": [
+        {
+          "id": "amazon-order-submit",
+          "title": "Submit Amazon Order Data",
+          "description": "Share Your Amazon order to earn rewards",
+          "points": 100,
+          "claimLimit": null,
+          "metadata": {
+            "type": "data-submission",
+            "source": "amazon"
+          }
+        }
+      ]
+    },
+    {
+      "id": "referral-rewards",
+      "title": "Referral Rewards",
+      "description": "Earn rewards from your referral network activities",
+      "icon": "peopleOutline",
+      "color": "#FF6B6B",
+      "status": "LIVE",
+      "enabled": true,
+      "tasks": [
+        { "id": "referral-1", "title": "Direct Invite Reward", "description": "Reward for directly inviting a user", "points": 50, "claimLimit": null },
+        { "id": "referral-2", "title": "Level 2 Referral Bonus", "description": "Bonus for referrals made by your direct invitees", "points": 5, "claimLimit": null },
+        { "id": "referral-3", "title": "Level 3 Referral Bonus", "description": "Bonus for referrals made at level 3", "points": 3, "claimLimit": null },
+        { "id": "referral-4", "title": "Level 4 Referral Bonus", "description": "Bonus for referrals made at level 4", "points": 1, "claimLimit": null }
+      ]
+    },
+    {
       "id": "social-engagement",
       "title": "Social Engagement",
       "description": "Share DataDance news and earn rewards",
       "icon": "shareOutline",
       "color": "#1DA1F2",
       "status": "LIVE",
+      "enabled": false,
       "tasks": [
         { "id": "social-1", "title": "DataDance Launch", "description": "Repost this Post to earn rewards", "postKey": "social-1", "points": 50, "claimLimit": 1,
           "picture": "https://images.unsplash.com/photo-1526378800651-c32d170fe6f8?w=800&auto=format&fit=crop"
@@ -39,6 +85,7 @@
       "icon": "peopleOutline",
       "color": "#34C8B9",
       "status": "LIVE",
+      "enabled": false,
       "tasks": [
         { "id": "profile-1", "title": "Complete Profile", "description": "Fill in your profile information including name, email, and profile picture to help us know you better", "requirementCount": 3, "points": 100, "claimLimit": 1 }
       ]
@@ -50,22 +97,9 @@
       "icon": "calendarOutline",
       "color": "#4ECDC4",
       "status": "LIVE",
+      "enabled": false,
       "tasks": [
         { "id": "early-1", "title": "Early Registration Bonus", "description": "Register and join DataDance before June 2025 to receive early adopter rewards", "points": 100, "claimLimit": 1 }
-      ]
-    },
-    {
-      "id": "referral-rewards",
-      "title": "Referral Rewards",
-      "description": "Earn rewards from your referral network activities",
-      "icon": "peopleOutline",
-      "color": "#FF6B6B",
-      "status": "LIVE",
-      "tasks": [
-        { "id": "referral-1", "title": "Direct Invite Reward", "description": "Reward for directly inviting a user", "points": 50, "claimLimit": null },
-        { "id": "referral-2", "title": "Level 2 Referral Bonus", "description": "Bonus for referrals made by your direct invitees", "points": 5, "claimLimit": null },
-        { "id": "referral-3", "title": "Level 3 Referral Bonus", "description": "Bonus for referrals made at level 3", "points": 3, "claimLimit": null },
-        { "id": "referral-4", "title": "Level 4 Referral Bonus", "description": "Bonus for referrals made at level 4", "points": 1, "claimLimit": null }
       ]
     },
     {
@@ -75,6 +109,7 @@
       "icon": "diamondOutline",
       "color": "#7C5CFC",
       "status": "LIVE",
+      "enabled": false,
       "tasks": [
         { "id": "assets-1", "title": "Novice Collector", "description": "Hold 3 NFTs in your collection", "requirementCount": 3, "points": 50, "claimLimit": 1 },
         { "id": "assets-2", "title": "Rising Collector", "description": "Hold 10 NFTs in your collection", "requirementCount": 10, "points": 100, "claimLimit": 1, "prerequisiteTaskId": "assets-1" },
@@ -90,6 +125,7 @@
       "icon": "starOutline",
       "color": "#FFB86C",
       "status": "LIVE",
+      "enabled": false,
       "tasks": [
         { "id": "badge-1", "title": "Brand Explorer", "description": "Collect badges from 3 different brands", "requirementCount": 3, "points": 50, "claimLimit": 1 },
         { "id": "badge-2", "title": "Brand Enthusiast", "description": "Collect badges from 5 different brands", "requirementCount": 5, "points": 50, "claimLimit": 1, "prerequisiteTaskId": "badge-1" },
@@ -103,7 +139,8 @@
       "description": "Earn rewards based on your DDC holdings",
       "icon": "cardOutline",
       "color": "#45B7AF",
-      "status": "LOCKED",
+      "status": "LIVE",
+      "enabled": false,
       "tasks": [
         { "id": "ddc-1", "title": "DDC Starter", "description": "Hold 10 DDC in your wallet", "requirementCount": 10, "points": 50, "claimLimit": 1 },
         { "id": "ddc-2", "title": "DDC Collector", "description": "Hold 50 DDC in your wallet", "requirementCount": 50, "points": 100, "claimLimit": 1, "prerequisiteTaskId": "ddc-1" },
@@ -121,7 +158,8 @@
       "description": "Data contribution & governance rewards",
       "icon": "diamondOutline",
       "color": "#7C5CFC",
-      "status": "LOCKED"
+      "status": "LIVE",
+      "enabled": false
     },
     {
       "id": "trading-incentives",
@@ -129,7 +167,8 @@
       "description": "Fee rebates & trading rewards",
       "icon": "trophyOutline",
       "color": "#FF6B6B",
-      "status": "LOCKED"
+      "status": "LIVE",
+      "enabled": false
     },
     {
       "id": "loyalty-program",
@@ -137,7 +176,8 @@
       "description": "Holding rewards & activity bonuses",
       "icon": "starOutline",
       "color": "#FFB86C",
-      "status": "LOCKED"
+      "status": "LIVE",
+      "enabled": false
     },
     {
       "id": "business-partnership",
@@ -145,7 +185,8 @@
       "description": "Brand collaboration rewards",
       "icon": "businessOutline",
       "color": "#A8E6CF",
-      "status": "LOCKED"
+      "status": "LIVE",
+      "enabled": false
     },
     {
       "id": "innovation-rewards",
@@ -153,7 +194,8 @@
       "description": "Beta testing & feedback rewards",
       "icon": "bulbOutline",
       "color": "#FF8B94",
-      "status": "LOCKED"
+      "status": "LIVE",
+      "enabled": false
     },
     {
       "id": "education-rewards",
@@ -161,7 +203,8 @@
       "description": "Learn & earn program",
       "icon": "schoolOutline",
       "color": "#3498DB",
-      "status": "LOCKED"
+      "status": "LIVE",
+      "enabled": false
     },
     {
       "id": "seasonal-events",
@@ -169,7 +212,8 @@
       "description": "Limited-time special rewards",
       "icon": "calendarOutline",
       "color": "#E056FD",
-      "status": "LOCKED"
+      "status": "LIVE",
+      "enabled": false
     },
     {
       "id": "ecosystem-building",
@@ -177,7 +221,8 @@
       "description": "Cross-chain collaboration rewards",
       "icon": "earthOutline",
       "color": "#95A5A6",
-      "status": "LOCKED"
+      "status": "LIVE",
+      "enabled": false
     }
   ]
 }

@@ -1,0 +1,20 @@
+{
+  "dataCollection": {
+    "amazon": {
+      "pointsPer10Items": 100,
+      "dailyLimit": 1000,
+      "monthlyLimit": 10000,
+      "rewardRule": "Earn 100 points for every 10 valid data items submitted",
+      "validationRules": [
+        "Duplicate data will not be counted",
+        "Invalid data will not be counted"
+      ],
+      "errors": {
+        "dailyLimitExceeded": "Daily submission limit reached (1,000 items), please try again tomorrow",
+        "monthlyLimitExceeded": "Monthly submission limit reached (10,000 items), please try again next month",
+        "duplicateData": "Duplicate data detected, no points awarded",
+        "invalidData": "Invalid data format, please check and resubmit"
+      }
+    }
+  }
+}

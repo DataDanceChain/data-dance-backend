@@ -1,6 +1,11 @@
 const crawlerService = require('../services/crawlerService');
 const prisma = require('../utils/prisma');
 const { createLogger } = require('../utils/logger');
+const { 
+  checkAmazonDataLimits, 
+  calculateAmazonDataPoints,
+  getAmazonDataRules
+} = require('../services/businessRulesService');
 const logger = createLogger('crawlerController');
 
 /**
@@ -186,20 +191,52 @@ async function uploadData(req, res) {
       });
     }
 
+    // Check for Amazon data and apply business rules
+    const amazonItems = validItems.filter(item => item.source === 'amazon');
+    let amazonLimits = null;
+    
+    if (amazonItems.length > 0) {
+      // Check Amazon specific limits
+      const limitCheck = await checkAmazonDataLimits(userId, amazonItems.length);
+      
+      if (!limitCheck.allowed) {
+        return res.status(429).json({
+          status: 'error',
+          message: limitCheck.error,
+          data: {
+            remainingDaily: limitCheck.remainingDaily,
+            remainingMonthly: limitCheck.remainingMonthly
+          }
+        });
+      }
+      
+      amazonLimits = {
+        remainingDaily: limitCheck.remainingDaily,
+        remainingMonthly: limitCheck.remainingMonthly
+      };
+    }
+
     // Upload all data at once - the service will handle source grouping internally
     const result = await crawlerService.uploadCrawlerData(validItems, userId);
 
     // Enhanced response with detailed information
+    const responseData = {
+      uploadedCount: result.uploadedCount,
+      pointsEarned: result.pointsEarned,
+      duplicatesCount: result.duplicatesCount || 0,
+      duplicateDetails: result.duplicateDetails || [],
+      qualityReports: result.qualityReports || [],
+      message: result.message || `Data uploaded successfully`
+    };
+
+    // Add Amazon limits info if Amazon data was uploaded
+    if (amazonLimits) {
+      responseData.amazonLimits = amazonLimits;
+    }
+
     res.json({
       status: 'success',
-      data: {
-        uploadedCount: result.uploadedCount,
-        pointsEarned: result.pointsEarned,
-        duplicatesCount: result.duplicatesCount || 0,
-        duplicateDetails: result.duplicateDetails || [],
-        qualityReports: result.qualityReports || [],
-        message: result.message || `成功上传 ${result.uploadedCount} 条数据`
-      }
+      data: responseData
     });
 
   } catch (error) {
@@ -426,6 +463,60 @@ async function deleteCrawlerTask(req, res) {
   }
 }
 
+/**
+ * GET /api/data-collection/amazon/status
+ * Get Amazon data collection rules and user status
+ */
+async function getAmazonDataStatus(req, res) {
+  try {
+    const userId = req.user.id;
+    
+    // Get rules information
+    const rules = getAmazonDataRules();
+    
+    // Get user today and monthly submission stats
+    const today = new Date();
+    const startOfDay = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+    const startOfMonth = new Date(today.getFullYear(), today.getMonth(), 1);
+    
+    const dailyCount = await prisma.crawlerData.count({
+      where: {
+        userId,
+        source: 'amazon',
+        createdAt: { gte: startOfDay }
+      }
+    });
+    
+    const monthlyCount = await prisma.crawlerData.count({
+      where: {
+        userId,
+        source: 'amazon',
+        createdAt: { gte: startOfMonth }
+      }
+    });
+    
+    return res.json({
+      status: 'success',
+      data: {
+        rules,
+        userStatus: {
+          dailySubmitted: dailyCount,
+          monthlySubmitted: monthlyCount,
+          remainingDaily: Math.max(0, rules.dailyLimit - dailyCount),
+          remainingMonthly: Math.max(0, rules.monthlyLimit - monthlyCount)
+        }
+      }
+    });
+    
+  } catch (error) {
+    logger.error('Get Amazon data status error:', error);
+    return res.status(500).json({
+      status: 'error',
+      message: 'Server error, please try again later'
+    });
+  }
+}
+
 module.exports = {
   getCrawlerTasks,
   createCrawlerTask,
@@ -434,5 +525,6 @@ module.exports = {
   getCrawlerStats,
   getUploadLimits,
   updateTaskStatus,
-  deleteCrawlerTask
+  deleteCrawlerTask,
+  getAmazonDataStatus
 }; 

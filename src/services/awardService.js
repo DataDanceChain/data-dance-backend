@@ -24,8 +24,10 @@ async function getAwardDefinitions() {
   // Create a map for quick lookup
   const awardMap = new Map(awards.map(award => [award.id, award]));
 
-  // Return awards in the order defined in awards.json
-  return awardConfig.map(config => awardMap.get(config.id));
+  // Return awards in the order defined in awards.json, filtering out disabled awards
+  return awardConfig
+    .filter(config => config.enabled !== false)
+    .map(config => awardMap.get(config.id));
 }
 
 /**
@@ -51,9 +53,10 @@ async function getUserAwards(userId) {
   const awardMap = new Map(awardsRaw.map(award => [award.id, award]));
   const userAwardMap = new Map(userAwards.map(ua => [ua.awardId, ua]));
 
-  // Process awards in the order defined in awards.json
+  // Process awards in the order defined in awards.json, filtering out disabled awards
   const result = [];
   for (const config of awardConfig) {
+    if (config.enabled === false) continue; // Skip disabled awards
     const award = awardMap.get(config.id);
     if (!award) continue; // Skip if award not found in database
 
@@ -73,7 +76,7 @@ async function getUserAwards(userId) {
     }
 
     // find userAward record
-    const ua = userAwardMap.get(award.id) || { status: 'LOCKED', claimed: false };
+    const ua = userAwardMap.get(award.id) || { status: 'DISABLED', claimed: false };
     
     // compute finalStatus per award based on task statuses
     let finalStatus;
@@ -83,9 +86,9 @@ async function getUserAwards(userId) {
       finalStatus = 'COMPLETED';
     } else if (completedCount > 0 || claimedCount > 0) {
       finalStatus = 'IN_PROGRESS';
-    } else if (award.status === 'LIVE' && ua.status === 'LOCKED') {
+    } else if (award.status === 'LIVE' && ua.status === 'DISABLED') {
       finalStatus = 'PARTICIPATE';
-    } else if (award.status === 'LOCKED') {
+    } else if (award.status === 'DISABLED') {
       finalStatus = 'COMING_SOON';
     } else {
       finalStatus = 'PARTICIPATE';
@@ -110,11 +113,11 @@ async function getUserAwards(userId) {
 }
 
 /**
- * Initialize UserAward entries for a new user, default LOCKED, claimed=false
+ * Initialize UserAward entries for a new user, default DISABLED, claimed=false
  */
 async function initializeUserAwards(userId) {
   const awards = await prisma.award.findMany({ select: { id: true } });
-  const data = awards.map(a => ({ userId, awardId: a.id, status: 'LOCKED', claimed: false }));
+  const data = awards.map(a => ({ userId, awardId: a.id, status: 'DISABLED', claimed: false }));
   await prisma.userAward.createMany({ data, skipDuplicates: true });
 }
 

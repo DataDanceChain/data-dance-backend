@@ -20,7 +20,7 @@
 10. [组织交易 API](#组织交易-api)
 11. [Pass API](#pass-api)
 12. [X API](#x-api)
-13. [Crawler API](#crawler-api)
+13. [Crawler API (包含Amazon Collection)](#crawler-api)
 
 ## 测试账号
 为了方便测试，我们提供了一个测试账号，可以使用账号密码登录：
@@ -2584,18 +2584,15 @@ Authorization: Bearer <token>
 
 ## Award System API
 
-### Get User Awards List
+### Get Platform Award Definitions
 
 ```
 GET /api/awards
 ```
 
-**Headers**:
-```
-Authorization: Bearer <token>
-```
+**Headers**: 无需认证
 
-**Description**: Get all award information for the currently authenticated user, including award progress and task list.
+**Description**: Get all platform award definitions (public data). Returns basic information about all available awards without user-specific progress data.
 
 **Response** (200 OK):
 ```json
@@ -2604,39 +2601,171 @@ Authorization: Bearer <token>
   "data": {
     "awards": [
       {
-        "awardId": "award-uuid",
-        "title": "Early Bird Reward",
-        "description": "Thank you for your early participation!",
-        "icon": "starOutline",
-        "color": "#FFB86C",
+        "id": "amazon-data-collection",
+        "title": "Amazon数据采集",
+        "description": "通过分享Amazon订单数据获得奖励",
+        "icon": "businessOutline",
+        "color": "#FF9500",
         "status": "LIVE",
+        "metadata": {
+          "source": "amazon",
+          "type": "data-collection",
+          "category": "data-sharing",
+          "logoUrl": "/assets/websites/amazon.png",
+          "actionUrl": "/user/crawl-tasks",
+          "buttonText": "提交数据"
+        }
+      },
+      {
+        "id": "referral-rewards",
+        "title": "Referral Rewards",
+        "description": "Earn rewards from your referral network activities",
+        "icon": "peopleOutline",
+        "color": "#FF6B6B",
+        "status": "LIVE",
+        "metadata": {}
+      }
+    ]
+  }
+}
+```
+
+**字段说明**:
+- `id`: 奖励唯一标识符
+- `title`: 奖励标题
+- `description`: 奖励描述
+- `icon`: 图标名称
+- `color`: 主题颜色
+- `status`: 奖励状态 (`LIVE`, `LOCKED`)
+- `metadata`: 附加元数据
+
+---
+
+### Get User Awards Status
+
+```
+GET /api/users/awards
+```
+
+**Headers**:
+```
+Authorization: Bearer <token>
+```
+
+**Description**: Get all award information for the currently authenticated user, including award progress, task details, and referral overview.
+
+**Response** (200 OK):
+```json
+{
+  "status": "success",
+  "data": {
+    "awards": [
+      {
+        "awardId": "amazon-data-collection",
+        "title": "Amazon数据采集",
+        "description": "通过分享Amazon订单数据获得奖励",
+        "icon": "businessOutline",
+        "color": "#FF9500",
         "metadata": {},
-        "totalTasks": 3,
-        "claimedTasks": 1,
-        "progress": 0.33,
-        "finalStatus": "IN_PROGRESS",
+        "totalTasks": 1,
+        "claimedTasks": 0,
+        "progress": 7,
+        "finalStatus": "PARTICIPATE",
         "tasks": [
           {
-            "id": "task-uuid",
-            "title": "Complete Profile",
-            "description": "Fill in your profile information including name, email, and profile picture to help us know you better",
+            "id": "amazon-order-submit",
+            "title": "提交Amazon订单数据",
+            "description": "Share Your Amazon order to earn rewards",
             "points": 100,
-            "claimLimit": 1,
-            "requirementCount": 3,
-            "doneCount": 2,
+            "claimLimit": null,
+            "doneCount": 7,
             "claimed": false,
-            "progress": 0.66,
-            "finalStatus": "IN_PROGRESS"
+            "progress": 7,
+            "finalStatus": "IN_PROGRESS",
+            "metadata": {
+              "type": "data-submission",
+              "source": "amazon"
+            }
           }
         ]
+      },
+      {
+        "awardId": "referral-rewards", 
+        "title": "Referral Rewards",
+        "description": "Earn rewards from your referral network activities",
+        "icon": "peopleOutline",
+        "color": "#FF6B6B",
+        "metadata": {},
+        "totalTasks": 4,
+        "claimedTasks": 0,
+        "progress": 0,
+        "finalStatus": "PARTICIPATE",
+        "tasks": [
+          {
+            "id": "referral-1",
+            "title": "Direct Invite Reward",
+            "description": "Reward for directly inviting a user",
+            "points": 50,
+            "claimLimit": null,
+            "doneCount": 0,
+            "claimed": false,
+            "progress": 0,
+            "finalStatus": "IN_PROGRESS"
+          }
+          // ... more referral tasks
+        ]
       }
+      // ... more awards
     ],
     "referralOverview": {
-      // See Referral System API below
+      "referrals": [],
+      "levelCounts": {"1": 0, "2": 0, "3": 0, "4": 0},
+      "earnedByLevel": [0, 0, 0, 0],
+      "totalReferralPoints": 0,
+      "unclaimReferralAwards": 0,
+      "networkActivity": 0
     }
   }
 }
 ```
+
+**字段说明**:
+- `awardId`: 奖励ID
+- `totalTasks`: 总任务数
+- `claimedTasks`: 已领取任务数
+- `progress`: 完成进度 (详见下方进度计算规则)
+- `finalStatus`: 奖励状态 (详见下方状态说明)
+- `tasks`: 详细任务列表
+- `referralOverview`: 推荐系统概览数据
+
+#### Award System 状态说明
+
+##### finalStatus 状态值
+
+**Award 级别状态**:
+- `CLAIMED`: 所有任务已完成并领取奖励
+- `COMPLETED`: 所有任务已完成，可领取奖励
+- `IN_PROGRESS`: 部分任务已完成，正在进行中
+- `PARTICIPATE`: 可参与状态
+- `COMING_SOON`: 即将开放
+- `LOCKED`: 未解锁
+
+**Task 级别状态**:
+- `CLAIMED`: 已领取奖励
+- `COMPLETED`: 已完成，可领取
+- `IN_PROGRESS`: 进行中
+- `LOCKED`: 未开始
+
+##### Progress 计算规则
+
+1. **固定目标任务**: `progress = currentCount / targetCount` (0-1之间的小数)
+2. **无限制任务**: `progress = totalSubmittedCount` (整数，表示总完成量)
+3. **条件任务**: `progress = condition ? 1 : 0` (满足条件为1，否则为0)
+
+**示例**:
+- NFT收集任务: `progress = 0.6` (已收集6个，目标10个)
+- Amazon数据提交: `progress = 25` (已提交25条数据)
+- 早期注册: `progress = 1` (满足条件) 或 `progress = 0` (不满足)
 
 ---
 
@@ -2682,12 +2811,14 @@ Authorization: Bearer <token>
 
 ---
 
+**HTTP状态码说明**:
 - `200 OK`: 请求成功
 - `201 Created`: 资源创建成功
 - `400 Bad Request`: 请求参数错误
 - `401 Unauthorized`: 未授权（未登录）
 - `403 Forbidden`: 权限不足
 - `404 Not Found`: 资源不存在
+- `429 Too Many Requests`: 请求过于频繁/超出限制
 - `500 Internal Server Error`: 服务器内部错误
 
 ## 组织交易 API
@@ -3365,7 +3496,7 @@ Authorization: Bearer <token>
 }
 ```
 
-## Crawler API
+## Crawler API (包含Amazon Collection)
 
 > 详细的系统架构、去重逻辑、数据质量评分等说明请参考：`docs/crawler-system-overview.md`
 
@@ -3508,9 +3639,107 @@ Authorization: Bearer <token>
 ```
 
 **错误响应**:
-- 400 Bad Request: 数据格式验证失败
-- 401 Unauthorized: 认证失败
-- 429 Too Many Requests: 超出上传限制
+- 400 Bad Request: Data format validation failed
+- 401 Unauthorized: Authentication failed
+- 429 Too Many Requests: Upload limit exceeded
+
+#### Amazon Collection Award Integration
+
+上传爬虫数据接口现已集成Amazon数据采集奖励系统的业务规则。当提交`source: "amazon"`的数据时，系统会自动：
+
+- 应用每日/每月提交限制（1,000/10,000条）
+- 执行重复数据检测和去重
+- 按照"每10条有效数据获得100积分"的规则计算奖励
+- 返回剩余配额信息
+
+**Amazon数据格式示例**:
+```json
+[
+  {
+    "source": "amazon",
+    "type": "order",
+    "timestamp": "2025-01-01T12:00:00Z",
+    "payload": {
+      "orderid": "12345",
+      "date": "2025-01-01",
+      "amount": 99.99,
+      "title": "Product Name",
+      "currency": "USD"
+    },
+    "metadata": {
+      "sourceUrl": "https://amazon.com/orders",
+      "category": "Electronics"
+    }
+  }
+]
+```
+
+**增强的响应** (当source为amazon时):
+```json
+{
+  "status": "success",
+  "data": {
+    "uploadedCount": 2,
+    "pointsEarned": 0,
+    "duplicatesCount": 0,
+    "message": "Data uploaded successfully",
+    "amazonLimits": {
+      "remainingDaily": 998,
+      "remainingMonthly": 9998
+    }
+  }
+}
+```
+
+**Amazon限制错误响应**:
+```json
+{
+  "status": "error",
+  "message": "Daily submission limit reached (1,000 items), please try again tomorrow",
+  "data": {
+    "remainingDaily": 0,
+    "remainingMonthly": 8000
+  }
+}
+```
+
+#### Amazon Collection Status
+
+```
+GET /api/data-collection/amazon/status
+```
+
+**请求头**:
+```
+Authorization: Bearer <token>
+```
+
+**说明**: 获取用户Amazon数据采集规则和当前状态
+
+**响应** (200 OK):
+```json
+{
+  "status": "success",
+  "data": {
+    "rules": {
+      "pointsPer10Items": 100,
+      "dailyLimit": 1000,
+      "monthlyLimit": 10000,
+      "rewardRule": "Earn 100 points for every 10 valid data items submitted",
+      "validationRules": [
+        "Duplicate data will not be counted",
+        "Invalid data will not be counted"
+      ]
+    },
+    "userStatus": {
+      "dailySubmitted": 2,
+      "monthlySubmitted": 2,
+      "remainingDaily": 998,
+      "remainingMonthly": 9998
+    }
+  }
+}
+```
 
 ### 数据格式
 
@@ -3532,30 +3761,3 @@ interface DataItem {
 #### 数据源要求
 - **Amazon**: payload必须包含 `orderid` 字段
 - **Luma**: payload建议包含 `eventId`、`taskId` 或 `id` 字段
-
-### 扩展接口
-
-#### 获取爬虫统计
-```
-GET /api/crawler/stats
-```
-
-#### 获取上传限制
-```
-GET /api/crawler/limits
-```
-
-#### 创建爬虫任务
-```
-POST /api/crawler-tasks
-```
-
-#### 更新任务状态
-```
-PUT /api/crawler-tasks/:taskId/status
-```
-
-#### 删除爬虫任务
-```
-DELETE /api/crawler-tasks/:taskId
-```

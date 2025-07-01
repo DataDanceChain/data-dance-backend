@@ -7,7 +7,8 @@ const {
   getCrawlerStats,
   getUploadLimits,
   updateTaskStatus,
-  deleteCrawlerTask
+  deleteCrawlerTask,
+  getAmazonDataStatus
 } = require('../controllers/crawlerController');
 const { protect } = require('../middlewares/authMiddleware');
 
@@ -30,5 +31,8 @@ router.delete('/crawler-tasks/:taskId', deleteCrawlerTask);
 // Statistics and limits endpoints
 router.get('/crawler/stats', getCrawlerStats);
 router.get('/crawler/limits', getUploadLimits);
+
+// Amazon collection specific endpoints
+router.get('/data-collection/amazon/status', getAmazonDataStatus);
 
 module.exports = router; 

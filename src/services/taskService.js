@@ -98,6 +98,39 @@ const awardStrategies = {
         await recordTaskProgress(userId, t.id, 1);
       }
     }
+  },
+  'amazon-data-collection': {
+    unlock: async (userId) => {
+      // Amazon tasks are always unlocked for users
+      await recordTaskProgress(userId, 'amazon-order-submit', 1);
+    },
+    prepare: async (userId) => {
+      // Get user's Amazon data submission count
+      const today = new Date();
+      const startOfDay = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+      
+      const dailyCount = await prisma.crawlerData.count({
+        where: {
+          userId,
+          source: 'amazon',
+          createdAt: { gte: startOfDay }
+        }
+      });
+      
+      const totalCount = await prisma.crawlerData.count({
+        where: {
+          userId,
+          source: 'amazon'
+        }
+      });
+      
+      return { dailyCount, totalCount };
+    },
+    computeProgress: async (task, userId, { dailyCount, totalCount }) => {
+      // Progress represents total number of data items submitted (unlimited task)
+      // Return total count as integer representing completion quantity
+      return totalCount;
+    }
   }
 };
 
@@ -142,6 +175,9 @@ async function getTasksByAward(userId, awardId) {
       finalStatus = 'CLAIMED';
     } else if (!prereqDone) {
       finalStatus = 'LOCKED';
+    } else if (awardId === 'amazon-data-collection' && progress > 0) {
+      // Amazon data collection: unlimited task, always IN_PROGRESS when has submissions
+      finalStatus = 'IN_PROGRESS';
     } else if ((awardId === 'referral-rewards' || awardId === 'social-engagement') && progress >= 0 && progress < 1) {
       // referral and social tasks: always show IN_PROGRESS even at 0
       finalStatus = 'IN_PROGRESS';
@@ -172,13 +208,22 @@ async function getTasksByAward(userId, awardId) {
         case 'ddc-holdings':
           doneCount = Math.min(context.ddcBalance, task.requirementCount);
           break;
+        case 'amazon-data-collection':
+          // For unlimited tasks, doneCount equals progress (total submissions)
+          doneCount = progress;
+          break;
         default:
           doneCount = Math.min(Math.floor(progress * task.requirementCount), task.requirementCount);
       }
     } else {
-      // fallback: either fully claimed or zero
-      const total = task.claimLimit ?? 1;
-      doneCount = claimed ? total : 0;
+      // For tasks without requirementCount (like Amazon data collection)
+      if (awardId === 'amazon-data-collection') {
+        doneCount = progress; // progress is already the total count for unlimited tasks
+      } else {
+        // fallback: either fully claimed or zero
+        const total = task.claimLimit ?? 1;
+        doneCount = claimed ? total : 0;
+      }
     }
     return {
       id: task.id,
