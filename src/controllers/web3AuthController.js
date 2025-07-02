@@ -3,7 +3,7 @@ const { generateToken } = require('../utils/jwtUtils');
 const { createLogger } = require('../utils/logger');
 const userService = require('../services/userService');
 const referralService = require('../services/referralService');
-const { generateReferralCode } = require('../utils/referralUtils');
+const { generateReferralCode, validateReferralCode } = require('../utils/referralUtils');
 
 const logger = createLogger('web3AuthController');
 
@@ -62,6 +62,81 @@ exports.web3authLogin = async (req, res) => {
           message: 'Organization accounts cannot use Web3Auth'
             });
           }
+          
+      // 处理现有用户的邀请码逻辑
+      let referrerId = null;
+      let invitationStatus = null;
+      
+      if (referralCode) {
+        // 检查用户是否已经被邀请过
+        const existingReferral = await prisma.referral.findUnique({
+          where: { inviteeId: user.id },
+          include: { inviter: { select: { id: true, name: true } } }
+        });
+
+        if (existingReferral) {
+          // 用户已经被邀请过，不能再使用邀请码
+          return res.status(400).json({
+            status: 'fail',
+            code: 'ALREADY_REFERRED',
+            message: 'User has already been referred',
+            data: {
+              inviterId: existingReferral.inviterId,
+              inviterName: existingReferral.inviter?.name,
+              code: existingReferral.code,
+              createdAt: existingReferral.createdAt
+            }
+          });
+        }
+
+        // 验证邀请码
+        try {
+          const referralData = await validateReferralCode(referralCode, user.id);
+          
+          if (!referralData.valid) {
+            const statusCode = referralData.errorCode === 'INVALID_CODE' ? 404 : 400;
+            return res.status(statusCode).json({
+              status: 'fail',
+              code: referralData.errorCode || 'INVALID_REFERRAL_CODE',
+              message: referralData.error || 'Invalid or expired referral code',
+              ...(referralData.data && { data: referralData.data })
+            });
+          }
+          
+          referrerId = referralData.referrerId;
+          
+          // 创建邀请关系
+          await prisma.$transaction(async (tx) => {
+            await tx.referral.create({
+              data: {
+                inviterId: referrerId,
+                inviteeId: user.id,
+                code: referralCode
+              }
+            });
+            
+            // 处理邀请奖励
+            await referralService.processReferral(user.id, referrerId, referralCode);
+          });
+          
+          invitationStatus = {
+            success: true,
+            code: 'REFERRAL_SUCCESSFUL',
+            message: 'Successfully used referral code'
+          };
+          
+        } catch (error) {
+          logger.error('Referral code validation error for existing user', { 
+            userId: user.id,
+            error: error.message 
+          });
+          return res.status(500).json({
+            status: 'error',
+            code: 'REFERRAL_VALIDATION_ERROR',
+            message: 'Failed to validate referral code'
+          });
+        }
+      }
 
       // 更新用户信息，包括新的社交账号信息
       const updateData = {
@@ -110,7 +185,11 @@ exports.web3authLogin = async (req, res) => {
 
       return res.status(200).json({
         status: 'success',
-        data: { token, user: safeUser }
+        data: { 
+          token, 
+          user: safeUser,
+          ...(invitationStatus && { invitationStatus })
+        }
       });
     }
 
@@ -127,12 +206,18 @@ exports.web3authLogin = async (req, res) => {
         let referrerId = null;
         if (referralCode) {
           try {
-            const referralData = await validateReferralCode(referralCode);
+            // Pass the user's email as a temporary identifier for validation
+            // Since this is a new user registration, we'll use the email as a unique identifier
+            const tempUserId = userInfo.email;
+            const referralData = await validateReferralCode(referralCode, tempUserId);
+            
             if (!referralData.valid) {
-              return res.status(400).json({
+              const statusCode = referralData.errorCode === 'INVALID_CODE' ? 404 : 400;
+              return res.status(statusCode).json({
                 status: 'fail',
-                code: 'INVALID_REFERRAL_CODE',
-            message: 'Invalid or expired referral code'
+                code: referralData.errorCode || 'INVALID_REFERRAL_CODE',
+                message: referralData.error || 'Invalid or expired referral code',
+                ...(referralData.data && { data: referralData.data })
               });
             }
             referrerId = referralData.referrerId;
@@ -147,28 +232,44 @@ exports.web3authLogin = async (req, res) => {
         }
 
     // 创建新用户
-        const newUser = await prisma.user.create({
-          data: {
-            email: userInfo.email,
-            name: userInfo.name || userInfo.email.split('@')[0],
-            avatar: userInfo.profileImage,
-            walletAddress,
-            authType: 'web3auth',
-            userType: 'regular',
-        referralCode: generateReferralCode(),
-            ...(xid && { xid }),
-        ...(xUsername && { xUsername }),
-            ...(xAccessToken && { xAccessToken }),
-            ...(xRefreshToken && { xRefreshToken }),
-        profile: { create: { language: 'en' } },
-            ...(referrerId && {
-          referredBy: { connect: { id: referrerId } }
-            })
+        const result = await prisma.$transaction(async (tx) => {
+          // 创建用户
+          const newUser = await tx.user.create({
+            data: {
+              email: userInfo.email,
+              name: userInfo.name || userInfo.email.split('@')[0],
+              avatar: userInfo.profileImage,
+              walletAddress,
+              authType: 'web3auth',
+              userType: 'regular',
+          referralCode: generateReferralCode(),
+              ...(xid && { xid }),
+          ...(xUsername && { xUsername }),
+              ...(xAccessToken && { xAccessToken }),
+              ...(xRefreshToken && { xRefreshToken }),
+          profile: { create: { language: 'en' } }
+            }
+          });
+
+          // 如果有邀请人，创建邀请关系
+          if (referrerId) {
+            await tx.referral.create({
+              data: {
+                inviterId: referrerId,
+                inviteeId: newUser.id,
+                code: referralCode
+              }
+            });
+            
+            // 处理邀请奖励
+            await referralService.processReferral(newUser.id, referrerId, referralCode);
           }
+
+          return newUser;
         });
 
-        const token = generateToken(newUser.id);
-    const { password, privateKey, ...safeUser } = newUser;
+        const token = generateToken(result.id);
+    const { password, privateKey, ...safeUser } = result;
 
         return res.status(201).json({
           status: 'success',
