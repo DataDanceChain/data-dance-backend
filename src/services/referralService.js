@@ -81,16 +81,15 @@ async function getReferralOverview(userId) {
     const lvl = parseInt(t.id.split('-')[1], 10);
     levelPointsMap[lvl] = t.points;
   });
-  // annotate each referral node with theirPoints and yourReward
-  const commissionRates = { 1: 5, 2: 3, 3: 1 };
+  // annotate each referral node with theirPoints
+  // 注意：yourReward现在由新的通用分润系统在任务完成时动态计算，基于百分比而非固定分值
   function annotate(nodes) {
     nodes.forEach(n => {
       const cnt = n.referrals.length;
-      const lvl = n.level;
-      // theirPoints: child count * 50
+      // theirPoints: child count * 50 (保留原有计算逻辑用于展示)
       n.theirPoints = cnt * 50;
-      // yourReward: child count * commission rate for this level (only levels 1-3)
-      n.yourReward = cnt * (commissionRates[lvl] || 0);
+      // yourReward已移除：现在使用基于百分比的动态分润系统
+      // 实际分润金额会根据下级完成的具体任务和其积分值来计算
       annotate(n.referrals);
     });
   }

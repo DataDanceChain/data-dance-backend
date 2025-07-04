@@ -1,6 +1,7 @@
 const prisma = require('../utils/prisma');
 const assetService = require('./assetService');
 const xService = require('./xService'); // New: use xService
+const { distributeUplineRewards } = require('./distributionService'); // 新增: 导入分润服务
 const { createLogger } = require('../utils/logger');
 const logger = createLogger('taskService');
 
@@ -349,6 +350,27 @@ async function claimTask(userId, taskId) {
         source: 'TASK_CLAIM',
         sourceId: taskId
       }});
+
+      // 新增: 处理上级分润奖励（所有任务都享受分润）
+      try {
+        const distributionResult = await distributeUplineRewards(userId, task.points, tx, taskId);
+        logger.info('上级分润处理完成', {
+          userId,
+          taskId,
+          baseReward: task.points,
+          distributionResult
+        });
+      } catch (distributionError) {
+        // 分润失败不影响主任务完成，但需要记录错误
+        logger.error('上级分润处理失败', {
+          userId,
+          taskId,
+          baseReward: task.points,
+          error: distributionError.message
+        });
+        // 这里选择继续执行而不是抛出错误，确保用户的主要奖励不受影响
+        // 生产环境中可能需要更严格的错误处理策略
+      }
 
       // Return enriched response with claimedAt and points
       return { success: true, data: { taskId, claimedAt: updatedUserTask.updatedAt, points: task.points } };

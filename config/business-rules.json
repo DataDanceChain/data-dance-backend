@@ -16,5 +16,11 @@
         "invalidData": "Invalid data format, please check and resubmit"
       }
     }
+  },
+  "rewardDistribution": {
+    "uplineRewardPercentages": [0.10, 0.05, 0.02],
+    "maxLevels": 3,
+    "roundingMode": "round",
+    "description": "Upline rewards for task completion: Level 1 (direct inviter): 10%, Level 2: 5%, Level 3: 2%"
   }
 }
