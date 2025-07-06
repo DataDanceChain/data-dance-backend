@@ -1,6 +1,7 @@
 const prisma = require('../utils/prisma');
 const { createLogger } = require('../utils/logger');
 const crypto = require('crypto');
+const { calculateAmazonDataPoints } = require('./businessRulesService');
 const logger = createLogger('crawlerService');
 
 // Data validation schema for different data types
@@ -30,8 +31,7 @@ const TASK_TEMPLATES = {
 // Daily and monthly limits
 const LIMITS = {
   DAILY: 1000,
-  MONTHLY: 10000,
-  POINTS_PER_10_RECORDS: 100
+  MONTHLY: 10000
 };
 
 /**
@@ -293,8 +293,8 @@ async function checkUploadLimits(userId) {
   });
 
   // Calculate points for daily and monthly counts
-  const dailyPoints = Math.floor(dailyCount / 10) * LIMITS.POINTS_PER_10_RECORDS;
-  const monthlyPoints = Math.floor(monthlyCount / 10) * LIMITS.POINTS_PER_10_RECORDS;
+  const dailyPoints = calculateAmazonDataPoints(dailyCount);
+  const monthlyPoints = calculateAmazonDataPoints(monthlyCount);
 
   return {
     daily: {
@@ -392,8 +392,8 @@ async function uploadCrawlerData(data, userId) {
       userId
     }));
 
-    // 计算积分
-    const pointsEarned = Math.floor(validItems.length / 10) * 100;
+    // 计算积分 - 使用业务规则服务
+    const pointsEarned = calculateAmazonDataPoints(validItems.length);
 
     // 执行数据库事务
     const result = await prisma.$transaction(async (tx) => {

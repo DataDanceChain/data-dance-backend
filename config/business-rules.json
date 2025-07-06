@@ -1,10 +1,10 @@
 {
   "dataCollection": {
     "amazon": {
-      "pointsPer10Items": 100,
+      "pointsPerItem": 10,
       "dailyLimit": 1000,
       "monthlyLimit": 10000,
-      "rewardRule": "Earn 100 points for every 10 valid data items submitted",
+      "rewardRule": "Earn 10 points for each valid data item submitted",
       "validationRules": [
         "Duplicate data will not be counted",
         "Invalid data will not be counted"

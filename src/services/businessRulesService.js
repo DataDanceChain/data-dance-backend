@@ -70,8 +70,7 @@ async function checkAmazonDataLimits(userId, itemCount) {
  */
 function calculateAmazonDataPoints(validItemCount) {
   const amazonRules = businessRules.dataCollection.amazon;
-  const groups = Math.floor(validItemCount / 10);
-  return groups * amazonRules.pointsPer10Items;
+  return validItemCount * amazonRules.pointsPerItem;
 }
 
 /**
@@ -81,7 +80,7 @@ function calculateAmazonDataPoints(validItemCount) {
 function getAmazonDataRules() {
   const amazonRules = businessRules.dataCollection.amazon;
   return {
-    pointsPer10Items: amazonRules.pointsPer10Items,
+    pointsPerItem: amazonRules.pointsPerItem,
     dailyLimit: amazonRules.dailyLimit,
     monthlyLimit: amazonRules.monthlyLimit,
     rewardRule: amazonRules.rewardRule,
