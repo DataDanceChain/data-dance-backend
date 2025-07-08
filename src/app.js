@@ -80,7 +80,7 @@ if (process.env.NODE_ENV !== 'production') {
   // 中间件
   app.use(cors(corsOptions));
 }
-app.use(express.json());
+app.use(express.json({ limit: '3mb' }));
 app.use(morgan('dev'));
 
 // Add request logging
