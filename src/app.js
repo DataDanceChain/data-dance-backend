@@ -60,7 +60,7 @@ const storage = multer.diskStorage({
 const upload = multer({
   storage: storage,
   limits: {
-    fileSize: 5 * 1024 * 1024 // 限制5MB
+    fileSize: 20 * 1024 * 1024 // 限制20MB
   }
 });
 
@@ -80,7 +80,7 @@ if (process.env.NODE_ENV !== 'production') {
   // 中间件
   app.use(cors(corsOptions));
 }
-app.use(express.json({ limit: '3mb' }));
+app.use(express.json({ limit: '20mb' }));
 app.use(morgan('dev'));
 
 // Add request logging

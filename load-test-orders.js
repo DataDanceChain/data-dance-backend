@@ -28,14 +28,14 @@ const CONFIG = {
   // Test scenarios configuration
   SINGLE_LARGE_REQUEST: {
     enabled: true,
-    ordersPerRequest: 100,  // Reasonable number of orders
+    ordersPerRequest: 30900,  // Approx. 19.9MB payload
     requestCount: 1
   },
   
   HIGH_CONCURRENCY: {
-    enabled: true,
-    concurrentRequests: 10,  // Moderate concurrency 
-    ordersPerRequest: 20,    // Smaller batches per request
+    enabled: false, // Disabling for this specific test
+    concurrentRequests: 30,
+    ordersPerRequest: 75,
   },
   
   // Debug mode for troubleshooting
@@ -46,7 +46,7 @@ const CONFIG = {
   },
   
   // Request timeout (in milliseconds)
-  REQUEST_TIMEOUT: 30000,
+  REQUEST_TIMEOUT: 60000, // Increased timeout for large payload
   
   // Delay between test scenarios (in milliseconds)
   SCENARIO_DELAY: 2000
