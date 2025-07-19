@@ -1,7 +1,7 @@
 const prisma = require('../utils/prisma');
 const assetService = require('./assetService');
 const xService = require('./xService'); // New: use xService
-const { distributeUplineRewards } = require('./distributionService'); // 新增: 导入分润服务
+const { distributeUplineRewards } = require('./distributionService'); // Import distribution service
 const { createLogger } = require('../utils/logger');
 const logger = createLogger('taskService');
 

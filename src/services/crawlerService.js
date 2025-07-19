@@ -2,6 +2,8 @@ const prisma = require('../utils/prisma');
 const { createLogger } = require('../utils/logger');
 const crypto = require('crypto');
 const { calculateAmazonDataPoints } = require('./businessRulesService');
+const { CRAWLER_MESSAGES } = require('../constants/messages');
+const { distributeUplineRewards } = require('./distributionService');
 const logger = createLogger('crawlerService');
 
 // Data validation schema for different data types
@@ -200,65 +202,65 @@ function validateDataItem(item) {
   const errors = [];
   const warnings = [];
 
-  // 基础验证
+  // Basic validation
   if (!item.source || !['amazon', 'luma'].includes(item.source)) {
-    errors.push('数据源必须是 amazon 或 luma');
+    errors.push(CRAWLER_MESSAGES.INVALID_SOURCE);
   }
 
   if (!item.type) {
-    errors.push('数据类型不能为空');
+    errors.push(CRAWLER_MESSAGES.INVALID_TYPE);
   }
 
   if (!item.payload || typeof item.payload !== 'object') {
-    errors.push('负载数据必须是有效的对象');
+    errors.push(CRAWLER_MESSAGES.INVALID_PAYLOAD);
   }
 
-  // Amazon特定验证
+  // Amazon-specific validation
   if (item.source === 'amazon') {
-    // 现在要求orderid作为必需字段
+    // orderid is now a required field
     if (!item.payload.orderid && !item.payload.orderId) {
-      errors.push('Amazon数据必须包含orderid字段');
+      errors.push(CRAWLER_MESSAGES.AMAZON_ORDERID_REQUIRED);
     }
     
-    // 验证orderid格式（Amazon订单号通常格式为：123-1234567-1234567）
+    // Validate orderid format (Amazon order ID format: 123-1234567-1234567)
     const orderid = item.payload.orderid || item.payload.orderId;
     if (orderid && !/^\d{3}-\d{7}-\d{7}$/.test(orderid)) {
-      warnings.push('Amazon订单号格式建议为：123-1234567-1234567');
+      warnings.push(CRAWLER_MESSAGES.AMAZON_ORDER_FORMAT_WARNING);
     }
 
     if (item.type === 'order' || item.type === 'product') {
       if (!item.payload.title) {
-        warnings.push('建议包含商品标题');
+        warnings.push(CRAWLER_MESSAGES.SUGGEST_TITLE);
       }
       if (!item.payload.price) {
-        warnings.push('建议包含价格信息');
+        warnings.push(CRAWLER_MESSAGES.SUGGEST_PRICE);
       }
       if (item.payload.price && !item.payload.currency) {
-        warnings.push('建议包含货币代码（如USD、EUR）');
+        warnings.push(CRAWLER_MESSAGES.SUGGEST_CURRENCY);
       }
     }
   }
 
-  // Luma特定验证
+  // Luma-specific validation
   if (item.source === 'luma') {
     if (!item.payload.eventId && !item.payload.taskId && !item.payload.id) {
-      warnings.push('建议包含Luma事件ID或任务ID以提高数据质量');
+      warnings.push(CRAWLER_MESSAGES.SUGGEST_LUMA_ID);
     }
 
     if (!item.payload.title) {
-      warnings.push('建议包含标题信息');
+      warnings.push(CRAWLER_MESSAGES.SUGGEST_TITLE);
     }
   }
 
-  // 元数据验证
+  // Metadata validation
   if (!item.metadata || !item.metadata.sourceUrl) {
-    warnings.push('建议包含来源URL以便追溯');
+    warnings.push(CRAWLER_MESSAGES.SUGGEST_SOURCE_URL);
   }
 
-  // 计算质量评分
+  // Calculate quality score
   const quality = calculateDataQuality(item);
   if (quality.score < 50) {
-    warnings.push(`数据质量评分较低 (${quality.score}/100)，建议完善数据格式`);
+    warnings.push(CRAWLER_MESSAGES.LOW_QUALITY_SCORE(quality.score));
   }
 
   return { errors, warnings, quality };
@@ -317,14 +319,14 @@ async function checkUploadLimits(userId) {
  */
 async function uploadCrawlerData(data, userId) {
   try {
-    console.log(`[CrawlerService] 开始处理用户 ${userId} 的 ${data.length} 条数据`);
+    console.log(CRAWLER_MESSAGES.UPLOAD_START(userId, data.length));
 
-    // 验证数据格式
+    // Validate data format
     if (!Array.isArray(data) || data.length === 0) {
-      throw new Error('数据必须是非空数组');
+      throw new Error(CRAWLER_MESSAGES.INVALID_DATA_FORMAT);
     }
 
-    // 检查上传限制
+    // Check upload limits
     const today = new Date();
     today.setHours(0, 0, 0, 0);
     const monthStart = new Date(today.getFullYear(), today.getMonth(), 1);
@@ -348,19 +350,19 @@ async function uploadCrawlerData(data, userId) {
     const monthlyLimit = 10000;
 
     if (dailyCount + data.length > dailyLimit) {
-      throw new Error(`超出日上传限制。今日已上传 ${dailyCount}/${dailyLimit} 条，本次尝试上传 ${data.length} 条`);
+      throw new Error(CRAWLER_MESSAGES.DAILY_LIMIT_EXCEEDED(dailyCount, dailyLimit, data.length));
     }
 
     if (monthlyCount + data.length > monthlyLimit) {
-      throw new Error(`超出月上传限制。本月已上传 ${monthlyCount}/${monthlyLimit} 条，本次尝试上传 ${data.length} 条`);
+      throw new Error(CRAWLER_MESSAGES.MONTHLY_LIMIT_EXCEEDED(monthlyCount, monthlyLimit, data.length));
     }
 
-    // 检查重复数据
+    // Check for duplicate data
     const { validItems, duplicates, qualityReports } = await checkDuplicates(data, userId);
 
-    console.log(`[CrawlerService] 去重结果: ${validItems.length} 有效, ${duplicates.length} 重复`);
+    console.log(CRAWLER_MESSAGES.DEDUP_RESULT(validItems.length, duplicates.length));
 
-    // 如果没有有效数据，返回结果但不执行数据库操作
+    // If no valid data, return result without database operations
     if (validItems.length === 0) {
       return {
         uploadedCount: 0,
@@ -368,18 +370,18 @@ async function uploadCrawlerData(data, userId) {
         duplicateDetails: duplicates,
         qualityReports,
         pointsEarned: 0,
-        message: duplicates.length > 0 ? '所有数据都是重复的' : '没有有效数据可上传'
+        message: duplicates.length > 0 ? CRAWLER_MESSAGES.ALL_DUPLICATES : CRAWLER_MESSAGES.NO_VALID_DATA
       };
     }
 
-    // 获取或创建用户的爬虫任务
+    // Get or create user's crawler tasks
     const tasks = await getOrCreateUserTasks(userId);
     const tasksBySource = tasks.reduce((acc, task) => {
       acc[task.source] = task;
       return acc;
     }, {});
 
-    // 准备数据库插入数据
+    // Prepare database insert data
     const insertData = validItems.map(item => ({
       source: item.source,
       type: item.type,
@@ -392,17 +394,17 @@ async function uploadCrawlerData(data, userId) {
       userId
     }));
 
-    // 计算积分 - 使用业务规则服务
+    // Calculate points - using business rules service
     const pointsEarned = calculateAmazonDataPoints(validItems.length);
 
-    // 执行数据库事务
+    // Execute database transaction
     const result = await prisma.$transaction(async (tx) => {
-      // 插入数据
+      // Insert data
       await tx.crawlerData.createMany({
         data: insertData
       });
 
-      // 更新任务记录数
+      // Update task record count
       for (const [source, count] of Object.entries(
         validItems.reduce((acc, item) => {
           acc[item.source] = (acc[item.source] || 0) + 1;
@@ -420,15 +422,15 @@ async function uploadCrawlerData(data, userId) {
         }
       }
 
-      // 计算并发放积分
+      // Calculate and award points
       if (pointsEarned > 0) {
-        // 更新用户总积分
+        // Update user total points
         await tx.user.update({
           where: { id: userId },
           data: { totalPoints: { increment: pointsEarned } }
         });
 
-        // 创建积分记录
+        // Create point record
         await tx.point.create({
           data: {
             userId,
@@ -438,13 +440,31 @@ async function uploadCrawlerData(data, userId) {
           }
         });
 
-        console.log(`[CrawlerService] 为用户 ${userId} 发放 ${pointsEarned} 积分`);
+        console.log(CRAWLER_MESSAGES.POINTS_AWARDED(userId, pointsEarned));
+        
+        // Distribute upline rewards for the crawler points
+        try {
+          const distributionResult = await distributeUplineRewards(userId, pointsEarned, tx, 'crawler_data_upload');
+          logger.info('Upline distribution completed for crawler data', {
+            userId,
+            baseReward: pointsEarned,
+            distributionResult
+          });
+        } catch (distributionError) {
+          // Distribution failure should not affect the main task completion
+          logger.error('Upline distribution failed for crawler data', {
+            userId,
+            baseReward: pointsEarned,
+            error: distributionError.message
+          });
+          // Continue execution without throwing
+        }
       }
 
       return { insertedCount: validItems.length };
     });
 
-    console.log(`[CrawlerService] 成功上传 ${validItems.length} 条数据，获得 ${pointsEarned} 积分`);
+    console.log(CRAWLER_MESSAGES.UPLOAD_SUCCESS(validItems.length, pointsEarned));
 
     return {
       uploadedCount: validItems.length,
@@ -452,11 +472,11 @@ async function uploadCrawlerData(data, userId) {
       duplicateDetails: duplicates,
       qualityReports,
       pointsEarned,
-      message: `成功上传 ${validItems.length} 条数据，获得 ${pointsEarned} 积分`
+      message: CRAWLER_MESSAGES.SUCCESS_MESSAGE(validItems.length, pointsEarned)
     };
 
   } catch (error) {
-    console.error('[CrawlerService] 上传数据失败:', error);
+    console.error(CRAWLER_MESSAGES.UPLOAD_FAILED, error);
     throw error;
   }
 }
@@ -554,7 +574,7 @@ async function getCrawlerStats(userId) {
  * Generate SHA256 hash of normalized payload data
  */
 function generateContentHash(payload) {
-  // 标准化对象：排序键、移除空值、统一格式
+  // Normalize object: sort keys, remove null values, unify format
   const normalized = normalizeObject(payload);
   const content = JSON.stringify(normalized);
   return crypto.createHash('sha256').update(content).digest('hex');
@@ -576,10 +596,10 @@ function normalizeObject(obj) {
   for (const key of sortedKeys) {
     const value = obj[key];
     if (typeof value === 'string') {
-      // 标准化字符串：去除多余空格、统一大小写
+      // Normalize string: remove extra spaces, unify case
       normalized[key] = value.trim().toLowerCase();
     } else if (typeof value === 'number') {
-      // 保持数字精度
+      // Maintain number precision
       normalized[key] = Number(value);
     } else if (typeof value === 'object') {
       normalized[key] = normalizeObject(value);
@@ -596,10 +616,10 @@ function normalizeObject(obj) {
  */
 function extractSourceId(source, payload) {
   if (source === 'amazon') {
-    // Amazon现在只使用orderid作为唯一标识符
+    // Amazon now only uses orderid as unique identifier
     return payload.orderid || payload.orderId || null;
   } else if (source === 'luma') {
-    // Luma标识符优先级：eventId > taskId > id
+    // Luma identifier priority: eventId > taskId > id
     return payload.eventId || 
            payload.taskId || 
            payload.id ||
@@ -616,39 +636,39 @@ async function checkDuplicates(items, userId) {
   const validItems = [];
   const qualityReports = [];
 
-  // 1. 批次内重复检查
+  // 1. Check duplicates within batch
   for (let i = 0; i < items.length; i++) {
     const currentItem = items[i];
     let isDuplicate = false;
     
-    // 验证数据质量
+    // Validate data quality
     const validation = validateDataItem(currentItem);
     qualityReports.push({
       index: i,
       validation
     });
 
-      // 如果有严重错误，跳过此项
+      // If there are serious errors, skip this item
   if (validation.errors.length > 0) {
     duplicates.push({
       index: i,
       reason: 'validation_error',
-      reasonText: '数据验证失败',
+      reasonText: 'Data validation failed',
       errors: validation.errors,
       warnings: validation.warnings
     });
     continue;
   }
 
-  // 验证并修复timestamp
+  // Validate and fix timestamp
   try {
     const timestamp = currentItem.timestamp ? new Date(currentItem.timestamp) : new Date();
     if (isNaN(timestamp.getTime())) {
       duplicates.push({
         index: i,
         reason: 'validation_error',
-        reasonText: '时间戳格式无效',
-        errors: ['时间戳格式无效'],
+        reasonText: 'Invalid timestamp format',
+        errors: ['Invalid timestamp format'],
         warnings: []
       });
       continue;
@@ -658,19 +678,19 @@ async function checkDuplicates(items, userId) {
     duplicates.push({
       index: i,
       reason: 'validation_error',
-      reasonText: '时间戳解析失败',
-      errors: ['时间戳解析失败'],
+      reasonText: 'Timestamp parsing failed',
+      errors: ['Timestamp parsing failed'],
       warnings: []
     });
     continue;
   }
 
-    // 生成内容哈希和提取源ID
+    // Generate content hash and extract source ID
     currentItem.contentHash = generateContentHash(currentItem.payload);
     currentItem.sourceId = extractSourceId(currentItem.source, currentItem.payload);
-    currentItem.originalIndex = i; // 保存原始索引
+    currentItem.originalIndex = i; // Save original index
 
-    // 检查与之前项目的重复
+    // Check for duplicates with previous items
     for (let j = 0; j < validItems.length; j++) {
       const similarity = detectSimilarity(currentItem, validItems[j]);
       
@@ -692,14 +712,14 @@ async function checkDuplicates(items, userId) {
     }
   }
 
-  // 2. 与数据库中现有数据的重复检查
+  // 2. Check duplicates against existing database data
   if (validItems.length > 0) {
     const contentHashes = validItems.map(item => item.contentHash);
     const sourceIds = validItems
       .filter(item => item.sourceId)
       .map(item => ({ source: item.source, sourceId: item.sourceId }));
 
-    // 查询可能的重复项
+    // Query possible duplicates
     const existingByHash = await prisma.crawlerData.findMany({
       where: {
         contentHash: { in: contentHashes }
@@ -709,7 +729,7 @@ async function checkDuplicates(items, userId) {
 
     const existingBySourceId = sourceIds.length > 0 ? await prisma.crawlerData.findMany({
       where: {
-        userId: userId, // 只在当前用户的数据中查找重复的sourceId
+        userId: userId, // Only look for duplicate sourceId in current user's data
         OR: sourceIds.map(({ source, sourceId }) => ({
           source: source,
           sourceId: sourceId
@@ -718,13 +738,13 @@ async function checkDuplicates(items, userId) {
       select: { source: true, sourceId: true, userId: true, createdAt: true }
     }) : [];
 
-    // 标记数据库重复项
+    // Mark database duplicates
     const finalValidItems = [];
     for (let i = validItems.length - 1; i >= 0; i--) {
       const item = validItems[i];
       let isDuplicate = false;
 
-      // 检查内容哈希重复
+      // Check content hash duplicates
       const hashDuplicate = existingByHash.find(existing => 
         existing.contentHash === item.contentHash
       );
@@ -733,14 +753,14 @@ async function checkDuplicates(items, userId) {
         duplicates.push({
           index: item.originalIndex,
           reason: 'content_hash_duplicate',
-          reasonText: '数据内容与现有记录相同',
+          reasonText: 'Data content is identical to existing record',
           existingUserId: hashDuplicate.userId,
           existingDate: hashDuplicate.createdAt
         });
         isDuplicate = true;
       }
 
-      // 检查源ID重复
+      // Check source ID duplicates
       if (!isDuplicate && item.sourceId) {
         const sourceIdDuplicate = existingBySourceId.find(existing =>
           existing.source === item.source && existing.sourceId === item.sourceId
@@ -750,7 +770,7 @@ async function checkDuplicates(items, userId) {
           duplicates.push({
             index: item.originalIndex,
             reason: 'source_id_duplicate',
-            reasonText: `您已经上传过相同的${item.source === 'amazon' ? 'Amazon订单' : 'Luma事件'}`,
+            reasonText: `You have already uploaded the same ${item.source === 'amazon' ? 'Amazon order' : 'Luma event'}`,
             existingUserId: sourceIdDuplicate.userId,
             existingDate: sourceIdDuplicate.createdAt
           });
@@ -777,7 +797,7 @@ async function checkDuplicates(items, userId) {
   };
 }
 
-// 数据质量评分系统
+// Data quality scoring system
 function calculateDataQuality(item) {
   let score = 0;
   let details = {
@@ -787,7 +807,7 @@ function calculateDataQuality(item) {
     formatCompliance: false
   };
 
-  // 官方标识符 (40分)
+  // Official identifiers (40 points)
   if (item.source === 'amazon') {
     if (item.payload.orderid || item.payload.orderId) {
       score += 40;
@@ -800,14 +820,14 @@ function calculateDataQuality(item) {
     }
   }
 
-  // 元数据完整性 (25分)
+  // Metadata completeness (25 points)
   if (item.metadata && typeof item.metadata === 'object') {
     if (item.metadata.sourceUrl) score += 15;
     if (item.metadata.category) score += 10;
     details.hasMetadata = score >= 15;
   }
 
-  // 标准字段 (25分)
+  // Standard fields (25 points)
   if (item.source === 'amazon' && item.type === 'product') {
     if (item.payload.title && item.payload.price) score += 15;
     if (item.payload.currency) score += 10;
@@ -818,34 +838,34 @@ function calculateDataQuality(item) {
     details.hasStandardFields = score >= 15;
   }
 
-  // 格式规范 (10分)
+  // Format standards (10 points)
   try {
     if (item.timestamp && new Date(item.timestamp).toISOString()) {
       score += 10;
       details.formatCompliance = true;
     }
   } catch (e) {
-    // 时间戳格式无效
+    // Invalid timestamp format
   }
 
   return { score, details };
 }
 
-// 智能重复检测算法
+// Intelligent duplicate detection algorithm
 function detectSimilarity(item1, item2) {
-  // 1. 内容哈希匹配（最高优先级）- 防止完全相同的内容
+  // 1. Content hash matching (highest priority) - prevent identical content
   if (item1.contentHash === item2.contentHash) {
     return {
       similarity: 1.0,
       reason: 'content_hash_match',
-      details: '数据内容完全相同'
+      details: 'Data content is completely identical'
     };
   }
 
-  // 注意：移除了官方标识符匹配检测，允许同一批次中有相同的ASIN
-  // 这样不同用户可以上传同一商品的不同体验数据
+  // Note: Removed official identifier match detection, allowing same ASIN in same batch
+  // This allows different users to upload different experience data for the same product
 
-  // 2. 标题和关键字段相似性检测（中优先级）
+  // 2. Title and key field similarity detection (medium priority)
   if (item1.source === item2.source && item1.type === item2.type) {
     const title1 = item1.payload.title?.toLowerCase().trim();
     const title2 = item2.payload.title?.toLowerCase().trim();
@@ -853,7 +873,7 @@ function detectSimilarity(item1, item2) {
     if (title1 && title2) {
       const titleSimilarity = calculateTextSimilarity(title1, title2);
       
-      // Amazon产品：标题相似 + 价格相同
+      // Amazon products: similar title + same price
       if (item1.source === 'amazon' && item1.type === 'product') {
         const price1 = Number(item1.payload.price);
         const price2 = Number(item2.payload.price);
@@ -862,17 +882,17 @@ function detectSimilarity(item1, item2) {
           return {
             similarity: 0.9,
             reason: 'title_price_match',
-            details: `标题相似度${(titleSimilarity * 100).toFixed(1)}%，价格相同: ${price1}`
+            details: `Title similarity ${(titleSimilarity * 100).toFixed(1)}%, same price: ${price1}`
           };
         }
       }
       
-      // 高相似度标题匹配
+      // High similarity title match
       if (titleSimilarity > 0.9) {
         return {
           similarity: titleSimilarity,
           reason: 'title_similarity',
-          details: `标题高度相似: ${(titleSimilarity * 100).toFixed(1)}%`
+          details: `Title highly similar: ${(titleSimilarity * 100).toFixed(1)}%`
         };
       }
     }
@@ -881,11 +901,11 @@ function detectSimilarity(item1, item2) {
   return {
     similarity: 0,
     reason: 'no_match',
-    details: '未检测到重复'
+    details: 'No duplicate detected'
   };
 }
 
-// 文本相似度计算（简化版Levenshtein）
+// Text similarity calculation (simplified Levenshtein)
 function calculateTextSimilarity(text1, text2) {
   if (text1 === text2) return 1.0;
   
@@ -894,7 +914,7 @@ function calculateTextSimilarity(text1, text2) {
   
   if (longer.length === 0) return 1.0;
   
-  // 计算编辑距离
+  // Calculate edit distance
   const editDistance = levenshteinDistance(longer, shorter);
   return (longer.length - editDistance) / longer.length;
 }
@@ -937,5 +957,6 @@ module.exports = {
   checkUploadLimits,
   initializeDefaultTasks,
   LIMITS,
-  TASK_TEMPLATES
+  TASK_TEMPLATES,
+  generateContentHash
 }; 

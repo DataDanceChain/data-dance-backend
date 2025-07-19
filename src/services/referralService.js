@@ -1,6 +1,11 @@
 // referral service: build referral overview up to 3 levels
 const prisma = require('../utils/prisma');
 const { recordTaskProgress } = require('./taskService');
+const { REFERRAL_MESSAGES } = require('../constants/messages');
+const { createLogger } = require('../utils/logger');
+const { distributeUplineRewards } = require('./distributionService');
+
+const logger = createLogger('referralService');
 
 async function fetchReferrals(userId, level, maxLevel) {
   if (level > maxLevel) return [];
@@ -135,18 +140,66 @@ async function claimReferralRewards(userId) {
  * Process a new referral: create Referral row and propagate progress up to 4 levels
  * @param {string} newUserId - the invitee user ID
  * @param {string} inviterId - the direct inviter user ID
+ * @param {string} referralCode - the referral code used
  */
 async function processReferral(newUserId, inviterId, referralCode) {
-  // record direct referral task (50 points) to be claimed later
-  await recordTaskProgress(inviterId, 'referral-1', 1);
-  
-  // record multi-level referral tasks for levels 2–4
-  let currentInvitee = newUserId;
-  for (let level = 2; level <= 4; level++) {
-    const parent = await prisma.referral.findUnique({ where: { inviteeId: currentInvitee }, select: { inviterId: true } });
-    if (!parent?.inviterId) break;
-    await recordTaskProgress(parent.inviterId, `referral-${level}`, 1);
-    currentInvitee = parent.inviterId;
+  try {
+    // Award immediate 50-point direct referral bonus
+    await prisma.$transaction(async (tx) => {
+      // Update inviter's total points
+      await tx.user.update({
+        where: { id: inviterId },
+        data: { totalPoints: { increment: 50 } }
+      });
+      
+      // Create point record for the direct referral bonus
+      await tx.point.create({
+        data: {
+          userId: inviterId,
+          amount: 50,
+          source: 'REFERRAL_DIRECT',
+          sourceId: newUserId // Track who triggered this reward
+        }
+      });
+      
+      logger.info(REFERRAL_MESSAGES.DIRECT_REWARD_AWARDED(inviterId, 50));
+      
+      // Distribute upline rewards for the 50-point direct referral bonus
+      try {
+        const distributionResult = await distributeUplineRewards(inviterId, 50, tx, `referral_direct_${newUserId}`);
+        logger.info('Upline distribution completed for direct referral bonus', {
+          inviterId,
+          inviteeId: newUserId,
+          baseReward: 50,
+          distributionResult
+        });
+      } catch (distributionError) {
+        // Distribution failure should not affect the main referral process
+        logger.error('Upline distribution failed for direct referral bonus', {
+          inviterId,
+          inviteeId: newUserId,
+          baseReward: 50,
+          error: distributionError.message
+        });
+        // Continue execution without throwing
+      }
+    });
+    
+    // Also record the referral task for tracking (but it's already paid)
+    await recordTaskProgress(inviterId, 'referral-1', 1);
+    
+    // Record multi-level referral tasks for levels 2–4
+    let currentInvitee = newUserId;
+    for (let level = 2; level <= 4; level++) {
+      const parent = await prisma.referral.findUnique({ where: { inviteeId: currentInvitee }, select: { inviterId: true } });
+      if (!parent?.inviterId) break;
+      await recordTaskProgress(parent.inviterId, `referral-${level}`, 1);
+      logger.info(REFERRAL_MESSAGES.MULTILEVEL_PROGRESS(parent.inviterId, level));
+      currentInvitee = parent.inviterId;
+    }
+  } catch (error) {
+    logger.error('Error processing referral', { error: error.message, newUserId, inviterId });
+    throw error;
   }
 }
 

@@ -1,38 +1,36 @@
 const prisma = require('../utils/prisma');
 const businessRules = require('../../config/business-rules.json');
 const { createLogger } = require('../utils/logger');
+const { DISTRIBUTION_MESSAGES } = require('../constants/messages');
 
 const logger = createLogger('distributionService');
 
 /**
- * 通用奖励分润服务
+ * Universal reward distribution service
  * 
- * 负责处理所有任务完成后的上级分润逻辑，替代原有的硬编码邀请奖励分润
+ * Handles upline distribution logic after all task completions, replacing hardcoded invitation reward distribution
  * 
- * 支持:
- * - 可配置的分润比例和层级
- * - 事务安全
- * - 详细的审计日志
- * - 小数精度处理
+ * Features:
+ * - Configurable distribution percentages and levels
+ * - Transaction safety
+ * - Detailed audit logging
+ * - Decimal precision handling
  */
 
 /**
- * 计算并分发上级奖励
- * @param {string} userId - 获得基础奖励的用户ID
- * @param {number} baseRewardAmount - 该用户获得的基础奖励积分数
- * @param {object} tx - Prisma事务客户端，确保所有数据库操作的原子性
- * @param {string} sourceTaskId - 触发分润的原始任务ID（用于审计）
+ * Calculate and distribute upline rewards
+ * @param {string} userId - User ID who earned the base reward
+ * @param {number} baseRewardAmount - Base reward points earned by the user
+ * @param {object} tx - Prisma transaction client to ensure atomic operations
+ * @param {string} sourceTaskId - Original task ID that triggered distribution (for audit)
  * @returns {Promise<{distributedRewards: Array, totalDistributed: number}>}
  */
 async function distributeUplineRewards(userId, baseRewardAmount, tx, sourceTaskId = null) {
-  logger.info('开始分发上级奖励', { 
-    userId, 
-    baseRewardAmount, 
+  const { uplineRewardPercentages, maxLevels, roundingMode } = businessRules.rewardDistribution;
+  logger.info(DISTRIBUTION_MESSAGES.START_DISTRIBUTION(userId, baseRewardAmount, maxLevels), { 
     sourceTaskId,
     config: businessRules.rewardDistribution 
   });
-
-  const { uplineRewardPercentages, maxLevels, roundingMode } = businessRules.rewardDistribution;
   const distributedRewards = [];
   let currentUserId = userId;
   let totalDistributed = 0;
@@ -41,7 +39,8 @@ async function distributeUplineRewards(userId, baseRewardAmount, tx, sourceTaskI
     for (let level = 0; level < Math.min(uplineRewardPercentages.length, maxLevels); level++) {
       const percentage = uplineRewardPercentages[level];
       
-      // 查找当前用户的邀请记录以找到其直接上级
+      // Find current user's referral record to locate their direct upline
+      logger.info(`Attempting to find referral for inviteeId: ${currentUserId}`);
       const referral = await tx.referral.findUnique({
         where: { inviteeId: currentUserId },
         include: {
@@ -50,11 +49,11 @@ async function distributeUplineRewards(userId, baseRewardAmount, tx, sourceTaskI
           }
         }
       });
+      logger.info(`Referral found: ${JSON.stringify(referral)}`);
 
-      // 如果没有邀请记录，意味着没有上级了，分润链中断
+      // If no referral record, means no upline, distribution chain breaks
       if (!referral) {
-        logger.info('分润链中断，未找到上级', { 
-          currentUserId, 
+        logger.info(DISTRIBUTION_MESSAGES.NO_REFERRER(currentUserId), { 
           level: level + 1,
           totalLevelsProcessed: level 
         });
@@ -64,37 +63,34 @@ async function distributeUplineRewards(userId, baseRewardAmount, tx, sourceTaskI
       const referrerId = referral.inviterId;
       const rawReward = baseRewardAmount * percentage;
       
-      // 根据配置进行小数处理
+      // Apply decimal rounding based on configuration
       const uplineReward = roundingMode === 'round' 
-        ? Math.round(rawReward * 100) / 100  // 保留2位小数并四舍五入
-        : Math.floor(rawReward * 100) / 100; // 保留2位小数并向下取整
+        ? Math.round(rawReward * 100) / 100  // Keep 2 decimal places and round
+        : Math.floor(rawReward * 100) / 100; // Keep 2 decimal places and floor
 
-      logger.info('计算上级奖励', {
-        level: level + 1,
-        referrerId,
+      logger.info(DISTRIBUTION_MESSAGES.PROCESS_LEVEL(level + 1, referrerId, percentage * 100, uplineReward), {
         referrerName: referral.inviter.name,
-        percentage: percentage * 100 + '%',
         rawReward,
         finalReward: uplineReward
       });
 
-      // 为上级增加总积分
+      // Add total points for upline
       await tx.user.update({
         where: { id: referrerId },
         data: { totalPoints: { increment: uplineReward } },
       });
       
-      // 为上级创建一条详细的积分来源记录，便于追踪
+      // Create detailed point source record for upline for tracking
       const pointRecord = await tx.point.create({
         data: {
           userId: referrerId,
           amount: uplineReward,
-          source: 'upline_reward', // 标记为"上级分润"
-          sourceId: sourceTaskId || userId, // 记录触发分润的原始任务ID或用户ID
+          source: 'upline_reward', // Mark as "upline reward"
+          sourceId: sourceTaskId || userId, // Record original task ID or user ID that triggered distribution
         },
       });
 
-      // 记录分润详情
+      // Record distribution details
       const rewardInfo = {
         level: level + 1,
         referrerId,
@@ -107,13 +103,13 @@ async function distributeUplineRewards(userId, baseRewardAmount, tx, sourceTaskI
       distributedRewards.push(rewardInfo);
       totalDistributed += uplineReward;
       
-      logger.info('成功分发上级奖励', rewardInfo);
+      logger.info(DISTRIBUTION_MESSAGES.AWARD_SUCCESS(referrerId, uplineReward, level + 1), rewardInfo);
 
-      // 将当前用户ID更新为上级的ID，以便在下一次循环中继续向上追溯
+      // Update current user ID to upline's ID to continue tracing up in next iteration
       currentUserId = referrerId;
     }
 
-    logger.info('分润分发完成', {
+    logger.info(DISTRIBUTION_MESSAGES.DISTRIBUTION_COMPLETE(totalDistributed, distributedRewards.length), {
       originalUserId: userId,
       levelsProcessed: distributedRewards.length,
       totalDistributed,
@@ -130,49 +126,49 @@ async function distributeUplineRewards(userId, baseRewardAmount, tx, sourceTaskI
     };
 
   } catch (error) {
-    logger.error('分润分发过程中发生错误', {
+    logger.error(DISTRIBUTION_MESSAGES.DISTRIBUTION_ERROR(error.message), {
       error: error.message,
       stack: error.stack,
       userId,
       baseRewardAmount,
       currentLevel: distributedRewards.length + 1
     });
-    throw error; // 重新抛出错误，让调用方的事务处理
+    throw error; // Re-throw error for caller's transaction handling
   }
 }
 
 /**
- * 获取用户的分润配置信息
- * @returns {object} 当前的分润配置
+ * Get user's distribution configuration info
+ * @returns {object} Current distribution configuration
  */
 function getDistributionConfig() {
   return businessRules.rewardDistribution;
 }
 
 /**
- * 验证分润配置的有效性
- * @returns {boolean} 配置是否有效
+ * Validate distribution configuration
+ * @returns {boolean} Whether configuration is valid
  */
 function validateDistributionConfig() {
   const config = businessRules.rewardDistribution;
   
   if (!config || !Array.isArray(config.uplineRewardPercentages)) {
-    logger.error('分润配置无效：缺少uplineRewardPercentages数组');
+    logger.error(DISTRIBUTION_MESSAGES.INVALID_PERCENTAGES);
     return false;
   }
   
   if (config.uplineRewardPercentages.some(p => typeof p !== 'number' || p < 0 || p > 1)) {
-    logger.error('分润配置无效：百分比值必须在0-1之间');
+    logger.error('Invalid distribution config: percentage values must be between 0-1');
     return false;
   }
   
   if (typeof config.maxLevels !== 'number' || config.maxLevels < 1) {
-    logger.error('分润配置无效：maxLevels必须是正整数');
+    logger.error('Invalid distribution config: maxLevels must be a positive integer');
     return false;
   }
   
   if (!['round', 'floor'].includes(config.roundingMode)) {
-    logger.error('分润配置无效：roundingMode必须是round或floor');
+    logger.error('Invalid distribution config: roundingMode must be round or floor');
     return false;
   }
   

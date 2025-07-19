@@ -2539,7 +2539,6 @@ Authorization: Bearer <token>
         "nickname": "User Name",
         "level": 1,
         "theirPoints": 100,
-        "yourReward": 5,
         "referrals": [
           {
             "id": "referee-id",
@@ -2547,7 +2546,6 @@ Authorization: Bearer <token>
             "nickname": "Referee Name",
             "level": 2,
             "theirPoints": 50,
-            "yourReward": 3,
             "referrals": []
           }
         ]
@@ -2562,10 +2560,19 @@ Authorization: Bearer <token>
     "earnedByLevel": [150, 100, 50, 0],
     "totalReferralPoints": 300,
     "unclaimReferralAwards": 50,
-    "networkActivity": 450
+    "networkActivity": 450,
+    "ownReferralCode": "DD-USER123"
   }
 }
 ```
+
+**重要说明**：
+1. **50积分直接推荐奖励**：当有人使用你的推荐码时，你会立即获得50积分
+2. **上级佣金系统**：所有积分产生事件（包括推荐奖励）都会触发上级佣金分配：
+   - 一级上线（直接推荐人）：获得10%佣金
+   - 二级上线：获得5%佣金  
+   - 三级上线：获得2%佣金
+3. **yourReward字段已移除**：现在使用基于百分比的动态分润系统
 
 ## 通行证 API
 
@@ -3053,15 +3060,36 @@ Authorization: Bearer <token>
     "uploadedCount": 10,
     "pointsEarned": 100,
     "duplicatesCount": 2,
-    "message": "数据上传成功"
+    "message": "Successfully uploaded 10 items, earned 100 points",
+    "qualityReports": [],
+    "duplicateDetails": []
   }
 }
 ```
 
 **错误响应**:
-- 400 Bad Request: Data format validation failed
+- 400 Bad Request: 
+  ```json
+  {
+    "status": "error",
+    "message": "No valid data items found",
+    "details": [
+      "Item 1: Amazon data must include orderid field"
+    ]
+  }
+  ```
 - 401 Unauthorized: Authentication failed
-- 429 Too Many Requests: Upload limit exceeded
+- 429 Too Many Requests: 
+  ```json
+  {
+    "status": "error",
+    "message": "Daily submission limit reached (1,000 items), please try again tomorrow",
+    "data": {
+      "remainingDaily": 0,
+      "remainingMonthly": 8000
+    }
+  }
+  ```
 
 #### Amazon Collection Award Integration
 
@@ -3069,8 +3097,14 @@ Authorization: Bearer <token>
 
 - 应用每日/每月提交限制（1,000/10,000条）
 - 执行重复数据检测和去重
-- 按照"每10条有效数据获得100积分"的规则计算奖励
+- 按照"每条有效数据获得10积分"的规则计算奖励
 - 返回剩余配额信息
+- 触发上级佣金分配（10%/5%/2%）
+
+**重复数据处理**：
+- 系统会检查`orderid`是否已存在
+- 重复的数据不会获得积分
+- 响应中会详细说明哪些数据是重复的
 
 **Amazon数据格式示例**:
 ```json
@@ -3080,7 +3114,7 @@ Authorization: Bearer <token>
     "type": "order",
     "timestamp": "2025-01-01T12:00:00Z",
     "payload": {
-      "orderid": "12345",
+      "orderid": "113-1234567-7890123",
       "date": "2025-01-01",
       "amount": 99.99,
       "title": "Product Name",
@@ -3099,14 +3133,27 @@ Authorization: Bearer <token>
 {
   "status": "success",
   "data": {
-    "uploadedCount": 2,
-    "pointsEarned": 0,
+    "uploadedCount": 5,
+    "pointsEarned": 50,
     "duplicatesCount": 0,
-    "message": "Data uploaded successfully",
+    "message": "Successfully uploaded 5 items, earned 50 points",
     "amazonLimits": {
-      "remainingDaily": 998,
-      "remainingMonthly": 9998
-    }
+      "remainingDaily": 995,
+      "remainingMonthly": 9995
+    },
+    "qualityReports": [
+      {
+        "index": 0,
+        "validation": {
+          "errors": [],
+          "warnings": [],
+          "quality": {
+            "score": 80,
+            "details": {}
+          }
+        }
+      }
+    ]
   }
 }
 ```
@@ -3140,10 +3187,10 @@ Authorization: Bearer <token>
   "status": "success",
   "data": {
     "rules": {
-      "pointsPer10Items": 100,
+      "pointsPerItem": 10,
       "dailyLimit": 1000,
       "monthlyLimit": 10000,
-      "rewardRule": "Earn 100 points for every 10 valid data items submitted",
+      "rewardRule": "Earn 10 points for each valid data item submitted",
       "validationRules": [
         "Duplicate data will not be counted",
         "Invalid data will not be counted"

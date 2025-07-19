@@ -10,7 +10,7 @@ const { generateReferralCode } = require('../utils/referralUtils');
  */
 exports.register = async (req, res) => {
   try {
-    const { email, password, name, isOrganization } = req.body;
+    const { email, password, name, isOrganization, referralCode: referralCodeFromRequest } = req.body;
 
     // 检查用户是否已存在
     const userExists = await prisma.user.findUnique({
@@ -28,8 +28,24 @@ exports.register = async (req, res) => {
     const salt = await bcrypt.genSalt(10);
     const hashedPassword = await bcrypt.hash(password, salt);
 
-    // 生成短邀请码
-    const referralCode = generateReferralCode();
+    // Generate a new referral code for the registering user
+    const newUsersOwnReferralCode = generateReferralCode();
+
+    let inviterId = null;
+    if (referralCodeFromRequest) {
+      const inviter = await prisma.user.findUnique({
+        where: { referralCode: referralCodeFromRequest },
+        select: { id: true }
+      });
+
+      if (!inviter) {
+        return res.status(400).json({
+          status: 'fail',
+          message: '无效的推荐码' // Invalid referral code
+        });
+      }
+      inviterId = inviter.id;
+    }
 
     // 创建用户
     const user = await prisma.user.create({
@@ -40,7 +56,7 @@ exports.register = async (req, res) => {
         isOrganization: isOrganization || false,
         userType: isOrganization ? 'organization' : 'regular',
         authType: 'traditional',
-        referralCode,  // 使用统一生成的推荐码
+        referralCode: newUsersOwnReferralCode, // Assign the newly generated code to the user
         profile: {
           create: {
             language: 'zh'
@@ -51,6 +67,36 @@ exports.register = async (req, res) => {
         profile: true
       }
     });
+
+    // If a valid inviter was found, create the referral record and award points
+    if (inviterId) {
+      await prisma.referral.create({
+        data: {
+          inviterId: inviterId,
+          inviteeId: user.id,
+          code: referralCodeFromRequest // Store the code that was used
+        }
+      });
+
+      // Award 50 points to the inviter for direct referral
+      await prisma.user.update({
+        where: { id: inviterId },
+        data: { totalPoints: { increment: 50 } }
+      });
+
+      await prisma.point.create({
+        data: {
+          userId: inviterId,
+          amount: 50,
+          source: 'REFERRAL_DIRECT',
+          sourceId: user.id // Invitee's ID as sourceId
+        }
+      });
+
+      // Distribute upline rewards for the direct referral points
+      const { distributeUplineRewards } = require('../services/distributionService');
+      await distributeUplineRewards(inviterId, 50, prisma, 'REFERRAL_DIRECT_NEW_USER');
+    }
 
     // 生成 token
     const token = generateToken(user.id);

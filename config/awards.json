@@ -24,7 +24,7 @@
         "category": "data-sharing",
         "logoUrl": "/assets/websites/amazon.png",
         "actionUrl": "/user/crawl-tasks",
-        "buttonText": "提交数据"
+        "buttonText": "Submit Data"
       },
       "tasks": [
         {
