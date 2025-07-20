@@ -326,153 +326,270 @@ async function uploadCrawlerData(data, userId) {
       throw new Error(CRAWLER_MESSAGES.INVALID_DATA_FORMAT);
     }
 
-    // Check upload limits
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const monthStart = new Date(today.getFullYear(), today.getMonth(), 1);
-
-    const [dailyCount, monthlyCount] = await Promise.all([
-      prisma.crawlerData.count({
-        where: {
-          userId,
-          createdAt: { gte: today }
-        }
-      }),
-      prisma.crawlerData.count({
-        where: {
-          userId,
-          createdAt: { gte: monthStart }
-        }
-      })
-    ]);
-
-    const dailyLimit = 1000;
-    const monthlyLimit = 10000;
-
-    if (dailyCount + data.length > dailyLimit) {
-      throw new Error(CRAWLER_MESSAGES.DAILY_LIMIT_EXCEEDED(dailyCount, dailyLimit, data.length));
+    // Pre-validate items before transaction
+    const preValidatedItems = [];
+    const validationErrors = [];
+    
+    for (let i = 0; i < data.length; i++) {
+      const item = data[i];
+      const validation = validateDataItem(item);
+      
+      if (validation.errors.length > 0) {
+        validationErrors.push({
+          index: i,
+          reason: 'validation_error',
+          reasonText: 'Data validation failed: ' + validation.errors.join(', '),
+          errors: validation.errors,
+          warnings: validation.warnings
+        });
+        continue;
+      }
+      
+      // Generate content hash and source ID
+      item.contentHash = generateContentHash(item.payload);
+      item.sourceId = extractSourceId(item.source, item.payload);
+      item.originalIndex = i;
+      
+      preValidatedItems.push(item);
     }
-
-    if (monthlyCount + data.length > monthlyLimit) {
-      throw new Error(CRAWLER_MESSAGES.MONTHLY_LIMIT_EXCEEDED(monthlyCount, monthlyLimit, data.length));
-    }
-
-    // Check for duplicate data
-    const { validItems, duplicates, qualityReports } = await checkDuplicates(data, userId);
-
-    console.log(CRAWLER_MESSAGES.DEDUP_RESULT(validItems.length, duplicates.length));
-
-    // If no valid data, return result without database operations
-    if (validItems.length === 0) {
+    
+    if (preValidatedItems.length === 0) {
       return {
         uploadedCount: 0,
-        duplicatesCount: duplicates.length,
-        duplicateDetails: duplicates,
-        qualityReports,
+        duplicatesCount: 0,
+        duplicateDetails: validationErrors,
+        qualityReports: [],
         pointsEarned: 0,
-        message: duplicates.length > 0 ? CRAWLER_MESSAGES.ALL_DUPLICATES : CRAWLER_MESSAGES.NO_VALID_DATA
+        message: CRAWLER_MESSAGES.NO_VALID_DATA
       };
     }
 
-    // Get or create user's crawler tasks
-    const tasks = await getOrCreateUserTasks(userId);
-    const tasksBySource = tasks.reduce((acc, task) => {
-      acc[task.source] = task;
-      return acc;
-    }, {});
-
-    // Prepare database insert data
-    const insertData = validItems.map(item => ({
-      source: item.source,
-      type: item.type,
-      timestamp: new Date(item.timestamp || new Date()),
-      metadata: item.metadata || {},
-      payload: item.payload,
-      contentHash: item.contentHash,
-      sourceId: item.sourceId,
-      taskId: tasksBySource[item.source]?.id,
-      userId
-    }));
-
-    // Calculate points - using business rules service
-    const pointsEarned = calculateAmazonDataPoints(validItems.length);
-
-    // Execute database transaction
+    // Execute database transaction with all checks inside
     const result = await prisma.$transaction(async (tx) => {
-      // Insert data
-      await tx.crawlerData.createMany({
-        data: insertData
-      });
+      // Check upload limits inside transaction
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      const monthStart = new Date(today.getFullYear(), today.getMonth(), 1);
 
-      // Update task record count
-      for (const [source, count] of Object.entries(
-        validItems.reduce((acc, item) => {
-          acc[item.source] = (acc[item.source] || 0) + 1;
-          return acc;
-        }, {})
-      )) {
-        if (tasksBySource[source]) {
-          await tx.crawlerTask.update({
-            where: { id: tasksBySource[source].id },
-            data: { 
-              recordCount: { increment: count },
-              updatedAt: new Date()
-            }
+      const [dailyCount, monthlyCount] = await Promise.all([
+        tx.crawlerData.count({
+          where: {
+            userId,
+            createdAt: { gte: today }
+          }
+        }),
+        tx.crawlerData.count({
+          where: {
+            userId,
+            createdAt: { gte: monthStart }
+          }
+        })
+      ]);
+
+      const dailyLimit = 1000;
+      const monthlyLimit = 10000;
+
+      if (dailyCount + preValidatedItems.length > dailyLimit) {
+        throw new Error(CRAWLER_MESSAGES.DAILY_LIMIT_EXCEEDED(dailyCount, dailyLimit, preValidatedItems.length));
+      }
+
+      if (monthlyCount + preValidatedItems.length > monthlyLimit) {
+        throw new Error(CRAWLER_MESSAGES.MONTHLY_LIMIT_EXCEEDED(monthlyCount, monthlyLimit, preValidatedItems.length));
+      }
+      
+      // Check for duplicates inside transaction
+      const validItems = [];
+      const duplicates = [];
+      const sourceIdsToCheck = preValidatedItems
+        .filter(item => item.sourceId)
+        .map(item => item.sourceId);
+      const contentHashesToCheck = preValidatedItems.map(item => item.contentHash);
+      
+      // Batch check for existing duplicates
+      console.log(`[DEBUG] Checking for duplicates - sourceIds: [${sourceIdsToCheck.join(', ')}]`);
+      console.log(`[DEBUG] Checking ${contentHashesToCheck.length} content hashes`);
+      
+      const existingData = await tx.crawlerData.findMany({
+        where: {
+          userId,
+          OR: [
+            { sourceId: { in: sourceIdsToCheck } },
+            { contentHash: { in: contentHashesToCheck } }
+          ]
+        },
+        select: {
+          sourceId: true,
+          contentHash: true
+        }
+      });
+      
+      console.log(`[DEBUG] Found ${existingData.length} existing records:`, existingData);
+      
+      const existingSourceIds = new Set(existingData.map(d => d.sourceId).filter(Boolean));
+      const existingHashes = new Set(existingData.map(d => d.contentHash));
+      
+      // Filter out duplicates
+      for (const item of preValidatedItems) {
+        if ((item.sourceId && existingSourceIds.has(item.sourceId)) || 
+            existingHashes.has(item.contentHash)) {
+          const duplicateType = item.sourceId && existingSourceIds.has(item.sourceId) ? 'order' : 'content';
+          duplicates.push({
+            index: item.originalIndex,
+            reason: 'duplicate_data',
+            reasonText: duplicateType === 'order' ? 
+              `This ${item.source} order has already been uploaded` :
+              'Identical content already exists in your data',
+            sourceId: item.sourceId,
+            contentHash: item.contentHash
           });
+        } else {
+          validItems.push(item);
+        }
+      }
+      
+      console.log(CRAWLER_MESSAGES.DEDUP_RESULT(validItems.length, duplicates.length));
+      
+      if (validItems.length === 0) {
+        return {
+          uploadedCount: 0,
+          duplicatesCount: duplicates.length,
+          duplicateDetails: duplicates.concat(validationErrors || []),
+          qualityReports: [],
+          pointsEarned: 0,
+          insertedCount: 0,
+          validItems: [],
+          duplicates,
+          validationErrors: validationErrors || []
+        };
+      }
+      
+      // Get or create user's crawler tasks within transaction
+      const sources = ['amazon', 'luma'];
+      const tasks = [];
+      for (const source of sources) {
+        let task = await tx.crawlerTask.findFirst({
+          where: { userId, source }
+        });
+        if (!task) {
+          const template = TASK_TEMPLATES[source];
+          task = await tx.crawlerTask.create({
+            data: { ...template, userId }
+          });
+        }
+        tasks.push(task);
+      }
+      
+      const tasksBySource = tasks.reduce((acc, task) => {
+        acc[task.source] = task;
+        return acc;
+      }, {});
+
+      // Prepare database insert data
+      const insertData = validItems.map(item => ({
+        source: item.source,
+        type: item.type,
+        timestamp: new Date(item.timestamp || new Date()),
+        metadata: item.metadata || {},
+        payload: item.payload,
+        contentHash: item.contentHash,
+        sourceId: item.sourceId,
+        taskId: tasksBySource[item.source]?.id,
+        userId
+      }));
+
+      // Calculate points - using business rules service
+      const pointsEarned = calculateAmazonDataPoints(validItems.length);
+
+      // Insert data with skipDuplicates to handle race conditions
+      const insertResult = await tx.crawlerData.createMany({
+        data: insertData,
+        skipDuplicates: true
+      });
+      
+      const actualInserted = insertResult.count;
+      // Update task record count based on actual inserted count
+      if (actualInserted > 0) {
+        // Count actual insertions by source
+        const insertedBySource = {};
+        for (const item of validItems.slice(0, actualInserted)) {
+          insertedBySource[item.source] = (insertedBySource[item.source] || 0) + 1;
+        }
+        
+        for (const [source, count] of Object.entries(insertedBySource)) {
+          if (tasksBySource[source]) {
+            await tx.crawlerTask.update({
+              where: { id: tasksBySource[source].id },
+              data: { 
+                recordCount: { increment: count },
+                updatedAt: new Date()
+              }
+            });
+          }
         }
       }
 
+      // Calculate points based on actual inserted items
+      const actualPointsEarned = calculateAmazonDataPoints(actualInserted);
+
       // Calculate and award points
-      if (pointsEarned > 0) {
+      if (actualPointsEarned > 0) {
         // Update user total points
         await tx.user.update({
           where: { id: userId },
-          data: { totalPoints: { increment: pointsEarned } }
+          data: { totalPoints: { increment: actualPointsEarned } }
         });
 
         // Create point record
         await tx.point.create({
           data: {
             userId,
-            amount: pointsEarned,
+            amount: actualPointsEarned,
             source: 'crawler',
             sourceId: 'data_upload'
           }
         });
 
-        console.log(CRAWLER_MESSAGES.POINTS_AWARDED(userId, pointsEarned));
+        console.log(CRAWLER_MESSAGES.POINTS_AWARDED(userId, actualPointsEarned));
         
         // Distribute upline rewards for the crawler points
         try {
-          const distributionResult = await distributeUplineRewards(userId, pointsEarned, tx, 'crawler_data_upload');
+          const distributionResult = await distributeUplineRewards(userId, actualPointsEarned, tx, 'crawler_data_upload');
           logger.info('Upline distribution completed for crawler data', {
             userId,
-            baseReward: pointsEarned,
+            baseReward: actualPointsEarned,
             distributionResult
           });
         } catch (distributionError) {
           // Distribution failure should not affect the main task completion
           logger.error('Upline distribution failed for crawler data', {
             userId,
-            baseReward: pointsEarned,
+            baseReward: actualPointsEarned,
             error: distributionError.message
           });
           // Continue execution without throwing
         }
       }
 
-      return { insertedCount: validItems.length };
+      return { 
+        insertedCount: actualInserted,
+        validItems,
+        duplicates,
+        pointsEarned: actualPointsEarned,
+        validationErrors
+      };
+    }, {
+      isolationLevel: 'Serializable' // Prevent concurrent transactions from interfering
     });
 
-    console.log(CRAWLER_MESSAGES.UPLOAD_SUCCESS(validItems.length, pointsEarned));
+    console.log(CRAWLER_MESSAGES.UPLOAD_SUCCESS(result.insertedCount, result.pointsEarned));
 
     return {
-      uploadedCount: validItems.length,
-      duplicatesCount: duplicates.length,
-      duplicateDetails: duplicates,
-      qualityReports,
-      pointsEarned,
-      message: CRAWLER_MESSAGES.SUCCESS_MESSAGE(validItems.length, pointsEarned)
+      uploadedCount: result.insertedCount,
+      duplicatesCount: result.duplicates.length,
+      duplicateDetails: result.duplicates.concat(result.validationErrors),
+      qualityReports: [],
+      pointsEarned: result.pointsEarned,
+      message: CRAWLER_MESSAGES.SUCCESS_MESSAGE(result.insertedCount, result.pointsEarned)
     };
 
   } catch (error) {
@@ -882,7 +999,7 @@ function detectSimilarity(item1, item2) {
           return {
             similarity: 0.9,
             reason: 'title_price_match',
-            details: `Title similarity ${(titleSimilarity * 100).toFixed(1)}%, same price: ${price1}`
+            details: `Product title and price match detected (${(titleSimilarity * 100).toFixed(0)}% similarity, price: $${price1})`
           };
         }
       }
@@ -892,7 +1009,7 @@ function detectSimilarity(item1, item2) {
         return {
           similarity: titleSimilarity,
           reason: 'title_similarity',
-          details: `Title highly similar: ${(titleSimilarity * 100).toFixed(1)}%`
+          details: `Product title is highly similar (${(titleSimilarity * 100).toFixed(0)}% match)`
         };
       }
     }

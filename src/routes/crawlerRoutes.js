@@ -11,6 +11,8 @@ const {
   getAmazonDataStatus
 } = require('../controllers/crawlerController');
 const { protect } = require('../middlewares/authMiddleware');
+const { idempotencyMiddleware } = require('../middlewares/idempotencyMiddleware');
+const { rateLimiters } = require('../middlewares/rateLimitMiddleware');
 
 const router = express.Router();
 
@@ -20,11 +22,19 @@ router.use(protect);
 // Core endpoints matching original specification
 router.get('/crawler-tasks', getCrawlerTasks);
 router.post('/crawler-tasks', createCrawlerTask);
-router.post('/crawler/upload', uploadData);
+router.post('/crawler/upload', 
+  rateLimiters.upload, // Apply strict rate limiting for uploads
+  idempotencyMiddleware({ required: false }), // Optional idempotency
+  uploadData
+);
 
 // Task management endpoints
 router.get('/crawler-tasks/:taskId/data', getCrawlerData);
-router.post('/crawler-tasks/:taskId/data', uploadData);
+router.post('/crawler-tasks/:taskId/data', 
+  rateLimiters.upload, // Apply strict rate limiting for uploads
+  idempotencyMiddleware({ required: false }), // Optional idempotency
+  uploadData
+);
 router.put('/crawler-tasks/:taskId/status', updateTaskStatus);
 router.delete('/crawler-tasks/:taskId', deleteCrawlerTask);
 

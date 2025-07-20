@@ -8,7 +8,7 @@ exports.validate = (req, res, next) => {
   if (!errors.isEmpty()) {
     return res.status(400).json({
       status: 'fail',
-      message: '请求数据验证失败',
+      message: 'Request validation failed',
       errors: errors.array()
     });
   }

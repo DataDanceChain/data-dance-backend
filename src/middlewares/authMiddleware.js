@@ -17,7 +17,7 @@ const protect = async (req, res, next) => {
     if (!token) {
       return res.status(401).json({
         status: 'fail',
-        message: '您未登录，请先登录'
+        message: 'Authentication required. Please login first.'
       });
     }
 
@@ -32,7 +32,7 @@ const protect = async (req, res, next) => {
     if (!currentUser) {
       return res.status(401).json({
         status: 'fail',
-        message: '此 token 对应的用户不存在'
+        message: 'User associated with this token does not exist'
       });
     }
 
@@ -42,7 +42,7 @@ const protect = async (req, res, next) => {
   } catch (error) {
     return res.status(401).json({
       status: 'fail',
-      message: '未授权，请重新登录'
+      message: 'Unauthorized access. Please login again.'
     });
   }
 };
@@ -54,14 +54,14 @@ const isOrganization = (req, res, next) => {
   if (!req.user) {
     return res.status(401).json({
       status: 'error',
-      message: '未授权访问'
+      message: 'Unauthorized access'
     });
   }
   
   if (!req.user.isOrganization) {
     return res.status(403).json({
       status: 'error',
-      message: '只有组织用户可以访问此资源'
+      message: 'Only organization users can access this resource'
     });
   }
   
@@ -76,7 +76,7 @@ const restrictTo = (...roles) => {
     if (!req.user || !roles.includes(req.user.role)) {
       return res.status(403).json({
         status: 'fail',
-        message: '没有权限访问此资源'
+        message: 'Insufficient permissions to access this resource'
       });
     }
     next();
