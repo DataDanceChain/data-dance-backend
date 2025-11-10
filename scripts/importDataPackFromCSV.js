@@ -21,7 +21,12 @@ function parseCSV(content) {
     if (values.length === headers.length) {
       const record = {};
       headers.forEach((header, index) => {
-        record[header.trim()] = values[index].trim();
+        const trimmedHeader = header.trim();
+        const trimmedValue = values[index].trim();
+        // 只添加非空字段
+        if (trimmedHeader && trimmedValue) {
+          record[trimmedHeader] = trimmedValue;
+        }
       });
       data.push(record);
     }
@@ -66,7 +71,7 @@ async function importDataPackFromCSV(csvFilePath, dataPackName, dataPackDescript
     
     if (!orgUser) {
       console.log("Creating DataDance Official organization user...");
-      const hashedPassword = await bcrypt.hash("Org@123", 10);
+      const hashedPassword = await bcrypt.hash("DataDance@2024", 10);
       
       orgUser = await prisma.user.create({
         data: {
@@ -115,12 +120,10 @@ async function importDataPackFromCSV(csvFilePath, dataPackName, dataPackDescript
     console.log(`✅ Valid records with email: ${validRecords.length}`);
     
     // 4. 创建 Snapshot 数据包（不关联活动）
-    const snapshot = await prisma.snapshot.create({
-      data: {
-        name: dataPackName,
-        description: dataPackDescription || `Data pack imported from ${path.basename(csvFilePath)}`,
-        // activityId: null,  // 不关联活动（可选字段，默认为null）
-        merchantId: orgUser.id,
+    const snapshotData = {
+      name: dataPackName,
+      description: dataPackDescription || `Data pack imported from ${path.basename(csvFilePath)}`,
+      merchantId: orgUser.id,
         claims: {
           source: csvFilePath,
           fileName: path.basename(csvFilePath),
@@ -136,7 +139,10 @@ async function importDataPackFromCSV(csvFilePath, dataPackName, dataPackDescript
             ...record
           }))
         }
-      }
+    };
+    
+    const snapshot = await prisma.snapshot.create({
+      data: snapshotData
     });
     
     console.log(`\n✅ Created Snapshot successfully!`);
@@ -154,11 +160,15 @@ async function importDataPackFromCSV(csvFilePath, dataPackName, dataPackDescript
     console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`);
     
     // 5. 为数据包添加标签
-    const dataPackTag = await prisma.tag.upsert({
-      where: { name: "Data Pack" },
-      update: {},
-      create: { name: "Data Pack" }
+    let dataPackTag = await prisma.tag.findFirst({
+      where: { name: "Data Pack" }
     });
+    
+    if (!dataPackTag) {
+      dataPackTag = await prisma.tag.create({
+        data: { name: "Data Pack" }
+      });
+    }
     
     await prisma.snapshot.update({
       where: { id: snapshot.id },
