@@ -279,8 +279,195 @@ const getSnapshotsByMerchant = async (req, res) => {
   }
 };
 
+// Create snapshot from CSV upload (standalone data pack, no activity required)
+const createSnapshotFromCSV = async (req, res) => {
+  try {
+    const { name, description, tags } = req.body;
+    const merchantId = req.user.id;
+    const csvFile = req.file;
+
+    if (!csvFile) {
+      return res.status(400).json({ error: 'CSV file is required' });
+    }
+
+    if (!name) {
+      return res.status(400).json({ error: 'Name is required' });
+    }
+
+    // Parse CSV file
+    const fs = require('fs');
+    const csvContent = fs.readFileSync(csvFile.path, 'utf-8');
+    
+    // Simple CSV parser (supports quoted fields)
+    function parseCSVLine(line) {
+      const result = [];
+      let current = '';
+      let inQuotes = false;
+      
+      for (let i = 0; i < line.length; i++) {
+        const char = line[i];
+        if (char === '"') {
+          inQuotes = !inQuotes;
+        } else if (char === ',' && !inQuotes) {
+          result.push(current);
+          current = '';
+        } else {
+          current += char;
+        }
+      }
+      result.push(current);
+      return result.map(item => item.replace(/^"|"$/g, '').trim());
+    }
+
+    const lines = csvContent.split('\n').filter(line => line.trim());
+    if (lines.length < 2) {
+      return res.status(400).json({ error: 'CSV file must contain at least a header row and one data row' });
+    }
+
+    const headers = parseCSVLine(lines[0]);
+    const data = [];
+    
+    for (let i = 1; i < lines.length; i++) {
+      const values = parseCSVLine(lines[i]);
+      if (values.length === headers.length) {
+        const record = {};
+        headers.forEach((header, index) => {
+          const trimmedHeader = header.trim();
+          const trimmedValue = values[index].trim();
+          if (trimmedHeader && trimmedValue) {
+            record[trimmedHeader] = trimmedValue;
+          }
+        });
+        data.push(record);
+      }
+    }
+
+    // Find email field
+    const emailField = headers.find(h => 
+      h.toLowerCase().includes('email') || 
+      h.toLowerCase().includes('邮箱') ||
+      h.toLowerCase().includes('mail')
+    );
+
+    if (!emailField) {
+      return res.status(400).json({ error: 'CSV must contain an email field (邮箱/email/mail)' });
+    }
+
+    // Filter valid records (must have email)
+    const validRecords = data.filter(record => record[emailField] && record[emailField].trim());
+    const recordsWithoutEmail = data.length - validRecords.length;
+
+    if (validRecords.length === 0) {
+      return res.status(400).json({ error: 'No valid records with email found in CSV' });
+    }
+
+    // Create snapshot data
+    const snapshotData = {
+      name,
+      description: description || `Data pack imported from ${csvFile.originalname}`,
+      merchantId,
+      claims: {
+        source: csvFile.path,
+        fileName: csvFile.originalname,
+        importDate: new Date().toISOString(),
+        recordCount: validRecords.length,
+        totalRecords: data.length,
+        skippedRecords: recordsWithoutEmail,
+        headers: headers,
+        emailField: emailField,
+        records: validRecords.map((record, index) => ({
+          recordId: index + 1,
+          email: record[emailField],
+          ...record
+        }))
+      }
+    };
+
+    // Create snapshot
+    const snapshot = await prisma.snapshot.create({
+      data: snapshotData,
+      include: {
+        merchant: true,
+        tags: true
+      }
+    });
+
+    // Add tags if provided
+    if (tags && Array.isArray(tags) && tags.length > 0) {
+      await prisma.snapshot.update({
+        where: { id: snapshot.id },
+        data: {
+          tags: {
+            connect: tags.map(tagId => ({ id: tagId }))
+          }
+        }
+      });
+    }
+
+    // Add "Data Pack" tag
+    let dataPackTag = await prisma.tag.findFirst({
+      where: { name: "Data Pack" }
+    });
+    
+    if (!dataPackTag) {
+      dataPackTag = await prisma.tag.create({
+        data: { name: "Data Pack" }
+      });
+    }
+
+    await prisma.snapshot.update({
+      where: { id: snapshot.id },
+      data: {
+        tags: {
+          connect: { id: dataPackTag.id }
+        }
+      }
+    });
+
+    // Clean up uploaded file
+    fs.unlinkSync(csvFile.path);
+
+    // Fetch updated snapshot with tags
+    const finalSnapshot = await prisma.snapshot.findUnique({
+      where: { id: snapshot.id },
+      include: {
+        merchant: true,
+        tags: true
+      }
+    });
+
+    res.status(201).json({
+      ...finalSnapshot,
+      importSummary: {
+        totalRecords: data.length,
+        validRecords: validRecords.length,
+        skippedRecords: recordsWithoutEmail,
+        emailField: emailField
+      }
+    });
+  } catch (error) {
+    console.error('Error creating snapshot from CSV:', error);
+    
+    // Clean up file if exists
+    if (req.file && req.file.path) {
+      try {
+        const fs = require('fs');
+        fs.unlinkSync(req.file.path);
+      } catch (e) {
+        // Ignore cleanup errors
+      }
+    }
+
+    res.status(500).json({ 
+      error: 'Failed to create snapshot from CSV',
+      message: error.message 
+    });
+  }
+};
+
 module.exports = {
   createSnapshot,
+  createSnapshotFromCSV,
   getSnapshots,
   getSnapshotById,
   updateSnapshot,

@@ -61,32 +61,56 @@ async function importDataPackFromCSV(csvFilePath, dataPackName, dataPackDescript
   try {
     console.log(`Starting to import data pack from CSV: ${csvFilePath}...`);
     
-    // 1. 查找或创建 DataDance Official 组织用户
+    // 1. 查找或创建亚马逊美国店铺组织用户
     let orgUser = await prisma.user.findFirst({
       where: { 
-        email: "official@datadance.io",
+        email: "contact@techgearusa.com",
         isOrganization: true
       }
     });
     
     if (!orgUser) {
-      console.log("Creating DataDance Official organization user...");
-      const hashedPassword = await bcrypt.hash("DataDance@2024", 10);
+      console.log("Creating TechGear USA organization user...");
+      const hashedPassword = await bcrypt.hash("TechGearUS@2024", 10);
       
+      // 创建组织用户
       orgUser = await prisma.user.create({
         data: {
-          email: "official@datadance.io",
-          name: "DataDance Official",
+          email: "contact@techgearusa.com",
+          name: "TechGear USA",
           password: hashedPassword,
           isOrganization: true,
-          description: "DataDance is a leading platform for data assetization and Web3 marketing, empowering businesses and individuals to unlock the value of their data through blockchain technology.",
+          description: "TechGear USA - A leading e-commerce merchant on Amazon marketplace, specializing in consumer electronics and tech accessories.",
           logo: "/assets/logos/datadance-logo.jpg",
           avatar: "/assets/logos/datadance-logo.jpg",
           referralCode: generateReferralCode()
         }
       });
       
-      console.log("Created DataDance Official organization user");
+      // 创建用户角色关联
+      try {
+        // 查找 ORGANIZATION_ADMIN 角色
+        const adminRole = await prisma.role.findFirst({
+          where: { name: "ORGANIZATION_ADMIN" }
+        });
+        
+        if (adminRole) {
+          // 创建用户角色关联
+          await prisma.userRole.create({
+            data: {
+              user: { connect: { id: orgUser.id } },
+              role: { connect: { id: adminRole.id } }
+            }
+          });
+          console.log(`Assigned ORGANIZATION_ADMIN role to TechGear USA`);
+        } else {
+          console.log("Warning: ORGANIZATION_ADMIN role not found");
+        }
+      } catch (roleError) {
+        console.error("Error assigning role to user:", roleError);
+      }
+      
+      console.log("Created TechGear USA organization user");
     }
     
     console.log(`Using merchant: ${orgUser.name} (${orgUser.email})`);
