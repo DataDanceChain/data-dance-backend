@@ -464,10 +464,10 @@ model Snapshot {
   updatedAt   DateTime  @updatedAt
   name        String
   description String?
-  activityId  String
+  activityId  String?
   merchantId  String
   claims      Json?
-  activity    Activity  @relation(fields: [activityId], references: [id])
+  activity    Activity? @relation(fields: [activityId], references: [id])
   merchant    User      @relation(fields: [merchantId], references: [id])
   dataNFTs    DataNFT[] @relation("DataNFTToSnapshot")
   tags        Tag[]     @relation("SnapshotToTag")
