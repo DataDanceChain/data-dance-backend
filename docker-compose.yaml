@@ -16,26 +16,29 @@ services:
       - ./package-lock.json:/app/package-lock.json
       - ./config:/app/config
     command: npm run dev  # 使用 nodemon 启动，使代码更新无需重建镜像即可生效
-    networks:
-      - backend_network
+    extra_hosts:
+      - "host.docker.internal:host-gateway"  # 允许容器访问主机服务
     restart: always
-    depends_on:
-      - ddc-backend-db
+    # 注意：如果使用外部数据库（如 datadance-postgres），
+    # 需要在 .env 中配置 DATABASE_URL 指向 host.docker.internal:5432
 
-  ddc-backend-db:
-    image: postgres:17
-    volumes:
-      - ./db:/var/lib/postgresql/data
-    ports:
-      - "127.0.0.1:15432:5432"
-    environment:
-      - POSTGRES_USER=ddc
-      - POSTGRES_PASSWORD=ddc
-      - POSTGRES_DB=ddc
-    restart: always
-    networks:
-      - backend_network
-
-networks:
-  backend_network:
-    driver: bridge
+# 已移除 ddc-backend-db 服务，使用外部的 datadance-postgres 数据库
+# 如需使用 Docker Compose 管理的数据库，取消下面的注释：
+#
+#  ddc-backend-db:
+#    image: postgres:17
+#    volumes:
+#      - ./db:/var/lib/postgresql/data
+#    ports:
+#      - "127.0.0.1:15432:5432"
+#    environment:
+#      - POSTGRES_USER=ddc
+#      - POSTGRES_PASSWORD=ddc
+#      - POSTGRES_DB=ddc
+#    restart: always
+#    networks:
+#      - backend_network
+#
+# networks:
+#   backend_network:
+#     driver: bridge

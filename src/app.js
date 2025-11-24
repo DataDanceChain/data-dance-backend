@@ -29,6 +29,7 @@ const snapshotRoutes = require('./routes/snapshotRoutes');
 const dataNFTRoutes = require('./routes/dataNFTRoutes');
 const promotionRoutes = require('./routes/promotionRoutes');
 const transactionRoutes = require('./routes/transactionRoutes');
+const ddcNFTMetadataRoutes = require('./routes/ddcNFTMetadataRoutes');
 
 const app = express();
 
@@ -132,6 +133,8 @@ app.use('/api/snapshots', snapshotRoutes);
 app.use('/api/data-nfts', dataNFTRoutes);
 app.use('/api/promotions', promotionRoutes);
 app.use('/api/organization/transactions', transactionRoutes);
+// DDC NFT Metadata API - 需要后端权限控制
+app.use('/metadata/ddcnft', ddcNFTMetadataRoutes);
 
 // 错误处理中间件
 app.use(errorHandler);
