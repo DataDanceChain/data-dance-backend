@@ -223,26 +223,72 @@ async function recordDataNFTToBlockchain(dataNFT, merchant) {
     }
     
     // 检查是否已经上链
-    if (dataNFT.blockchainTxHash) {
-      console.log(`   ⚠️  Already recorded on blockchain: ${dataNFT.blockchainTxHash}`);
+    if (dataNFT.blockchainTxHash && dataNFT.blockchainTokenId) {
+      console.log(`   ⚠️  Already recorded on blockchain:`);
+      console.log(`      Transaction Hash: ${dataNFT.blockchainTxHash}`);
+      console.log(`      Token ID: ${dataNFT.blockchainTokenId}`);
       return {
         success: true,
         alreadyRecorded: true,
-        txHash: dataNFT.blockchainTxHash
+        txHash: dataNFT.blockchainTxHash,
+        tokenId: dataNFT.blockchainTokenId
       };
     }
     
     // 生成 metadata URI（使用配置的 baseUrl）
     const baseUrl = process.env.METADATA_BASE_URL || DDC_MARKET_CONFIG.baseUrl;
     
-    // 根据配置，token 1 和 2 已存在
-    // 我们需要为新的 DataNFT 分配 token ID（从 3 开始，或使用递增的 ID）
-    // 这里可以使用 DataNFT 的序号或哈希来分配 token ID
-    const dataNFTIdHash = ethers.keccak256(ethers.toUtf8Bytes(dataNFT.id));
-    // 将哈希转换为 token ID，但确保不与已存在的 token 1, 2 冲突
-    // 使用哈希值模一个大的数字，然后加上 3（因为 1, 2 已存在）
-    const hashBigInt = BigInt(dataNFTIdHash);
-    const tokenId = (hashBigInt % BigInt(1000000)) + BigInt(3); // 从 3 开始
+    // 生成 token ID：使用 serial 序号（从 3 开始，因为 token 1 和 2 已存在）
+    // 1. 先查询数据库中已上链的最大 tokenId
+    const maxTokenIdInDb = await prisma.dataNFT.findFirst({
+      where: {
+        blockchainTokenId: { not: null }
+      },
+      orderBy: {
+        blockchainTokenId: 'desc'
+      },
+      select: {
+        blockchainTokenId: true
+      }
+    });
+    
+    // 2. 查询链上已存在的最大 tokenId（从 3 开始检查）
+    const checkProvider = getProvider();
+    const checkABI = ['function ownerOf(uint256) view returns (address)'];
+    const checkContract = new ethers.Contract(DDC_MARKET_CONFIG.contractAddress, checkABI, checkProvider);
+    
+    let maxTokenIdOnChain = BigInt(2); // token 1 和 2 已存在
+    let checkTokenId = BigInt(3);
+    let maxChainChecks = 1000; // 最多检查 1000 个 token
+    
+    console.log(`   🔍 Checking on-chain token IDs...`);
+    while (checkTokenId <= BigInt(maxChainChecks)) {
+      try {
+        await checkContract.ownerOf(checkTokenId);
+        maxTokenIdOnChain = checkTokenId;
+        checkTokenId = checkTokenId + 1n;
+      } catch (error) {
+        // Token 不存在，停止检查
+        break;
+      }
+    }
+    
+    // 3. 使用两者中的最大值 + 1 作为新的 tokenId
+    const maxTokenIdInDbBigInt = maxTokenIdInDb?.blockchainTokenId 
+      ? BigInt(maxTokenIdInDb.blockchainTokenId) 
+      : BigInt(0);
+    
+    const nextTokenId = (maxTokenIdInDbBigInt > maxTokenIdOnChain 
+      ? maxTokenIdInDbBigInt 
+      : maxTokenIdOnChain) + 1n;
+    
+    // 确保至少从 3 开始
+    const tokenId = nextTokenId < BigInt(3) ? BigInt(3) : nextTokenId;
+    
+    console.log(`   📊 Token ID generation:`);
+    console.log(`      Max in DB: ${maxTokenIdInDbBigInt.toString()}`);
+    console.log(`      Max on-chain: ${maxTokenIdOnChain.toString()}`);
+    console.log(`      Next Token ID: ${tokenId.toString()}`);
     
     // Metadata URI 格式：https://api.datadance.ai/metadata/ddcnft/{tokenId}
     const metadataUri = `${baseUrl}/${tokenId.toString()}`;
@@ -468,6 +514,22 @@ async function recordDataNFTToBlockchain(dataNFT, merchant) {
     console.log(`   🆔 Token ID: ${realTokenId}`);
     console.log(`   📄 Metadata URI: ${metadataUri}`);
     
+    // 更新数据库，保存 tokenId 和 txHash
+    try {
+      await prisma.dataNFT.update({
+        where: { id: dataNFT.id },
+        data: {
+          blockchainTokenId: realTokenId,
+          blockchainTxHash: txHash,
+          blockchainRecordedAt: new Date()
+        }
+      });
+      console.log(`   💾 Database updated with blockchain info`);
+    } catch (dbError) {
+      console.log(`   ⚠️  Failed to update database: ${dbError.message}`);
+      // 即使数据库更新失败，也返回成功（因为链上已经成功）
+    }
+    
     return {
       success: true,
       walletAddress: wallet.address,
@@ -531,7 +593,7 @@ async function recordAllDataNFTsToBlockchain() {
     where: {
       isPublished: true,
       // 只处理未上链的 DataNFT
-      // blockchainTxHash: null
+      blockchainTxHash: null
     },
     include: {
       merchant: {

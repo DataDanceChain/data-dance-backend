@@ -490,6 +490,11 @@ model DataNFT {
   dataSource   String            @default("activity") // "activity" | "upload"
   dataRecords  Json?             // 用于存储直接上传的CSV数据
   
+  // 区块链相关字段
+  blockchainTokenId    String?   @unique // 链上的 token ID (serial 序号)
+  blockchainTxHash     String?   // 上链交易的 hash
+  blockchainRecordedAt DateTime? // 上链时间
+  
   merchant     User              @relation(fields: [merchantId], references: [id])
   purchases    DataNFTPurchase[]
   snapshots    Snapshot[]        @relation("DataNFTToSnapshot")
