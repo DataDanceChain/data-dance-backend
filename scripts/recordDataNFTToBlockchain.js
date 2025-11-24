@@ -55,9 +55,13 @@ try {
     vm.runInContext(code, sandbox);
     
     DDCNFTManager = sandbox.module.exports.DDCNFTManager || sandbox.exports.DDCNFTManager;
+    getKeyHash = sandbox.module.exports.getKeyHash || sandbox.exports.getKeyHash;
     
     if (DDCNFTManager) {
       console.log('✅ DDC Market SDK loaded successfully (manual load)');
+      if (getKeyHash) {
+        console.log('✅ getKeyHash function loaded');
+      }
     } else {
       console.log('⚠️  SDK loaded but DDCNFTManager not found');
     }
@@ -131,24 +135,39 @@ async function initDDCNFTManager() {
   // 但根据第一个反馈，jsonRPC 模式下不需要自己构造
   // 我们先尝试只传入 { type: 'jsonRpc' }，如果失败再尝试传入实例
   try {
-    // 方式1: 只传入类型，让 SDK 内部创建（根据第一个反馈）
+    // 方式1: 只传入类型，让 SDK 内部创建（根据 demo，walletAddress 可以是空字符串，SDK 会自动提取）
     const manager = await DDCNFTManager.init({
-      walletAddress: wallet.address,
+      walletAddress: '', // 空字符串，SDK 会自动从 privateKey 提取地址（与 demo 一致）
       provider: { type: 'jsonRpc' },
       signer: { privateKey: backendPrivateKey },
       debug: false,
     });
     
-    // SDK 初始化后，需要设置合约地址（如果 SDK 没有自动从 API 获取）
-    // 根据配置，合约地址是 0xCcDfB99c5bb0328C4Ce3823d637F41d8687372E2
+    // SDK 初始化后，先获取已部署的合约列表（根据 demo）
+    const deployedContracts = manager.getAllDeployedAddresses ? manager.getAllDeployedAddresses() : [];
+    console.log(`   📋 Found ${deployedContracts.length} deployed contracts`);
+    
+    // 设置合约地址（使用已部署的合约地址，地址比较需要转换为小写）
+    const contractAddressLower = DDC_MARKET_CONFIG.contractAddress.toLowerCase();
+    const deployedLower = deployedContracts.map(addr => addr.toLowerCase());
+    
+    // 如果合约在已部署列表中，使用列表中的地址（保持原始大小写）
+    let contractAddressToUse = DDC_MARKET_CONFIG.contractAddress;
+    if (deployedLower.includes(contractAddressLower)) {
+      const foundAddress = deployedContracts.find(addr => addr.toLowerCase() === contractAddressLower);
+      contractAddressToUse = foundAddress;
+      console.log(`   ✅ Contract ${foundAddress} found in deployed contracts`);
+    } else {
+      console.log(`   ⚠️  Contract ${DDC_MARKET_CONFIG.contractAddress} not in deployed list, setting manually`);
+    }
+    
     if (manager.setContractAddress || manager.setDDCNFTAddress) {
-      const contractAddress = DDC_MARKET_CONFIG.contractAddress;
       if (manager.setContractAddress) {
-        manager.setContractAddress(contractAddress);
+        manager.setContractAddress(contractAddressToUse);
       } else if (manager.setDDCNFTAddress) {
-        manager.setDDCNFTAddress(contractAddress);
+        manager.setDDCNFTAddress(contractAddressToUse);
       }
-      console.log(`   ✅ Contract address set: ${contractAddress}`);
+      console.log(`   ✅ Contract address set: ${contractAddressToUse}`);
     }
     
     return manager;
@@ -168,15 +187,31 @@ async function initDDCNFTManager() {
       debug: false,
     });
     
-    // 设置合约地址
+    // SDK 初始化后，先获取已部署的合约列表（根据 demo）
+    const deployedContracts = manager.getAllDeployedAddresses ? manager.getAllDeployedAddresses() : [];
+    console.log(`   📋 Found ${deployedContracts.length} deployed contracts`);
+    
+    // 设置合约地址（使用已部署的合约地址，地址比较需要转换为小写）
+    const contractAddressLower = DDC_MARKET_CONFIG.contractAddress.toLowerCase();
+    const deployedLower = deployedContracts.map(addr => addr.toLowerCase());
+    
+    // 如果合约在已部署列表中，使用列表中的地址（保持原始大小写）
+    let contractAddressToUse = DDC_MARKET_CONFIG.contractAddress;
+    if (deployedLower.includes(contractAddressLower)) {
+      const foundAddress = deployedContracts.find(addr => addr.toLowerCase() === contractAddressLower);
+      contractAddressToUse = foundAddress;
+      console.log(`   ✅ Contract ${foundAddress} found in deployed contracts`);
+    } else {
+      console.log(`   ⚠️  Contract ${DDC_MARKET_CONFIG.contractAddress} not in deployed list, setting manually`);
+    }
+    
     if (manager.setContractAddress || manager.setDDCNFTAddress) {
-      const contractAddress = DDC_MARKET_CONFIG.contractAddress;
       if (manager.setContractAddress) {
-        manager.setContractAddress(contractAddress);
+        manager.setContractAddress(contractAddressToUse);
       } else if (manager.setDDCNFTAddress) {
-        manager.setDDCNFTAddress(contractAddress);
+        manager.setDDCNFTAddress(contractAddressToUse);
       }
-      console.log(`   ✅ Contract address set: ${contractAddress}`);
+      console.log(`   ✅ Contract address set: ${contractAddressToUse}`);
     }
     
     return manager;
@@ -238,8 +273,31 @@ async function recordDataNFTToBlockchain(dataNFT, merchant) {
     // 生成 metadata URI（使用配置的 baseUrl）
     const baseUrl = process.env.METADATA_BASE_URL || DDC_MARKET_CONFIG.baseUrl;
     
-    // 生成 token ID：使用 serial 序号（从 3 开始，因为 token 1 和 2 已存在）
-    // 1. 先查询数据库中已上链的最大 tokenId
+    // 生成 token ID：使用自增序号，确保不重复
+    // 1. 查询链上已存在的最大 tokenId（从 1 开始检查）
+    // 注意：合约的 ownerOf 返回 bytes32，不是 address
+    const checkProvider = getProvider();
+    const checkABI = ['function ownerOf(uint256) view returns (bytes32)'];
+    const checkContract = new ethers.Contract(DDC_MARKET_CONFIG.contractAddress, checkABI, checkProvider);
+    
+    let maxTokenIdOnChain = BigInt(0);
+    let checkTokenId = BigInt(1);
+    let maxChainChecks = 10000; // 最多检查 10000 个 token
+    
+    console.log(`   🔍 Checking on-chain token IDs to find max...`);
+    while (checkTokenId <= BigInt(maxChainChecks)) {
+      try {
+        await checkContract.ownerOf(checkTokenId);
+        // Token 存在，更新最大值
+        maxTokenIdOnChain = checkTokenId;
+        checkTokenId = checkTokenId + 1n;
+      } catch (error) {
+        // Token 不存在，停止检查
+        break;
+      }
+    }
+    
+    // 2. 查询数据库中已上链的最大 tokenId（作为备用检查）
     const maxTokenIdInDb = await prisma.dataNFT.findFirst({
       where: {
         blockchainTokenId: { not: null }
@@ -252,50 +310,52 @@ async function recordDataNFTToBlockchain(dataNFT, merchant) {
       }
     });
     
-    // 2. 查询链上已存在的最大 tokenId（从 3 开始检查）
-    const checkProvider = getProvider();
-    const checkABI = ['function ownerOf(uint256) view returns (address)'];
-    const checkContract = new ethers.Contract(DDC_MARKET_CONFIG.contractAddress, checkABI, checkProvider);
-    
-    let maxTokenIdOnChain = BigInt(2); // token 1 和 2 已存在
-    let checkTokenId = BigInt(3);
-    let maxChainChecks = 1000; // 最多检查 1000 个 token
-    
-    console.log(`   🔍 Checking on-chain token IDs...`);
-    while (checkTokenId <= BigInt(maxChainChecks)) {
-      try {
-        await checkContract.ownerOf(checkTokenId);
-        maxTokenIdOnChain = checkTokenId;
-        checkTokenId = checkTokenId + 1n;
-      } catch (error) {
-        // Token 不存在，停止检查
-        break;
-      }
-    }
-    
-    // 3. 使用两者中的最大值 + 1 作为新的 tokenId
     const maxTokenIdInDbBigInt = maxTokenIdInDb?.blockchainTokenId 
       ? BigInt(maxTokenIdInDb.blockchainTokenId) 
       : BigInt(0);
     
+    // 3. 使用链上和数据库中的最大值，取较大者 + 1 作为新的 tokenId
     const nextTokenId = (maxTokenIdInDbBigInt > maxTokenIdOnChain 
       ? maxTokenIdInDbBigInt 
       : maxTokenIdOnChain) + 1n;
     
-    // 确保至少从 3 开始
-    const tokenId = nextTokenId < BigInt(3) ? BigInt(3) : nextTokenId;
+    // 4. 确保 tokenId 至少从 1 开始（如果链上没有任何 token）
+    const tokenId = nextTokenId < BigInt(1) ? BigInt(1) : nextTokenId;
+    
+    // 5. 再次检查这个 tokenId 是否已存在（双重保险）
+    let finalTokenId = tokenId;
+    let attempts = 0;
+    const maxAttempts = 100;
+    
+    while (attempts < maxAttempts) {
+      try {
+        const owner = await checkContract.ownerOf(finalTokenId);
+        // Token 已存在（ownerOf 返回 bytes32），递增
+        console.log(`   ⚠️  Token ID ${finalTokenId} already exists (owner: ${owner}), trying ${finalTokenId + 1n}...`);
+        finalTokenId = finalTokenId + 1n;
+        attempts++;
+      } catch (error) {
+        // Token 不存在，可以使用
+        break;
+      }
+    }
+    
+    if (attempts >= maxAttempts) {
+      throw new Error(`Failed to find available token ID after ${maxAttempts} attempts`);
+    }
     
     console.log(`   📊 Token ID generation:`);
     console.log(`      Max in DB: ${maxTokenIdInDbBigInt.toString()}`);
     console.log(`      Max on-chain: ${maxTokenIdOnChain.toString()}`);
-    console.log(`      Next Token ID: ${tokenId.toString()}`);
+    console.log(`      Calculated: ${tokenId.toString()}`);
+    console.log(`      Final Token ID (after duplicate check): ${finalTokenId.toString()}`);
     
     // Metadata URI 格式：https://api.datadance.ai/metadata/ddcnft/{tokenId}
-    const metadataUri = `${baseUrl}/${tokenId.toString()}`;
+    const metadataUri = `${baseUrl}/${finalTokenId.toString()}`;
     
-    console.log(`   Metadata URI: ${metadataUri}`);
-    console.log(`   Token ID: ${tokenId.toString()}`);
-    console.log(`   Key Hash: ${DDC_MARKET_CONFIG.keyHash}`);
+    console.log(`   📝 Metadata URI: ${metadataUri}`);
+    console.log(`   🆔 Token ID (Serial): ${finalTokenId.toString()}`);
+    console.log(`   🔑 Key Hash: ${DDC_MARKET_CONFIG.keyHash}`);
     
     // DDC Market 合约 ABI
     // 根据提供的 keyHash，可能需要在调用时传入 keyHash 参数
@@ -323,7 +383,7 @@ async function recordDataNFTToBlockchain(dataNFT, merchant) {
     let receipt = null;
     let error = null;
     
-    // 尝试使用 SDK 的 DDCNFTManager（优先）
+    // 使用 SDK 的 DDCNFTManager（仅使用 SDK，不使用 ethers.js）
     try {
       console.log(`   🔄 Attempting to mint DataNFT using SDK...`);
       
@@ -331,21 +391,62 @@ async function recordDataNFTToBlockchain(dataNFT, merchant) {
       const manager = await initDDCNFTManager();
       console.log(`   ✅ DDCNFTManager initialized`);
       
-      // 使用 SDK 的方法来 mint（具体方法名需要根据 SDK 文档调整）
-      // 可能的方法：mint, createToken, registerDataNFT 等
-      let result = null;
+      // 尝试不同的 SDK mint 方法调用方式
+      // 方式1: mint(tokenId, keyHash) - 根据之前的实现
+      // 方式2: mint(tokenId, keyHash, metadataUri) - 可能需要 metadata URI
+      // 方式3: mint({ tokenId, keyHash, metadataUri }) - 对象参数
       
-      // 根据 SDK 源码，mint 方法签名是: mint(tokenId: bigint, keyHash: string)
-      // 返回交易哈希（string），不是对象
-      console.log(`   📝 Calling SDK mint method with tokenId=${tokenId}, keyHash=${DDC_MARKET_CONFIG.keyHash}`);
-      txHash = await manager.mint(BigInt(tokenId), DDC_MARKET_CONFIG.keyHash);
-      realTokenId = tokenId.toString();
+      let mintResult = null;
+      
+      // 根据 demo，需要使用 getKeyHash 从 privateKey 生成 keyHash
+      let keyHash = null;
+      if (getKeyHash) {
+        try {
+          const backendPrivateKey = process.env.BACKEND_WALLET_PRIVATE_KEY;
+          if (backendPrivateKey) {
+            // getKeyHash 是同步函数，接受 privateKey 字符串
+            keyHash = getKeyHash(backendPrivateKey);
+            console.log(`   ✅ Generated keyHash from privateKey using getKeyHash`);
+          } else {
+            throw new Error('BACKEND_WALLET_PRIVATE_KEY not found');
+          }
+        } catch (keyHashError) {
+          console.log(`   ⚠️  Failed to generate keyHash: ${keyHashError.message}`);
+          console.log(`   💡 Falling back to configured keyHash`);
+          keyHash = DDC_MARKET_CONFIG.keyHash;
+        }
+      } else {
+        console.log(`   ⚠️  getKeyHash function not available, using configured keyHash`);
+        keyHash = DDC_MARKET_CONFIG.keyHash;
+      }
+      
+      // 根据 demo，mint 方法签名是: mint(tokenId: bigint, keyHash: string)
+      console.log(`   📝 Calling SDK mint(tokenId=${finalTokenId}, keyHash=${keyHash.substring(0, 10)}...)...`);
+      mintResult = await manager.mint(BigInt(finalTokenId), keyHash);
+      console.log(`   ✅ SDK mint method succeeded`);
+      
+      // mintResult 可能是交易哈希（string）或交易对象
+      if (typeof mintResult === 'string') {
+        txHash = mintResult;
+      } else if (mintResult && mintResult.hash) {
+        txHash = mintResult.hash;
+      } else if (mintResult && typeof mintResult === 'object' && mintResult.txHash) {
+        txHash = mintResult.txHash;
+      } else {
+        throw new Error('SDK mint returned unexpected result format');
+      }
+      
+      realTokenId = finalTokenId.toString();
       
       console.log(`   ✅ Transaction sent via SDK: ${txHash}`);
       
       // 等待交易确认
       const provider = getProvider();
       const tx = await provider.getTransaction(txHash);
+      if (!tx) {
+        throw new Error('Transaction not found');
+      }
+      
       receipt = await tx.wait();
       
       if (receipt && receipt.hash) {
@@ -353,159 +454,62 @@ async function recordDataNFTToBlockchain(dataNFT, merchant) {
         console.log(`   ✅ Transaction confirmed!`);
         console.log(`   📦 Block: ${receipt.blockNumber}`);
         console.log(`   ⛽ Gas used: ${receipt.gasUsed.toString()}`);
+        
+        // 尝试从事件中获取 token ID
+        if (receipt.logs && receipt.logs.length > 0) {
+          try {
+            const TransferABI = ['event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)'];
+            const TokenMintedABI = ['event TokenMinted(uint256 indexed tokenId, address indexed to, string metadataURI)'];
+            const iface = new ethers.Interface([...TransferABI, ...TokenMintedABI]);
+            
+            for (const log of receipt.logs) {
+              try {
+                const parsed = iface.parseLog(log);
+                if (parsed && parsed.args) {
+                  if (parsed.name === 'Transfer' && parsed.args.tokenId) {
+                    realTokenId = parsed.args.tokenId.toString();
+                    break;
+                  } else if (parsed.name === 'TokenMinted' && parsed.args.tokenId) {
+                    realTokenId = parsed.args.tokenId.toString();
+                    break;
+                  }
+                }
+              } catch (e) {
+                // 忽略解析错误
+              }
+            }
+          } catch (e) {
+            // 忽略事件解析错误
+          }
+        }
+        
+        if (!realTokenId) {
+          realTokenId = finalTokenId.toString();
+        }
       } else {
         throw new Error('Transaction receipt missing hash');
       }
       
     } catch (sdkError) {
-      console.log(`   ⚠️  SDK method failed: ${sdkError.message}`);
-      console.log(`   🔄 Falling back to direct ethers.js call...`);
+      error = sdkError.message;
+      console.log(`   ❌ SDK method failed: ${error}`);
+      console.log(`   💡 This might be due to:`);
+      console.log(`      1. SDK mint method signature incorrect`);
+      console.log(`      2. Contract method not available`);
+      console.log(`      3. Insufficient permissions (wallet may not be contract owner)`);
+      console.log(`      4. Invalid parameters`);
+      console.log(`      5. Contract address may be incorrect`);
+      console.log(`   📝 Error details: ${sdkError.message}`);
       
-      // 如果 SDK 失败，回退到直接使用 ethers.js
-      try {
-        console.log(`   🔄 Attempting to mint DataNFT using ethers.js directly...`);
-        
-        // 创建合约实例
-        const contract = new ethers.Contract(
-          DDC_MARKET_CONFIG.contractAddress,
-          DDC_MARKET_ABI,
-          wallet
-        );
-        
-        // 尝试不同的方法签名（优先尝试包含 keyHash 的方法）
-        const keyHashBytes32 = DDC_MARKET_CONFIG.keyHash; // 已经是 bytes32 格式
-        const methodsToTry = [
-          // 方法1: mint(to, tokenId, uri, keyHash) - 包含 keyHash
-          { name: 'mint with keyHash', call: () => contract.mint(wallet.address, tokenId, metadataUri, keyHashBytes32) },
-          // 方法2: mintWithKeyHash(to, tokenId, uri, keyHash)
-          { name: 'mintWithKeyHash', call: () => contract.mintWithKeyHash(wallet.address, tokenId, metadataUri, keyHashBytes32) },
-          // 方法3: registerDataNFT(tokenId, metadataURI, keyHash)
-          { name: 'registerDataNFT with keyHash', call: () => contract.registerDataNFT(tokenId, metadataUri, keyHashBytes32) },
-          // 方法4: mint(to, tokenId, uri) - 不包含 keyHash
-          { name: 'mint', call: () => contract.mint(wallet.address, tokenId, metadataUri) },
-          // 方法5: safeMint(to, tokenId, uri)
-          { name: 'safeMint', call: () => contract.safeMint(wallet.address, tokenId, metadataUri) },
-          // 方法6: createToken(to, uri)
-          { name: 'createToken', call: () => contract.createToken(wallet.address, metadataUri) },
-          // 方法7: registerDataNFT(tokenId, metadataURI)
-          { name: 'registerDataNFT', call: () => contract.registerDataNFT(tokenId, metadataUri) }
-        ];
-        
-        let tx = null;
-        let methodUsed = null;
-        
-        for (let i = 0; i < methodsToTry.length; i++) {
-          try {
-            console.log(`   📝 Trying method ${i + 1}/${methodsToTry.length}: ${methodsToTry[i].name}...`);
-            tx = await methodsToTry[i].call();
-            methodUsed = methodsToTry[i].name;
-            console.log(`   ✅ Method "${methodUsed}" succeeded!`);
-            break;
-          } catch (methodError) {
-            // 如果方法不存在，继续尝试下一个
-            if (methodError.code === 'CALL_EXCEPTION' || 
-                methodError.message.includes('function') || 
-                methodError.message.includes('not found') ||
-                methodError.message.includes('execution reverted')) {
-              continue;
-            }
-            // 其他错误（如权限、参数等），记录并继续
-            console.log(`   ⚠️  Method ${i + 1} failed: ${methodError.message.substring(0, 100)}`);
-            continue;
-          }
-        }
-        
-          if (!tx) {
-            // 如果所有 mint 方法都失败，尝试使用 setTokenURI
-            console.log(`   💡 所有 mint 方法都不可用，尝试使用 setTokenURI...`);
-            console.log(`   💡 提示: 合约可能不支持直接 mint，或者需要特定的权限`);
-            
-            // 尝试使用 setTokenURI 方法
-            try {
-              const setURIABI = ['function setTokenURI(uint256 tokenId, string memory tokenURI) external'];
-              const setURIContract = new ethers.Contract(
-                DDC_MARKET_CONFIG.contractAddress,
-                setURIABI,
-                wallet
-              );
-              
-              // 使用 token ID 1 作为测试（根据之前的测试，token 1 和 2 已存在）
-              // 实际应该根据 DataNFT 分配或生成 token ID
-              const assignedTokenId = 1; // 这里应该根据实际逻辑分配 token ID
-              console.log(`   📝 尝试设置 Token ${assignedTokenId} 的 URI...`);
-              
-              tx = await setURIContract.setTokenURI(assignedTokenId, metadataUri);
-              realTokenId = assignedTokenId.toString();
-              console.log(`   ✅ setTokenURI 方法可用！`);
-            } catch (setURIError) {
-              console.log(`   ❌ setTokenURI 也失败: ${setURIError.message.substring(0, 200)}`);
-              throw new Error(`No suitable contract method found. Contract may need different ABI or the contract address may be incorrect. Last error: ${setURIError.message.substring(0, 200)}`);
-            }
-          }
-          
-          console.log(`   📤 Transaction sent: ${tx.hash}`);
-          console.log(`   ⏳ Waiting for confirmation...`);
-          
-          // 等待交易确认
-          receipt = await tx.wait();
-          
-          if (receipt && receipt.hash) {
-            txHash = receipt.hash;
-            console.log(`   ✅ Transaction confirmed!`);
-            console.log(`   📦 Block: ${receipt.blockNumber}`);
-            console.log(`   ⛽ Gas used: ${receipt.gasUsed.toString()}`);
-            
-            // 尝试从事件中获取 token ID
-            if (receipt.logs && receipt.logs.length > 0) {
-              try {
-                const iface = new ethers.Interface(DDC_MARKET_ABI);
-                for (const log of receipt.logs) {
-                  try {
-                    const parsed = iface.parseLog(log);
-                    if (parsed && parsed.args) {
-                      if (parsed.name === 'Transfer' && parsed.args.tokenId) {
-                        realTokenId = parsed.args.tokenId.toString();
-                      } else if (parsed.name === 'TokenMinted' && parsed.args.tokenId) {
-                        realTokenId = parsed.args.tokenId.toString();
-                      }
-                    }
-                  } catch (e) {
-                    // 忽略解析错误
-                  }
-                }
-              } catch (e) {
-                // 忽略事件解析错误
-              }
-            }
-            
-            if (!realTokenId) {
-              realTokenId = tokenId.toString();
-            }
-            
-          } else {
-            throw new Error('Transaction receipt missing hash');
-          }
-        
-      } catch (contractError) {
-        error = contractError.message;
-        console.log(`   ❌ Contract call failed: ${error}`);
-        console.log(`   💡 This might be due to:`);
-        console.log(`      1. Contract ABI mismatch`);
-        console.log(`      2. Contract method not available`);
-        console.log(`      3. Insufficient permissions`);
-        console.log(`      4. Invalid parameters`);
-        console.log(`      5. Contract address may be incorrect`);
-        console.log(`   📝 Error details: ${contractError.message}`);
-        
-        // 如果合约调用失败，返回错误信息
-        return {
-          success: false,
-          error: error,
-          walletAddress: wallet.address,
-          balance: balanceEth,
-          metadataUri: metadataUri
-        };
-      }
+      // SDK 失败，返回错误信息（不再回退到 ethers.js）
+      return {
+        success: false,
+        error: error,
+        walletAddress: wallet.address,
+        balance: balanceEth,
+        metadataUri: metadataUri,
+        tokenId: tokenId.toString()
+      };
     }
     
     // 记录上链信息
