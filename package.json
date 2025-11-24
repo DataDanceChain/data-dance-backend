@@ -14,7 +14,7 @@
     "seed:all": "node scripts/createAwards.js && node scripts/createBadges.js && node scripts/createCultureWeb3Event.js && node scripts/createGCCEvent.js && node scripts/createHashGlobalUser.js && node scripts/createOffGridEvent.js && node scripts/createRPCParty.js && node scripts/seedTestUserData.js"
   },
   "dependencies": {
-    "@ddcmarket/sdk": "github:DataDanceChain/DDC-Market-SDK",
+    "@ddcmarket/sdk": "^0.2.1",
     "@paralleldrive/cuid2": "^2.2.2",
     "@prisma/client": "5.0.0",
     "apn": "^2.2.0",
@@ -56,5 +56,6 @@
     "prisma": "5.0.0",
     "supertest": "^7.1.1",
     "typescript": "^5.1.3"
-  }
+  },
+  "packageManager": "yarn@1.22.22+sha512.a6b2f7906b721bba3d67d4aff083df04dad64c399707841b7acf00f6b133b7ac24255f2652fa22ae3534329dc6180534e98d17432037ff6fd140556e2bb3137e"
 }
