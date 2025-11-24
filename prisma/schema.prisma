@@ -464,10 +464,10 @@ model Snapshot {
   updatedAt   DateTime  @updatedAt
   name        String
   description String?
-  activityId  String?
+  activityId  String
   merchantId  String
   claims      Json?
-  activity    Activity? @relation(fields: [activityId], references: [id])
+  activity    Activity  @relation(fields: [activityId], references: [id])
   merchant    User      @relation(fields: [merchantId], references: [id])
   dataNFTs    DataNFT[] @relation("DataNFTToSnapshot")
   tags        Tag[]     @relation("SnapshotToTag")
@@ -485,6 +485,11 @@ model DataNFT {
   currentSales Int               @default(0)
   merchantId   String
   image        String?
+  
+  // 数据来源标识和数据存储
+  dataSource   String            @default("activity") // "activity" | "upload"
+  dataRecords  Json?             // 用于存储直接上传的CSV数据
+  
   merchant     User              @relation(fields: [merchantId], references: [id])
   purchases    DataNFTPurchase[]
   snapshots    Snapshot[]        @relation("DataNFTToSnapshot")

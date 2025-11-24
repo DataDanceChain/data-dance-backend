@@ -124,11 +124,19 @@ const getDataNFTs = async (req, res) => {
 
     // 为每个 DataNFT 计算 size 字段
     const dataWithSize = dataNFTs.map(nft => {
-      // 获取所有 snapshots 的 claims
-      const allClaims = nft.snapshots.flatMap(s => s.claims || []);
-      // 获取所有不重复的 userId
-      const uniqueUserIds = [...new Set(allClaims.map(c => c.userId).filter(Boolean))];
-      const size = uniqueUserIds.length;
+      let size = 0;
+      
+      if (nft.dataSource === 'upload' && nft.dataRecords) {
+        // 直接上传的数据包：从 dataRecords 计算
+        size = nft.dataRecords.recordCount || 0;
+      } else {
+        // 活动数据：从 snapshots.claims 计算
+        const allClaims = nft.snapshots.flatMap(s => s.claims || []);
+        // 获取所有不重复的 userId
+        const uniqueUserIds = [...new Set(allClaims.map(c => c.userId).filter(Boolean))];
+        size = uniqueUserIds.length;
+      }
+      
       return { ...nft, size };
     });
 
@@ -175,8 +183,18 @@ const getDataNFTById = async (req, res) => {
     }
 
     // 计算 size 字段
-    const userIds = dataNFT.snapshots.map(s => s.userId).filter(Boolean);
-    const size = new Set(userIds).size;
+    let size = 0;
+    
+    if (dataNFT.dataSource === 'upload' && dataNFT.dataRecords) {
+      // 直接上传的数据包：从 dataRecords 计算
+      size = dataNFT.dataRecords.recordCount || 0;
+    } else {
+      // 活动数据：从 snapshots.claims 计算
+      const allClaims = dataNFT.snapshots.flatMap(s => s.claims || []);
+      const uniqueUserIds = [...new Set(allClaims.map(c => c.userId).filter(Boolean))];
+      size = uniqueUserIds.length;
+    }
+    
     res.json({ ...dataNFT, size });
   } catch (error) {
     console.error('Error fetching DataNFT:', error);
