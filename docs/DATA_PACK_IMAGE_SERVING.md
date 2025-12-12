@@ -13,17 +13,48 @@
 http://localhost:8080/data-pack/{Category} Data Pack.svg
 ```
 
-### 示例
+**示例**:
 - `http://localhost:8080/data-pack/Electronics Data Pack.svg`
 - `http://localhost:8080/data-pack/Fashion & Apparel Data Pack.svg`
 - `http://localhost:8080/data-pack/Home & Kitchen Data Pack.svg`
 - `http://localhost:8080/data-pack/Other Data Pack.svg`
 
+### Owner 头像图片
+所有用户和商家的头像图片可以通过以下路径访问：
+
+```
+http://localhost:8080/assets/avatars/{filename}.jpg
+```
+
+**示例**:
+- `http://localhost:8080/assets/avatars/default-avatar.jpg`
+- `http://localhost:8080/assets/avatars/merchant-avatar.png`
+
 ## 🔧 后端配置
 
 ### 静态文件服务配置
 
-在 `src/app.js` 中已添加：
+在 `src/app.js` 中已配置：
+
+#### 1. Assets 静态文件服务（头像、Logo、Banner 等）
+
+```javascript
+// 静态文件服务 - Assets (avatars, logos, banners, nfts, etc.)
+app.use('/assets', express.static(path.join(__dirname, '../public/assets'), {
+  setHeaders: (res, filePath) => {
+    // Apple Wallet pass 文件
+    if (filePath.endsWith('.pkpass')) {
+      res.set('Content-Type', 'application/vnd.apple.pkpass');
+    }
+    // 图片文件设置缓存
+    else if (filePath.match(/\.(jpg|jpeg|png|gif|webp|avif)$/i)) {
+      res.set('Cache-Control', 'public, max-age=31536000'); // 1年
+    }
+  }
+}));
+```
+
+#### 2. Data Pack 图片静态文件服务
 
 ```javascript
 // 静态文件服务 - Data Pack Images
@@ -32,7 +63,6 @@ app.use('/data-pack', express.static(path.join(__dirname, '../public/data-pack')
     // 确保 SVG 文件返回正确的 MIME 类型
     if (filePath.endsWith('.svg')) {
       res.set('Content-Type', 'image/svg+xml');
-      // 设置缓存头（可选，SVG 文件通常可以缓存）
       res.set('Cache-Control', 'public, max-age=31536000'); // 1年
     }
   }
@@ -44,9 +74,13 @@ app.use('/data-pack', express.static(path.join(__dirname, '../public/data-pack')
 ```
 public/
   ├── assets/
-  │   ├── banners/
-  │   └── nfts/
-  └── data-pack/
+  │   ├── avatars/          # 用户和商家头像
+  │   │   └── default-avatar.jpg
+  │   ├── banners/          # 活动横幅
+  │   ├── nfts/            # NFT 图片（活动数据）
+  │   ├── logos/           # Logo 图片
+  │   └── badges/          # 徽章图片
+  └── data-pack/           # 数据包 SVG 图片
       ├── Automotive Data Pack.svg
       ├── Baby & Kids Data Pack.svg
       ├── Beauty & Personal Care Data Pack.svg
@@ -64,21 +98,34 @@ public/
 ### 方式 1: 直接使用相对路径（推荐）
 
 ```javascript
-// 在 API 响应中，图片路径已经是 /data-pack/xxx.svg
+// DataNFT 封面图
 <img src={nft.coverImage} alt={nft.title} />
 // 浏览器会自动使用当前域名，变成：
 // http://localhost:8080/data-pack/Electronics Data Pack.svg
+
+// Owner 头像
+<img src={nft.ownerAvatar} alt={nft.owner} />
+// 浏览器会自动使用当前域名，变成：
+// http://localhost:8080/assets/avatars/default-avatar.jpg
 ```
 
 ### 方式 2: 使用完整 URL
 
 ```javascript
 const API_BASE_URL = 'http://localhost:8080';
-const imageUrl = nft.coverImage.startsWith('http') 
+
+// DataNFT 封面图
+const coverImageUrl = nft.coverImage.startsWith('http') 
   ? nft.coverImage 
   : `${API_BASE_URL}${nft.coverImage}`;
 
-<img src={imageUrl} alt={nft.title} />
+// Owner 头像
+const avatarUrl = nft.ownerAvatar?.startsWith('http') 
+  ? nft.ownerAvatar 
+  : `${API_BASE_URL}${nft.ownerAvatar || '/assets/avatars/default-avatar.jpg'}`;
+
+<img src={coverImageUrl} alt={nft.title} />
+<img src={avatarUrl} alt={nft.owner} />
 ```
 
 ### 方式 3: 使用 Next.js Image 组件（如果使用 Next.js）
@@ -97,15 +144,26 @@ import Image from 'next/image';
 
 ## 📋 HTTP 响应头
 
-当访问 SVG 图片时，服务器会返回以下响应头：
+### SVG 图片响应头
+
+当访问 SVG 图片时，服务器会返回：
 
 ```
 Content-Type: image/svg+xml
 Cache-Control: public, max-age=31536000
 ```
 
+### JPG/PNG 图片响应头
+
+当访问 JPG/PNG 图片（头像、NFT 等）时，服务器会返回：
+
+```
+Content-Type: image/jpeg 或 image/png
+Cache-Control: public, max-age=31536000
+```
+
 这确保了：
-- ✅ 浏览器正确识别 SVG 格式
+- ✅ 浏览器正确识别图片格式
 - ✅ 图片可以被缓存，提高性能
 - ✅ 支持跨域访问（如果配置了 CORS）
 

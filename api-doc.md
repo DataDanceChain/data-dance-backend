@@ -1707,20 +1707,44 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 
 ### 图片格式说明
 
-DataNFT 的 `coverImage` 字段支持两种图片格式：
+所有图片（包括 DataNFT 封面图和 Owner 头像）都通过后端静态文件服务提供，可直接通过 HTTP 访问。
+
+#### DataNFT 封面图 (`coverImage`)
+
+支持两种图片格式：
 
 1. **SVG 矢量图**（数据包）:
    - 路径格式：`/data-pack/{Category} Data Pack.svg`
    - 示例：`/data-pack/Electronics Data Pack.svg`
+   - 访问地址：`http://localhost:8080/data-pack/Electronics Data Pack.svg`
    - 特点：矢量图，可无损缩放，文件小
-   - 前端可直接使用 `<img src={coverImage} />` 显示
+   - MIME 类型：`image/svg+xml`
 
 2. **JPG/PNG 位图**（活动数据）:
    - 路径格式：`/assets/nfts/{filename}.jpg` 或 `/assets/nfts/{filename}.png`
+   - 访问地址：`http://localhost:8080/assets/nfts/{filename}.jpg`
    - 特点：位图，固定分辨率
-   - 前端可直接使用 `<img src={coverImage} />` 显示
+   - MIME 类型：`image/jpeg` 或 `image/png`
 
-**注意**: 所有图片路径都是相对于网站根目录的路径，前端需要根据实际情况拼接完整 URL。
+#### Owner 头像 (`ownerAvatar`)
+
+- 路径格式：`/assets/avatars/{filename}.jpg` 或 `/assets/avatars/{filename}.png`
+- 访问地址：`http://localhost:8080/assets/avatars/{filename}.jpg`
+- 特点：商家/组织用户的头像图片
+- MIME 类型：`image/jpeg` 或 `image/png`
+- 默认头像：`/assets/avatars/default-avatar.jpg`（如果用户未上传头像）
+
+**前端使用**:
+```javascript
+// 所有图片都可以直接使用，浏览器会自动使用当前域名
+<img src={nft.coverImage} alt={nft.title} />
+<img src={nft.ownerAvatar} alt={nft.owner} />
+```
+
+**注意**: 
+- 所有图片路径都是相对于网站根目录的路径
+- 图片通过后端静态文件服务提供，无需额外配置
+- 支持 SVG、JPG、PNG 等常见图片格式
 
 ### Size 字段计算说明
 
@@ -2322,12 +2346,16 @@ GET /api/data-nfts/purchased?page=1&limit=10
 - 两者数据结构类似，但 `/nft-market` 只展示已发布（`isPublished=true`）的 DataNFT
 
 **图片格式支持**:
-- **数据包** (`dataSource: "upload"`): 使用 SVG 格式，路径为 `/data-pack/{Category} Data Pack.svg`
-  - 示例：`/data-pack/Electronics Data Pack.svg`
-  - 支持所有常见类别：Automotive, Baby & Kids, Beauty & Personal Care, Books & Media, Electronics, Fashion & Apparel, Health & Wellness, Home & Kitchen, Sports & Outdoors, Other
-- **活动数据** (`dataSource: "activity"`): 使用 JPG/PNG 格式，路径为 `/assets/nfts/{filename}.jpg`
+- **DataNFT 封面图**:
+  - **数据包** (`dataSource: "upload"`): 使用 SVG 格式，路径为 `/data-pack/{Category} Data Pack.svg`
+    - 示例：`/data-pack/Electronics Data Pack.svg`
+    - 支持所有常见类别：Automotive, Baby & Kids, Beauty & Personal Care, Books & Media, Electronics, Fashion & Apparel, Health & Wellness, Home & Kitchen, Sports & Outdoors, Other
+  - **活动数据** (`dataSource: "activity"`): 使用 JPG/PNG 格式，路径为 `/assets/nfts/{filename}.jpg`
+- **Owner 头像**:
+  - 路径格式：`/assets/avatars/{filename}.jpg` 或 `/assets/avatars/{filename}.png`
+  - 默认头像：`/assets/avatars/default-avatar.jpg`
 - 所有图片都通过后端静态文件服务提供，可直接通过 HTTP 访问
-- 前端使用 `<img src={coverImage} />` 即可显示，浏览器自动识别格式
+- 前端使用 `<img src={coverImage} />` 和 `<img src={ownerAvatar} />` 即可显示，浏览器自动识别格式
 
 **Size 字段计算**:
 - **上传数据包** (`dataSource: "upload"`): `size = dataRecords.recordCount`（CSV 文件中的有效记录数）

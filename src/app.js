@@ -102,11 +102,18 @@ app.use(express.urlencoded({ extended: true }));
 // 配置 MIME 类型
 express.static.mime.define({ 'application/vnd.apple.pkpass': ['pkpass'] });
 
-// 静态文件服务 - Assets
+// 静态文件服务 - Assets (avatars, logos, banners, nfts, etc.)
 app.use('/assets', express.static(path.join(__dirname, '../public/assets'), {
   setHeaders: (res, filePath) => {
+    // Apple Wallet pass 文件
     if (filePath.endsWith('.pkpass')) {
       res.set('Content-Type', 'application/vnd.apple.pkpass');
+    }
+    // 图片文件设置缓存和 MIME 类型
+    else if (filePath.match(/\.(jpg|jpeg|png|gif|webp|avif)$/i)) {
+      // 设置缓存头（图片文件可以缓存）
+      res.set('Cache-Control', 'public, max-age=31536000'); // 1年
+      // Express static 会自动设置正确的 MIME 类型
     }
   }
 }));
