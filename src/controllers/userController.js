@@ -481,3 +481,139 @@ exports.getReferralCode = async (req, res) => {
     });
   }
 };
+
+/**
+ * 检查圣诞欢迎奖励领取状态
+ * @route GET /api/users/christmas-welcome-bonus/status
+ * @access Private
+ */
+exports.getChristmasWelcomeBonusStatus = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const POINTS_AWARDED = 5;
+    const SOURCE = 'CHRISTMAS_WELCOME_BONUS';
+
+    // 检查是否已领取
+    const existingClaim = await prisma.point.findFirst({
+      where: {
+        userId,
+        source: SOURCE
+      },
+      orderBy: { createdAt: 'desc' }
+    });
+
+    res.status(200).json({
+      status: 'success',
+      data: {
+        claimed: !!existingClaim,
+        claimedAt: existingClaim?.createdAt || null,
+        pointsAwarded: POINTS_AWARDED
+      }
+    });
+  } catch (error) {
+    console.error('Error checking Christmas welcome bonus status:', error);
+    res.status(500).json({
+      status: 'error',
+      message: 'Server error',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+};
+
+/**
+ * 领取圣诞欢迎奖励
+ * @route POST /api/users/christmas-welcome-bonus/claim
+ * @access Private
+ */
+exports.claimChristmasWelcomeBonus = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const POINTS_AWARDED = 5;
+    const SOURCE = 'CHRISTMAS_WELCOME_BONUS';
+    
+    // 圣诞活动时间范围（可根据实际需求调整）
+    const CHRISTMAS_START = new Date('2024-12-01T00:00:00Z');
+    const CHRISTMAS_END = new Date('2025-01-07T23:59:59Z');
+    const now = new Date();
+
+    // 检查是否在活动期间
+    if (now < CHRISTMAS_START || now > CHRISTMAS_END) {
+      return res.status(400).json({
+        status: 'error',
+        message: 'Christmas Welcome Bonus is not available at this time',
+        code: 'NOT_ELIGIBLE'
+      });
+    }
+
+    // 使用事务确保并发安全
+    const result = await prisma.$transaction(async (tx) => {
+      // 检查是否已领取（在事务内检查，防止并发问题）
+      const existingClaim = await tx.point.findFirst({
+        where: {
+          userId,
+          source: SOURCE
+        }
+      });
+
+      if (existingClaim) {
+        throw new Error('ALREADY_CLAIMED');
+      }
+
+      // 更新用户总积分
+      const updatedUser = await tx.user.update({
+        where: { id: userId },
+        data: {
+          totalPoints: { increment: POINTS_AWARDED }
+        },
+        select: { totalPoints: true }
+      });
+
+      // 创建积分记录
+      const pointRecord = await tx.point.create({
+        data: {
+          userId,
+          amount: POINTS_AWARDED,
+          source: SOURCE,
+          sourceId: 'christmas_welcome_bonus_2024'
+        }
+      });
+
+      return {
+        pointsAwarded: POINTS_AWARDED,
+        newBalance: updatedUser.totalPoints,
+        claimedAt: pointRecord.createdAt
+      };
+    }, {
+      isolationLevel: 'Serializable' // 最高隔离级别，防止并发问题
+    });
+
+    res.status(200).json({
+      status: 'success',
+      message: 'Christmas Welcome Bonus claimed successfully',
+      data: {
+        pointsAwarded: result.pointsAwarded,
+        description: 'Christmas Welcome Bonus',
+        newBalance: result.newBalance,
+        claimedAt: result.claimedAt
+      }
+    });
+  } catch (error) {
+    console.error('Error claiming Christmas welcome bonus:', error);
+    
+    // 处理已领取错误
+    if (error.message === 'ALREADY_CLAIMED') {
+      return res.status(400).json({
+        status: 'error',
+        message: 'Christmas Welcome Bonus has already been claimed',
+        code: 'ALREADY_CLAIMED'
+      });
+    }
+
+    // 处理其他错误
+    res.status(500).json({
+      status: 'error',
+      message: 'Server error',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+};

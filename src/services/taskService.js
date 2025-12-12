@@ -398,4 +398,59 @@ function handleClaimError(error) {
   return { status: 500, message: error.message || "Internal server error" }; // Return the actual error message if not one of the above
 }
 
-module.exports = { getTasksByAward, recordTaskProgress, claimTask };
+/**
+ * Check Christmas shopping tasks completion status for a user
+ * @param {string} userId - User ID
+ * @returns {Promise<Object>} Task status object with canClaim, tasksCompleted, totalTasks, missingTasks
+ */
+async function checkChristmasShoppingTasks(userId) {
+  const CHRISTMAS_AWARD_ID = 'christmas-shopping';
+  
+  try {
+    const tasks = await getTasksByAward(userId, CHRISTMAS_AWARD_ID);
+    
+    if (!tasks || tasks.length === 0) {
+      // If no tasks found, assume not eligible
+      return {
+        canClaim: false,
+        tasksCompleted: 0,
+        totalTasks: 0,
+        missingTasks: []
+      };
+    }
+    
+    const totalTasks = tasks.length;
+    const completedTasks = tasks.filter(t => t.finalStatus === 'COMPLETED' || t.claimed);
+    const tasksCompleted = completedTasks.length;
+    const canClaim = tasksCompleted === totalTasks && totalTasks > 0;
+    
+    // Get missing tasks (not completed and not claimed)
+    const missingTasks = tasks
+      .filter(t => t.finalStatus !== 'COMPLETED' && !t.claimed)
+      .map(t => ({
+        taskId: t.id,
+        title: t.title,
+        currentCount: t.doneCount || 0,
+        requiredCount: t.requirementCount || 1,
+        progress: t.progress || 0
+      }));
+    
+    return {
+      canClaim,
+      tasksCompleted,
+      totalTasks,
+      missingTasks
+    };
+  } catch (error) {
+    logger.error('Error checking Christmas shopping tasks:', error);
+    // Return safe default
+    return {
+      canClaim: false,
+      tasksCompleted: 0,
+      totalTasks: 0,
+      missingTasks: []
+    };
+  }
+}
+
+module.exports = { getTasksByAward, recordTaskProgress, claimTask, checkChristmasShoppingTasks };

@@ -10,7 +10,9 @@ const {
   importWallet, 
   rewardPoints, 
   getReferralCode, 
-  getRegistrationTime
+  getRegistrationTime,
+  getChristmasWelcomeBonusStatus,
+  claimChristmasWelcomeBonus
 } = require('../controllers/userController');
 // Referral endpoints are now centralized under /api/referrals via referralRoutes.js
 const { protect } = require('../middlewares/authMiddleware');
@@ -49,5 +51,8 @@ router.get('/referral-code', getReferralCode);
 // 获取当前用户注册时间
 router.get('/registered-at', getRegistrationTime);
 
+// 圣诞欢迎奖励相关接口
+router.get('/christmas-welcome-bonus/status', getChristmasWelcomeBonusStatus);
+router.post('/christmas-welcome-bonus/claim', claimChristmasWelcomeBonus);
 
 module.exports = router;

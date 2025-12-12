@@ -1,5 +1,6 @@
 const prisma = require('../utils/prisma');
 const assetService = require('../services/assetService');
+const { checkChristmasShoppingTasks } = require('../services/taskService');
 
 /**
  * 获取用户资产总览
@@ -101,6 +102,19 @@ exports.getBadges = async function (req, res) {
     const collectedBadgeIds = userBadges.map(ub => ub.badgeId);
     const uncollectedBadges = allBadges.filter(badge => !collectedBadgeIds.includes(badge.id));
 
+    // 检查圣诞徽章的任务状态
+    const CHRISTMAS_BADGE_ID = 'christmas-badge-2025';
+    const christmasBadge = allBadges.find(b => b.id === CHRISTMAS_BADGE_ID);
+    let christmasTaskStatus = null;
+    
+    if (christmasBadge) {
+      const isCollected = collectedBadgeIds.includes(CHRISTMAS_BADGE_ID);
+      if (!isCollected) {
+        // Only check task status if badge is not collected
+        christmasTaskStatus = await checkChristmasShoppingTasks(req.user.id);
+      }
+    }
+
     res.status(200).json({
       status: 'success',
       data: {
@@ -116,17 +130,26 @@ exports.getBadges = async function (req, res) {
           },
           acquiredAt: ub.acquiredAt
         })),
-        uncollected: uncollectedBadges.map(badge => ({
-          id: badge.id,
-          name: badge.name,
-          description: badge.description,
-          image: badge.image,
-          creator: {
-            id: badge.creator.id,
-            name: badge.creator.name,
-            isOrganization: badge.creator.isOrganization
+        uncollected: uncollectedBadges.map(badge => {
+          const badgeData = {
+            id: badge.id,
+            name: badge.name,
+            description: badge.description,
+            image: badge.image,
+            creator: {
+              id: badge.creator.id,
+              name: badge.creator.name,
+              isOrganization: badge.creator.isOrganization
+            }
+          };
+          
+          // Add taskStatus for Christmas badge if not collected
+          if (badge.id === CHRISTMAS_BADGE_ID && christmasTaskStatus) {
+            badgeData.taskStatus = christmasTaskStatus;
           }
-        }))
+          
+          return badgeData;
+        })
       }
     });
   } catch (error) {
@@ -231,6 +254,9 @@ exports.getBadgeDetail = async function (req, res) {
 exports.collectBadge = async function (req, res) {
   try {
     const { id } = req.params;
+    const userId = req.user.id;
+    const CHRISTMAS_BADGE_ID = 'christmas-badge-2025';
+    const CHRISTMAS_POINTS = 5;
     
     // 检查勋章是否存在
     const badge = await prisma.badge.findUnique({
@@ -264,65 +290,109 @@ exports.collectBadge = async function (req, res) {
       });
     }
     
-    // 创建用户勋章关系
-    const userBadge = await prisma.userBadge.create({
-      data: {
-        user: {
-          connect: { id: req.user.id }
+    // Special handling for Christmas badge: verify tasks are completed
+    if (id === CHRISTMAS_BADGE_ID) {
+      const taskStatus = await checkChristmasShoppingTasks(userId);
+      
+      if (!taskStatus.canClaim) {
+        return res.status(400).json({
+          status: 'error',
+          message: 'Please complete all Christmas tasks before claiming the Christmas Badge',
+          code: 'TASKS_INCOMPLETE',
+          data: {
+            missingTasks: taskStatus.missingTasks,
+            activityStatusUrl: '/user/awards?category=christmas-shopping'
+          }
+        });
+      }
+    }
+    
+    // 使用事务确保数据一致性
+    const result = await prisma.$transaction(async (tx) => {
+      // 创建用户勋章关系
+      const userBadge = await tx.userBadge.create({
+        data: {
+          user: {
+            connect: { id: userId }
+          },
+          badge: {
+            connect: { id }
+          },
+          acquiredAt: new Date()
         },
-        badge: {
-          connect: { id }
-        },
-        acquiredAt: new Date()
-      },
-      include: {
-        badge: {
-          include: {
-            creator: true
+        include: {
+          badge: {
+            include: {
+              creator: true
+            }
           }
         }
+      });
+      
+      // 如果是圣诞徽章，发放 5 积分
+      if (id === CHRISTMAS_BADGE_ID) {
+        // 更新用户总积分
+        await tx.user.update({
+          where: { id: userId },
+          data: {
+            totalPoints: { increment: CHRISTMAS_POINTS }
+          }
+        });
+        
+        // 创建积分记录
+        await tx.point.create({
+          data: {
+            userId,
+            amount: CHRISTMAS_POINTS,
+            source: 'BADGE_CLAIM',
+            sourceId: CHRISTMAS_BADGE_ID
+          }
+        });
       }
-    });
-    
-    // 记录交易
-    await prisma.assetTransaction.create({
-      data: {
-        user: {
-          connect: { id: req.user.id }
-        },
-        type: 'BADGE_ACQUIRED',
-        assetId: id,
-        description: `Collected badge: ${badge.name}`
-      }
-    });
-    
-    // 创建通知
-    await prisma.notification.create({
-      data: {
-        user: {
-          connect: { id: req.user.id }
-        },
-        type: 'BADGE',
-        title: 'New Badge Collected',
-        content: `Congratulations! You've earned the ${badge.name} badge from ${badge.creator.name}.`,
-        isRead: false
-      }
+      
+      // 记录交易
+      await tx.assetTransaction.create({
+        data: {
+          user: {
+            connect: { id: userId }
+          },
+          type: 'BADGE_ACQUIRED',
+          assetId: id,
+          description: `Collected badge: ${badge.name}`
+        }
+      });
+      
+      // 创建通知
+      await tx.notification.create({
+        data: {
+          user: {
+            connect: { id: userId }
+          },
+          type: 'BADGE',
+          title: 'New Badge Collected',
+          content: `Congratulations! You've earned the ${badge.name} badge from ${badge.creator.name}.${id === CHRISTMAS_BADGE_ID ? ` You've also earned ${CHRISTMAS_POINTS} Points!` : ''}`,
+          isRead: false
+        }
+      });
+      
+      return userBadge;
     });
     
     res.status(200).json({
       status: 'success',
       message: 'Badge collected successfully',
       data: {
-        id: userBadge.badge.id,
-        name: userBadge.badge.name,
-        description: userBadge.badge.description,
-        image: userBadge.badge.image,
+        id: result.badge.id,
+        name: result.badge.name,
+        description: result.badge.description,
+        image: result.badge.image,
         creator: {
-          id: userBadge.badge.creator.id,
-          name: userBadge.badge.creator.name,
-          isOrganization: userBadge.badge.creator.isOrganization
+          id: result.badge.creator.id,
+          name: result.badge.creator.name,
+          isOrganization: result.badge.creator.isOrganization
         },
-        acquiredAt: userBadge.acquiredAt
+        acquiredAt: result.acquiredAt,
+        ...(id === CHRISTMAS_BADGE_ID ? { pointsAwarded: CHRISTMAS_POINTS } : {})
       }
     });
   } catch (error) {
