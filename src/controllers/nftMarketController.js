@@ -33,8 +33,20 @@ exports.getMarketList = async (req, res) => {
       orderBy: search ? undefined : { createdAt: 'desc' }
     });
     let data = dataNFTs.map(nft => {
-      const userIds = nft.snapshots.map(s => s.userId).filter(Boolean);
-      const size = new Set(userIds).size;
+      // 计算 size：根据 dataSource 类型使用不同的计算方式
+      let size = 0;
+      if (nft.dataSource === 'upload' && nft.dataRecords) {
+        // 直接上传的数据包：从 dataRecords 计算
+        const dataRecords = typeof nft.dataRecords === 'string' 
+          ? JSON.parse(nft.dataRecords) 
+          : nft.dataRecords;
+        size = dataRecords.recordCount || 0;
+      } else {
+        // 活动数据：从 snapshots 计算
+        const userIds = nft.snapshots.map(s => s.userId).filter(Boolean);
+        size = new Set(userIds).size;
+      }
+      
       // 计算关联度分数
       let score = 0;
       if (search) {
@@ -96,9 +108,19 @@ exports.getMarketDetail = async (req, res) => {
       _count: { id: true },
       where: { dataNFTId: id }
     });
-    // 计算实际数据量
-    const userIds = dataNFT.snapshots.map(s => s.userId).filter(Boolean);
-    const size = new Set(userIds).size;
+    // 计算实际数据量：根据 dataSource 类型使用不同的计算方式
+    let size = 0;
+    if (dataNFT.dataSource === 'upload' && dataNFT.dataRecords) {
+      // 直接上传的数据包：从 dataRecords 计算
+      const dataRecords = typeof dataNFT.dataRecords === 'string' 
+        ? JSON.parse(dataNFT.dataRecords) 
+        : dataNFT.dataRecords;
+      size = dataRecords.recordCount || 0;
+    } else {
+      // 活动数据：从 snapshots 计算
+      const userIds = dataNFT.snapshots.map(s => s.userId).filter(Boolean);
+      size = new Set(userIds).size;
+    }
     res.status(200).json({
       status: 'success',
       data: {
