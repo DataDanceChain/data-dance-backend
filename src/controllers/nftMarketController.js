@@ -54,7 +54,10 @@ exports.getMarketList = async (req, res) => {
         size,
         price: nft.price,
         description: nft.description,
-        tags: nft.tags.map(t => t.name),
+        tags: nft.tags.map(t => ({
+          id: t.id,
+          name: t.name
+        })),
         _score: score
       };
     });
@@ -108,7 +111,10 @@ exports.getMarketDetail = async (req, res) => {
         size,
         price: dataNFT.price,
         description: dataNFT.description,
-        tags: dataNFT.tags.map(t => t.name),
+        tags: dataNFT.tags.map(t => ({
+          id: t.id,
+          name: t.name
+        })),
         sales: sales._count.id || 0,
         revenue: sales._count.id * dataNFT.price || 0
       }

@@ -34,3 +34,8 @@ node scripts/recordDataNFTToBlockchain.js --all
 - 检查数据库：查看 `DataNFT` 表中的 `blockchainTokenId` 和 `blockchainTxHash` 字段
 - 检查链上：使用 tokenId 查询链上合约确认 mint 成功
 
+
+
+
+
+

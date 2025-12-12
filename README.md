@@ -7,14 +7,64 @@
 ### 环境要求
 - Docker & Docker Compose
 - Node.js 18+ (开发环境)
+- PostgreSQL 数据库（可使用外部数据库或 Docker Compose 管理的数据库）
 
-### 启动服务
+### 使用外部数据库（datadance-postgres）
+
+如果您的 Docker Desktop 中已有运行中的 `datadance-postgres` 容器，按以下步骤配置：
+
+1. **创建环境配置文件**
+```bash
+cp env.example .env
+```
+
+2. **配置数据库连接**
+
+编辑 `.env` 文件，设置 `DATABASE_URL`：
+
+**如果后端在 Docker 容器中运行**（推荐）：
+```bash
+DATABASE_URL="postgresql://postgres:postgres@host.docker.internal:5432/datadance?schema=public"
+```
+
+**如果后端在本地运行**：
+```bash
+DATABASE_URL="postgresql://postgres:postgres@localhost:5432/datadance?schema=public"
+```
+
+3. **运行数据库迁移**
+```bash
+# 如果使用 Docker
+docker compose exec ddc-backend-api npm run prisma:migrate
+
+# 如果本地运行
+npm run prisma:migrate
+```
+
+4. **启动后端服务**
+```bash
+# 使用 Docker Compose（推荐）
+docker compose up -d
+
+# 或本地运行
+npm install
+npm run dev
+```
+
+服务启动后：
+- **API服务**: http://localhost:10000
+- **数据库**: localhost:5432 (PostgreSQL - datadance-postgres 容器)
+
+### 启动所有服务（包含数据库）
+
+如果需要使用 Docker Compose 管理的数据库：
+
 ```bash
 # 克隆仓库
 git clone <repository-url>
 cd data-dance-backend
 
-# 启动所有服务
+# 启动所有服务（需要先取消 docker-compose.yaml 中数据库服务的注释）
 docker compose up -d
 ```
 
@@ -51,18 +101,39 @@ docker compose up -d
 ## 🛠 开发环境
 
 ### Docker开发（推荐）
+
+**使用外部数据库（datadance-postgres）**：
 ```bash
-# 启动开发环境
+# 1. 确保 .env 文件已配置正确的 DATABASE_URL
+# DATABASE_URL="postgresql://postgres:postgres@host.docker.internal:5432/datadance?schema=public"
+
+# 2. 启动开发环境
 docker compose up --build
 
-# 查看日志
+# 3. 运行数据库迁移（首次启动）
+docker compose exec ddc-backend-api npm run prisma:migrate
+
+# 4. 查看日志
 docker compose logs -f ddc-backend-api
 ```
 
 ### 本地开发
+
+**使用外部数据库（datadance-postgres）**：
 ```bash
+# 1. 安装依赖
 npm install
-cp .env.example .env
+
+# 2. 创建环境配置文件
+cp env.example .env
+
+# 3. 配置 .env 文件中的 DATABASE_URL
+# DATABASE_URL="postgresql://postgres:postgres@localhost:5432/datadance?schema=public"
+
+# 4. 运行数据库迁移（首次启动）
+npm run prisma:migrate
+
+# 5. 启动开发服务器
 npm run dev
 ```
 

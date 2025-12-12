@@ -202,3 +202,8 @@ node scripts/recordDataNFTToBlockchain.js --all
 3. 记录交易哈希到数据库
 4. 实现完整的链上交易流程
 
+
+
+
+
+

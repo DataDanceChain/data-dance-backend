@@ -37,8 +37,9 @@ const app = express();
 const publicDir = path.join(__dirname, '../public');
 const bannerDir = path.join(publicDir, 'assets/banners');
 const nftDir = path.join(publicDir, 'assets/nfts');
+const dataPackDir = path.join(publicDir, 'data-pack');
 
-[publicDir, bannerDir, nftDir].forEach(dir => {
+[publicDir, bannerDir, nftDir, dataPackDir].forEach(dir => {
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
   }
@@ -101,11 +102,23 @@ app.use(express.urlencoded({ extended: true }));
 // 配置 MIME 类型
 express.static.mime.define({ 'application/vnd.apple.pkpass': ['pkpass'] });
 
-// 静态文件服务
+// 静态文件服务 - Assets
 app.use('/assets', express.static(path.join(__dirname, '../public/assets'), {
-  setHeaders: (res, path) => {
-    if (path.endsWith('.pkpass')) {
+  setHeaders: (res, filePath) => {
+    if (filePath.endsWith('.pkpass')) {
       res.set('Content-Type', 'application/vnd.apple.pkpass');
+    }
+  }
+}));
+
+// 静态文件服务 - Data Pack Images
+app.use('/data-pack', express.static(path.join(__dirname, '../public/data-pack'), {
+  setHeaders: (res, filePath) => {
+    // 确保 SVG 文件返回正确的 MIME 类型
+    if (filePath.endsWith('.svg')) {
+      res.set('Content-Type', 'image/svg+xml');
+      // 设置缓存头（可选，SVG 文件通常可以缓存）
+      res.set('Cache-Control', 'public, max-age=31536000'); // 1年
     }
   }
 }));

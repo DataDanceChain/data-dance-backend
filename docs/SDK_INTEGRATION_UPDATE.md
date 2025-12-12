@@ -142,3 +142,8 @@ node scripts/recordDataNFTToBlockchain.js --nft-id <nft-id>
 **最后更新**: 2025年1月
 **状态**: ✅ 已根据聊天记录更新实现
 
+
+
+
+
+
