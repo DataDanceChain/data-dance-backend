@@ -532,8 +532,8 @@ exports.claimChristmasWelcomeBonus = async (req, res) => {
     const SOURCE = 'CHRISTMAS_WELCOME_BONUS';
     
     // 圣诞活动时间范围（可根据实际需求调整）
-    const CHRISTMAS_START = new Date('2024-12-01T00:00:00Z');
-    const CHRISTMAS_END = new Date('2025-01-07T23:59:59Z');
+    const CHRISTMAS_START = new Date('2025-12-01T00:00:00Z');
+    const CHRISTMAS_END = new Date('2025-12-31T23:59:59Z');
     const now = new Date();
 
     // 检查是否在活动期间
