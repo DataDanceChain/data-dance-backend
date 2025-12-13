@@ -12,7 +12,9 @@ const {
   getReferralCode, 
   getRegistrationTime,
   getChristmasWelcomeBonusStatus,
-  claimChristmasWelcomeBonus
+  claimChristmasWelcomeBonus,
+  verifyXFollow,
+  verifyTelegramJoin
 } = require('../controllers/userController');
 // Referral endpoints are now centralized under /api/referrals via referralRoutes.js
 const { protect } = require('../middlewares/authMiddleware');
@@ -54,5 +56,9 @@ router.get('/registered-at', getRegistrationTime);
 // 圣诞欢迎奖励相关接口
 router.get('/christmas-welcome-bonus/status', getChristmasWelcomeBonusStatus);
 router.post('/christmas-welcome-bonus/claim', claimChristmasWelcomeBonus);
+
+// 圣诞购物任务验证接口
+router.post('/christmas-shopping/verify-x-follow', verifyXFollow);
+router.post('/christmas-shopping/verify-telegram-join', verifyTelegramJoin);
 
 module.exports = router;

@@ -198,6 +198,158 @@ When trying to claim the Christmas Badge before completing all tasks:
 
 ---
 
+### 3. Verify X Follow
+
+**Endpoint:** `POST /api/users/christmas-shopping/verify-x-follow`
+
+**Authentication:** Required (Bearer Token)
+
+**Description:** Verifies that the user has followed the DDC official X account. This is a manual verification - user clicks the button after following, and the system marks the task as completed.
+
+**Request Headers:**
+```
+Authorization: Bearer <JWT_TOKEN>
+Content-Type: application/json
+```
+
+**Request Body:** None
+
+**Success Response (200 OK):**
+
+```json
+{
+  "status": "success",
+  "data": {
+    "verified": true,
+    "alreadyCompleted": false,
+    "verifiedAt": "2025-12-15T10:30:00Z",
+    "taskId": "follow-x",
+    "taskStatus": {
+      "id": "follow-x",
+      "title": "Follow X (Twitter)",
+      "finalStatus": "COMPLETED",
+      "progress": 1.0,
+      "completedAt": "2025-12-15T10:30:00Z"
+    },
+    "allTasksStatus": {
+      "upload-3-orders": {
+        "id": "upload-3-orders",
+        "title": "Upload 3+ December Orders",
+        "finalStatus": "COMPLETED",
+        "progress": 1.0,
+        "doneCount": 3,
+        "requiredCount": 3,
+        "completedAt": "2025-12-14T08:00:00Z"
+      },
+      "follow-x": {
+        "id": "follow-x",
+        "title": "Follow X (Twitter)",
+        "finalStatus": "COMPLETED",
+        "progress": 1.0,
+        "completedAt": "2025-12-15T10:30:00Z"
+      },
+      "join-telegram": {
+        "id": "join-telegram",
+        "title": "Join Telegram",
+        "finalStatus": "IN_PROGRESS",
+        "progress": 0.0,
+        "doneCount": 0,
+        "requiredCount": 1
+      }
+    },
+    "allTasksCompleted": false
+  }
+}
+```
+
+**Response Fields:**
+- `verified`: `boolean` - Whether verification succeeded
+- `alreadyCompleted`: `boolean` - Whether task was already completed before this call
+- `verifiedAt`: `string` - Timestamp when task was verified/completed
+- `taskId`: `string` - Task identifier
+- `taskStatus`: `object` - Status of the verified task
+- `allTasksStatus`: `object` - Status of all Christmas shopping tasks
+- `allTasksCompleted`: `boolean` - Whether all tasks are completed (triggers auto-claim badge)
+
+**Notes:**
+- If task was already completed, `alreadyCompleted` will be `true` and `verifiedAt` will be the original completion time
+- If all tasks are completed, the Christmas Badge will be automatically claimed
+- This is an idempotent operation - calling it multiple times won't cause issues
+
+---
+
+### 4. Verify Telegram Join
+
+**Endpoint:** `POST /api/users/christmas-shopping/verify-telegram-join`
+
+**Authentication:** Required (Bearer Token)
+
+**Description:** Verifies that the user has joined the Telegram group. This is a manual verification - user clicks the button after joining, and the system marks the task as completed.
+
+**Request Headers:**
+```
+Authorization: Bearer <JWT_TOKEN>
+Content-Type: application/json
+```
+
+**Request Body:** None
+
+**Success Response (200 OK):**
+
+```json
+{
+  "status": "success",
+  "data": {
+    "verified": true,
+    "alreadyCompleted": false,
+    "verifiedAt": "2025-12-15T11:00:00Z",
+    "taskId": "join-telegram",
+    "taskStatus": {
+      "id": "join-telegram",
+      "title": "Join Telegram",
+      "finalStatus": "COMPLETED",
+      "progress": 1.0,
+      "completedAt": "2025-12-15T11:00:00Z"
+    },
+    "allTasksStatus": {
+      "upload-3-orders": {
+        "id": "upload-3-orders",
+        "title": "Upload 3+ December Orders",
+        "finalStatus": "COMPLETED",
+        "progress": 1.0,
+        "doneCount": 3,
+        "requiredCount": 3,
+        "completedAt": "2025-12-14T08:00:00Z"
+      },
+      "follow-x": {
+        "id": "follow-x",
+        "title": "Follow X (Twitter)",
+        "finalStatus": "COMPLETED",
+        "progress": 1.0,
+        "completedAt": "2025-12-15T10:30:00Z"
+      },
+      "join-telegram": {
+        "id": "join-telegram",
+        "title": "Join Telegram",
+        "finalStatus": "COMPLETED",
+        "progress": 1.0,
+        "completedAt": "2025-12-15T11:00:00Z"
+      }
+    },
+    "allTasksCompleted": true
+  }
+}
+```
+
+**Response Fields:** (Same as Verify X Follow)
+
+**Notes:**
+- Same behavior as Verify X Follow
+- If all tasks are completed after this verification, the Christmas Badge will be automatically claimed
+- 5 Points will be automatically awarded with the badge
+
+---
+
 ## Business Logic
 
 ### Christmas Badge Special Rules
@@ -372,6 +524,12 @@ All errors follow this format:
 - [ ] Badge appears in collected section after claim
 - [ ] `taskStatus` is not included for collected Christmas Badge
 - [ ] Other badges work normally without task verification
+- [ ] Verify X Follow endpoint marks task as completed
+- [ ] Verify Telegram Join endpoint marks task as completed
+- [ ] Verification endpoints return updated task status
+- [ ] Verification endpoints are idempotent (can be called multiple times)
+- [ ] All tasks completed triggers automatic badge claim
+- [ ] December orders are correctly filtered (only 2025-12-01 to 2025-12-31)
 
 ---
 
@@ -379,12 +537,20 @@ All errors follow this format:
 
 1. **Christmas Badge ID:** The Christmas Badge must have the ID `christmas-badge-2025` in the database
 2. **Award ID:** Christmas Shopping tasks must be associated with `awardId: "christmas-shopping"`
-3. **Task Completion:** A task is considered completed when `finalStatus === 'COMPLETED'` or `claimed === true`
-4. **December Order Filtering:** Only orders with `timestamp` between 2025-12-01 and 2025-12-31 are counted for Christmas tasks
-5. **Auto-Claim:** The badge is automatically claimed when all tasks are completed - users don't need to manually claim it
-6. **Points Source:** Points are recorded with `source: "BADGE_CLAIM"` and `sourceId: "christmas-badge-2025"`
-7. **Transaction Safety:** All badge claim operations use database transactions for consistency
-8. **Event Period:** The Christmas event runs from December 1, 2025 to December 31, 2025 (ends on Dec 23 per requirements, but system allows until Dec 31)
+3. **Task IDs:** The following task IDs must exist in the database:
+   - `upload-3-orders` - Upload 3+ December Orders task
+   - `follow-x` - Follow X (Twitter) task
+   - `join-telegram` - Join Telegram task
+4. **Task Completion:** A task is considered completed when:
+   - `finalStatus === 'COMPLETED'` or `claimed === true`
+   - For manual verification tasks (follow-x, join-telegram): when `claimRecords` array has at least one entry
+5. **December Order Filtering:** Only orders with `timestamp` between 2025-12-01 and 2025-12-31 are counted for Christmas tasks
+6. **Manual Verification:** Follow X and Join Telegram tasks use manual verification - user clicks button after completing the action
+7. **Auto-Claim:** The badge is automatically claimed when all tasks are completed - users don't need to manually claim it
+8. **Points Source:** Points are recorded with `source: "BADGE_CLAIM"` and `sourceId: "christmas-badge-2025"`
+9. **Transaction Safety:** All badge claim operations use database transactions for consistency
+10. **Event Period:** The Christmas event runs from December 1, 2025 to December 31, 2025
+11. **Idempotency:** Verification endpoints are idempotent - calling them multiple times won't cause duplicate records
 
 ---
 

@@ -521,6 +521,344 @@ exports.getChristmasWelcomeBonusStatus = async (req, res) => {
 };
 
 /**
+ * 验证用户关注 X (Twitter)
+ * @route POST /api/users/christmas-shopping/verify-x-follow
+ * @access Private
+ */
+exports.verifyXFollow = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const TASK_ID = 'follow-x'; // 需要在数据库中创建此任务
+    const AWARD_ID = 'christmas-shopping';
+    
+    // 使用事务确保数据一致性
+    const result = await prisma.$transaction(async (tx) => {
+      // 检查任务是否存在
+      const task = await tx.task.findUnique({
+        where: { id: TASK_ID },
+        select: { id: true, awardId: true, title: true }
+      });
+      
+      if (!task || task.awardId !== AWARD_ID) {
+        throw new Error('Task not found or invalid');
+      }
+      
+      // 获取或创建 UserTask
+      let userTask = await tx.userTask.findUnique({
+        where: {
+          userId_taskId: { userId, taskId: TASK_ID }
+        }
+      });
+      
+      const now = new Date();
+      const alreadyCompleted = userTask?.claimed || (userTask?.claimRecords && userTask.claimRecords.length > 0);
+      
+      if (!alreadyCompleted) {
+        // 标记任务为完成（通过添加 claimRecord）
+        const claimRecords = userTask?.claimRecords || [];
+        const newClaimRecords = [...claimRecords, now];
+        
+        if (userTask) {
+          userTask = await tx.userTask.update({
+            where: { userId_taskId: { userId, taskId: TASK_ID } },
+            data: {
+              claimRecords: newClaimRecords,
+              claimed: true,
+              status: 'LIVE'
+            }
+          });
+        } else {
+          userTask = await tx.userTask.create({
+            data: {
+              userId,
+              taskId: TASK_ID,
+              claimRecords: newClaimRecords,
+              claimed: true,
+              status: 'LIVE'
+            }
+          });
+        }
+      }
+      
+      // 获取所有圣诞任务的状态
+      const { getTasksByAward } = require('../services/taskService');
+      const allTasks = await getTasksByAward(userId, AWARD_ID);
+      
+      // 检查是否所有任务都完成
+      const allCompleted = allTasks.every(t => t.finalStatus === 'COMPLETED' || t.claimed);
+      
+      // 如果所有任务完成，自动领取徽章
+      if (allCompleted && allTasks.length > 0) {
+        const CHRISTMAS_BADGE_ID = 'christmas-badge-2025';
+        const CHRISTMAS_POINTS = 5;
+        
+        const badge = await tx.badge.findUnique({
+          where: { id: CHRISTMAS_BADGE_ID }
+        });
+        
+        if (badge) {
+          const existingUserBadge = await tx.userBadge.findUnique({
+            where: {
+              userId_badgeId: {
+                userId,
+                badgeId: CHRISTMAS_BADGE_ID
+              }
+            }
+          });
+          
+          if (!existingUserBadge) {
+            await tx.userBadge.create({
+              data: {
+                userId,
+                badgeId: CHRISTMAS_BADGE_ID,
+                acquiredAt: now
+              }
+            });
+            
+            await tx.user.update({
+              where: { id: userId },
+              data: { totalPoints: { increment: CHRISTMAS_POINTS } }
+            });
+            
+            await tx.point.create({
+              data: {
+                userId,
+                amount: CHRISTMAS_POINTS,
+                source: 'BADGE_CLAIM',
+                sourceId: CHRISTMAS_BADGE_ID
+              }
+            });
+            
+            await tx.notification.create({
+              data: {
+                userId,
+                type: 'BADGE',
+                title: 'Christmas Badge Auto-claimed!',
+                content: `Congratulations! You've completed all Christmas tasks and automatically earned the Exclusive DDC Christmas Badge and ${CHRISTMAS_POINTS} Points!`,
+                isRead: false
+              }
+            });
+          }
+        }
+      }
+      
+      // 构建任务状态映射
+      const allTasksStatus = {};
+      allTasks.forEach(t => {
+        allTasksStatus[t.id] = {
+          id: t.id,
+          title: t.title,
+          finalStatus: t.finalStatus,
+          progress: t.progress || 0,
+          doneCount: t.doneCount || 0,
+          requiredCount: t.requirementCount || 1,
+          ...(t.finalStatus === 'COMPLETED' || t.claimed ? {
+            completedAt: userTask?.updatedAt || now
+          } : {})
+        };
+      });
+      
+      return {
+        verified: true,
+        alreadyCompleted,
+        verifiedAt: alreadyCompleted ? (userTask?.claimRecords?.[0] || userTask?.updatedAt || now) : now,
+        taskId: TASK_ID,
+        taskStatus: {
+          id: TASK_ID,
+          title: task.title,
+          finalStatus: 'COMPLETED',
+          progress: 1.0,
+          completedAt: alreadyCompleted ? (userTask?.claimRecords?.[0] || userTask?.updatedAt || now) : now
+        },
+        allTasksStatus,
+        allTasksCompleted: allCompleted
+      };
+    });
+    
+    res.status(200).json({
+      status: 'success',
+      data: result
+    });
+  } catch (error) {
+    console.error('Error verifying X follow:', error);
+    res.status(500).json({
+      status: 'error',
+      message: 'Server error',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+};
+
+/**
+ * 验证用户加入 Telegram
+ * @route POST /api/users/christmas-shopping/verify-telegram-join
+ * @access Private
+ */
+exports.verifyTelegramJoin = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const TASK_ID = 'join-telegram'; // 需要在数据库中创建此任务
+    const AWARD_ID = 'christmas-shopping';
+    
+    // 使用事务确保数据一致性
+    const result = await prisma.$transaction(async (tx) => {
+      // 检查任务是否存在
+      const task = await tx.task.findUnique({
+        where: { id: TASK_ID },
+        select: { id: true, awardId: true, title: true }
+      });
+      
+      if (!task || task.awardId !== AWARD_ID) {
+        throw new Error('Task not found or invalid');
+      }
+      
+      // 获取或创建 UserTask
+      let userTask = await tx.userTask.findUnique({
+        where: {
+          userId_taskId: { userId, taskId: TASK_ID }
+        }
+      });
+      
+      const now = new Date();
+      const alreadyCompleted = userTask?.claimed || (userTask?.claimRecords && userTask.claimRecords.length > 0);
+      
+      if (!alreadyCompleted) {
+        // 标记任务为完成（通过添加 claimRecord）
+        const claimRecords = userTask?.claimRecords || [];
+        const newClaimRecords = [...claimRecords, now];
+        
+        if (userTask) {
+          userTask = await tx.userTask.update({
+            where: { userId_taskId: { userId, taskId: TASK_ID } },
+            data: {
+              claimRecords: newClaimRecords,
+              claimed: true,
+              status: 'LIVE'
+            }
+          });
+        } else {
+          userTask = await tx.userTask.create({
+            data: {
+              userId,
+              taskId: TASK_ID,
+              claimRecords: newClaimRecords,
+              claimed: true,
+              status: 'LIVE'
+            }
+          });
+        }
+      }
+      
+      // 获取所有圣诞任务的状态
+      const { getTasksByAward } = require('../services/taskService');
+      const allTasks = await getTasksByAward(userId, AWARD_ID);
+      
+      // 检查是否所有任务都完成
+      const allCompleted = allTasks.every(t => t.finalStatus === 'COMPLETED' || t.claimed);
+      
+      // 如果所有任务完成，自动领取徽章
+      if (allCompleted && allTasks.length > 0) {
+        const CHRISTMAS_BADGE_ID = 'christmas-badge-2025';
+        const CHRISTMAS_POINTS = 5;
+        
+        const badge = await tx.badge.findUnique({
+          where: { id: CHRISTMAS_BADGE_ID }
+        });
+        
+        if (badge) {
+          const existingUserBadge = await tx.userBadge.findUnique({
+            where: {
+              userId_badgeId: {
+                userId,
+                badgeId: CHRISTMAS_BADGE_ID
+              }
+            }
+          });
+          
+          if (!existingUserBadge) {
+            await tx.userBadge.create({
+              data: {
+                userId,
+                badgeId: CHRISTMAS_BADGE_ID,
+                acquiredAt: now
+              }
+            });
+            
+            await tx.user.update({
+              where: { id: userId },
+              data: { totalPoints: { increment: CHRISTMAS_POINTS } }
+            });
+            
+            await tx.point.create({
+              data: {
+                userId,
+                amount: CHRISTMAS_POINTS,
+                source: 'BADGE_CLAIM',
+                sourceId: CHRISTMAS_BADGE_ID
+              }
+            });
+            
+            await tx.notification.create({
+              data: {
+                userId,
+                type: 'BADGE',
+                title: 'Christmas Badge Auto-claimed!',
+                content: `Congratulations! You've completed all Christmas tasks and automatically earned the Exclusive DDC Christmas Badge and ${CHRISTMAS_POINTS} Points!`,
+                isRead: false
+              }
+            });
+          }
+        }
+      }
+      
+      // 构建任务状态映射
+      const allTasksStatus = {};
+      allTasks.forEach(t => {
+        allTasksStatus[t.id] = {
+          id: t.id,
+          title: t.title,
+          finalStatus: t.finalStatus,
+          progress: t.progress || 0,
+          doneCount: t.doneCount || 0,
+          requiredCount: t.requirementCount || 1,
+          ...(t.finalStatus === 'COMPLETED' || t.claimed ? {
+            completedAt: userTask?.updatedAt || now
+          } : {})
+        };
+      });
+      
+      return {
+        verified: true,
+        alreadyCompleted,
+        verifiedAt: alreadyCompleted ? (userTask?.claimRecords?.[0] || userTask?.updatedAt || now) : now,
+        taskId: TASK_ID,
+        taskStatus: {
+          id: TASK_ID,
+          title: task.title,
+          finalStatus: 'COMPLETED',
+          progress: 1.0,
+          completedAt: alreadyCompleted ? (userTask?.claimRecords?.[0] || userTask?.updatedAt || now) : now
+        },
+        allTasksStatus,
+        allTasksCompleted: allCompleted
+      };
+    });
+    
+    res.status(200).json({
+      status: 'success',
+      data: result
+    });
+  } catch (error) {
+    console.error('Error verifying Telegram join:', error);
+    res.status(500).json({
+      status: 'error',
+      message: 'Server error',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+};
+
+/**
  * 领取圣诞欢迎奖励
  * @route POST /api/users/christmas-welcome-bonus/claim
  * @access Private

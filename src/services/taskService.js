@@ -170,15 +170,64 @@ const awardStrategies = {
         select: { id: true, timestamp: true }
       });
       
-      return { decemberOrderCount: decemberOrders.length };
+      // Check manual verification tasks (follow-x, join-telegram)
+      const userTasks = await prisma.userTask.findMany({
+        where: {
+          userId,
+          task: {
+            awardId: 'christmas-shopping',
+            id: { in: ['follow-x', 'join-telegram'] }
+          }
+        },
+        select: {
+          taskId: true,
+          claimed: true,
+          claimRecords: true
+        }
+      });
+      
+      const followXCompleted = userTasks.find(ut => ut.taskId === 'follow-x')?.claimed || 
+                               userTasks.find(ut => ut.taskId === 'follow-x')?.claimRecords?.length > 0;
+      const telegramCompleted = userTasks.find(ut => ut.taskId === 'join-telegram')?.claimed || 
+                                userTasks.find(ut => ut.taskId === 'join-telegram')?.claimRecords?.length > 0;
+      
+      return { 
+        decemberOrderCount: decemberOrders.length,
+        followXCompleted: followXCompleted ? 1 : 0,
+        telegramCompleted: telegramCompleted ? 1 : 0
+      };
     },
-    computeProgress: async (task, userId, { decemberOrderCount }) => {
-      // For "Upload 3+ December Orders" task, check if user has 3+ orders
-      const requiredCount = task.requirementCount || 3;
-      if (decemberOrderCount >= requiredCount) {
-        return 1; // Completed
+    computeProgress: async (task, userId, { decemberOrderCount, followXCompleted, telegramCompleted }) => {
+      // For "Upload 3+ December Orders" task
+      if (task.id === 'upload-3-orders' || task.id?.includes('upload') || task.id?.includes('order')) {
+        const requiredCount = task.requirementCount || 3;
+        if (decemberOrderCount >= requiredCount) {
+          return 1; // Completed
+        }
+        return requiredCount > 0 ? decemberOrderCount / requiredCount : 0;
       }
-      return requiredCount > 0 ? decemberOrderCount / requiredCount : 0; // Progress ratio
+      
+      // For "Follow X" task
+      if (task.id === 'follow-x') {
+        return followXCompleted || 0;
+      }
+      
+      // For "Join Telegram" task
+      if (task.id === 'join-telegram') {
+        return telegramCompleted || 0;
+      }
+      
+      // Default: check if task is claimed
+      const userTask = await prisma.userTask.findUnique({
+        where: { userId_taskId: { userId, taskId: task.id } },
+        select: { claimed: true, claimRecords: true }
+      });
+      
+      if (userTask?.claimed || (userTask?.claimRecords && userTask.claimRecords.length > 0)) {
+        return 1;
+      }
+      
+      return 0;
     }
   }
 };
