@@ -132,6 +132,54 @@ const awardStrategies = {
       // Return total count as integer representing completion quantity
       return totalCount;
     }
+  },
+  'christmas-shopping': {
+    unlock: async (userId) => {
+      // Christmas shopping tasks are unlocked for all users during December 2025
+      const now = new Date();
+      const CHRISTMAS_START = new Date('2025-12-01T00:00:00Z');
+      const CHRISTMAS_END = new Date('2025-12-31T23:59:59Z');
+      
+      if (now >= CHRISTMAS_START && now <= CHRISTMAS_END) {
+        // Unlock all Christmas shopping tasks
+        const tasks = await prisma.task.findMany({
+          where: { awardId: 'christmas-shopping' },
+          select: { id: true }
+        });
+        for (const task of tasks) {
+          await recordTaskProgress(userId, task.id, 1);
+        }
+      }
+    },
+    prepare: async (userId) => {
+      // Get count of December 2025 Amazon orders
+      const DECEMBER_2025_START = new Date('2025-12-01T00:00:00Z');
+      const DECEMBER_2025_END = new Date('2025-12-31T23:59:59Z');
+      
+      // Count orders where timestamp is in December 2025
+      const decemberOrders = await prisma.crawlerData.findMany({
+        where: {
+          userId,
+          source: 'amazon',
+          type: 'order',
+          timestamp: {
+            gte: DECEMBER_2025_START,
+            lte: DECEMBER_2025_END
+          }
+        },
+        select: { id: true, timestamp: true }
+      });
+      
+      return { decemberOrderCount: decemberOrders.length };
+    },
+    computeProgress: async (task, userId, { decemberOrderCount }) => {
+      // For "Upload 3+ December Orders" task, check if user has 3+ orders
+      const requiredCount = task.requirementCount || 3;
+      if (decemberOrderCount >= requiredCount) {
+        return 1; // Completed
+      }
+      return requiredCount > 0 ? decemberOrderCount / requiredCount : 0; // Progress ratio
+    }
   }
 };
 
@@ -139,8 +187,14 @@ async function getTasksByAward(userId, awardId) {
   const strategy = awardStrategies[awardId] || {};
   // Prepare context (e.g., ddcBalance) once
   const context = strategy.prepare ? await strategy.prepare(userId) : {};
-  // Unlock tasks using context
-  if (strategy.unlock) await strategy.unlock(userId, context);
+  // Unlock tasks using context (pass context if unlock accepts it)
+  if (strategy.unlock) {
+    if (strategy.unlock.length > 1) {
+      await strategy.unlock(userId, context);
+    } else {
+      await strategy.unlock(userId);
+    }
+  }
   // Fetch static tasks and userTask records
   const tasks = await prisma.task.findMany({
     where: { awardId },
@@ -158,7 +212,7 @@ async function getTasksByAward(userId, awardId) {
   });
   const userTasks = await prisma.userTask.findMany({ where: { userId } });
   // Compute progress and finalStatus for each task
-  return Promise.all(tasks.map(async task => {
+  const taskResults = await Promise.all(tasks.map(async task => {
     const ut = userTasks.find(u => u.taskId === task.id);
     const claimRecords = ut?.claimRecords || [];
     const limit = task.claimLimit ?? 1;
@@ -213,6 +267,10 @@ async function getTasksByAward(userId, awardId) {
           // For unlimited tasks, doneCount equals progress (total submissions)
           doneCount = progress;
           break;
+        case 'christmas-shopping':
+          // For Christmas shopping tasks, doneCount is the actual count (e.g., December orders)
+          doneCount = Math.min(context.decemberOrderCount || 0, task.requirementCount || 3);
+          break;
         default:
           doneCount = Math.min(Math.floor(progress * task.requirementCount), task.requirementCount);
       }
@@ -244,6 +302,84 @@ async function getTasksByAward(userId, awardId) {
       ...(task.metadata && Object.keys(task.metadata).length > 0 ? { metadata: task.metadata } : {})
     };
   }));
+  
+  // Special handling: Auto-claim Christmas badge when all tasks are completed (not just claimed)
+  if (awardId === 'christmas-shopping' && taskResults.length > 0) {
+    try {
+      const allCompleted = taskResults.every(t => t.finalStatus === 'COMPLETED' || t.claimed);
+      
+      if (allCompleted) {
+        const CHRISTMAS_BADGE_ID = 'christmas-badge-2025';
+        const CHRISTMAS_POINTS = 5;
+        
+        // Check if badge exists and user hasn't collected it
+        const badge = await prisma.badge.findUnique({
+          where: { id: CHRISTMAS_BADGE_ID }
+        });
+        
+        if (badge) {
+          const existingUserBadge = await prisma.userBadge.findUnique({
+            where: {
+              userId_badgeId: {
+                userId,
+                badgeId: CHRISTMAS_BADGE_ID
+              }
+            }
+          });
+          
+          if (!existingUserBadge) {
+            // Auto-claim Christmas badge in a separate transaction
+            await prisma.$transaction(async (tx) => {
+              await tx.userBadge.create({
+                data: {
+                  userId,
+                  badgeId: CHRISTMAS_BADGE_ID,
+                  acquiredAt: new Date()
+                }
+              });
+              
+              // Award 5 points for badge
+              await tx.user.update({
+                where: { id: userId },
+                data: { totalPoints: { increment: CHRISTMAS_POINTS } }
+              });
+              
+              await tx.point.create({
+                data: {
+                  userId,
+                  amount: CHRISTMAS_POINTS,
+                  source: 'BADGE_CLAIM',
+                  sourceId: CHRISTMAS_BADGE_ID
+                }
+              });
+              
+              // Create notification
+              await tx.notification.create({
+                data: {
+                  userId,
+                  type: 'BADGE',
+                  title: 'Christmas Badge Auto-claimed!',
+                  content: `Congratulations! You've completed all Christmas tasks and automatically earned the Exclusive DDC Christmas Badge and ${CHRISTMAS_POINTS} Points!`,
+                  isRead: false
+                }
+              });
+            });
+            
+            logger.info('Christmas badge auto-claimed via getTasksByAward', { userId, badgeId: CHRISTMAS_BADGE_ID });
+          }
+        }
+      }
+    } catch (badgeError) {
+      // Badge auto-claim failure should not affect task retrieval
+      logger.error('Failed to auto-claim Christmas badge in getTasksByAward', {
+        userId,
+        awardId,
+        error: badgeError.message
+      });
+    }
+  }
+  
+  return taskResults;
 }
 
 async function updateProgressForAwardTasks(userId, awardId) {
@@ -370,6 +506,105 @@ async function claimTask(userId, taskId) {
         });
         // 这里选择继续执行而不是抛出错误，确保用户的主要奖励不受影响
         // 生产环境中可能需要更严格的错误处理策略
+      }
+
+      // Special handling: Auto-claim Christmas badge when all Christmas shopping tasks are completed
+      if (task.awardId === 'christmas-shopping') {
+        try {
+          // Check if all Christmas shopping tasks are completed
+          const allTasks = await tx.task.findMany({
+            where: { awardId: 'christmas-shopping' },
+            select: { id: true, requirementCount: true }
+          });
+          
+          // Get strategy to compute progress for all tasks
+          const strategy = awardStrategies['christmas-shopping'];
+          const context = strategy?.prepare ? await strategy.prepare(userId) : {};
+          
+          // Check if all tasks are completed (progress >= 1)
+          let allCompleted = true;
+          for (const t of allTasks) {
+            // Compute progress to check if task is completed
+            if (strategy?.computeProgress) {
+              const progress = await strategy.computeProgress(t, userId, context);
+              if (progress < 1) {
+                allCompleted = false;
+                break;
+              }
+            } else {
+              // If no strategy, assume not completed
+              allCompleted = false;
+              break;
+            }
+          }
+          
+          if (allCompleted && allTasks.length > 0) {
+            const CHRISTMAS_BADGE_ID = 'christmas-badge-2025';
+            const CHRISTMAS_POINTS = 5;
+            
+            // Check if badge exists and user hasn't collected it
+            const badge = await tx.badge.findUnique({
+              where: { id: CHRISTMAS_BADGE_ID }
+            });
+            
+            if (badge) {
+              const existingUserBadge = await tx.userBadge.findUnique({
+                where: {
+                  userId_badgeId: {
+                    userId,
+                    badgeId: CHRISTMAS_BADGE_ID
+                  }
+                }
+              });
+              
+              if (!existingUserBadge) {
+                // Auto-claim Christmas badge
+                await tx.userBadge.create({
+                  data: {
+                    userId,
+                    badgeId: CHRISTMAS_BADGE_ID,
+                    acquiredAt: new Date()
+                  }
+                });
+                
+                // Award 5 points for badge
+                await tx.user.update({
+                  where: { id: userId },
+                  data: { totalPoints: { increment: CHRISTMAS_POINTS } }
+                });
+                
+                await tx.point.create({
+                  data: {
+                    userId,
+                    amount: CHRISTMAS_POINTS,
+                    source: 'BADGE_CLAIM',
+                    sourceId: CHRISTMAS_BADGE_ID
+                  }
+                });
+                
+                // Create notification
+                await tx.notification.create({
+                  data: {
+                    userId,
+                    type: 'BADGE',
+                    title: 'Christmas Badge Auto-claimed!',
+                    content: `Congratulations! You've completed all Christmas tasks and automatically earned the Exclusive DDC Christmas Badge and ${CHRISTMAS_POINTS} Points!`,
+                    isRead: false
+                  }
+                });
+                
+                logger.info('Christmas badge auto-claimed', { userId, badgeId: CHRISTMAS_BADGE_ID });
+              }
+            }
+          }
+        } catch (badgeError) {
+          // Badge auto-claim failure should not affect task claim
+          logger.error('Failed to auto-claim Christmas badge', {
+            userId,
+            taskId,
+            error: badgeError.message
+          });
+        }
       }
 
       // Return enriched response with claimedAt and points

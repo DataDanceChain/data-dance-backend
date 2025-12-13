@@ -155,3 +155,4 @@ After setup, verify everything is working:
 - ✅ Process data-pack-4.csv: `node scripts/processAndUploadDataPack4.js`
 - ✅ Check statistics: `node scripts/checkStats.js`
 - ✅ View DataNFTs in Prisma Studio: `npm run prisma:studio`
+

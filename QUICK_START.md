@@ -95,3 +95,4 @@ node scripts/setupLocalDatabase.js
 ## 📚 More Information
 
 See `docs/LOCAL_SETUP_GUIDE.md` for detailed setup instructions.
+

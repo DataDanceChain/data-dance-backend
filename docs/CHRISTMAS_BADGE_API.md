@@ -205,20 +205,30 @@ When trying to claim the Christmas Badge before completing all tasks:
 1. **Task Verification Required:**
    - The Christmas Badge (`id: "christmas-badge-2025"`) requires all Christmas Shopping tasks to be completed before it can be claimed
    - Tasks are identified by the `awardId: "christmas-shopping"` in the task system
+   - **December 2025 Order Filtering**: Only Amazon orders with `timestamp` in December 2025 (2025-12-01 to 2025-12-31) are counted
 
-2. **Points Reward:**
+2. **Auto-Claim Feature:**
+   - **Automatic Badge Claim**: When all Christmas Shopping tasks are completed (progress >= 1), the badge is **automatically claimed** without user action
+   - Auto-claim happens when:
+     - User completes the last task (via `claimTask`)
+     - User views their tasks (via `getTasksByAward` for `christmas-shopping`)
+   - Users do NOT need to manually claim the badge - it's awarded automatically
+
+3. **Points Reward:**
    - Claiming the Christmas Badge awards **5 Points** to the user
    - Points are added to the user's total balance
    - A point record is created with `source: "BADGE_CLAIM"` and `sourceId: "christmas-badge-2025"`
 
-3. **Task Status Check:**
+4. **Task Status Check:**
    - Task status is checked in real-time when:
      - Getting the badge list (`GET /api/assets/badges`)
      - Attempting to claim the badge (`POST /api/assets/badges/:id/collect`)
+     - Viewing Christmas shopping tasks (`GET /api/tasks/christmas-shopping`)
 
-4. **Transaction Safety:**
+5. **Transaction Safety:**
    - Badge claim operations use database transactions to ensure data consistency
    - Prevents duplicate claims and ensures points are awarded correctly
+   - Auto-claim operations are idempotent (safe to retry)
 
 ---
 
@@ -370,8 +380,11 @@ All errors follow this format:
 1. **Christmas Badge ID:** The Christmas Badge must have the ID `christmas-badge-2025` in the database
 2. **Award ID:** Christmas Shopping tasks must be associated with `awardId: "christmas-shopping"`
 3. **Task Completion:** A task is considered completed when `finalStatus === 'COMPLETED'` or `claimed === true`
-4. **Points Source:** Points are recorded with `source: "BADGE_CLAIM"` and `sourceId: "christmas-badge-2025"`
-5. **Transaction Safety:** All badge claim operations use database transactions for consistency
+4. **December Order Filtering:** Only orders with `timestamp` between 2025-12-01 and 2025-12-31 are counted for Christmas tasks
+5. **Auto-Claim:** The badge is automatically claimed when all tasks are completed - users don't need to manually claim it
+6. **Points Source:** Points are recorded with `source: "BADGE_CLAIM"` and `sourceId: "christmas-badge-2025"`
+7. **Transaction Safety:** All badge claim operations use database transactions for consistency
+8. **Event Period:** The Christmas event runs from December 1, 2025 to December 31, 2025 (ends on Dec 23 per requirements, but system allows until Dec 31)
 
 ---
 
