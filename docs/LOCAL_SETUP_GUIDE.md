@@ -156,3 +156,4 @@ After setup, verify everything is working:
 - ✅ Check statistics: `node scripts/checkStats.js`
 - ✅ View DataNFTs in Prisma Studio: `npm run prisma:studio`
 
+

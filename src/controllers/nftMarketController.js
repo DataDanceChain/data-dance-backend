@@ -43,7 +43,7 @@ exports.getMarketList = async (req, res) => {
         size = dataRecords.recordCount || 0;
       } else {
         // 活动数据：从 snapshots 计算
-        const userIds = nft.snapshots.map(s => s.userId).filter(Boolean);
+      const userIds = nft.snapshots.map(s => s.userId).filter(Boolean);
         size = new Set(userIds).size;
       }
       
@@ -118,7 +118,7 @@ exports.getMarketDetail = async (req, res) => {
       size = dataRecords.recordCount || 0;
     } else {
       // 活动数据：从 snapshots 计算
-      const userIds = dataNFT.snapshots.map(s => s.userId).filter(Boolean);
+    const userIds = dataNFT.snapshots.map(s => s.userId).filter(Boolean);
       size = new Set(userIds).size;
     }
     res.status(200).json({

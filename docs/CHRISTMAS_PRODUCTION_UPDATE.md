@@ -269,3 +269,4 @@ If you encounter any issues during the update process, check:
 1. Server logs: `pm2 logs data-dance-backend` or `docker logs <container>`
 2. Database connection: Verify `DATABASE_URL` in `.env`
 3. API documentation: `docs/CHRISTMAS_BADGE_API.md`
+

@@ -132,15 +132,15 @@ exports.getBadges = async function (req, res) {
         })),
         uncollected: uncollectedBadges.map(badge => {
           const badgeData = {
-            id: badge.id,
-            name: badge.name,
-            description: badge.description,
-            image: badge.image,
-            creator: {
-              id: badge.creator.id,
-              name: badge.creator.name,
-              isOrganization: badge.creator.isOrganization
-            }
+          id: badge.id,
+          name: badge.name,
+          description: badge.description,
+          image: badge.image,
+          creator: {
+            id: badge.creator.id,
+            name: badge.creator.name,
+            isOrganization: badge.creator.isOrganization
+          }
           };
           
           // Add taskStatus for Christmas badge if not collected
@@ -309,25 +309,25 @@ exports.collectBadge = async function (req, res) {
     
     // 使用事务确保数据一致性
     const result = await prisma.$transaction(async (tx) => {
-      // 创建用户勋章关系
+    // 创建用户勋章关系
       const userBadge = await tx.userBadge.create({
-        data: {
-          user: {
+      data: {
+        user: {
             connect: { id: userId }
-          },
-          badge: {
-            connect: { id }
-          },
-          acquiredAt: new Date()
         },
-        include: {
-          badge: {
-            include: {
-              creator: true
-            }
+        badge: {
+          connect: { id }
+        },
+        acquiredAt: new Date()
+      },
+      include: {
+        badge: {
+          include: {
+            creator: true
           }
         }
-      });
+      }
+    });
       
       // 如果是圣诞徽章，发放 5 积分
       if (id === CHRISTMAS_BADGE_ID) {
@@ -349,30 +349,30 @@ exports.collectBadge = async function (req, res) {
           }
         });
       }
-      
-      // 记录交易
+    
+    // 记录交易
       await tx.assetTransaction.create({
-        data: {
-          user: {
+      data: {
+        user: {
             connect: { id: userId }
-          },
-          type: 'BADGE_ACQUIRED',
-          assetId: id,
-          description: `Collected badge: ${badge.name}`
-        }
-      });
-      
-      // 创建通知
+        },
+        type: 'BADGE_ACQUIRED',
+        assetId: id,
+        description: `Collected badge: ${badge.name}`
+      }
+    });
+    
+    // 创建通知
       await tx.notification.create({
-        data: {
-          user: {
+      data: {
+        user: {
             connect: { id: userId }
-          },
-          type: 'BADGE',
-          title: 'New Badge Collected',
+        },
+        type: 'BADGE',
+        title: 'New Badge Collected',
           content: `Congratulations! You've earned the ${badge.name} badge from ${badge.creator.name}.${id === CHRISTMAS_BADGE_ID ? ` You've also earned ${CHRISTMAS_POINTS} Points!` : ''}`,
-          isRead: false
-        }
+        isRead: false
+      }
       });
       
       return userBadge;
