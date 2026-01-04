@@ -24,10 +24,10 @@ async function getCrawlerTasks(req, res) {
     };
 
     // Validate filters
-    if (filters.source && !['amazon', 'luma'].includes(filters.source)) {
+    if (filters.source && !['amazon', 'luma', 'airbnb', 'booking'].includes(filters.source)) {
       return res.status(400).json({
         status: 'error',
-        message: 'Invalid source. Must be "amazon" or "luma"'
+        message: 'Invalid source. Must be "amazon", "luma", "airbnb", or "booking"'
       });
     }
 
@@ -94,10 +94,10 @@ async function createCrawlerTask(req, res) {
       });
     }
 
-    if (!['amazon', 'luma'].includes(source)) {
+    if (!['amazon', 'luma', 'airbnb', 'booking'].includes(source)) {
       return res.status(400).json({
         status: 'error',
-        message: 'Invalid source. Must be "amazon" or "luma"'
+        message: 'Invalid source. Must be "amazon", "luma", "airbnb", or "booking"'
       });
     }
 

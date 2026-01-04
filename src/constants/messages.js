@@ -2,7 +2,7 @@
 
 const CRAWLER_MESSAGES = {
   // Validation errors
-  INVALID_SOURCE: 'Data source must be amazon or luma',
+  INVALID_SOURCE: 'Data source must be amazon, luma, airbnb, or booking',
   INVALID_TYPE: 'Data type cannot be empty',
   INVALID_PAYLOAD: 'Payload data must be a valid object',
   AMAZON_ORDERID_REQUIRED: 'Amazon data must include orderid field',

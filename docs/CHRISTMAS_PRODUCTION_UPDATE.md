@@ -270,3 +270,4 @@ If you encounter any issues during the update process, check:
 2. Database connection: Verify `DATABASE_URL` in `.env`
 3. API documentation: `docs/CHRISTMAS_BADGE_API.md`
 
+

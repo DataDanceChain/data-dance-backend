@@ -97,3 +97,7 @@ public/assets/passes/*.pkpass
 # Miscellaneous
 *.pem
 .debug/
+
+# Large data files (exceed GitHub 100MB limit)
+cleaned-data/
+data-pack-*.csv

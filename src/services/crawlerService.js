@@ -17,18 +17,70 @@ const DATA_SCHEMAS = {
 };
 
 // Crawler task templates
+// Each source can have multiple tasks, identified by taskId
 const TASK_TEMPLATES = {
-  amazon: {
-    title: 'Amazon Order History',
-    description: 'Crawl your Amazon order history to earn rewards',
-    source: 'amazon'
-  },
-  luma: {
-    title: 'Luma Task History', 
-    description: 'Crawl your Luma task history to earn rewards',
-    source: 'luma'
-  }
+  amazon: [
+    {
+      taskId: 'amazon_orders',
+      title: 'Amazon Order History',
+      description: 'Crawl your Amazon order history to earn rewards',
+      source: 'amazon'
+    }
+  ],
+  luma: [
+    {
+      taskId: 'luma_events',
+      title: 'Luma Events',
+      description: 'Luma events history',
+      source: 'luma'
+    }
+  ],
+  airbnb: [
+    {
+      taskId: 'airbnb_trips',
+      title: 'Airbnb Trips',
+      description: 'Airbnb trips list',
+      source: 'airbnb'
+    },
+    {
+      taskId: 'airbnb_past_trips',
+      title: 'Airbnb Past Trips',
+      description: 'Airbnb past trips',
+      source: 'airbnb'
+    }
+  ],
+  booking: [
+    {
+      taskId: 'booking_past_trips',
+      title: 'Booking Past Trips',
+      description: 'Booking.com past trips list',
+      source: 'booking'
+    },
+    {
+      taskId: 'booking_past_trip_bookings',
+      title: 'Booking Past Trip Bookings',
+      description: 'Booking.com bookings list for a past trip (trip detail)',
+      source: 'booking'
+    },
+    {
+      taskId: 'booking_past_trip_booking_detail',
+      title: 'Booking Past Trip Booking Detail',
+      description: 'Booking.com archived booking detail (print view)',
+      source: 'booking'
+    }
+  ]
 };
+
+// Helper function to get all task templates for a source
+function getTaskTemplatesForSource(source) {
+  return TASK_TEMPLATES[source] || [];
+}
+
+// Helper function to get a specific task template by source and taskId
+function getTaskTemplate(source, taskId) {
+  const templates = TASK_TEMPLATES[source] || [];
+  return templates.find(t => t.taskId === taskId) || templates[0];
+}
 
 // Daily and monthly limits
 const LIMITS = {
@@ -40,27 +92,33 @@ const LIMITS = {
  * Initialize default crawler tasks for a new user
  */
 async function initializeDefaultTasks(userId) {
-  const sources = ['amazon', 'luma'];
+  const sources = ['amazon', 'luma', 'airbnb', 'booking'];
   const tasks = [];
   
   for (const source of sources) {
-    // Check if user already has a task for this source
-    const existingTask = await prisma.crawlerTask.findFirst({
-      where: {
-        userId,
-        source
-      }
-    });
+    const templates = getTaskTemplatesForSource(source);
     
-    if (!existingTask) {
-      const template = TASK_TEMPLATES[source];
-      const task = await prisma.crawlerTask.create({
-        data: {
-          ...template,
-          userId
+    for (const template of templates) {
+      // Check if user already has this specific task
+      const existingTask = await prisma.crawlerTask.findFirst({
+        where: {
+          userId,
+          source,
+          title: template.title
         }
       });
-      tasks.push(task);
+      
+      if (!existingTask) {
+        const task = await prisma.crawlerTask.create({
+          data: {
+            title: template.title,
+            description: template.description,
+            source: template.source,
+            userId
+          }
+        });
+        tasks.push(task);
+      }
     }
   }
   
@@ -139,13 +197,30 @@ async function getCrawlerTasks(userId, filters = {}) {
 
 /**
  * Create or get existing crawler task for user
+ * @param {string} userId - User ID
+ * @param {string} source - Data source (amazon, luma, airbnb, booking)
+ * @param {string} taskId - Optional task ID to get specific task (e.g., 'airbnb_trips', 'booking_past_trips')
  */
-async function getOrCreateCrawlerTask(userId, source) {
-  // Look for existing task for this specific source
+async function getOrCreateCrawlerTask(userId, source, taskId = null) {
+  // Get task template
+  const template = taskId 
+    ? getTaskTemplate(source, taskId)
+    : getTaskTemplatesForSource(source)[0];
+  
+  if (!template) {
+    throw new Error(`Unsupported crawler source: ${source}`);
+  }
+
+  // Look for existing task
+  const where = {
+    userId,
+    source,
+    title: template.title
+  };
+  
   let task = await prisma.crawlerTask.findFirst({
     where: {
-      userId,
-      source,
+      ...where,
       status: {
         in: ['pending', 'running']
       }
@@ -153,18 +228,20 @@ async function getOrCreateCrawlerTask(userId, source) {
   });
 
   if (!task) {
-    // Create new task from template
-    const template = TASK_TEMPLATES[source];
-    if (!template) {
-      throw new Error(`Unsupported crawler source: ${source}`);
+    // Check if any task exists (even if completed)
+    task = await prisma.crawlerTask.findFirst({ where });
+    
+    if (!task) {
+      // Create new task from template
+      task = await prisma.crawlerTask.create({
+        data: {
+          title: template.title,
+          description: template.description,
+          source: template.source,
+          userId
+        }
+      });
     }
-
-    task = await prisma.crawlerTask.create({
-      data: {
-        ...template,
-        userId
-      }
-    });
   }
 
   return task;
@@ -174,22 +251,34 @@ async function getOrCreateCrawlerTask(userId, source) {
  * Get or create user tasks for all sources
  */
 async function getOrCreateUserTasks(userId) {
-  const sources = ['amazon', 'luma'];
+  const sources = ['amazon', 'luma', 'airbnb', 'booking'];
   const tasks = [];
 
   for (const source of sources) {
-    let task = await prisma.crawlerTask.findFirst({
-      where: { userId, source }
-    });
-
-    if (!task) {
-      const template = TASK_TEMPLATES[source];
-      task = await prisma.crawlerTask.create({
-        data: { ...template, userId }
+    const templates = getTaskTemplatesForSource(source);
+    
+    for (const template of templates) {
+      let task = await prisma.crawlerTask.findFirst({
+        where: { 
+          userId, 
+          source,
+          title: template.title
+        }
       });
-    }
 
-    tasks.push(task);
+      if (!task) {
+        task = await prisma.crawlerTask.create({
+          data: {
+            title: template.title,
+            description: template.description,
+            source: template.source,
+            userId
+          }
+        });
+      }
+
+      tasks.push(task);
+    }
   }
 
   return tasks;
@@ -203,7 +292,7 @@ function validateDataItem(item) {
   const warnings = [];
 
   // Basic validation
-  if (!item.source || !['amazon', 'luma'].includes(item.source)) {
+  if (!item.source || !['amazon', 'luma', 'airbnb', 'booking'].includes(item.source)) {
     errors.push(CRAWLER_MESSAGES.INVALID_SOURCE);
   }
 
@@ -464,7 +553,7 @@ async function uploadCrawlerData(data, userId) {
       }
       
       // Get or create user's crawler tasks within transaction
-      const sources = ['amazon', 'luma'];
+      const sources = ['amazon', 'luma', 'airbnb', 'booking'];
       const tasks = [];
       for (const source of sources) {
         let task = await tx.crawlerTask.findFirst({
@@ -887,7 +976,7 @@ async function checkDuplicates(items, userId) {
           duplicates.push({
             index: item.originalIndex,
             reason: 'source_id_duplicate',
-            reasonText: `You have already uploaded the same ${item.source === 'amazon' ? 'Amazon order' : 'Luma event'}`,
+            reasonText: `You have already uploaded the same ${item.source === 'amazon' ? 'Amazon order' : item.source === 'luma' ? 'Luma event' : item.source === 'airbnb' ? 'Airbnb trip' : item.source === 'booking' ? 'Booking trip' : 'data item'}`,
             existingUserId: sourceIdDuplicate.userId,
             existingDate: sourceIdDuplicate.createdAt
           });
