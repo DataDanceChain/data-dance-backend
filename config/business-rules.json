@@ -15,6 +15,38 @@
         "duplicateData": "Duplicate data detected, no points awarded",
         "invalidData": "Invalid data format, please check and resubmit"
       }
+    },
+    "airbnb": {
+      "pointsPerItem": 10,
+      "dailyLimit": 1000,
+      "monthlyLimit": 10000,
+      "rewardRule": "Earn 10 points for each valid data item submitted",
+      "validationRules": [
+        "Duplicate data will not be counted",
+        "Invalid data will not be counted"
+      ],
+      "errors": {
+        "dailyLimitExceeded": "Daily submission limit reached (1,000 items), please try again tomorrow",
+        "monthlyLimitExceeded": "Monthly submission limit reached (10,000 items), please try again next month",
+        "duplicateData": "Duplicate data detected, no points awarded",
+        "invalidData": "Invalid data format, please check and resubmit"
+      }
+    },
+    "booking": {
+      "pointsPerItem": 10,
+      "dailyLimit": 1000,
+      "monthlyLimit": 10000,
+      "rewardRule": "Earn 10 points for each valid data item submitted",
+      "validationRules": [
+        "Duplicate data will not be counted",
+        "Invalid data will not be counted"
+      ],
+      "errors": {
+        "dailyLimitExceeded": "Daily submission limit reached (1,000 items), please try again tomorrow",
+        "monthlyLimitExceeded": "Monthly submission limit reached (10,000 items), please try again next month",
+        "duplicateData": "Duplicate data detected, no points awarded",
+        "invalidData": "Invalid data format, please check and resubmit"
+      }
     }
   },
   "rewardDistribution": {

@@ -1,7 +1,7 @@
 const prisma = require('../utils/prisma');
 const { createLogger } = require('../utils/logger');
 const crypto = require('crypto');
-const { calculateAmazonDataPoints } = require('./businessRulesService');
+const { calculateAmazonDataPoints, calculateDataPoints } = require('./businessRulesService');
 const { CRAWLER_MESSAGES } = require('../constants/messages');
 const { distributeUplineRewards } = require('./distributionService');
 const logger = createLogger('crawlerService');
@@ -586,9 +586,6 @@ async function uploadCrawlerData(data, userId) {
         userId
       }));
 
-      // Calculate points - using business rules service
-      const pointsEarned = calculateAmazonDataPoints(validItems.length);
-
       // Insert data with skipDuplicates to handle race conditions
       const insertResult = await tx.crawlerData.createMany({
         data: insertData,
@@ -596,14 +593,19 @@ async function uploadCrawlerData(data, userId) {
       });
       
       const actualInserted = insertResult.count;
-      // Update task record count based on actual inserted count
+      
+      // Get actual inserted items (we need to query them back to know their sources)
+      // Since createMany doesn't return the inserted records, we'll use the validItems
+      // and count by source based on the insertion order
+      const insertedBySource = {};
       if (actualInserted > 0) {
         // Count actual insertions by source
-        const insertedBySource = {};
-        for (const item of validItems.slice(0, actualInserted)) {
-          insertedBySource[item.source] = (insertedBySource[item.source] || 0) + 1;
+        for (let i = 0; i < Math.min(actualInserted, validItems.length); i++) {
+          const source = validItems[i].source;
+          insertedBySource[source] = (insertedBySource[source] || 0) + 1;
         }
         
+        // Update task record count based on actual inserted count
         for (const [source, count] of Object.entries(insertedBySource)) {
           if (tasksBySource[source]) {
             await tx.crawlerTask.update({
@@ -617,8 +619,11 @@ async function uploadCrawlerData(data, userId) {
         }
       }
 
-      // Calculate points based on actual inserted items
-      const actualPointsEarned = calculateAmazonDataPoints(actualInserted);
+      // Calculate points based on actual inserted items, grouped by source
+      let actualPointsEarned = 0;
+      for (const [source, count] of Object.entries(insertedBySource)) {
+        actualPointsEarned += calculateDataPoints(source, count);
+      }
 
       // Calculate and award points
       if (actualPointsEarned > 0) {

@@ -4,7 +4,10 @@ const { createLogger } = require('../utils/logger');
 const { 
   checkAmazonDataLimits, 
   calculateAmazonDataPoints,
-  getAmazonDataRules
+  getAmazonDataRules,
+  checkDataLimits,
+  calculateDataPoints,
+  getDataRules
 } = require('../services/businessRulesService');
 const logger = createLogger('crawlerController');
 
@@ -191,29 +194,37 @@ async function uploadData(req, res) {
       });
     }
 
-    // Check for Amazon data and apply business rules
-    const amazonItems = validItems.filter(item => item.source === 'amazon');
-    let amazonLimits = null;
+    // Check for data limits by source (Amazon, Airbnb, Booking)
+    const itemsBySource = {
+      amazon: validItems.filter(item => item.source === 'amazon'),
+      airbnb: validItems.filter(item => item.source === 'airbnb'),
+      booking: validItems.filter(item => item.source === 'booking')
+    };
     
-    if (amazonItems.length > 0) {
-      // Check Amazon specific limits
-      const limitCheck = await checkAmazonDataLimits(userId, amazonItems.length);
-      
-      if (!limitCheck.allowed) {
-        return res.status(429).json({
-          status: 'error',
-          message: limitCheck.error,
-          data: {
-            remainingDaily: limitCheck.remainingDaily,
-            remainingMonthly: limitCheck.remainingMonthly
-          }
-        });
+    const sourceLimits = {};
+    
+    // Check limits for each source
+    for (const [source, items] of Object.entries(itemsBySource)) {
+      if (items.length > 0) {
+        const limitCheck = await checkDataLimits(userId, source, items.length);
+        
+        if (!limitCheck.allowed) {
+          return res.status(429).json({
+            status: 'error',
+            message: limitCheck.error,
+            data: {
+              source,
+              remainingDaily: limitCheck.remainingDaily,
+              remainingMonthly: limitCheck.remainingMonthly
+            }
+          });
+        }
+        
+        sourceLimits[source] = {
+          remainingDaily: limitCheck.remainingDaily,
+          remainingMonthly: limitCheck.remainingMonthly
+        };
       }
-      
-      amazonLimits = {
-        remainingDaily: limitCheck.remainingDaily,
-        remainingMonthly: limitCheck.remainingMonthly
-      };
     }
 
     // Upload all data at once - the service will handle source grouping internally
@@ -229,9 +240,9 @@ async function uploadData(req, res) {
       message: result.message || `Data uploaded successfully`
     };
 
-    // Add Amazon limits info if Amazon data was uploaded
-    if (amazonLimits) {
-      responseData.amazonLimits = amazonLimits;
+    // Add source limits info if data was uploaded
+    if (Object.keys(sourceLimits).length > 0) {
+      responseData.sourceLimits = sourceLimits;
     }
 
     res.json({

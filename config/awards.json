@@ -41,6 +41,66 @@
       ]
     },
     {
+      "id": "airbnb-data-collection",
+      "title": "Airbnb Data Collection",
+      "description": "Share Your Airbnb trips to earn rewards",
+      "icon": "businessOutline",
+      "color": "#FF5A5F",
+      "status": "LIVE",
+      "enabled": true,
+      "metadata": {
+        "source": "airbnb",
+        "type": "data-collection",
+        "category": "data-sharing",
+        "logoUrl": "/assets/websites/airbnb.png",
+        "actionUrl": "/user/crawl-tasks",
+        "buttonText": "Submit Data"
+      },
+      "tasks": [
+        {
+          "id": "airbnb-trip-submit",
+          "title": "Submit Airbnb Trip Data",
+          "description": "Share Your Airbnb trips to earn rewards",
+          "points": 100,
+          "claimLimit": null,
+          "metadata": {
+            "type": "data-submission",
+            "source": "airbnb"
+          }
+        }
+      ]
+    },
+    {
+      "id": "booking-data-collection",
+      "title": "Booking Data Collection",
+      "description": "Share Your Booking.com trips to earn rewards",
+      "icon": "businessOutline",
+      "color": "#003580",
+      "status": "LIVE",
+      "enabled": true,
+      "metadata": {
+        "source": "booking",
+        "type": "data-collection",
+        "category": "data-sharing",
+        "logoUrl": "/assets/websites/booking.png",
+        "actionUrl": "/user/crawl-tasks",
+        "buttonText": "Submit Data"
+      },
+      "tasks": [
+        {
+          "id": "booking-trip-submit",
+          "title": "Submit Booking Trip Data",
+          "description": "Share Your Booking.com trips to earn rewards",
+          "points": 100,
+          "claimLimit": null,
+          "metadata": {
+            "type": "data-submission",
+            "source": "booking"
+          }
+        }
+      ]
+    },
+    {
       "id": "referral-rewards",
       "title": "Referral Rewards",
       "description": "Earn rewards from your referral network activities",

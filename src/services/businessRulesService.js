@@ -74,6 +74,110 @@ function calculateAmazonDataPoints(validItemCount) {
 }
 
 /**
+ * 计算数据提交应获得的积分（通用函数，支持所有数据源）
+ * @param {string} source - 数据源 ('amazon', 'airbnb', 'booking')
+ * @param {number} validItemCount - 有效数据条数
+ * @returns {number} 应获得的积分
+ */
+function calculateDataPoints(source, validItemCount) {
+  const sourceRules = businessRules.dataCollection[source];
+  if (!sourceRules) {
+    // 如果没有特定规则，使用 Amazon 规则作为默认值
+    const amazonRules = businessRules.dataCollection.amazon;
+    return validItemCount * amazonRules.pointsPerItem;
+  }
+  return validItemCount * sourceRules.pointsPerItem;
+}
+
+/**
+ * 检查数据提交限制（通用函数，支持所有数据源）
+ * @param {string} userId - 用户ID
+ * @param {string} source - 数据源 ('amazon', 'airbnb', 'booking')
+ * @param {number} itemCount - 本次提交的数据条数
+ * @returns {Promise<{allowed: boolean, error?: string, remainingDaily?: number, remainingMonthly?: number}>}
+ */
+async function checkDataLimits(userId, source, itemCount) {
+  const sourceRules = businessRules.dataCollection[source];
+  if (!sourceRules) {
+    // 如果没有特定规则，使用 Amazon 规则作为默认值
+    const amazonRules = businessRules.dataCollection.amazon;
+    return checkAmazonDataLimits(userId, itemCount);
+  }
+  
+  // 获取今日和本月的提交统计
+  const today = new Date();
+  const startOfDay = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+  const startOfMonth = new Date(today.getFullYear(), today.getMonth(), 1);
+  
+  // 查询用户的数据提交记录
+  const dailyCount = await prisma.crawlerData.count({
+    where: {
+      userId,
+      source,
+      createdAt: {
+        gte: startOfDay
+      }
+    }
+  });
+  
+  const monthlyCount = await prisma.crawlerData.count({
+    where: {
+      userId,
+      source,
+      createdAt: {
+        gte: startOfMonth
+      }
+    }
+  });
+  
+  // 检查每日限制
+  if (dailyCount + itemCount > sourceRules.dailyLimit) {
+    return {
+      allowed: false,
+      error: sourceRules.errors.dailyLimitExceeded,
+      remainingDaily: Math.max(0, sourceRules.dailyLimit - dailyCount),
+      remainingMonthly: Math.max(0, sourceRules.monthlyLimit - monthlyCount)
+    };
+  }
+  
+  // 检查每月限制
+  if (monthlyCount + itemCount > sourceRules.monthlyLimit) {
+    return {
+      allowed: false,
+      error: sourceRules.errors.monthlyLimitExceeded,
+      remainingDaily: Math.max(0, sourceRules.dailyLimit - dailyCount),
+      remainingMonthly: Math.max(0, sourceRules.monthlyLimit - monthlyCount)
+    };
+  }
+  
+  return {
+    allowed: true,
+    remainingDaily: sourceRules.dailyLimit - dailyCount - itemCount,
+    remainingMonthly: sourceRules.monthlyLimit - monthlyCount - itemCount
+  };
+}
+
+/**
+ * 获取数据采集规则信息（通用函数，支持所有数据源）
+ * @param {string} source - 数据源 ('amazon', 'airbnb', 'booking')
+ * @returns {object} 规则信息
+ */
+function getDataRules(source) {
+  const sourceRules = businessRules.dataCollection[source];
+  if (!sourceRules) {
+    // 如果没有特定规则，使用 Amazon 规则作为默认值
+    return getAmazonDataRules();
+  }
+  return {
+    pointsPerItem: sourceRules.pointsPerItem,
+    dailyLimit: sourceRules.dailyLimit,
+    monthlyLimit: sourceRules.monthlyLimit,
+    rewardRule: sourceRules.rewardRule,
+    validationRules: sourceRules.validationRules
+  };
+}
+
+/**
  * 获取Amazon数据采集规则信息（用于前端显示）
  * @returns {object} 规则信息
  */
@@ -135,5 +239,9 @@ module.exports = {
   calculateAmazonDataPoints,
   getAmazonDataRules,
   validateAndDeduplicateAmazonData,
-  generateDataHash
+  generateDataHash,
+  // 通用函数（支持所有数据源）
+  calculateDataPoints,
+  checkDataLimits,
+  getDataRules
 };

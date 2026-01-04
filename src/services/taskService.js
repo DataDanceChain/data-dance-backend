@@ -133,6 +133,72 @@ const awardStrategies = {
       return totalCount;
     }
   },
+  'airbnb-data-collection': {
+    unlock: async (userId) => {
+      // Airbnb tasks are always unlocked for users
+      await recordTaskProgress(userId, 'airbnb-trip-submit', 1);
+    },
+    prepare: async (userId) => {
+      // Get user's Airbnb data submission count
+      const today = new Date();
+      const startOfDay = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+      
+      const dailyCount = await prisma.crawlerData.count({
+        where: {
+          userId,
+          source: 'airbnb',
+          createdAt: { gte: startOfDay }
+        }
+      });
+      
+      const totalCount = await prisma.crawlerData.count({
+        where: {
+          userId,
+          source: 'airbnb'
+        }
+      });
+      
+      return { dailyCount, totalCount };
+    },
+    computeProgress: async (task, userId, { dailyCount, totalCount }) => {
+      // Progress represents total number of data items submitted (unlimited task)
+      // Return total count as integer representing completion quantity
+      return totalCount;
+    }
+  },
+  'booking-data-collection': {
+    unlock: async (userId) => {
+      // Booking tasks are always unlocked for users
+      await recordTaskProgress(userId, 'booking-trip-submit', 1);
+    },
+    prepare: async (userId) => {
+      // Get user's Booking data submission count
+      const today = new Date();
+      const startOfDay = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+      
+      const dailyCount = await prisma.crawlerData.count({
+        where: {
+          userId,
+          source: 'booking',
+          createdAt: { gte: startOfDay }
+        }
+      });
+      
+      const totalCount = await prisma.crawlerData.count({
+        where: {
+          userId,
+          source: 'booking'
+        }
+      });
+      
+      return { dailyCount, totalCount };
+    },
+    computeProgress: async (task, userId, { dailyCount, totalCount }) => {
+      // Progress represents total number of data items submitted (unlimited task)
+      // Return total count as integer representing completion quantity
+      return totalCount;
+    }
+  },
   'christmas-shopping': {
     unlock: async (userId) => {
       // Christmas shopping tasks are unlocked for all users during December 2025
@@ -279,8 +345,8 @@ async function getTasksByAward(userId, awardId) {
       finalStatus = 'CLAIMED';
     } else if (!prereqDone) {
       finalStatus = 'LOCKED';
-    } else if (awardId === 'amazon-data-collection' && progress > 0) {
-      // Amazon data collection: unlimited task, always IN_PROGRESS when has submissions
+    } else if ((awardId === 'amazon-data-collection' || awardId === 'airbnb-data-collection' || awardId === 'booking-data-collection') && progress > 0) {
+      // Data collection tasks: unlimited task, always IN_PROGRESS when has submissions
       finalStatus = 'IN_PROGRESS';
     } else if ((awardId === 'referral-rewards' || awardId === 'social-engagement') && progress >= 0 && progress < 1) {
       // referral and social tasks: always show IN_PROGRESS even at 0
@@ -313,6 +379,8 @@ async function getTasksByAward(userId, awardId) {
           doneCount = Math.min(context.ddcBalance, task.requirementCount);
           break;
         case 'amazon-data-collection':
+        case 'airbnb-data-collection':
+        case 'booking-data-collection':
           // For unlimited tasks, doneCount equals progress (total submissions)
           doneCount = progress;
           break;
@@ -324,8 +392,8 @@ async function getTasksByAward(userId, awardId) {
           doneCount = Math.min(Math.floor(progress * task.requirementCount), task.requirementCount);
       }
     } else {
-      // For tasks without requirementCount (like Amazon data collection)
-      if (awardId === 'amazon-data-collection') {
+      // For tasks without requirementCount (like data collection tasks)
+      if (awardId === 'amazon-data-collection' || awardId === 'airbnb-data-collection' || awardId === 'booking-data-collection') {
         doneCount = progress; // progress is already the total count for unlimited tasks
       } else {
         // fallback: either fully claimed or zero
