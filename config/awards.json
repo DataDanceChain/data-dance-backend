@@ -52,7 +52,7 @@
         "source": "airbnb",
         "type": "data-collection",
         "category": "data-sharing",
-        "logoUrl": "/assets/websites/airbnb.png",
+        "logoUrl": "/assets/websites/airbnb.webp",
         "actionUrl": "/user/crawl-tasks",
         "buttonText": "Submit Data"
       },
@@ -82,7 +82,7 @@
         "source": "booking",
         "type": "data-collection",
         "category": "data-sharing",
-        "logoUrl": "/assets/websites/booking.png",
+        "logoUrl": "/assets/websites/booking.svg",
         "actionUrl": "/user/crawl-tasks",
         "buttonText": "Submit Data"
       },
