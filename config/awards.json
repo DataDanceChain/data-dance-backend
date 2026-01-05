@@ -105,7 +105,7 @@
       "title": "Luma Data Collection",
       "description": "Share Your Luma events to earn rewards",
       "icon": "businessOutline",
-      "color": "#8B5CF6",
+      "color": "#1a1a1a",
       "status": "LIVE",
       "enabled": true,
       "metadata": {
