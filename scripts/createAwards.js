@@ -13,7 +13,8 @@ async function main() {
         description: award.description,
         icon: award.icon,
         color: award.color,
-        status: award.status
+        status: award.status,
+        metadata: award.metadata || {}
       },
       create: {
         id: award.id,
@@ -21,7 +22,8 @@ async function main() {
         description: award.description,
         icon: award.icon,
         color: award.color,
-        status: award.status
+        status: award.status,
+        metadata: award.metadata || {}
       }
     });
   }

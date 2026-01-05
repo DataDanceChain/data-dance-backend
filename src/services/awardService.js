@@ -24,10 +24,11 @@ async function getAwardDefinitions() {
   // Create a map for quick lookup
   const awardMap = new Map(awards.map(award => [award.id, award]));
 
-  // Return awards in the order defined in awards.json, filtering out disabled awards
+  // Return awards in the order defined in awards.json, filtering out disabled awards and null values
   return awardConfig
     .filter(config => config.enabled !== false)
-    .map(config => awardMap.get(config.id));
+    .map(config => awardMap.get(config.id))
+    .filter(award => award !== null && award !== undefined); // Filter out null/undefined awards
 }
 
 /**
