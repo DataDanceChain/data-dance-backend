@@ -178,38 +178,185 @@ model PluginScript {
 
 ## 快速开始（实现后）
 
-### 上传脚本示例
+### 1. 插件检查更新（完整示例）
+
+```javascript
+// 插件端完整代码
+async function checkAndUpdatePlugin() {
+  const platform = 'amazon';
+  const clientTag = 'chrome-extension';
+  const currentVersion = localStorage.getItem('pluginVersion') || '0.0.0';
+  
+  try {
+    // 1. 检查版本
+    const checkResponse = await fetch(
+      `/api/plugin-scripts/check-version?platform=${platform}&clientTag=${clientTag}&currentVersion=${currentVersion}`
+    );
+    const checkResult = await checkResponse.json();
+    
+    if (checkResult.status === 'success' && checkResult.data.updateAvailable) {
+      console.log(`Update available: ${checkResult.data.latestVersion}`);
+      
+      // 2. 下载最新脚本
+      const scriptResponse = await fetch(
+        `/api/plugin-scripts/latest?platform=${platform}&clientTag=${clientTag}`
+      );
+      const scriptResult = await scriptResponse.json();
+      
+      if (scriptResult.status === 'success') {
+        // 3. 保存脚本和版本
+        localStorage.setItem('pluginScript', scriptResult.data.script);
+        localStorage.setItem('pluginVersion', scriptResult.data.version);
+        
+        // 4. 执行新脚本
+        executeScript(scriptResult.data.script);
+        
+        console.log(`Plugin updated to ${scriptResult.data.version}`);
+      }
+    } else {
+      console.log('Plugin is up to date');
+      // 使用本地缓存的脚本
+      const cachedScript = localStorage.getItem('pluginScript');
+      if (cachedScript) {
+        executeScript(cachedScript);
+      }
+    }
+  } catch (error) {
+    console.error('Update check failed:', error);
+    // 错误处理：使用本地缓存
+    const cachedScript = localStorage.getItem('pluginScript');
+    if (cachedScript) {
+      executeScript(cachedScript);
+    }
+  }
+}
+
+function executeScript(scriptContent) {
+  try {
+    const script = document.createElement('script');
+    script.textContent = scriptContent;
+    document.head.appendChild(script);
+  } catch (error) {
+    console.error('Script execution error:', error);
+  }
+}
+```
+
+### 2. 上传新脚本（完整示例）
 
 ```bash
+# 使用 curl
 curl -X POST http://localhost:8080/api/plugin-scripts/upload \
   -H "Content-Type: application/json" \
   -d '{
     "platform": "amazon",
     "clientTag": "chrome-extension",
-    "version": "1.0.0",
-    "script": "(function() { console.log(\"Amazon plugin\"); })();",
-    "description": "Initial release",
+    "version": "1.3.0",
+    "script": "(function() {\n  console.log(\"Amazon plugin v1.3.0\");\n  // Order extraction logic\n})();",
+    "description": "Added support for new Amazon order format",
+    "metadata": {
+      "changelog": "1. Fixed order ID parsing\n2. Added multi-item support",
+      "author": "dev-team"
+    },
     "setAsLatest": true,
     "setAsActive": true
   }'
 ```
 
-### 插件检查版本示例
-
 ```javascript
-// 插件端代码
-const response = await fetch(
-  '/api/plugin-scripts/check-version?platform=amazon&clientTag=chrome-extension&currentVersion=1.0.0'
-);
-const { data } = await response.json();
+// 使用 JavaScript fetch
+async function uploadScript() {
+  const response = await fetch('/api/plugin-scripts/upload', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      platform: 'amazon',
+      clientTag: 'chrome-extension',
+      version: '1.3.0',
+      script: `(function() {
+        console.log('Amazon plugin v1.3.0');
+        // Implementation
+      })();`,
+      description: 'Added new features',
+      metadata: {
+        changelog: '1. Feature A\n2. Feature B',
+        author: 'dev-team'
+      },
+      setAsLatest: true,
+      setAsActive: true
+    })
+  });
+  
+  const result = await response.json();
+  console.log('Upload result:', result);
+}
+```
 
-if (data.updateAvailable) {
-  // 下载新版本
-  const scriptResponse = await fetch(
-    '/api/plugin-scripts/latest?platform=amazon&clientTag=chrome-extension'
-  );
-  const { data: scriptData } = await scriptResponse.json();
-  // 保存并执行新脚本
+### 3. API 请求/响应格式
+
+**检查版本:**
+```
+GET /api/plugin-scripts/check-version?platform=amazon&clientTag=chrome-extension&currentVersion=1.1.0
+
+Response:
+{
+  "status": "success",
+  "data": {
+    "currentVersion": "1.1.0",
+    "latestVersion": "1.2.0",
+    "isUpToDate": false,
+    "updateAvailable": true,
+    "updateUrl": "/api/plugin-scripts/latest?platform=amazon&clientTag=chrome-extension"
+  }
+}
+```
+
+**获取最新脚本:**
+```
+GET /api/plugin-scripts/latest?platform=amazon&clientTag=chrome-extension
+
+Response:
+{
+  "status": "success",
+  "data": {
+    "platform": "amazon",
+    "clientTag": "chrome-extension",
+    "version": "1.2.0",
+    "script": "(function() { ... })();",
+    "metadata": { ... }
+  }
+}
+```
+
+**上传脚本:**
+```
+POST /api/plugin-scripts/upload
+Content-Type: application/json
+
+Request Body:
+{
+  "platform": "amazon",
+  "clientTag": "chrome-extension",
+  "version": "1.3.0",
+  "script": "(function() { ... })();",
+  "description": "Optional description",
+  "setAsLatest": true,
+  "setAsActive": true
+}
+
+Response:
+{
+  "status": "success",
+  "data": {
+    "id": "script-uuid",
+    "platform": "amazon",
+    "clientTag": "chrome-extension",
+    "version": "1.3.0",
+    "isLatest": true,
+    "isActive": true
+  }
 }
 ```
 
