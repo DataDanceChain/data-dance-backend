@@ -4,34 +4,48 @@ const { getReferralOverview } = require('./referralService');
 const { awards: awardConfig } = require('../../config/awards.json');
 
 /**
+ * Convert camelCase to kebab-case
+ * Example: businessOutline -> business-outline
+ */
+function camelToKebab(str) {
+  return str.replace(/([a-z0-9])([A-Z])/g, '$1-$2').toLowerCase();
+}
+
+/**
  * Convert icon name to image path
- * Maps icon names to static file paths
+ * Maps icon names to static file paths with intelligent conversion
+ * 
+ * @param {string} iconName - Icon name (e.g., "businessOutline") or path (e.g., "/assets/icons/icon.svg")
+ * @returns {string|null} - Image path or null if iconName is empty
  */
 function getIconPath(iconName) {
   if (!iconName) return null;
-  
-  // Icon name to path mapping
-  const iconMap = {
-    'businessOutline': '/assets/icons/business-outline.svg',
-    'peopleOutline': '/assets/icons/people-outline.svg',
-    'shareOutline': '/assets/icons/share-outline.svg',
-    'calendarOutline': '/assets/icons/calendar-outline.svg',
-    'diamondOutline': '/assets/icons/diamond-outline.svg',
-    'starOutline': '/assets/icons/star-outline.svg',
-    'cardOutline': '/assets/icons/card-outline.svg',
-    'trophyOutline': '/assets/icons/trophy-outline.svg',
-    'bulbOutline': '/assets/icons/bulb-outline.svg',
-    'schoolOutline': '/assets/icons/school-outline.svg',
-    'earthOutline': '/assets/icons/earth-outline.svg'
-  };
   
   // If already a path, return as is
   if (iconName.startsWith('/')) {
     return iconName;
   }
   
-  // Map icon name to path
-  return iconMap[iconName] || `/assets/icons/${iconName}.svg`;
+  // Icon name to path mapping (explicit mappings for special cases)
+  const iconMap = {
+    'businessOutline': 'business-outline',
+    'peopleOutline': 'people-outline',
+    'shareOutline': 'share-outline',
+    'calendarOutline': 'calendar-outline',
+    'diamondOutline': 'diamond-outline',
+    'starOutline': 'star-outline',
+    'cardOutline': 'card-outline',
+    'trophyOutline': 'trophy-outline',
+    'bulbOutline': 'bulb-outline',
+    'schoolOutline': 'school-outline',
+    'earthOutline': 'earth-outline'
+  };
+  
+  // Use explicit mapping if available, otherwise convert camelCase to kebab-case
+  const iconFileName = iconMap[iconName] || camelToKebab(iconName);
+  
+  // Return path with .svg extension
+  return `/assets/icons/${iconFileName}.svg`;
 }
 
 /**
