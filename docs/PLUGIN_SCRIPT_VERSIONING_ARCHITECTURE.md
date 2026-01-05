@@ -37,7 +37,9 @@ model PluginScript {
   platform    String   // 'amazon', 'airbnb', 'booking', 'luma'
   clientTag   String   // 'chrome-extension', 'firefox-addon', etc.
   version     String   // Semantic version: '1.0.0', '1.1.0', etc.
-  script      String   // The actual JavaScript code
+  scriptUrl   String   // Object storage URL/path to the script file
+  scriptSize  Int?     // Script file size in bytes (optional)
+  checksum    String?  // SHA256 checksum for integrity verification (optional)
   description String?  // Optional description of changes
   isActive    Boolean  @default(true) // Whether this version is active
   isLatest    Boolean  @default(false) // Whether this is the latest version
@@ -50,6 +52,24 @@ model PluginScript {
   @@index([platform, clientTag, isLatest])
   @@index([platform, clientTag, isActive])
 }
+```
+
+### Storage Architecture
+
+**对象存储方案：**
+- ✅ 脚本文件存储在对象存储（S3/OSS/本地文件系统）
+- ✅ 数据库只存储文件路径/URL
+- ✅ 支持 CDN 加速（可选）
+- ✅ 支持版本管理和回滚
+
+**文件路径规则：**
+```
+/plugin-scripts/{platform}/{clientTag}/{version}.js
+
+示例：
+/plugin-scripts/amazon/chrome-extension/1.0.0.js
+/plugin-scripts/amazon/chrome-extension/1.1.0.js
+/plugin-scripts/airbnb/chrome-extension/1.0.0.js
 ```
 
 ### Indexes
@@ -77,17 +97,23 @@ model PluginScript {
     "platform": "amazon",
     "clientTag": "chrome-extension",
     "version": "1.2.0",
-    "script": "// Plugin script content\n(function() { ... })();",
+    "scriptUrl": "https://storage.example.com/plugin-scripts/amazon/chrome-extension/1.2.0.js",
+    "scriptSize": 10240,
+    "checksum": "sha256:abc123...",
+    "description": "Updated Amazon order extraction logic",
     "metadata": {
-      "description": "Updated Amazon order extraction logic",
       "changelog": "Fixed order ID parsing issue",
       "author": "dev-team"
     },
-    "checksum": "sha256:abc123...", // Optional: for integrity verification
     "updatedAt": "2025-12-15T10:00:00Z"
   }
 }
 ```
+
+**说明：**
+- `scriptUrl`: 对象存储中的脚本文件 URL，插件可以直接下载
+- `scriptSize`: 文件大小（字节），用于显示和验证
+- `checksum`: SHA256 校验和，用于验证文件完整性
 
 **Response (404 Not Found):**
 ```json
@@ -158,9 +184,11 @@ model PluginScript {
     "platform": "amazon",
     "clientTag": "chrome-extension",
     "version": "1.1.0",
-    "script": "// Plugin script content\n(function() { ... })();",
+    "scriptUrl": "https://storage.example.com/plugin-scripts/amazon/chrome-extension/1.1.0.js",
+    "scriptSize": 8192,
+    "checksum": "sha256:xyz789...",
+    "description": "Initial Amazon script",
     "metadata": {
-      "description": "Initial Amazon script",
       "changelog": "First release"
     },
     "isActive": true,
@@ -222,9 +250,23 @@ model PluginScript {
 
 **Endpoint:** `POST /api/plugin-scripts/upload`
 
+**Content-Type:** `multipart/form-data` 或 `application/json`
+
 **Note:** Currently no authentication required (for development/testing)
 
-**Request Body:**
+**Request Format (multipart/form-data):**
+```
+platform: "amazon"
+clientTag: "chrome-extension"
+version: "1.3.0"
+script: [File] // JavaScript file (.js)
+description: "Optional description of changes"
+metadata: { "changelog": "...", "author": "..." } (JSON string)
+setAsLatest: true
+setAsActive: true
+```
+
+**Request Format (application/json - 直接传脚本内容):**
 ```json
 {
   "platform": "amazon",
@@ -237,10 +279,17 @@ model PluginScript {
     "author": "dev-team",
     "tested": true
   },
-  "setAsLatest": true, // Whether to set this as the latest version
-  "setAsActive": true  // Whether to activate this version
+  "setAsLatest": true,
+  "setAsActive": true
 }
 ```
+
+**处理流程：**
+1. 接收脚本内容（文件或文本）
+2. 上传到对象存储
+3. 获取文件 URL
+4. 计算文件大小和校验和
+5. 保存元数据到数据库（包括 scriptUrl）
 
 **Response (201 Created):**
 ```json
@@ -251,6 +300,9 @@ model PluginScript {
     "platform": "amazon",
     "clientTag": "chrome-extension",
     "version": "1.3.0",
+    "scriptUrl": "https://storage.example.com/plugin-scripts/amazon/chrome-extension/1.3.0.js",
+    "scriptSize": 15360,
+    "checksum": "sha256:def456...",
     "isLatest": true,
     "isActive": true,
     "createdAt": "2025-12-16T10:00:00Z"
@@ -354,9 +406,10 @@ model PluginScript {
 5. Plugin calls: GET /api/plugin-scripts/latest
    Parameters: platform, clientTag
    ↓
-6. Backend returns latest script content
+6. Backend returns scriptUrl (object storage URL)
    ↓
 7. Plugin:
+   - Downloads script from scriptUrl
    - Validates script (optional: checksum verification)
    - Saves script locally
    - Updates local version number
@@ -371,7 +424,10 @@ model PluginScript {
 2. Backend:
    - Validates version format (semantic versioning)
    - Checks for duplicate version
-   - Stores script in database
+   - Uploads script file to object storage
+   - Gets file URL from object storage
+   - Calculates file size and checksum
+   - Stores metadata (scriptUrl, scriptSize, checksum) in database
    - If setAsLatest: true
      → Marks previous latest as isLatest: false
      → Marks new version as isLatest: true
@@ -380,7 +436,9 @@ model PluginScript {
    ↓
 3. Next time plugin checks version:
    - Detects new version available
-   - Downloads and updates automatically
+   - Gets scriptUrl from API
+   - Downloads script from object storage
+   - Updates automatically
 ```
 
 ### Version Management
@@ -528,7 +586,9 @@ CREATE TABLE "PluginScript" (
   "platform" TEXT NOT NULL,
   "clientTag" TEXT NOT NULL,
   "version" TEXT NOT NULL,
-  "script" TEXT NOT NULL,
+  "scriptUrl" TEXT NOT NULL,
+  "scriptSize" INTEGER,
+  "checksum" TEXT,
   "description" TEXT,
   "isActive" BOOLEAN NOT NULL DEFAULT true,
   "isLatest" BOOLEAN NOT NULL DEFAULT false,
@@ -542,6 +602,58 @@ CREATE TABLE "PluginScript" (
 
 CREATE INDEX "PluginScript_platform_clientTag_isLatest_idx" ON "PluginScript"("platform", "clientTag", "isLatest");
 CREATE INDEX "PluginScript_platform_clientTag_isActive_idx" ON "PluginScript"("platform", "clientTag", "isActive");
+```
+
+## Object Storage Configuration
+
+### Storage Options
+
+**方案 1: 本地文件系统（开发/简单部署）**
+```
+存储路径: public/plugin-scripts/{platform}/{clientTag}/{version}.js
+访问 URL: http://your-domain.com/plugin-scripts/amazon/chrome-extension/1.0.0.js
+```
+
+**方案 2: 对象存储服务（生产环境推荐）**
+- **AWS S3**: `s3://bucket-name/plugin-scripts/{platform}/{clientTag}/{version}.js`
+- **阿里云 OSS**: `https://bucket.oss-cn-hangzhou.aliyuncs.com/plugin-scripts/...`
+- **腾讯云 COS**: `https://bucket.cos.ap-shanghai.myqcloud.com/plugin-scripts/...`
+- **MinIO**: `http://minio-server/bucket/plugin-scripts/...`
+
+### 文件路径规则
+
+```
+/plugin-scripts/{platform}/{clientTag}/{version}.js
+
+示例：
+/plugin-scripts/amazon/chrome-extension/1.0.0.js
+/plugin-scripts/amazon/chrome-extension/1.1.0.js
+/plugin-scripts/airbnb/chrome-extension/1.0.0.js
+/plugin-scripts/booking/android-app/1.0.0.js
+```
+
+### 环境变量配置
+
+```bash
+# 对象存储配置
+STORAGE_TYPE="local"  # 'local' | 's3' | 'oss' | 'cos' | 'minio'
+
+# 本地存储（如果使用）
+STORAGE_BASE_PATH="/public/plugin-scripts"
+
+# S3 配置（如果使用）
+AWS_S3_BUCKET="your-bucket-name"
+AWS_S3_REGION="us-east-1"
+AWS_ACCESS_KEY_ID="your-access-key"
+AWS_SECRET_ACCESS_KEY="your-secret-key"
+AWS_S3_ENDPOINT="https://s3.amazonaws.com"  # 可选，用于兼容 S3 的服务
+
+# OSS 配置（如果使用）
+OSS_BUCKET="your-bucket-name"
+OSS_REGION="cn-hangzhou"
+OSS_ACCESS_KEY_ID="your-access-key"
+OSS_ACCESS_KEY_SECRET="your-secret-key"
+OSS_ENDPOINT="https://oss-cn-hangzhou.aliyuncs.com"
 ```
 
 ---

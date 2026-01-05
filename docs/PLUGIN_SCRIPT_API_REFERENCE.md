@@ -174,7 +174,9 @@ GET /api/plugin-scripts/latest?platform=amazon&clientTag=chrome-extension
     "platform": "amazon",
     "clientTag": "chrome-extension",
     "version": "1.2.0",
-    "script": "(function() {\n  // Amazon order extraction script\n  console.log('Amazon plugin v1.2.0');\n  // ... script content ...\n})();",
+    "scriptUrl": "https://storage.example.com/plugin-scripts/amazon/chrome-extension/1.2.0.js",
+    "scriptSize": 10240,
+    "checksum": "sha256:abc123def456...",
     "description": "Updated Amazon order extraction logic",
     "metadata": {
       "changelog": "Fixed order ID parsing issue, added support for new order format",
@@ -184,12 +186,16 @@ GET /api/plugin-scripts/latest?platform=amazon&clientTag=chrome-extension
     },
     "isActive": true,
     "isLatest": true,
-    "checksum": "sha256:abc123def456...",
     "createdAt": "2025-12-15T10:00:00.000Z",
     "updatedAt": "2025-12-15T10:00:00.000Z"
   }
 }
 ```
+
+**说明：**
+- `scriptUrl`: 对象存储中的脚本文件 URL，插件需要从此 URL 下载脚本
+- `scriptSize`: 文件大小（字节）
+- `checksum`: SHA256 校验和，用于验证文件完整性
 
 **响应 - 未找到 (404 Not Found):**
 
@@ -205,28 +211,43 @@ GET /api/plugin-scripts/latest?platform=amazon&clientTag=chrome-extension
 ```javascript
 async function downloadLatestScript(platform, clientTag) {
   try {
+    // 1. 获取脚本元数据（包括 scriptUrl）
     const response = await fetch(
       `/api/plugin-scripts/latest?platform=${platform}&clientTag=${clientTag}`
     );
     const result = await response.json();
     
     if (result.status === 'success') {
-      const { script, version, checksum } = result.data;
+      const { scriptUrl, version, checksum, scriptSize } = result.data;
       
-      // 可选: 验证脚本完整性
+      // 2. 从对象存储下载脚本文件
+      const scriptResponse = await fetch(scriptUrl);
+      if (!scriptResponse.ok) {
+        throw new Error(`Failed to download script: ${scriptResponse.statusText}`);
+      }
+      
+      const scriptContent = await scriptResponse.text();
+      
+      // 3. 可选: 验证脚本完整性
       if (checksum) {
-        const calculatedChecksum = await calculateSHA256(script);
+        const calculatedChecksum = await calculateSHA256(scriptContent);
         if (calculatedChecksum !== checksum) {
           throw new Error('Script integrity check failed');
         }
       }
       
-      // 保存脚本和版本
-      localStorage.setItem('pluginScript', script);
-      localStorage.setItem('pluginVersion', version);
+      // 4. 可选: 验证文件大小
+      if (scriptSize && scriptContent.length !== scriptSize) {
+        throw new Error('Script size mismatch');
+      }
       
-      // 执行脚本
-      executeScript(script);
+      // 5. 保存脚本和版本
+      localStorage.setItem('pluginScript', scriptContent);
+      localStorage.setItem('pluginVersion', version);
+      localStorage.setItem('pluginScriptUrl', scriptUrl);
+      
+      // 6. 执行脚本
+      executeScript(scriptContent);
       
       console.log(`Plugin updated to version ${version}`);
     }
@@ -268,19 +289,33 @@ function executeScript(scriptContent) {
 
 **Content-Type:** `application/json`
 
-**Request Body:**
+**Request Body (两种方式):**
 
+**方式 1: multipart/form-data (推荐，支持文件上传)**
 | 字段 | 类型 | 必填 | 说明 | 示例 |
 |------|------|------|------|------|
-| `platform` | string | ✅ | 平台 ID | `amazon`, `airbnb`, `booking`, `luma` |
-| `clientTag` | string | ✅ | 客户端标识 | `chrome-extension`, `firefox-addon`, `ios-app`, `android-app`, `web-app` |
-| `version` | string | ✅ | 版本号（语义化版本） | `1.0.0`, `1.1.0`, `2.0.0` |
+| `platform` | string | ✅ | 平台 ID | `amazon` |
+| `clientTag` | string | ✅ | 客户端标识 | `chrome-extension` |
+| `version` | string | ✅ | 版本号（语义化版本） | `1.0.0` |
+| `script` | File | ✅ | JavaScript 脚本文件 (.js) | `script.js` |
+| `description` | string | ❌ | 版本描述 | `"Fixed order parsing bug"` |
+| `metadata` | string | ❌ | 元数据（JSON 字符串） | `'{"changelog": "...", "author": "..."}'` |
+| `setAsLatest` | boolean | ❌ | 是否设置为最新版本 | `true` |
+| `setAsActive` | boolean | ❌ | 是否激活此版本 | `true` |
+| `createdBy` | string | ❌ | 创建者标识 | `"dev-team"` |
+
+**方式 2: application/json (直接传脚本内容)**
+| 字段 | 类型 | 必填 | 说明 | 示例 |
+|------|------|------|------|------|
+| `platform` | string | ✅ | 平台 ID | `amazon` |
+| `clientTag` | string | ✅ | 客户端标识 | `chrome-extension` |
+| `version` | string | ✅ | 版本号（语义化版本） | `1.0.0` |
 | `script` | string | ✅ | JavaScript 脚本内容 | `"(function() { ... })();"` |
 | `description` | string | ❌ | 版本描述 | `"Fixed order parsing bug"` |
 | `metadata` | object | ❌ | 元数据 | `{ "changelog": "...", "author": "..." }` |
-| `setAsLatest` | boolean | ❌ | 是否设置为最新版本（默认: false） | `true`, `false` |
-| `setAsActive` | boolean | ❌ | 是否激活此版本（默认: true） | `true`, `false` |
-| `createdBy` | string | ❌ | 创建者标识 | `"dev-team"`, `"admin"` |
+| `setAsLatest` | boolean | ❌ | 是否设置为最新版本 | `true` |
+| `setAsActive` | boolean | ❌ | 是否激活此版本 | `true` |
+| `createdBy` | string | ❌ | 创建者标识 | `"dev-team"` |
 
 **请求示例:**
 
@@ -316,6 +351,9 @@ curl -X POST http://localhost:8080/api/plugin-scripts/upload \
     "platform": "amazon",
     "clientTag": "chrome-extension",
     "version": "1.3.0",
+    "scriptUrl": "https://storage.example.com/plugin-scripts/amazon/chrome-extension/1.3.0.js",
+    "scriptSize": 15360,
+    "checksum": "sha256:def456...",
     "isLatest": true,
     "isActive": true,
     "description": "Added support for new Amazon order format",
