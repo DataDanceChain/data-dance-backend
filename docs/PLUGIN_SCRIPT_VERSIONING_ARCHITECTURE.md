@@ -56,20 +56,20 @@ model PluginScript {
 
 ### Storage Architecture
 
-**对象存储方案：**
-- ✅ 脚本文件存储在对象存储（S3/OSS/本地文件系统）
+**文件系统存储方案：**
+- ✅ 脚本文件存储在本地文件系统 `public/plugin-scripts/`
 - ✅ 数据库只存储文件路径/URL
-- ✅ 支持 CDN 加速（可选）
+- ✅ 通过 Express 静态文件服务提供 HTTP 访问
 - ✅ 支持版本管理和回滚
 
 **文件路径规则：**
 ```
-/plugin-scripts/{platform}/{clientTag}/{version}.js
+文件系统路径: public/plugin-scripts/{platform}/{clientTag}/{version}.js
+访问 URL: http://your-domain.com/plugin-scripts/{platform}/{clientTag}/{version}.js
 
 示例：
-/plugin-scripts/amazon/chrome-extension/1.0.0.js
-/plugin-scripts/amazon/chrome-extension/1.1.0.js
-/plugin-scripts/airbnb/chrome-extension/1.0.0.js
+- public/plugin-scripts/amazon/chrome-extension/1.0.0.js
+- 访问: http://your-domain.com/plugin-scripts/amazon/chrome-extension/1.0.0.js
 ```
 
 ### Indexes
@@ -286,8 +286,8 @@ setAsActive: true
 
 **处理流程：**
 1. 接收脚本内容（文件或文本）
-2. 上传到对象存储
-3. 获取文件 URL
+2. 保存到本地文件系统 `public/plugin-scripts/{platform}/{clientTag}/{version}.js`
+3. 生成文件访问 URL `http://your-domain.com/plugin-scripts/{platform}/{clientTag}/{version}.js`
 4. 计算文件大小和校验和
 5. 保存元数据到数据库（包括 scriptUrl）
 
@@ -406,10 +406,10 @@ setAsActive: true
 5. Plugin calls: GET /api/plugin-scripts/latest
    Parameters: platform, clientTag
    ↓
-6. Backend returns scriptUrl (object storage URL)
+6. Backend returns scriptUrl (file system URL)
    ↓
 7. Plugin:
-   - Downloads script from scriptUrl
+   - Downloads script from scriptUrl (HTTP GET)
    - Validates script (optional: checksum verification)
    - Saves script locally
    - Updates local version number
@@ -424,8 +424,8 @@ setAsActive: true
 2. Backend:
    - Validates version format (semantic versioning)
    - Checks for duplicate version
-   - Uploads script file to object storage
-   - Gets file URL from object storage
+   - Saves script file to local file system `public/plugin-scripts/{platform}/{clientTag}/{version}.js`
+   - Generates file URL `http://your-domain.com/plugin-scripts/{platform}/{clientTag}/{version}.js`
    - Calculates file size and checksum
    - Stores metadata (scriptUrl, scriptSize, checksum) in database
    - If setAsLatest: true
@@ -437,7 +437,7 @@ setAsActive: true
 3. Next time plugin checks version:
    - Detects new version available
    - Gets scriptUrl from API
-   - Downloads script from object storage
+   - Downloads script from file system URL (HTTP GET)
    - Updates automatically
 ```
 
@@ -604,57 +604,58 @@ CREATE INDEX "PluginScript_platform_clientTag_isLatest_idx" ON "PluginScript"("p
 CREATE INDEX "PluginScript_platform_clientTag_isActive_idx" ON "PluginScript"("platform", "clientTag", "isActive");
 ```
 
-## Object Storage Configuration
+## File System Storage Configuration
 
-### Storage Options
+### 存储结构
 
-**方案 1: 本地文件系统（开发/简单部署）**
 ```
-存储路径: public/plugin-scripts/{platform}/{clientTag}/{version}.js
-访问 URL: http://your-domain.com/plugin-scripts/amazon/chrome-extension/1.0.0.js
+public/
+  └── plugin-scripts/
+      ├── amazon/
+      │   ├── chrome-extension/
+      │   │   ├── 1.0.0.js
+      │   │   ├── 1.1.0.js
+      │   │   └── 1.2.0.js
+      │   └── firefox-addon/
+      │       └── 1.0.0.js
+      ├── airbnb/
+      │   └── chrome-extension/
+      │       └── 1.0.0.js
+      └── booking/
+          └── chrome-extension/
+              └── 1.0.0.js
 ```
-
-**方案 2: 对象存储服务（生产环境推荐）**
-- **AWS S3**: `s3://bucket-name/plugin-scripts/{platform}/{clientTag}/{version}.js`
-- **阿里云 OSS**: `https://bucket.oss-cn-hangzhou.aliyuncs.com/plugin-scripts/...`
-- **腾讯云 COS**: `https://bucket.cos.ap-shanghai.myqcloud.com/plugin-scripts/...`
-- **MinIO**: `http://minio-server/bucket/plugin-scripts/...`
 
 ### 文件路径规则
 
 ```
-/plugin-scripts/{platform}/{clientTag}/{version}.js
+文件系统路径: public/plugin-scripts/{platform}/{clientTag}/{version}.js
+访问 URL: http://your-domain.com/plugin-scripts/{platform}/{clientTag}/{version}.js
 
 示例：
-/plugin-scripts/amazon/chrome-extension/1.0.0.js
-/plugin-scripts/amazon/chrome-extension/1.1.0.js
-/plugin-scripts/airbnb/chrome-extension/1.0.0.js
-/plugin-scripts/booking/android-app/1.0.0.js
+- public/plugin-scripts/amazon/chrome-extension/1.0.0.js
+- 访问: http://your-domain.com/plugin-scripts/amazon/chrome-extension/1.0.0.js
+```
+
+### 静态文件服务配置
+
+在 `src/app.js` 中配置静态文件服务：
+
+```javascript
+// 静态文件服务 - Plugin Scripts
+app.use('/plugin-scripts', express.static(path.join(__dirname, '../public/plugin-scripts'), {
+  setHeaders: (res, filePath) => {
+    if (filePath.endsWith('.js')) {
+      res.set('Content-Type', 'application/javascript');
+      res.set('Cache-Control', 'public, max-age=3600'); // 1小时缓存
+    }
+  }
+}));
 ```
 
 ### 环境变量配置
 
-```bash
-# 对象存储配置
-STORAGE_TYPE="local"  # 'local' | 's3' | 'oss' | 'cos' | 'minio'
-
-# 本地存储（如果使用）
-STORAGE_BASE_PATH="/public/plugin-scripts"
-
-# S3 配置（如果使用）
-AWS_S3_BUCKET="your-bucket-name"
-AWS_S3_REGION="us-east-1"
-AWS_ACCESS_KEY_ID="your-access-key"
-AWS_SECRET_ACCESS_KEY="your-secret-key"
-AWS_S3_ENDPOINT="https://s3.amazonaws.com"  # 可选，用于兼容 S3 的服务
-
-# OSS 配置（如果使用）
-OSS_BUCKET="your-bucket-name"
-OSS_REGION="cn-hangzhou"
-OSS_ACCESS_KEY_ID="your-access-key"
-OSS_ACCESS_KEY_SECRET="your-secret-key"
-OSS_ENDPOINT="https://oss-cn-hangzhou.aliyuncs.com"
-```
+无需额外配置，使用默认的文件系统路径即可。
 
 ---
 
