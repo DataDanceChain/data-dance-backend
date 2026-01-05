@@ -163,7 +163,7 @@ for (const config of awardConfig) {
 
 ## 当前启用的 Awards
 
-根据 `config/awards.json`，目前只有 **2 个 awards** 是启用的：
+根据 `config/awards.json`，目前有 **5 个 awards** 是启用的：
 
 ### 1. Amazon Data Collection (`amazon-data-collection`)
 - **enabled**: `true`
@@ -171,7 +171,25 @@ for (const config of awardConfig) {
 - **任务**: Amazon Order Submit（无限制提交）
 - **奖励**: 每次提交 100 积分
 
-### 2. Referral Rewards (`referral-rewards`)
+### 2. Airbnb Data Collection (`airbnb-data-collection`)
+- **enabled**: `true`
+- **状态**: `LIVE`
+- **任务**: Airbnb Trip Submit（无限制提交）
+- **奖励**: 每次提交 100 积分
+
+### 3. Booking Data Collection (`booking-data-collection`)
+- **enabled**: `true`
+- **状态**: `LIVE`
+- **任务**: Booking Trip Submit（无限制提交）
+- **奖励**: 每次提交 100 积分
+
+### 4. Luma Data Collection (`luma-data-collection`)
+- **enabled**: `true`
+- **状态**: `LIVE`
+- **任务**: Luma Event Submit（无限制提交）
+- **奖励**: 每次提交 100 积分
+
+### 5. Referral Rewards (`referral-rewards`)
 - **enabled**: `true`
 - **状态**: `LIVE`
 - **任务**: 

@@ -75,7 +75,7 @@ function calculateAmazonDataPoints(validItemCount) {
 
 /**
  * 计算数据提交应获得的积分（通用函数，支持所有数据源）
- * @param {string} source - 数据源 ('amazon', 'airbnb', 'booking')
+ * @param {string} source - 数据源 ('amazon', 'luma', 'airbnb', 'booking')
  * @param {number} validItemCount - 有效数据条数
  * @returns {number} 应获得的积分
  */
@@ -92,7 +92,7 @@ function calculateDataPoints(source, validItemCount) {
 /**
  * 检查数据提交限制（通用函数，支持所有数据源）
  * @param {string} userId - 用户ID
- * @param {string} source - 数据源 ('amazon', 'airbnb', 'booking')
+ * @param {string} source - 数据源 ('amazon', 'luma', 'airbnb', 'booking')
  * @param {number} itemCount - 本次提交的数据条数
  * @returns {Promise<{allowed: boolean, error?: string, remainingDaily?: number, remainingMonthly?: number}>}
  */
@@ -159,7 +159,7 @@ async function checkDataLimits(userId, source, itemCount) {
 
 /**
  * 获取数据采集规则信息（通用函数，支持所有数据源）
- * @param {string} source - 数据源 ('amazon', 'airbnb', 'booking')
+ * @param {string} source - 数据源 ('amazon', 'luma', 'airbnb', 'booking')
  * @returns {object} 规则信息
  */
 function getDataRules(source) {
