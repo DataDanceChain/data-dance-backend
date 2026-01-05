@@ -101,6 +101,36 @@
       ]
     },
     {
+      "id": "luma-data-collection",
+      "title": "Luma Data Collection",
+      "description": "Share Your Luma events to earn rewards",
+      "icon": "businessOutline",
+      "color": "#8B5CF6",
+      "status": "LIVE",
+      "enabled": true,
+      "metadata": {
+        "source": "luma",
+        "type": "data-collection",
+        "category": "data-sharing",
+        "logoUrl": "/assets/websites/luma.png",
+        "actionUrl": "/user/crawl-tasks",
+        "buttonText": "Submit Data"
+      },
+      "tasks": [
+        {
+          "id": "luma-event-submit",
+          "title": "Submit Luma Event Data",
+          "description": "Share Your Luma events to earn rewards",
+          "points": 100,
+          "claimLimit": null,
+          "metadata": {
+            "type": "data-submission",
+            "source": "luma"
+          }
+        }
+      ]
+    },
+    {
       "id": "referral-rewards",
       "title": "Referral Rewards",
       "description": "Earn rewards from your referral network activities",
