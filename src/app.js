@@ -115,6 +115,11 @@ app.use('/assets', express.static(path.join(__dirname, '../public/assets'), {
       res.set('Cache-Control', 'public, max-age=31536000'); // 1年
       // Express static 会自动设置正确的 MIME 类型
     }
+    // SVG 图标文件
+    else if (filePath.endsWith('.svg')) {
+      res.set('Content-Type', 'image/svg+xml');
+      res.set('Cache-Control', 'public, max-age=31536000'); // 1年
+    }
   }
 }));
 

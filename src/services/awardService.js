@@ -4,6 +4,49 @@ const { getReferralOverview } = require('./referralService');
 const { awards: awardConfig } = require('../../config/awards.json');
 
 /**
+ * Convert icon name to image path
+ * Maps icon names to static file paths
+ */
+function getIconPath(iconName) {
+  if (!iconName) return null;
+  
+  // Icon name to path mapping
+  const iconMap = {
+    'businessOutline': '/assets/icons/business-outline.svg',
+    'peopleOutline': '/assets/icons/people-outline.svg',
+    'shareOutline': '/assets/icons/share-outline.svg',
+    'calendarOutline': '/assets/icons/calendar-outline.svg',
+    'diamondOutline': '/assets/icons/diamond-outline.svg',
+    'starOutline': '/assets/icons/star-outline.svg',
+    'cardOutline': '/assets/icons/card-outline.svg',
+    'trophyOutline': '/assets/icons/trophy-outline.svg',
+    'bulbOutline': '/assets/icons/bulb-outline.svg',
+    'schoolOutline': '/assets/icons/school-outline.svg',
+    'earthOutline': '/assets/icons/earth-outline.svg'
+  };
+  
+  // If already a path, return as is
+  if (iconName.startsWith('/')) {
+    return iconName;
+  }
+  
+  // Map icon name to path
+  return iconMap[iconName] || `/assets/icons/${iconName}.svg`;
+}
+
+/**
+ * Transform award object to include icon path
+ */
+function transformAwardIcon(award) {
+  if (!award) return award;
+  
+  return {
+    ...award,
+    icon: getIconPath(award.icon)
+  };
+}
+
+/**
  * Fetch platform award definitions (id, title, description, icon, color, status, metadata)
  * Returns awards in the same order as defined in awards.json
  */
@@ -25,10 +68,12 @@ async function getAwardDefinitions() {
   const awardMap = new Map(awards.map(award => [award.id, award]));
 
   // Return awards in the order defined in awards.json, filtering out disabled awards and null values
+  // Transform icon names to image paths
   return awardConfig
     .filter(config => config.enabled !== false)
     .map(config => awardMap.get(config.id))
-    .filter(award => award !== null && award !== undefined); // Filter out null/undefined awards
+    .filter(award => award !== null && award !== undefined) // Filter out null/undefined awards
+    .map(award => transformAwardIcon(award)); // Transform icon to image path
 }
 
 /**
@@ -99,7 +144,7 @@ async function getUserAwards(userId) {
       awardId: award.id,
       title: award.title,
       description: award.description,
-      icon: award.icon,
+      icon: getIconPath(award.icon), // Transform icon to image path
       color: award.color,
       metadata: award.metadata,
       totalTasks: total,
