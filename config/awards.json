@@ -35,7 +35,8 @@
           "claimLimit": null,
           "metadata": {
             "type": "data-submission",
-            "source": "amazon"
+            "source": "amazon",
+            "crawlerTaskId": "amazon_orders"
           }
         }
       ]
@@ -58,14 +59,27 @@
       },
       "tasks": [
         {
-          "id": "airbnb-trip-submit",
-          "title": "Submit Airbnb Trip Data",
-          "description": "Share Your Airbnb trips to earn rewards",
+          "id": "airbnb-trips-submit",
+          "title": "Submit Airbnb Trips",
+          "description": "Share your Airbnb trips list",
           "points": 100,
           "claimLimit": null,
           "metadata": {
             "type": "data-submission",
-            "source": "airbnb"
+            "source": "airbnb",
+            "crawlerTaskId": "airbnb_trips"
+          }
+        },
+        {
+          "id": "airbnb-past-trips-submit",
+          "title": "Submit Airbnb Past Trips",
+          "description": "Share your Airbnb past trips",
+          "points": 100,
+          "claimLimit": null,
+          "metadata": {
+            "type": "data-submission",
+            "source": "airbnb",
+            "crawlerTaskId": "airbnb_past_trips"
           }
         }
       ]
@@ -88,14 +102,39 @@
       },
       "tasks": [
         {
-          "id": "booking-trip-submit",
-          "title": "Submit Booking Trip Data",
-          "description": "Share Your Booking.com trips to earn rewards",
+          "id": "booking-past-trips-submit",
+          "title": "Submit Booking Past Trips",
+          "description": "Share your Booking.com past trips list",
           "points": 100,
           "claimLimit": null,
           "metadata": {
             "type": "data-submission",
-            "source": "booking"
+            "source": "booking",
+            "crawlerTaskId": "booking_past_trips"
+          }
+        },
+        {
+          "id": "booking-trip-bookings-submit",
+          "title": "Submit Booking Trip Bookings",
+          "description": "Share your Booking.com bookings list for a past trip",
+          "points": 100,
+          "claimLimit": null,
+          "metadata": {
+            "type": "data-submission",
+            "source": "booking",
+            "crawlerTaskId": "booking_past_trip_bookings"
+          }
+        },
+        {
+          "id": "booking-booking-detail-submit",
+          "title": "Submit Booking Detail",
+          "description": "Share your Booking.com archived booking detail",
+          "points": 100,
+          "claimLimit": null,
+          "metadata": {
+            "type": "data-submission",
+            "source": "booking",
+            "crawlerTaskId": "booking_past_trip_booking_detail"
           }
         }
       ]
@@ -125,7 +164,8 @@
           "claimLimit": null,
           "metadata": {
             "type": "data-submission",
-            "source": "luma"
+            "source": "luma",
+            "crawlerTaskId": "luma_events"
           }
         }
       ]
