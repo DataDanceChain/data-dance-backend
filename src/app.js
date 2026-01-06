@@ -70,18 +70,16 @@ const upload = multer({
 app.set('upload', upload);
 
 // CORS 配置
-if (process.env.NODE_ENV !== 'production') {
-  const corsOptions = {
-    origin: process.env.FRONTEND_URL || 'http://localhost:8100',
-    credentials: true,
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization'],
-    exposedHeaders: ['Content-Range', 'X-Content-Range']
-  };
+const corsOptions = {
+  origin: process.env.FRONTEND_URL || (process.env.NODE_ENV === 'production' ? '*' : 'http://localhost:8100'),
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  exposedHeaders: ['Content-Range', 'X-Content-Range']
+};
 
-  // 中间件
-  app.use(cors(corsOptions));
-}
+// 中间件 - 生产环境也需要 CORS
+app.use(cors(corsOptions));
 app.use(express.json({ limit: '20mb' }));
 app.use(morgan('dev'));
 
@@ -161,10 +159,10 @@ app.use('/api/organization/transactions', transactionRoutes);
 // DDC NFT Metadata API - 需要后端权限控制
 app.use('/metadata/ddcnft', ddcNFTMetadataRoutes);
 
-// 错误处理中间件
-app.use(errorHandler);
-
-// Add error logging
+// Add error logging (must be before errorHandler)
 app.use(logger.errorLogger);
+
+// 错误处理中间件 (must be last)
+app.use(errorHandler);
 
 module.exports = app;
