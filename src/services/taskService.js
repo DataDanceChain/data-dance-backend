@@ -106,97 +106,135 @@ const awardStrategies = {
       await recordTaskProgress(userId, 'amazon-order-submit', 1);
     },
     prepare: async (userId) => {
-      // Get user's Amazon data submission count
-      const today = new Date();
-      const startOfDay = new Date(today.getFullYear(), today.getMonth(), today.getDate());
-      
-      const dailyCount = await prisma.crawlerData.count({
-        where: {
-          userId,
-          source: 'amazon',
-          createdAt: { gte: startOfDay }
-        }
+      // Get Amazon CrawlerTask with taskId
+      const crawlerTask = await prisma.crawlerTask.findFirst({
+        where: { userId, source: 'amazon', taskId: 'amazon_orders' },
+        select: { id: true, taskId: true }
       });
       
+      let countByTaskId = 0;
+      if (crawlerTask) {
+        countByTaskId = await prisma.crawlerData.count({
+          where: {
+            userId,
+            source: 'amazon',
+            taskId: crawlerTask.id
+          }
+        });
+      }
+      
+      // Fallback: total count by source
       const totalCount = await prisma.crawlerData.count({
-        where: {
-          userId,
-          source: 'amazon'
-        }
+        where: { userId, source: 'amazon' }
       });
       
-      return { dailyCount, totalCount };
+      return { countsByTaskId: { 'amazon_orders': countByTaskId }, totalCount };
     },
-    computeProgress: async (task, userId, { dailyCount, totalCount }) => {
-      // Progress represents total number of data items submitted (unlimited task)
-      // Return total count as integer representing completion quantity
-      return totalCount;
+    computeProgress: async (task, userId, { countsByTaskId, totalCount }) => {
+      // If task has crawlerTaskId, count by specific task
+      const crawlerTaskId = task.metadata?.crawlerTaskId;
+      if (crawlerTaskId && countsByTaskId[crawlerTaskId] != null) {
+        return countsByTaskId[crawlerTaskId];
+      }
+      
+      // Fallback: use total count (backward compatibility)
+      return totalCount || 0;
     }
   },
   'airbnb-data-collection': {
     unlock: async (userId) => {
-      // Airbnb tasks are always unlocked for users
-      await recordTaskProgress(userId, 'airbnb-trip-submit', 1);
+      // Unlock all Airbnb tasks
+      const tasks = ['airbnb-trips-submit', 'airbnb-past-trips-submit'];
+      for (const taskId of tasks) {
+        await recordTaskProgress(userId, taskId, 1);
+      }
     },
     prepare: async (userId) => {
-      // Get user's Airbnb data submission count
-      const today = new Date();
-      const startOfDay = new Date(today.getFullYear(), today.getMonth(), today.getDate());
-      
-      const dailyCount = await prisma.crawlerData.count({
-        where: {
-          userId,
-          source: 'airbnb',
-          createdAt: { gte: startOfDay }
-        }
+      // Get all Airbnb CrawlerTasks with taskId
+      const crawlerTasks = await prisma.crawlerTask.findMany({
+        where: { userId, source: 'airbnb' },
+        select: { id: true, taskId: true }
       });
       
+      // Count data by taskId
+      const countsByTaskId = {};
+      for (const ct of crawlerTasks) {
+        if (ct.taskId) {
+          const count = await prisma.crawlerData.count({
+            where: {
+              userId,
+              source: 'airbnb',
+              taskId: ct.id
+            }
+          });
+          countsByTaskId[ct.taskId] = count;
+        }
+      }
+      
+      // Fallback: total count by source (for backward compatibility)
       const totalCount = await prisma.crawlerData.count({
-        where: {
-          userId,
-          source: 'airbnb'
-        }
+        where: { userId, source: 'airbnb' }
       });
       
-      return { dailyCount, totalCount };
+      return { countsByTaskId, totalCount };
     },
-    computeProgress: async (task, userId, { dailyCount, totalCount }) => {
-      // Progress represents total number of data items submitted (unlimited task)
-      // Return total count as integer representing completion quantity
-      return totalCount;
+    computeProgress: async (task, userId, { countsByTaskId, totalCount }) => {
+      // If task has crawlerTaskId, count by specific task
+      const crawlerTaskId = task.metadata?.crawlerTaskId;
+      if (crawlerTaskId && countsByTaskId[crawlerTaskId] != null) {
+        return countsByTaskId[crawlerTaskId];
+      }
+      
+      // Fallback: use total count (backward compatibility)
+      return totalCount || 0;
     }
   },
   'booking-data-collection': {
     unlock: async (userId) => {
-      // Booking tasks are always unlocked for users
-      await recordTaskProgress(userId, 'booking-trip-submit', 1);
+      // Unlock all Booking tasks
+      const tasks = ['booking-past-trips-submit', 'booking-trip-bookings-submit', 'booking-booking-detail-submit'];
+      for (const taskId of tasks) {
+        await recordTaskProgress(userId, taskId, 1);
+      }
     },
     prepare: async (userId) => {
-      // Get user's Booking data submission count
-      const today = new Date();
-      const startOfDay = new Date(today.getFullYear(), today.getMonth(), today.getDate());
-      
-      const dailyCount = await prisma.crawlerData.count({
-        where: {
-          userId,
-          source: 'booking',
-          createdAt: { gte: startOfDay }
-        }
+      // Get all Booking CrawlerTasks with taskId
+      const crawlerTasks = await prisma.crawlerTask.findMany({
+        where: { userId, source: 'booking' },
+        select: { id: true, taskId: true }
       });
       
+      // Count data by taskId
+      const countsByTaskId = {};
+      for (const ct of crawlerTasks) {
+        if (ct.taskId) {
+          const count = await prisma.crawlerData.count({
+            where: {
+              userId,
+              source: 'booking',
+              taskId: ct.id
+            }
+          });
+          countsByTaskId[ct.taskId] = count;
+        }
+      }
+      
+      // Fallback: total count by source (for backward compatibility)
       const totalCount = await prisma.crawlerData.count({
-        where: {
-          userId,
-          source: 'booking'
-        }
+        where: { userId, source: 'booking' }
       });
       
-      return { dailyCount, totalCount };
+      return { countsByTaskId, totalCount };
     },
-    computeProgress: async (task, userId, { dailyCount, totalCount }) => {
-      // Progress represents total number of data items submitted (unlimited task)
-      // Return total count as integer representing completion quantity
-      return totalCount;
+    computeProgress: async (task, userId, { countsByTaskId, totalCount }) => {
+      // If task has crawlerTaskId, count by specific task
+      const crawlerTaskId = task.metadata?.crawlerTaskId;
+      if (crawlerTaskId && countsByTaskId[crawlerTaskId] != null) {
+        return countsByTaskId[crawlerTaskId];
+      }
+      
+      // Fallback: use total count (backward compatibility)
+      return totalCount || 0;
     }
   },
   'luma-data-collection': {
@@ -204,6 +242,41 @@ const awardStrategies = {
       // Luma tasks are always unlocked for users
       await recordTaskProgress(userId, 'luma-event-submit', 1);
     },
+    prepare: async (userId) => {
+      // Get Luma CrawlerTask with taskId
+      const crawlerTask = await prisma.crawlerTask.findFirst({
+        where: { userId, source: 'luma', taskId: 'luma_events' },
+        select: { id: true, taskId: true }
+      });
+      
+      let countByTaskId = 0;
+      if (crawlerTask) {
+        countByTaskId = await prisma.crawlerData.count({
+          where: {
+            userId,
+            source: 'luma',
+            taskId: crawlerTask.id
+          }
+        });
+      }
+      
+      // Fallback: total count by source
+      const totalCount = await prisma.crawlerData.count({
+        where: { userId, source: 'luma' }
+      });
+      
+      return { countsByTaskId: { 'luma_events': countByTaskId }, totalCount };
+    },
+    computeProgress: async (task, userId, { countsByTaskId, totalCount }) => {
+      // If task has crawlerTaskId, count by specific task
+      const crawlerTaskId = task.metadata?.crawlerTaskId;
+      if (crawlerTaskId && countsByTaskId[crawlerTaskId] != null) {
+        return countsByTaskId[crawlerTaskId];
+      }
+      
+      // Fallback: use total count
+      return totalCount || 0;
+    }
     prepare: async (userId) => {
       // Get user's Luma data submission count
       const today = new Date();

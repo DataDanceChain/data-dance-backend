@@ -299,6 +299,7 @@ model DataDanceID {
 
 model CrawlerTask {
   id          String        @id @default(uuid())
+  taskId      String?       // 对应 TASK_TEMPLATES 中的 taskId (e.g., "booking_past_trips")
   title       String
   description String?
   source      String

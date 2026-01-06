@@ -111,6 +111,7 @@ async function initializeDefaultTasks(userId) {
       if (!existingTask) {
         const task = await prisma.crawlerTask.create({
           data: {
+            taskId: template.taskId, // 保存 taskId 用于关联 Award Task
             title: template.title,
             description: template.description,
             source: template.source,
@@ -235,6 +236,7 @@ async function getOrCreateCrawlerTask(userId, source, taskId = null) {
       // Create new task from template
       task = await prisma.crawlerTask.create({
         data: {
+          taskId: template.taskId, // 保存 taskId 用于关联 Award Task
           title: template.title,
           description: template.description,
           source: template.source,
@@ -556,16 +558,26 @@ async function uploadCrawlerData(data, userId) {
       const sources = ['amazon', 'luma', 'airbnb', 'booking'];
       const tasks = [];
       for (const source of sources) {
-        let task = await tx.crawlerTask.findFirst({
-          where: { userId, source }
-        });
-        if (!task) {
-          const template = TASK_TEMPLATES[source];
-          task = await tx.crawlerTask.create({
-            data: { ...template, userId }
+        const templates = getTaskTemplatesForSource(source);
+        // For backward compatibility, use first template if multiple exist
+        const template = templates[0];
+        if (template) {
+          let task = await tx.crawlerTask.findFirst({
+            where: { userId, source, taskId: template.taskId }
           });
+          if (!task) {
+            task = await tx.crawlerTask.create({
+              data: {
+                taskId: template.taskId,
+                title: template.title,
+                description: template.description,
+                source: template.source,
+                userId
+              }
+            });
+          }
+          tasks.push(task);
         }
-        tasks.push(task);
       }
       
       const tasksBySource = tasks.reduce((acc, task) => {
