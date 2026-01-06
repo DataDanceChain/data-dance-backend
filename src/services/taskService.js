@@ -451,9 +451,10 @@ async function getTasksByAward(userId, awardId) {
       finalStatus = 'CLAIMED';
     } else if (!prereqDone) {
       finalStatus = 'LOCKED';
-    } else if ((awardId === 'amazon-data-collection' || awardId === 'airbnb-data-collection' || awardId === 'booking-data-collection' || awardId === 'luma-data-collection') && progress > 0) {
-      // Data collection tasks: unlimited task, always IN_PROGRESS when has submissions
-      finalStatus = 'IN_PROGRESS';
+    } else if (awardId === 'amazon-data-collection' || awardId === 'airbnb-data-collection' || awardId === 'booking-data-collection' || awardId === 'luma-data-collection') {
+      // Data collection tasks: unlimited task, always IN_PROGRESS if unlocked (ut exists means unlocked)
+      // Show IN_PROGRESS even at 0 progress, as these tasks are always available
+      finalStatus = ut ? 'IN_PROGRESS' : 'LOCKED';
     } else if ((awardId === 'referral-rewards' || awardId === 'social-engagement') && progress >= 0 && progress < 1) {
       // referral and social tasks: always show IN_PROGRESS even at 0
       finalStatus = 'IN_PROGRESS';
