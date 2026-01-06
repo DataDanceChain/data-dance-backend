@@ -277,33 +277,6 @@ const awardStrategies = {
       // Fallback: use total count
       return totalCount || 0;
     }
-    prepare: async (userId) => {
-      // Get user's Luma data submission count
-      const today = new Date();
-      const startOfDay = new Date(today.getFullYear(), today.getMonth(), today.getDate());
-      
-      const dailyCount = await prisma.crawlerData.count({
-        where: {
-          userId,
-          source: 'luma',
-          createdAt: { gte: startOfDay }
-        }
-      });
-      
-      const totalCount = await prisma.crawlerData.count({
-        where: {
-          userId,
-          source: 'luma'
-        }
-      });
-      
-      return { dailyCount, totalCount };
-    },
-    computeProgress: async (task, userId, { dailyCount, totalCount }) => {
-      // Progress represents total number of data items submitted (unlimited task)
-      // Return total count as integer representing completion quantity
-      return totalCount;
-    }
   },
   'christmas-shopping': {
     unlock: async (userId) => {
