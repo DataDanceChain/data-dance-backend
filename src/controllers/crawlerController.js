@@ -50,7 +50,7 @@ async function getCrawlerTasks(req, res) {
 
     const result = await crawlerService.getCrawlerTasks(userId, filters);
 
-    // Format response to match original spec
+    // Format response to match frontend mockup: id (taskId), origin, path, tags
     const formattedTasks = result.tasks.map(task => ({
       id: task.id,
       title: task.title,
@@ -62,7 +62,9 @@ async function getCrawlerTasks(req, res) {
       recordCount: task.recordCount,
       dataUrl: task.dataUrl || null,
       log: task.log || null,
-      tags: task.tags
+      tags: task.tags || [],
+      origin: task.origin ?? null,
+      path: task.path ?? null
     }));
 
     res.json({
@@ -88,7 +90,7 @@ async function getCrawlerTasks(req, res) {
 async function createCrawlerTask(req, res) {
   try {
     const userId = req.user.id;
-    const { source } = req.body;
+    const { source, taskId } = req.body;
 
     if (!source) {
       return res.status(400).json({
@@ -104,20 +106,23 @@ async function createCrawlerTask(req, res) {
       });
     }
 
-    const task = await crawlerService.getOrCreateCrawlerTask(userId, source);
+    const task = await crawlerService.getOrCreateCrawlerTask(userId, source, taskId || null);
 
+    const template = task.taskId ? crawlerService.getTaskTemplate(source, task.taskId) : null;
     res.status(201).json({
       status: 'success',
       data: {
         task: {
-          id: task.id,
+          id: task.taskId || task.id,
+          dbId: task.id,
           title: task.title,
           description: task.description,
           source: task.source,
           status: task.status,
           recordCount: task.recordCount,
           createdAt: task.createdAt,
-          updatedAt: task.updatedAt
+          updatedAt: task.updatedAt,
+          ...(template && { origin: template.origin, path: template.path })
         }
       }
     });
@@ -147,7 +152,8 @@ async function createCrawlerTask(req, res) {
 
 /**
  * POST /api/upload
- * Upload crawler data (simplified to match original spec)
+ * Upload crawler data. Each item may include optional taskId (e.g. "airbnb_current_trips")
+ * so data and recordCount are attributed to that task for score/award aggregation.
  */
 async function uploadData(req, res) {
   try {

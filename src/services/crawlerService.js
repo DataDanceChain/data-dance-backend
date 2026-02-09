@@ -16,57 +16,55 @@ const DATA_SCHEMAS = {
   custom: [] // No required fields for custom type
 };
 
-// Crawler task templates
-// Each source can have multiple tasks, identified by taskId
+// Crawler task templates — match frontend mockup: id, title, description, source, origin, path
+// Only Airbnb has 2 tasks (past + current); others have 1 each.
 const TASK_TEMPLATES = {
   amazon: [
     {
       taskId: 'amazon_orders',
       title: 'Amazon Order History',
       description: 'Crawl your Amazon order history to earn rewards',
-      source: 'amazon'
+      source: 'amazon',
+      origin: 'https://www.amazon.com',
+      path: '/gp/css/order-history'
     }
   ],
   luma: [
     {
       taskId: 'luma_events',
-      title: 'Luma Events',
+      title: 'events',
       description: 'Luma events history',
-      source: 'luma'
+      source: 'luma',
+      origin: 'https://lu.ma',
+      path: '/home?period=past'
     }
   ],
   airbnb: [
     {
       taskId: 'airbnb_trips',
-      title: 'Airbnb Trips',
-      description: 'Airbnb trips list',
-      source: 'airbnb'
-    },
-    {
-      taskId: 'airbnb_past_trips',
       title: 'Airbnb Past Trips',
       description: 'Airbnb past trips',
-      source: 'airbnb'
+      source: 'airbnb',
+      origin: 'https://www.airbnb.com.sg',
+      path: '/users/profile/past-trips'
+    },
+    {
+      taskId: 'airbnb_current_trips',
+      title: 'Airbnb Trips',
+      description: 'Airbnb trips list',
+      source: 'airbnb',
+      origin: 'https://www.airbnb.com.sg',
+      path: '/trips/v1'
     }
   ],
   booking: [
     {
-      taskId: 'booking_past_trips',
-      title: 'Booking Past Trips',
-      description: 'Booking.com past trips list',
-      source: 'booking'
-    },
-    {
-      taskId: 'booking_past_trip_bookings',
-      title: 'Booking Past Trip Bookings',
-      description: 'Booking.com bookings list for a past trip (trip detail)',
-      source: 'booking'
-    },
-    {
-      taskId: 'booking_past_trip_booking_detail',
-      title: 'Booking Past Trip Booking Detail',
-      description: 'Booking.com archived booking detail (print view)',
-      source: 'booking'
+      taskId: 'booking_past_bookings',
+      title: 'Booking.com Past Bookings',
+      description: 'One-click crawl: Automatically fetch all past trips and their booking details',
+      source: 'booking',
+      origin: 'https://secure.booking.com',
+      path: '/mytrips.en-gb.html'
     }
   ]
 };
@@ -99,15 +97,13 @@ async function initializeDefaultTasks(userId) {
     const templates = getTaskTemplatesForSource(source);
     
     for (const template of templates) {
-      // Check if user already has this specific task
       const existingTask = await prisma.crawlerTask.findFirst({
         where: {
           userId,
           source,
-          title: template.title
+          ...(template.taskId ? { taskId: template.taskId } : { title: template.title })
         }
       });
-      
       if (!existingTask) {
         const task = await prisma.crawlerTask.create({
           data: {
@@ -158,16 +154,19 @@ async function getCrawlerTasks(userId, filters = {}) {
   // Get total count
   const total = await prisma.crawlerTask.count({ where });
 
-  // Get paginated tasks
+  // Get paginated tasks (include taskId for template lookup)
   const tasks = await prisma.crawlerTask.findMany({
     where,
     select: {
       id: true,
+      taskId: true,
       title: true,
       description: true,
       source: true,
       status: true,
       recordCount: true,
+      dataUrl: true,
+      log: true,
       createdAt: true,
       updatedAt: true
     },
@@ -176,14 +175,20 @@ async function getCrawlerTasks(userId, filters = {}) {
     take: limit
   });
 
-  // Add mock tags for API compatibility
-  const tasksWithTags = tasks.map(task => ({
-    ...task,
-    tags: [
-      { id: task.source, name: task.source.charAt(0).toUpperCase() + task.source.slice(1) },
-      { id: 'orders', name: 'Orders' }
-    ]
-  }));
+  // Enrich with template origin/path and frontend shape: id = taskId, tags
+  const tasksWithTags = tasks.map(task => {
+    const template = getTaskTemplate(task.source, task.taskId);
+    return {
+      ...task,
+      id: task.taskId || task.id,
+      origin: template?.origin ?? null,
+      path: template?.path ?? null,
+      tags: [
+        { id: task.source, name: task.source.charAt(0).toUpperCase() + task.source.slice(1) },
+        { id: 'orders', name: 'Orders' }
+      ]
+    };
+  });
 
   return {
     tasks: tasksWithTags,
@@ -258,19 +263,18 @@ async function getOrCreateUserTasks(userId) {
 
   for (const source of sources) {
     const templates = getTaskTemplatesForSource(source);
-    
     for (const template of templates) {
       let task = await prisma.crawlerTask.findFirst({
-        where: { 
-          userId, 
+        where: {
+          userId,
           source,
-          title: template.title
+          ...(template.taskId ? { taskId: template.taskId } : { title: template.title })
         }
       });
-
       if (!task) {
         task = await prisma.crawlerTask.create({
           data: {
+            taskId: template.taskId,
             title: template.title,
             description: template.description,
             source: template.source,
@@ -278,7 +282,6 @@ async function getOrCreateUserTasks(userId) {
           }
         });
       }
-
       tasks.push(task);
     }
   }
@@ -554,39 +557,46 @@ async function uploadCrawlerData(data, userId) {
         };
       }
       
-      // Get or create user's crawler tasks within transaction
-      const sources = ['amazon', 'luma', 'airbnb', 'booking'];
-      const tasks = [];
-      for (const source of sources) {
-        const templates = getTaskTemplatesForSource(source);
-        // For backward compatibility, use first template if multiple exist
-        const template = templates[0];
-        if (template) {
-          let task = await tx.crawlerTask.findFirst({
-            where: { userId, source, taskId: template.taskId }
+      // Resolve (source, taskId) -> CrawlerTask for each item; support optional item.taskId for correct task
+      const taskKey = (source, templateTaskId) => `${source}:${templateTaskId || ''}`;
+      const tasksByKey = {};
+      const getOrCreateTask = async (source, templateTaskId) => {
+        const key = taskKey(source, templateTaskId);
+        if (tasksByKey[key]) return tasksByKey[key];
+        const template = templateTaskId
+          ? getTaskTemplate(source, templateTaskId)
+          : getTaskTemplatesForSource(source)[0];
+        if (!template) return null;
+        let task = await tx.crawlerTask.findFirst({
+          where: { userId, source, taskId: template.taskId }
+        });
+        if (!task) {
+          task = await tx.crawlerTask.create({
+            data: {
+              taskId: template.taskId,
+              title: template.title,
+              description: template.description,
+              source: template.source,
+              userId
+            }
           });
-          if (!task) {
-            task = await tx.crawlerTask.create({
-              data: {
-                taskId: template.taskId,
-                title: template.title,
-                description: template.description,
-                source: template.source,
-                userId
-              }
-            });
-          }
-          tasks.push(task);
         }
-      }
-      
-      const tasksBySource = tasks.reduce((acc, task) => {
-        acc[task.source] = task;
-        return acc;
-      }, {});
+        tasksByKey[key] = task;
+        return task;
+      };
 
-      // Prepare database insert data
-      const insertData = validItems.map(item => ({
+      // Resolve task for each item: use item.taskId if present and valid for source, else first template
+      const itemTasks = [];
+      for (const item of validItems) {
+        const templateTaskId = item.taskId && getTaskTemplate(item.source, item.taskId)
+          ? item.taskId
+          : null;
+        const task = await getOrCreateTask(item.source, templateTaskId);
+        itemTasks.push(task);
+      }
+
+      // Prepare database insert data (each record tied to its CrawlerTask)
+      const insertData = validItems.map((item, i) => ({
         source: item.source,
         type: item.type,
         timestamp: new Date(item.timestamp || new Date()),
@@ -594,9 +604,19 @@ async function uploadCrawlerData(data, userId) {
         payload: item.payload,
         contentHash: item.contentHash,
         sourceId: item.sourceId,
-        taskId: tasksBySource[item.source]?.id,
+        taskId: itemTasks[i]?.id ?? null,
         userId
-      }));
+      })).filter(row => row.taskId != null);
+
+      if (insertData.length === 0) {
+        return {
+          insertedCount: 0,
+          validItems: [],
+          duplicates,
+          pointsEarned: 0,
+          validationErrors
+        };
+      }
 
       // Insert data with skipDuplicates to handle race conditions
       const insertResult = await tx.crawlerData.createMany({
@@ -606,29 +626,25 @@ async function uploadCrawlerData(data, userId) {
       
       const actualInserted = insertResult.count;
       
-      // Get actual inserted items (we need to query them back to know their sources)
-      // Since createMany doesn't return the inserted records, we'll use the validItems
-      // and count by source based on the insertion order
+      // Attribute inserted count to tasks/sources (first actualInserted items with a task)
       const insertedBySource = {};
-      if (actualInserted > 0) {
-        // Count actual insertions by source
-        for (let i = 0; i < Math.min(actualInserted, validItems.length); i++) {
-          const source = validItems[i].source;
-          insertedBySource[source] = (insertedBySource[source] || 0) + 1;
-        }
-        
-        // Update task record count based on actual inserted count
-        for (const [source, count] of Object.entries(insertedBySource)) {
-          if (tasksBySource[source]) {
-            await tx.crawlerTask.update({
-              where: { id: tasksBySource[source].id },
-              data: { 
-                recordCount: { increment: count },
-                updatedAt: new Date()
-              }
-            });
-          }
-        }
+      const insertedByTaskDbId = {};
+      let attributed = 0;
+      for (let i = 0; i < validItems.length && attributed < actualInserted; i++) {
+        if (!itemTasks[i]) continue;
+        attributed += 1;
+        const item = validItems[i];
+        const task = itemTasks[i];
+        insertedByTaskDbId[task.id] = (insertedByTaskDbId[task.id] || 0) + 1;
+        insertedBySource[item.source] = (insertedBySource[item.source] || 0) + 1;
+      }
+      
+      // Update recordCount per task (so each task's doneCount / 分数归集 is correct)
+      for (const [taskDbId, count] of Object.entries(insertedByTaskDbId)) {
+        await tx.crawlerTask.update({
+          where: { id: taskDbId },
+          data: { recordCount: { increment: count }, updatedAt: new Date() }
+        });
       }
 
       // Calculate points based on actual inserted items, grouped by source
@@ -706,26 +722,28 @@ async function uploadCrawlerData(data, userId) {
 
 /**
  * Get crawler data for a task with pagination
+ * @param {string} taskIdOrDbId - Either template taskId (e.g. "luma_events") or CrawlerTask DB id (UUID)
  */
-async function getCrawlerData(userId, taskId, page = 1, limit = 50) {
-  // Validate task belongs to user
+async function getCrawlerData(userId, taskIdOrDbId, page = 1, limit = 50) {
+  const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(taskIdOrDbId);
   const task = await prisma.crawlerTask.findFirst({
-    where: {
-      id: taskId,
-      userId
-    }
+    where: isUuid
+      ? { id: taskIdOrDbId, userId }
+      : { userId, taskId: taskIdOrDbId }
   });
 
   if (!task) {
     throw new Error('Task not found or does not belong to user');
   }
 
+  const taskDbId = task.id;
+
   const total = await prisma.crawlerData.count({
-    where: { taskId }
+    where: { taskId: taskDbId }
   });
 
   const data = await prisma.crawlerData.findMany({
-    where: { taskId },
+    where: { taskId: taskDbId },
     select: {
       id: true,
       source: true,
@@ -1173,6 +1191,7 @@ function levenshteinDistance(str1, str2) {
 module.exports = {
   getCrawlerTasks,
   getOrCreateCrawlerTask,
+  getTaskTemplate,
   uploadCrawlerData,
   getCrawlerData,
   getCrawlerStats,

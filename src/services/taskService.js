@@ -191,20 +191,16 @@ const awardStrategies = {
   },
   'booking-data-collection': {
     unlock: async (userId) => {
-      // Unlock all Booking tasks
-      const tasks = ['booking-past-trips-submit', 'booking-trip-bookings-submit', 'booking-booking-detail-submit'];
+      const tasks = ['booking-past-bookings-submit'];
       for (const taskId of tasks) {
         await recordTaskProgress(userId, taskId, 1);
       }
     },
     prepare: async (userId) => {
-      // Get all Booking CrawlerTasks with taskId
       const crawlerTasks = await prisma.crawlerTask.findMany({
         where: { userId, source: 'booking' },
         select: { id: true, taskId: true }
       });
-      
-      // Count data by taskId
       const countsByTaskId = {};
       for (const ct of crawlerTasks) {
         if (ct.taskId) {
@@ -218,12 +214,9 @@ const awardStrategies = {
           countsByTaskId[ct.taskId] = count;
         }
       }
-      
-      // Fallback: total count by source (for backward compatibility)
       const totalCount = await prisma.crawlerData.count({
         where: { userId, source: 'booking' }
       });
-      
       return { countsByTaskId, totalCount };
     },
     computeProgress: async (task, userId, { countsByTaskId, totalCount }) => {

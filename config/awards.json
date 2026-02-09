@@ -67,7 +67,7 @@
           "metadata": {
             "type": "data-submission",
             "source": "airbnb",
-            "crawlerTaskId": "airbnb_trips"
+            "crawlerTaskId": "airbnb_current_trips"
           }
         },
         {
@@ -79,7 +79,7 @@
           "metadata": {
             "type": "data-submission",
             "source": "airbnb",
-            "crawlerTaskId": "airbnb_past_trips"
+            "crawlerTaskId": "airbnb_trips"
           }
         }
       ]
@@ -102,39 +102,15 @@
       },
       "tasks": [
         {
-          "id": "booking-past-trips-submit",
-          "title": "Submit Booking Past Trips",
-          "description": "Share your Booking.com past trips list",
+          "id": "booking-past-bookings-submit",
+          "title": "Submit Booking.com Past Bookings",
+          "description": "One-click crawl: Automatically fetch all past trips and their booking details",
           "points": 100,
           "claimLimit": null,
           "metadata": {
             "type": "data-submission",
             "source": "booking",
-            "crawlerTaskId": "booking_past_trips"
-          }
-        },
-        {
-          "id": "booking-trip-bookings-submit",
-          "title": "Submit Booking Trip Bookings",
-          "description": "Share your Booking.com bookings list for a past trip",
-          "points": 100,
-          "claimLimit": null,
-          "metadata": {
-            "type": "data-submission",
-            "source": "booking",
-            "crawlerTaskId": "booking_past_trip_bookings"
-          }
-        },
-        {
-          "id": "booking-booking-detail-submit",
-          "title": "Submit Booking Detail",
-          "description": "Share your Booking.com archived booking detail",
-          "points": 100,
-          "claimLimit": null,
-          "metadata": {
-            "type": "data-submission",
-            "source": "booking",
-            "crawlerTaskId": "booking_past_trip_booking_detail"
+            "crawlerTaskId": "booking_past_bookings"
           }
         }
       ]
