@@ -106,7 +106,7 @@ const awardStrategies = {
       await recordTaskProgress(userId, 'amazon-order-submit', 1);
     },
     prepare: async (userId) => {
-      // Get Amazon CrawlerTask with taskId
+      // Get Amazon CrawlerTask with taskId (may be missing if created before taskId was set)
       const crawlerTask = await prisma.crawlerTask.findFirst({
         where: { userId, source: 'amazon', taskId: 'amazon_orders' },
         select: { id: true, taskId: true }
@@ -123,12 +123,13 @@ const awardStrategies = {
         });
       }
       
-      // Fallback: total count by source
       const totalCount = await prisma.crawlerData.count({
         where: { userId, source: 'amazon' }
       });
       
-      return { countsByTaskId: { 'amazon_orders': countByTaskId }, totalCount };
+      // When no CrawlerTask with taskId exists, use totalCount so doneCount is not stuck at 0
+      const effectiveCount = crawlerTask ? countByTaskId : totalCount;
+      return { countsByTaskId: { 'amazon_orders': effectiveCount }, totalCount };
     },
     computeProgress: async (task, userId, { countsByTaskId, totalCount }) => {
       // If task has crawlerTaskId, count by specific task
