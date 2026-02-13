@@ -410,7 +410,7 @@ async function getTasksByAward(userId, awardId) {
       : (limit > 0 ? Math.min(claimRecords.length / limit, 1) : null);
     const claimed = claimRecords.length >= limit;
     // determine if prerequisite task is done
-    const prereqDone = !task.prerequisiteTaskId || (userTasks.find(u => u.taskId === task.prerequisiteTaskId)?.claimRecords.length > 0);
+    const prereqDone = !task.prerequisiteTaskId || (userTasks.find(u => u.taskId === task.prerequisiteTaskId)?.claimRecords?.length > 0);
 
     // determine finalStatus per task
     let finalStatus;
