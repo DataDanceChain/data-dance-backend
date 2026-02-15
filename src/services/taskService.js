@@ -2,8 +2,22 @@ const prisma = require('../utils/prisma');
 const assetService = require('./assetService');
 const xService = require('./xService'); // New: use xService
 const { distributeUplineRewards } = require('./distributionService'); // Import distribution service
+const { TASK_TEMPLATES } = require('./crawlerService'); // For resolving crawler task URLs
 const { createLogger } = require('../utils/logger');
 const logger = createLogger('taskService');
+
+/**
+ * Look up the crawler task URL by crawlerTaskId (e.g. "luma_events").
+ * Returns origin + path (e.g. "https://lu.ma/home?period=past") or null.
+ */
+function getCrawlerTaskUrl(crawlerTaskId) {
+  if (!crawlerTaskId) return null;
+  for (const templates of Object.values(TASK_TEMPLATES)) {
+    const tpl = templates.find(t => t.taskId === crawlerTaskId);
+    if (tpl) return `${tpl.origin}${tpl.path}`;
+  }
+  return null;
+}
 
 // Strategy map for award-specific unlock and progress logic
 const awardStrategies = {
@@ -476,6 +490,9 @@ async function getTasksByAward(userId, awardId) {
         doneCount = claimed ? total : 0;
       }
     }
+    // Resolve crawler task URL from metadata.crawlerTaskId
+    const url = getCrawlerTaskUrl(task.metadata?.crawlerTaskId);
+
     return {
       id: task.id,
       title: task.title,
@@ -487,6 +504,7 @@ async function getTasksByAward(userId, awardId) {
       progress,
       finalStatus,
       // include optional fields only when they have content
+      ...(url ? { url } : {}),
       ...(task.description ? { description: task.description } : {}),
       ...(task.claimLimit != null ? { claimLimit: task.claimLimit } : {}),
       ...(task.requirementCount != null ? { requirementCount: task.requirementCount } : {}),
