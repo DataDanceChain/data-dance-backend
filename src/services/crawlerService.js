@@ -865,6 +865,12 @@ function extractSourceId(source, payload) {
            payload.taskId || 
            payload.id ||
            null;
+  } else if (source === 'airbnb') {
+    // Airbnb uses tripId as unique identifier (e.g. "2023-Singapore-15 – 18 Sep 2023")
+    return payload.tripId || null;
+  } else if (source === 'booking') {
+    // Booking uses bookingId as unique identifier (e.g. "Hotel Scheuble-10 Oct 2019")
+    return payload.bookingId || null;
   }
   return null;
 }
