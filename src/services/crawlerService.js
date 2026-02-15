@@ -503,19 +503,24 @@ async function uploadCrawlerData(data, userId) {
       console.log(`[DEBUG] Checking for duplicates - sourceIds: [${sourceIdsToCheck.join(', ')}]`);
       console.log(`[DEBUG] Checking ${contentHashesToCheck.length} content hashes`);
       
-      const existingData = await tx.crawlerData.findMany({
-        where: {
-          userId,
-          OR: [
-            { sourceId: { in: sourceIdsToCheck } },
-            { contentHash: { in: contentHashesToCheck } }
-          ]
-        },
-        select: {
-          sourceId: true,
-          contentHash: true
-        }
-      });
+      // sourceId check is global (same order/trip should not be submitted by different accounts)
+      // contentHash check is per-user (same content structure from different users is expected)
+      const [existingBySourceId, existingByHash] = await Promise.all([
+        sourceIdsToCheck.length > 0
+          ? tx.crawlerData.findMany({
+              where: { sourceId: { in: sourceIdsToCheck } },
+              select: { sourceId: true }
+            })
+          : [],
+        tx.crawlerData.findMany({
+          where: { userId, contentHash: { in: contentHashesToCheck } },
+          select: { contentHash: true }
+        })
+      ]);
+      const existingData = [
+        ...existingBySourceId.map(d => ({ sourceId: d.sourceId, contentHash: null })),
+        ...existingByHash.map(d => ({ sourceId: null, contentHash: d.contentHash }))
+      ];
       
       console.log(`[DEBUG] Found ${existingData.length} existing records:`, existingData);
       
@@ -974,9 +979,9 @@ async function checkDuplicates(items, userId) {
       select: { contentHash: true, userId: true, createdAt: true }
     });
 
+    // sourceId check is global: same order/trip/booking should not be submitted by any user
     const existingBySourceId = sourceIds.length > 0 ? await prisma.crawlerData.findMany({
       where: {
-        userId: userId, // Only look for duplicate sourceId in current user's data
         OR: sourceIds.map(({ source, sourceId }) => ({
           source: source,
           sourceId: sourceId
