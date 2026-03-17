@@ -147,6 +147,112 @@
       ]
     },
     {
+      "id": "new-user-bonus",
+      "title": "New User Bonus",
+      "description": "Explore DataDance Wallet & Claim up to 100 Points",
+      "icon": "giftOutline",
+      "color": "#546E7A",
+      "status": "LIVE",
+      "enabled": true,
+      "metadata": {
+        "type": "campaign",
+        "campaignType": "new-user",
+        "durationDays": 30,
+        "uiTheme": {
+          "accent": "#90A4AE",
+          "bgStart": "#546E7A",
+          "bgEnd": "#263238",
+          "iconColor": "#546E7A"
+        }
+      },
+      "tasks": [
+        {
+          "id": "new-user-welcome-bonus",
+          "title": "Welcome Bonus",
+          "description": "Claim your welcome reward",
+          "points": 5,
+          "claimLimit": 1,
+          "metadata": { "type": "WELCOME_CLAIM" }
+        },
+        {
+          "id": "new-user-3day-checkin",
+          "title": "3-Day Check-in",
+          "description": "Check in 3 times to unlock extra Points.",
+          "points": 15,
+          "claimLimit": 1,
+          "requirementCount": 3,
+          "metadata": { "type": "CHECK_IN_COUNT", "required": 3 }
+        },
+        {
+          "id": "new-user-first-upload",
+          "title": "First Upload",
+          "description": "Upload your first data source to earn Points (0/1)",
+          "points": 50,
+          "claimLimit": 1,
+          "requirementCount": 1,
+          "metadata": { "type": "UPLOAD_DISTINCT_SOURCES", "required": 1 }
+        },
+        {
+          "id": "new-user-explore-more",
+          "title": "Explore More",
+          "description": "Complete 2 uploads from different data sources (0/2)",
+          "points": 30,
+          "claimLimit": 1,
+          "requirementCount": 2,
+          "metadata": { "type": "UPLOAD_DISTINCT_SOURCES", "required": 2 }
+        }
+      ]
+    },
+    {
+      "id": "daily-tasks",
+      "title": "Daily Tasks",
+      "description": "Just a few seconds a day to earn extra Points.",
+      "icon": "sparklesOutline",
+      "color": "#5C6BC0",
+      "status": "LIVE",
+      "enabled": true,
+      "metadata": {
+        "type": "campaign",
+        "campaignType": "daily",
+        "uiTheme": {
+          "accent": "#5C6BC0",
+          "bgStart": "#5C6BC0",
+          "bgEnd": "#4527A0",
+          "iconColor": "#4527A0"
+        }
+      },
+      "tasks": [
+        {
+          "id": "daily-check-in",
+          "title": "Daily Check-in",
+          "description": "Check in daily to earn Points.",
+          "points": 1,
+          "claimLimit": null,
+          "metadata": {
+            "type": "DAILY_CHECK_IN",
+            "recurring": "DAILY",
+            "dynamicPoints": "CHECKIN_STREAK_1_7"
+          }
+        },
+        {
+          "id": "daily-open-rewards-hub",
+          "title": "Open Rewards Hub",
+          "description": "See what data you can upload",
+          "points": 2,
+          "claimLimit": null,
+          "metadata": { "type": "REWARDS_HUB_VISIT", "recurring": "DAILY" }
+        },
+        {
+          "id": "daily-upload-bonus",
+          "title": "Daily Upload Bonus",
+          "description": "First upload today earns extra Points",
+          "points": 3,
+          "claimLimit": null,
+          "metadata": { "type": "DAILY_FIRST_UPLOAD", "recurring": "DAILY" }
+        }
+      ]
+    },
+    {
       "id": "referral-rewards",
       "title": "Referral Rewards",
       "description": "Earn rewards from your referral network activities",

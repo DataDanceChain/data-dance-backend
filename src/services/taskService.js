@@ -19,6 +19,59 @@ function getCrawlerTaskUrl(crawlerTaskId) {
   return null;
 }
 
+function startOfUtcDay(date = new Date()) {
+  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
+}
+
+async function hasDailyEvent(userId, type, day = startOfUtcDay(new Date())) {
+  const existing = await prisma.userDailyEvent.findUnique({
+    where: { userId_type_day: { userId, type, day } },
+    select: { id: true }
+  });
+  return !!existing;
+}
+
+async function getConsecutiveCheckInStreak(userId, today = startOfUtcDay(new Date())) {
+  // Fetch recent check-ins (enough to cover the 7-day cap)
+  const recent = await prisma.userDailyEvent.findMany({
+    where: { userId, type: 'CHECK_IN', day: { lte: today } },
+    orderBy: { day: 'desc' },
+    take: 10,
+    select: { day: true }
+  });
+  const set = new Set(recent.map(r => r.day.toISOString()));
+  let streak = 0;
+  for (let i = 0; i < 365; i++) {
+    const d = new Date(today);
+    d.setUTCDate(d.getUTCDate() - i);
+    if (set.has(d.toISOString())) {
+      streak += 1;
+      continue;
+    }
+    break;
+  }
+  return streak;
+}
+
+async function countCheckInsSince(userId, sinceDay) {
+  return prisma.userDailyEvent.count({
+    where: {
+      userId,
+      type: 'CHECK_IN',
+      day: { gte: sinceDay }
+    }
+  });
+}
+
+function isRecurringDailyTask(task) {
+  return task?.metadata?.recurring === 'DAILY' || task?.metadata?.type === 'DAILY_CHECK_IN' || task?.metadata?.type === 'REWARDS_HUB_VISIT' || task?.metadata?.type === 'DAILY_FIRST_UPLOAD';
+}
+
+function hasClaimRecordOnDay(claimRecords, day) {
+  const dayIso = day.toISOString();
+  return (claimRecords || []).some((ts) => startOfUtcDay(new Date(ts)).toISOString() === dayIso);
+}
+
 // Strategy map for award-specific unlock and progress logic
 const awardStrategies = {
   'profile-awards': {
@@ -112,6 +165,78 @@ const awardStrategies = {
       for (const t of tasks) {
         await recordTaskProgress(userId, t.id, 1);
       }
+    }
+  },
+  'new-user-bonus': {
+    prepare: async (userId) => {
+      const user = await prisma.user.findUnique({ where: { id: userId }, select: { createdAt: true } });
+      const campaignStart = startOfUtcDay(user?.createdAt || new Date());
+      const campaignEnd = new Date(campaignStart);
+      campaignEnd.setUTCDate(campaignEnd.getUTCDate() + 30);
+
+      const checkInCount = await countCheckInsSince(userId, campaignStart);
+
+      const sources = ['amazon', 'booking', 'airbnb', 'luma'];
+      const uploadedSources = await Promise.all(
+        sources.map(async (source) => {
+          const count = await prisma.crawlerData.count({ where: { userId, source } });
+          return count > 0 ? source : null;
+        })
+      );
+      const distinctUploads = uploadedSources.filter(Boolean);
+
+      return { campaignStart, campaignEnd, checkInCount, distinctUploadCount: distinctUploads.length };
+    },
+    unlock: async (userId, ctx) => {
+      const now = new Date();
+      if (now > ctx.campaignEnd) return;
+      // Ensure tasks exist as visible records (so finalStatus is not LOCKED)
+      await recordTaskProgress(userId, 'new-user-welcome-bonus', 1);
+      await recordTaskProgress(userId, 'new-user-3day-checkin', 1);
+      await recordTaskProgress(userId, 'new-user-first-upload', 1);
+      await recordTaskProgress(userId, 'new-user-explore-more', 1);
+    },
+    computeProgress: async (task, userId, ctx) => {
+      const now = new Date();
+      if (now > ctx.campaignEnd) return 0;
+      if (task.id === 'new-user-welcome-bonus') return 1;
+      if (task.id === 'new-user-3day-checkin') {
+        const required = task.requirementCount || 3;
+        return required > 0 ? Math.min(ctx.checkInCount / required, 1) : 0;
+      }
+      if (task.id === 'new-user-first-upload') {
+        return ctx.distinctUploadCount >= 1 ? 1 : 0;
+      }
+      if (task.id === 'new-user-explore-more') {
+        const required = task.requirementCount || 2;
+        return required > 0 ? Math.min(ctx.distinctUploadCount / required, 1) : 0;
+      }
+      return 0;
+    }
+  },
+  'daily-tasks': {
+    prepare: async (userId) => {
+      const today = startOfUtcDay(new Date());
+      const [checkedInToday, visitedToday, streak] = await Promise.all([
+        hasDailyEvent(userId, 'CHECK_IN', today),
+        hasDailyEvent(userId, 'REWARDS_HUB_VISIT', today),
+        getConsecutiveCheckInStreak(userId, today)
+      ]);
+      const uploadsToday = await prisma.crawlerData.count({
+        where: { userId, createdAt: { gte: today } }
+      });
+      return { today, checkedInToday, visitedToday, streak, uploadsToday };
+    },
+    unlock: async (userId) => {
+      await recordTaskProgress(userId, 'daily-check-in', 1);
+      await recordTaskProgress(userId, 'daily-open-rewards-hub', 1);
+      await recordTaskProgress(userId, 'daily-upload-bonus', 1);
+    },
+    computeProgress: async (task, userId, ctx) => {
+      if (task.id === 'daily-check-in') return ctx.checkedInToday ? 1 : 0;
+      if (task.id === 'daily-open-rewards-hub') return ctx.visitedToday ? 1 : 0;
+      if (task.id === 'daily-upload-bonus') return ctx.uploadsToday > 0 ? 1 : 0;
+      return 0;
     }
   },
   'amazon-data-collection': {
@@ -417,12 +542,17 @@ async function getTasksByAward(userId, awardId) {
   const taskResults = await Promise.all(tasks.map(async task => {
     const ut = userTasks.find(u => u.taskId === task.id);
     const claimRecords = ut?.claimRecords || [];
+    const today = startOfUtcDay(new Date());
+
     const limit = task.claimLimit ?? 1;
     // Compute progress via strategy or default
     const progress = strategy.computeProgress
       ? await strategy.computeProgress(task, userId, { ...context })
       : (limit > 0 ? Math.min(claimRecords.length / limit, 1) : null);
-    const claimed = claimRecords.length >= limit;
+
+    // Recurring daily tasks are considered "claimed" only for the current day.
+    const claimedToday = isRecurringDailyTask(task) ? hasClaimRecordOnDay(claimRecords, today) : false;
+    const claimed = isRecurringDailyTask(task) ? claimedToday : (claimRecords.length >= limit);
     // determine if prerequisite task is done
     const prereqDone = !task.prerequisiteTaskId || (userTasks.find(u => u.taskId === task.prerequisiteTaskId)?.claimRecords?.length > 0);
 
@@ -619,7 +749,16 @@ async function claimTask(userId, taskId) {
         logger.error('Task not found during claim', { userId, taskId });
         throw new Error("Task not found");
       }
-      if (task.UserTasks[0]?.claimed) {
+      // For recurring daily tasks, allow multiple claims over time but prevent duplicates in the same day.
+      const isDailyRecurring = isRecurringDailyTask(task);
+      const today = startOfUtcDay(new Date());
+      if (isDailyRecurring) {
+        const existing = task.UserTasks[0];
+        if (existing?.claimRecords && hasClaimRecordOnDay(existing.claimRecords, today)) {
+          logger.error('Task already claimed today', { userId, taskId });
+          throw new Error("Task already claimed");
+        }
+      } else if (task.UserTasks[0]?.claimed) {
         logger.error('Task already claimed', { userId, taskId });
         throw new Error("Task already claimed");
       }
@@ -666,8 +805,11 @@ async function claimTask(userId, taskId) {
       });
       const now = new Date();
       const newClaimRecords = [...(existingUserTask?.claimRecords || []), now];
-      // For continuous tasks, flip claimed when reach limit; for one-time default to true
-      const isClaimedFlag = task.claimLimit != null ? newClaimRecords.length >= task.claimLimit : true;
+      // For recurring daily tasks: never flip permanent claimed=true (claimRecords tracks history)
+      // For others: flip claimed when reach limit; for claimLimit=null default to true
+      const isClaimedFlag = isDailyRecurring
+        ? false
+        : (task.claimLimit != null ? newClaimRecords.length >= task.claimLimit : true);
       logger.info('New claimRecords and computed claimed flag', { userId, taskId, newClaimRecords, claimed: isClaimedFlag });
 
       let updatedUserTask;
@@ -689,21 +831,28 @@ async function claimTask(userId, taskId) {
         create: { userId, awardId: task.awardId }
       });
 
+      // Determine points awarded (supports dynamic points for some tasks)
+      let pointsAwarded = task.points;
+      if (task.metadata?.dynamicPoints === 'CHECKIN_STREAK_1_7') {
+        const streak = await getConsecutiveCheckInStreak(userId, today);
+        pointsAwarded = Math.max(1, Math.min(streak, 7));
+      }
+
       // 发放积分流水
       await tx.point.create({ data: {
         userId,
-        amount: task.points,
+        amount: pointsAwarded,
         source: 'TASK_CLAIM',
         sourceId: taskId
       }});
 
       // 新增: 处理上级分润奖励（所有任务都享受分润）
       try {
-        const distributionResult = await distributeUplineRewards(userId, task.points, tx, taskId);
+        const distributionResult = await distributeUplineRewards(userId, pointsAwarded, tx, taskId);
         logger.info('上级分润处理完成', {
           userId,
           taskId,
-          baseReward: task.points,
+          baseReward: pointsAwarded,
           distributionResult
         });
       } catch (distributionError) {
@@ -818,7 +967,7 @@ async function claimTask(userId, taskId) {
       }
 
       // Return enriched response with claimedAt and points
-      return { success: true, data: { taskId, claimedAt: updatedUserTask.updatedAt, points: task.points } };
+      return { success: true, data: { taskId, claimedAt: updatedUserTask.updatedAt, points: pointsAwarded } };
     });
     // Log successful claim or validation result
     logger.info('claimTask result', { userId, taskId, result: result.data });

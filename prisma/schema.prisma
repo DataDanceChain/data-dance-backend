@@ -55,6 +55,7 @@ model User {
   profile                  UserProfile?
   roles                    UserRole[]
   UserTasks                UserTask[]
+  dailyEvents              UserDailyEvent[]
 }
 
 model UserProfile {
@@ -107,6 +108,21 @@ model Point {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
   user      User     @relation(fields: [userId], references: [id])
+}
+
+// Generic daily event log for reward tasks (e.g. check-in, rewards hub visit)
+model UserDailyEvent {
+  id        String   @id @default(uuid())
+  userId    String
+  type      String
+  day       DateTime // normalized to start-of-day UTC
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@unique([userId, type, day])
+  @@index([userId, day])
+  @@index([type, day])
 }
 
 model Badge {

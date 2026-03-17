@@ -858,6 +858,76 @@ exports.verifyTelegramJoin = async (req, res) => {
   }
 };
 
+function startOfUtcDay(date = new Date()) {
+  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
+}
+
+/**
+ * Daily check-in (idempotent per day)
+ * @route POST /api/users/check-in
+ * @access Private
+ */
+exports.checkIn = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const day = startOfUtcDay(new Date());
+
+    const event = await prisma.userDailyEvent.upsert({
+      where: { userId_type_day: { userId, type: 'CHECK_IN', day } },
+      update: {},
+      create: { userId, type: 'CHECK_IN', day }
+    });
+
+    return res.status(200).json({
+      status: 'success',
+      data: {
+        checkedIn: true,
+        day: event.day.toISOString()
+      }
+    });
+  } catch (error) {
+    console.error('Error recording daily check-in:', error);
+    return res.status(500).json({
+      status: 'error',
+      message: 'Server error',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+};
+
+/**
+ * Record a rewards hub visit (idempotent per day)
+ * @route POST /api/users/rewards-hub-visit
+ * @access Private
+ */
+exports.recordRewardsHubVisit = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const day = startOfUtcDay(new Date());
+
+    const event = await prisma.userDailyEvent.upsert({
+      where: { userId_type_day: { userId, type: 'REWARDS_HUB_VISIT', day } },
+      update: {},
+      create: { userId, type: 'REWARDS_HUB_VISIT', day }
+    });
+
+    return res.status(200).json({
+      status: 'success',
+      data: {
+        visited: true,
+        day: event.day.toISOString()
+      }
+    });
+  } catch (error) {
+    console.error('Error recording rewards hub visit:', error);
+    return res.status(500).json({
+      status: 'error',
+      message: 'Server error',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+};
+
 /**
  * 领取圣诞欢迎奖励
  * @route POST /api/users/christmas-welcome-bonus/claim
