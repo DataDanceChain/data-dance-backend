@@ -34,6 +34,7 @@ exports.getMe = async (req, res) => {
       isOrganization: user.isOrganization || user.userType === 'organization',
       userType: user.userType,
       authType: user.authType,
+      createdAt: user.createdAt,
       totalPoints: user.totalPoints,
       xid: user.xid,
       xUsername: user.xUsername

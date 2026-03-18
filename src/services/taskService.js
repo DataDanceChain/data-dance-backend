@@ -623,11 +623,25 @@ async function getTasksByAward(userId, awardId) {
     // Resolve crawler task URL from metadata.crawlerTaskId
     const url = getCrawlerTaskUrl(task.metadata?.crawlerTaskId);
 
+    // Optional: provide a points preview for tasks with dynamic points.
+    // This supports UX like showing the exact Points for today's check-in.
+    let pointsPreview;
+    if (task?.metadata?.dynamicPoints === 'CHECKIN_STREAK_1_7') {
+      // For daily check-in streak points:
+      // - `context.streak` from prepare() is the current consecutive streak up to today.
+      // - if user has not checked in today, claiming after check-in would increase streak by 1.
+      const currentStreak = typeof context.streak === 'number' ? context.streak : 0;
+      const checkedInToday = !!context.checkedInToday;
+      const effectiveStreakForToday = checkedInToday ? currentStreak : currentStreak + 1;
+      pointsPreview = Math.max(1, Math.min(effectiveStreakForToday, 7));
+    }
+
     return {
       id: task.id,
       title: task.title,
       // always include core fields
       points: task.points,
+      ...(pointsPreview != null ? { pointsPreview } : {}),
       doneCount,
       claimRecords,
       claimed,
