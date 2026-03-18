@@ -151,7 +151,7 @@
       "title": "New User Bonus",
       "description": "Explore DataDance Wallet & Claim up to 100 Points",
       "icon": "giftOutline",
-      "color": "#546E7A",
+      "color": "#2D8A73",
       "status": "LIVE",
       "enabled": true,
       "metadata": {
@@ -159,10 +159,10 @@
         "campaignType": "new-user",
         "durationDays": 30,
         "uiTheme": {
-          "accent": "#90A4AE",
-          "bgStart": "#546E7A",
-          "bgEnd": "#263238",
-          "iconColor": "#546E7A"
+          "accent": "#5EEAD4",
+          "bgStart": "#2D8A73",
+          "bgEnd": "#16685A",
+          "iconColor": "#0F4F45"
         }
       },
       "tasks": [
@@ -208,17 +208,17 @@
       "title": "Daily Tasks",
       "description": "Just a few seconds a day to earn extra Points.",
       "icon": "sparklesOutline",
-      "color": "#5C6BC0",
+      "color": "#0A84FF",
       "status": "LIVE",
       "enabled": true,
       "metadata": {
         "type": "campaign",
         "campaignType": "daily",
         "uiTheme": {
-          "accent": "#5C6BC0",
-          "bgStart": "#5C6BC0",
-          "bgEnd": "#4527A0",
-          "iconColor": "#4527A0"
+          "accent": "#4FB3FF",
+          "bgStart": "#0A84FF",
+          "bgEnd": "#005AE0",
+          "iconColor": "#003BA8"
         }
       },
       "tasks": [
