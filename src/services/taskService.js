@@ -227,11 +227,6 @@ const awardStrategies = {
       });
       return { today, checkedInToday, visitedToday, streak, uploadsToday };
     },
-    unlock: async (userId) => {
-      await recordTaskProgress(userId, 'daily-check-in', 1);
-      await recordTaskProgress(userId, 'daily-open-rewards-hub', 1);
-      await recordTaskProgress(userId, 'daily-upload-bonus', 1);
-    },
     computeProgress: async (task, userId, ctx) => {
       if (task.id === 'daily-check-in') return ctx.checkedInToday ? 1 : 0;
       if (task.id === 'daily-open-rewards-hub') return ctx.visitedToday ? 1 : 0;
@@ -562,6 +557,10 @@ async function getTasksByAward(userId, awardId) {
       finalStatus = 'CLAIMED';
     } else if (!prereqDone) {
       finalStatus = 'LOCKED';
+    } else if (awardId === 'daily-tasks' && isRecurringDailyTask(task)) {
+      // Daily tasks should always be visible as actionable, even before any check-in/visit/upload happens.
+      // Avoid depending on userTask upsert side-effects in GET /awards/:awardId/tasks.
+      finalStatus = 'IN_PROGRESS';
     } else if (awardId === 'amazon-data-collection' || awardId === 'airbnb-data-collection' || awardId === 'booking-data-collection' || awardId === 'luma-data-collection') {
       // Data collection tasks: unlimited task, always IN_PROGRESS if unlocked (ut exists means unlocked)
       // Show IN_PROGRESS even at 0 progress, as these tasks are always available
