@@ -33,18 +33,22 @@ async function hasDailyEvent(userId, type, day = startOfUtcDay(new Date())) {
 
 async function getConsecutiveCheckInStreak(userId, today = startOfUtcDay(new Date())) {
   // Fetch recent check-ins (enough to cover the 7-day cap)
+  // Need enough rows for long consecutive streaks (cap is 7 for points, but preview should stay accurate).
   const recent = await prisma.userDailyEvent.findMany({
     where: { userId, type: 'CHECK_IN', day: { lte: today } },
     orderBy: { day: 'desc' },
-    take: 10,
+    take: 40,
     select: { day: true }
   });
-  const set = new Set(recent.map(r => r.day.toISOString()));
+  // Normalize to UTC calendar day so DB/driver millisecond or offset quirks never break matching.
+  const set = new Set(recent.map((r) => startOfUtcDay(r.day).toISOString()));
+  const todayKey = startOfUtcDay(today).toISOString();
   let streak = 0;
   for (let i = 0; i < 365; i++) {
-    const d = new Date(today);
+    const d = new Date(todayKey);
     d.setUTCDate(d.getUTCDate() - i);
-    if (set.has(d.toISOString())) {
+    const key = startOfUtcDay(d).toISOString();
+    if (set.has(key)) {
       streak += 1;
       continue;
     }
@@ -65,6 +69,17 @@ async function countCheckInsSince(userId, sinceDay) {
 
 function isRecurringDailyTask(task) {
   return task?.metadata?.recurring === 'DAILY' || task?.metadata?.type === 'DAILY_CHECK_IN' || task?.metadata?.type === 'REWARDS_HUB_VISIT' || task?.metadata?.type === 'DAILY_FIRST_UPLOAD';
+}
+
+/**
+ * Daily check-in awards 1–7 points from consecutive UTC check-in streak (cap 7).
+ * Prefer metadata.dynamicPoints from DB; also key off stable task id so production still works
+ * if Task.metadata was never re-seeded after adding CHECKIN_STREAK_1_7 to awards.json.
+ */
+function usesCheckinStreakDynamicPoints(task) {
+  return (
+    task?.metadata?.dynamicPoints === 'CHECKIN_STREAK_1_7' || task?.id === 'daily-check-in'
+  );
 }
 
 function hasClaimRecordOnDay(claimRecords, day) {
@@ -625,7 +640,7 @@ async function getTasksByAward(userId, awardId) {
     // Optional: provide a points preview for tasks with dynamic points.
     // This supports UX like showing the exact Points for today's check-in.
     let pointsPreview;
-    if (task?.metadata?.dynamicPoints === 'CHECKIN_STREAK_1_7') {
+    if (usesCheckinStreakDynamicPoints(task)) {
       // For daily check-in streak points:
       // - `context.streak` from prepare() is the current consecutive streak up to today.
       // - if user has not checked in today, claiming after check-in would increase streak by 1.
@@ -846,7 +861,7 @@ async function claimTask(userId, taskId) {
 
       // Determine points awarded (supports dynamic points for some tasks)
       let pointsAwarded = task.points;
-      if (task.metadata?.dynamicPoints === 'CHECKIN_STREAK_1_7') {
+      if (usesCheckinStreakDynamicPoints(task)) {
         const streak = await getConsecutiveCheckInStreak(userId, today);
         pointsAwarded = Math.max(1, Math.min(streak, 7));
       }
@@ -1060,4 +1075,11 @@ async function checkChristmasShoppingTasks(userId) {
   }
 }
 
-module.exports = { getTasksByAward, recordTaskProgress, claimTask, checkChristmasShoppingTasks };
+module.exports = {
+  getTasksByAward,
+  recordTaskProgress,
+  claimTask,
+  checkChristmasShoppingTasks,
+  /** Exposed for ops scripts (e.g. diagnose-daily-checkin); same logic as claim path */
+  getConsecutiveCheckInStreak,
+};
