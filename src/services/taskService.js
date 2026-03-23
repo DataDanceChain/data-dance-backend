@@ -44,9 +44,13 @@ async function getConsecutiveCheckInStreak(userId, today = startOfUtcDay(new Dat
   const set = new Set(recent.map((r) => startOfUtcDay(r.day).toISOString()));
   const todayKey = startOfUtcDay(today).toISOString();
   let streak = 0;
+  // If today has no check-in yet, do not start the walk on "today" or the streak is always 0 and
+  // UI shows 1 pt until after check-in. Count consecutive days ending yesterday; callers that add +1
+  // for "today's" reward then match the real claim amount after the user checks in.
+  const startOffset = set.has(todayKey) ? 0 : 1;
   for (let i = 0; i < 365; i++) {
     const d = new Date(todayKey);
-    d.setUTCDate(d.getUTCDate() - i);
+    d.setUTCDate(d.getUTCDate() - startOffset - i);
     const key = startOfUtcDay(d).toISOString();
     if (set.has(key)) {
       streak += 1;
