@@ -416,14 +416,17 @@ model UserTask {
 }
 
 model Referral {
-  id        String   @id @default(uuid())
-  inviterId String
-  inviteeId String   @unique
-  code      String
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-  invitee   User     @relation("InvitesReceived", fields: [inviteeId], references: [id])
-  inviter   User     @relation("InvitesSent", fields: [inviterId], references: [id])
+  id           String   @id @default(uuid())
+  inviterId    String
+  inviteeId    String   @unique
+  code         String
+  campaignSlug String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  invitee      User     @relation("InvitesReceived", fields: [inviteeId], references: [id])
+  inviter      User     @relation("InvitesSent", fields: [inviterId], references: [id])
+
+  @@index([inviterId, campaignSlug])
 }
 
 model XPostCache {

@@ -4,7 +4,8 @@ const {
   useReferralCode, 
   getReferralOverview, 
   getReferralStatus,
-  claimReferralRewards 
+  claimReferralRewards,
+  getMothersDay2026Stats,
 } = require('../controllers/referralController');
 const { protect } = require('../middlewares/authMiddleware');
 
@@ -13,6 +14,8 @@ router.use(protect);
 
 // Use referral code
 router.post('/use-code', useReferralCode);
+
+router.get('/campaign/mothers-day-2026/stats', getMothersDay2026Stats);
 
 // Get referral overview (summary)
 router.get('/overview', getReferralOverview);

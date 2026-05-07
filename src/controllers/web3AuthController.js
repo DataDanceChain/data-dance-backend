@@ -4,6 +4,11 @@ const { createLogger } = require('../utils/logger');
 const userService = require('../services/userService');
 const referralService = require('../services/referralService');
 const { generateReferralCode, validateReferralCode } = require('../utils/referralUtils');
+const {
+  MOTHERS_DAY_2026_SLUG,
+  normalizeReferralCampaignInput,
+  assertCampaignActive,
+} = require('../constants/referralCampaigns');
 
 const logger = createLogger('web3AuthController');
 
@@ -14,7 +19,41 @@ const logger = createLogger('web3AuthController');
  */
 exports.web3authLogin = async (req, res) => {
   try {
-    const { userInfo, walletAddress, xid, xUsername, xAccessToken, xRefreshToken, referralCode } = req.body;
+    const {
+      userInfo,
+      walletAddress,
+      xid,
+      xUsername,
+      xAccessToken,
+      xRefreshToken,
+      referralCode: referralCodeRaw,
+    } = req.body;
+
+    const referralCode = referralCodeRaw ? String(referralCodeRaw).trim() : null;
+
+    let campaignSlug = null;
+    try {
+      campaignSlug = normalizeReferralCampaignInput(req.body.referralCampaign ?? req.body.campaign);
+      assertCampaignActive(campaignSlug);
+    } catch (e) {
+      if (e.code === 'INVALID_CAMPAIGN' || e.code === 'CAMPAIGN_INACTIVE') {
+        return res.status(400).json({
+          status: 'fail',
+          code: e.code,
+          message: e.message,
+        });
+      }
+      throw e;
+    }
+
+    if (campaignSlug && !referralCode) {
+      return res.status(400).json({
+        status: 'fail',
+        code: 'CAMPAIGN_REQUIRES_REFERRAL_CODE',
+        message:
+          "Mother's Day Bonus requires signing up through an invite link that includes your friend's referral code.",
+      });
+    }
 
     logger.info('Web3Auth login attempt', { 
       email: userInfo?.email,
@@ -22,7 +61,9 @@ exports.web3authLogin = async (req, res) => {
       xid,
       xUsername,
       hasAccessToken: Boolean(xAccessToken),
-      hasRefreshToken: Boolean(xRefreshToken)
+      hasRefreshToken: Boolean(xRefreshToken),
+      hasReferralCode: Boolean(referralCode),
+      campaignSlug,
     });
 
     // 1. 基础验证
@@ -111,12 +152,16 @@ exports.web3authLogin = async (req, res) => {
               data: {
                 inviterId: referrerId,
                 inviteeId: user.id,
-                code: referralCode
+                code: referralCode,
+                campaignSlug,
               }
             });
             
-            // 处理邀请奖励
-            await referralService.processReferral(user.id, referrerId, referralCode);
+            if (campaignSlug === MOTHERS_DAY_2026_SLUG) {
+              await referralService.processCampaignReferral(user.id, referrerId, campaignSlug);
+            } else {
+              await referralService.processReferral(user.id, referrerId, referralCode);
+            }
           });
           
           invitationStatus = {
@@ -257,12 +302,16 @@ exports.web3authLogin = async (req, res) => {
               data: {
                 inviterId: referrerId,
                 inviteeId: newUser.id,
-                code: referralCode
+                code: referralCode,
+                campaignSlug,
               }
             });
             
-            // 处理邀请奖励
-            await referralService.processReferral(newUser.id, referrerId, referralCode);
+            if (campaignSlug === MOTHERS_DAY_2026_SLUG) {
+              await referralService.processCampaignReferral(newUser.id, referrerId, campaignSlug);
+            } else {
+              await referralService.processReferral(newUser.id, referrerId, referralCode);
+            }
           }
 
           return newUser;

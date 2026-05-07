@@ -2,6 +2,12 @@ const bcrypt = require('bcryptjs');
 const { generateToken } = require('../utils/jwtUtils');
 const prisma = require('../utils/prisma');
 const { generateReferralCode } = require('../utils/referralUtils');
+const referralService = require('../services/referralService');
+const {
+  MOTHERS_DAY_2026_SLUG,
+  normalizeReferralCampaignInput,
+  assertCampaignActive,
+} = require('../constants/referralCampaigns');
 
 /**
  * 用户注册
@@ -10,7 +16,41 @@ const { generateReferralCode } = require('../utils/referralUtils');
  */
 exports.register = async (req, res) => {
   try {
-    const { email, password, name, isOrganization, referralCode: referralCodeFromRequest } = req.body;
+    const {
+      email,
+      password,
+      name,
+      isOrganization,
+      referralCode: referralCodeRaw,
+      referralCampaign,
+      campaign,
+    } = req.body;
+
+    const referralCodeFromRequest = referralCodeRaw ? String(referralCodeRaw).trim() : null;
+
+    let campaignSlug = null;
+    try {
+      campaignSlug = normalizeReferralCampaignInput(referralCampaign ?? campaign);
+      assertCampaignActive(campaignSlug);
+    } catch (e) {
+      if (e.code === 'INVALID_CAMPAIGN' || e.code === 'CAMPAIGN_INACTIVE') {
+        return res.status(400).json({
+          status: 'fail',
+          code: e.code,
+          message: e.message,
+        });
+      }
+      throw e;
+    }
+
+    if (campaignSlug && !referralCodeFromRequest) {
+      return res.status(400).json({
+        status: 'fail',
+        code: 'CAMPAIGN_REQUIRES_REFERRAL_CODE',
+        message:
+          "Mother's Day Bonus requires signing up through an invite link that includes your friend's referral code.",
+      });
+    }
 
     // 检查用户是否已存在
     const userExists = await prisma.user.findUnique({
@@ -74,28 +114,16 @@ exports.register = async (req, res) => {
         data: {
           inviterId: inviterId,
           inviteeId: user.id,
-          code: referralCodeFromRequest // Store the code that was used
-        }
+          code: referralCodeFromRequest,
+          campaignSlug,
+        },
       });
 
-      // Award 50 points to the inviter for direct referral
-      await prisma.user.update({
-        where: { id: inviterId },
-        data: { totalPoints: { increment: 50 } }
-      });
-
-      await prisma.point.create({
-        data: {
-          userId: inviterId,
-          amount: 50,
-          source: 'REFERRAL_DIRECT',
-          sourceId: user.id // Invitee's ID as sourceId
-        }
-      });
-
-      // Distribute upline rewards for the direct referral points
-      const { distributeUplineRewards } = require('../services/distributionService');
-      await distributeUplineRewards(inviterId, 50, prisma, 'REFERRAL_DIRECT_NEW_USER');
+      if (campaignSlug === MOTHERS_DAY_2026_SLUG) {
+        await referralService.processCampaignReferral(user.id, inviterId, campaignSlug);
+      } else {
+        await referralService.processReferral(user.id, inviterId, referralCodeFromRequest);
+      }
     }
 
     // 生成 token

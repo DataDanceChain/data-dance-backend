@@ -1,5 +1,12 @@
 const prisma = require('../utils/prisma');
-const { getReferralOverview, claimReferralRewards, processReferral, getReferralStatus, useReferralCode } = require('../services/referralService');
+const {
+  getReferralOverview,
+  claimReferralRewards,
+  getReferralStatus,
+  useReferralCode,
+  countCampaignInvitesAsInviter,
+} = require('../services/referralService');
+const { MOTHERS_DAY_2026_SLUG } = require('../constants/referralCampaigns');
 
 /**
  * Use referral code (previously invitation code)
@@ -8,7 +15,7 @@ const { getReferralOverview, claimReferralRewards, processReferral, getReferralS
  */
 exports.useReferralCode = async (req, res) => {
   try {
-    const { code } = req.body;
+    const { code, campaign, referralCampaign } = req.body;
     const userId = req.user.id;
 
     if (!code) {
@@ -19,7 +26,7 @@ exports.useReferralCode = async (req, res) => {
       });
     }
 
-    const result = await useReferralCode(userId, code);
+    const result = await useReferralCode(userId, code, campaign ?? referralCampaign);
     
     return res.status(200).json({
       status: 'success',
@@ -47,6 +54,14 @@ exports.useReferralCode = async (req, res) => {
     }
     
     if (error.code === 'SELF_REFERRAL_NOT_ALLOWED') {
+      return res.status(400).json({
+        status: 'fail',
+        code: error.code,
+        message: error.message
+      });
+    }
+
+    if (error.code === 'INVALID_CAMPAIGN' || error.code === 'CAMPAIGN_INACTIVE' || error.code === 'CAMPAIGN_REQUIRES_REFERRAL_CODE') {
       return res.status(400).json({
         status: 'fail',
         code: error.code,
@@ -111,5 +126,31 @@ exports.claimReferralRewards = async (req, res) => {
   } catch (error) {
     console.error('Error claiming referral rewards:', error);
     return res.status(400).json({ status: 'fail', message: error.message });
+  }
+};
+
+/**
+ * Mother's Day campaign invite count for current user
+ * @route GET /api/referrals/campaign/mothers-day-2026/stats
+ * @access Private
+ */
+exports.getMothersDay2026Stats = async (req, res) => {
+  try {
+    const successfulInvites = await countCampaignInvitesAsInviter(req.user.id, MOTHERS_DAY_2026_SLUG);
+    const user = await prisma.user.findUnique({
+      where: { id: req.user.id },
+      select: { referralCode: true },
+    });
+    return res.status(200).json({
+      status: 'success',
+      data: {
+        slug: MOTHERS_DAY_2026_SLUG,
+        successfulInvites,
+        ownReferralCode: user?.referralCode ?? '',
+      },
+    });
+  } catch (error) {
+    console.error('getMothersDay2026Stats error', error);
+    return res.status(500).json({ status: 'error', message: 'Server error' });
   }
 };

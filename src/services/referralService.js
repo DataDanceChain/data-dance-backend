@@ -4,6 +4,12 @@ const { recordTaskProgress } = require('./taskService');
 const { REFERRAL_MESSAGES } = require('../constants/messages');
 const { createLogger } = require('../utils/logger');
 const { distributeUplineRewards } = require('./distributionService');
+const {
+  MOTHERS_DAY_2026_SLUG,
+  MOTHERS_DAY_2026,
+  normalizeReferralCampaignInput,
+  assertCampaignActive,
+} = require('../constants/referralCampaigns');
 
 const logger = createLogger('referralService');
 
@@ -142,6 +148,55 @@ async function claimReferralRewards(userId) {
  * @param {string} inviterId - the direct inviter user ID
  * @param {string} referralCode - the referral code used
  */
+/**
+ * Mother's Day (and similar) flat bonuses — no multi-level tasks or upline distribution.
+ */
+async function processCampaignReferral(newUserId, inviterId, campaignSlug) {
+  let inviterAmount = 0;
+  let inviteeAmount = 0;
+  if (campaignSlug === MOTHERS_DAY_2026_SLUG) {
+    inviterAmount = MOTHERS_DAY_2026.inviterPoints;
+    inviteeAmount = MOTHERS_DAY_2026.inviteePoints;
+  } else {
+    throw new Error(`Unsupported campaign for referral rewards: ${campaignSlug}`);
+  }
+
+  await prisma.$transaction(async (tx) => {
+    await tx.user.update({
+      where: { id: inviterId },
+      data: { totalPoints: { increment: inviterAmount } },
+    });
+    await tx.point.create({
+      data: {
+        userId: inviterId,
+        amount: inviterAmount,
+        source: 'REFERRAL_CAMPAIGN_MOTHERS_DAY_INVITER',
+        sourceId: newUserId,
+      },
+    });
+    await tx.user.update({
+      where: { id: newUserId },
+      data: { totalPoints: { increment: inviteeAmount } },
+    });
+    await tx.point.create({
+      data: {
+        userId: newUserId,
+        amount: inviteeAmount,
+        source: 'REFERRAL_CAMPAIGN_MOTHERS_DAY_INVITEE',
+        sourceId: inviterId,
+      },
+    });
+  });
+
+  logger.info('Campaign referral rewards issued', {
+    campaignSlug,
+    inviterId,
+    inviteeId: newUserId,
+    inviterAmount,
+    inviteeAmount,
+  });
+}
+
 async function processReferral(newUserId, inviterId, referralCode) {
   try {
     // Award immediate 50-point direct referral bonus
@@ -273,7 +328,29 @@ async function getReferralStatus(userId) {
  * @param {string} code - The referral code to use
  * @throws {Error} with code property for specific error cases
  */
-async function useReferralCode(userId, code) {
+async function countCampaignInvitesAsInviter(userId, campaignSlug) {
+  if (!campaignSlug) return 0;
+  return prisma.referral.count({
+    where: { inviterId: userId, campaignSlug },
+  });
+}
+
+async function useReferralCode(userId, code, referralCampaignRaw = null) {
+  let campaignSlug = null;
+  try {
+    campaignSlug = normalizeReferralCampaignInput(referralCampaignRaw);
+  } catch (e) {
+    if (e.code) throw e;
+    throw e;
+  }
+  assertCampaignActive(campaignSlug);
+
+  if (campaignSlug && !code) {
+    const err = new Error('Referral code is required for campaign invites');
+    err.code = 'MISSING_CODE';
+    throw err;
+  }
+
   // Check if user has already been referred
   const existingReferral = await prisma.referral.findUnique({
     where: { inviteeId: userId },
@@ -319,12 +396,16 @@ async function useReferralCode(userId, code) {
         data: {
           inviterId: inviter.id,
           inviteeId: userId,
-          code: code  // Store the code used for the referral
+          code,
+          campaignSlug,
         }
       });
       
-      // Process multi-level rewards within the same transaction
-      await processReferral(userId, inviter.id, code);
+      if (campaignSlug === MOTHERS_DAY_2026_SLUG) {
+        await processCampaignReferral(userId, inviter.id, campaignSlug);
+      } else {
+        await processReferral(userId, inviter.id, code);
+      }
       
       return referral;
     });
@@ -347,4 +428,12 @@ async function useReferralCode(userId, code) {
   }
 }
 
-module.exports = { getReferralOverview, claimReferralRewards, processReferral, getReferralStatus, useReferralCode };
+module.exports = {
+  getReferralOverview,
+  claimReferralRewards,
+  processReferral,
+  processCampaignReferral,
+  getReferralStatus,
+  useReferralCode,
+  countCampaignInvitesAsInviter,
+};

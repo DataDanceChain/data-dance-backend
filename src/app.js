@@ -19,6 +19,7 @@ const web3AuthRoutes = require('./routes/web3AuthRoutes');
 const awardRoutes = require('./routes/awardRoutes');
 const taskRoutes = require('./routes/taskRoutes');
 const referralRoutes = require('./routes/referralRoutes');
+const referralCampaignRoutes = require('./routes/referralCampaignRoutes');
 const passRoutes = require('./routes/passRoutes');
 const passWebServiceRoutes = require('./routes/passWebServiceRoutes');
 const googleWalletRoutes = require('./routes/googleWalletRoutes');
@@ -144,6 +145,7 @@ app.use('/api/auth', web3AuthRoutes);
 // 调整 awardRoutes 和 taskRoutes 的挂载路径
 app.use('/api', awardRoutes);
 app.use('/api', taskRoutes);
+app.use('/api/referrals/campaign', referralCampaignRoutes);
 app.use('/api/referrals', referralRoutes);
 app.use('/api/x', xRoutes);
 app.use('/api/assets/passes', passRoutes);
