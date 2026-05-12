@@ -88,7 +88,7 @@ console.log('    }');
 console.log('  }');
 console.log('\nExpected Database Changes:');
 console.log('  - New Referral record created');
-console.log('  - User A: +50 points (direct referral bonus)');
+console.log('  - User A: +150 points (direct referral bonus)');
 console.log('  - User A\'s upline: Gets 10%/5%/2% commission on the 50 points');
 
 console.log('\n📝 Test 2.2: In-App Referral Submission');
@@ -105,7 +105,7 @@ console.log('    }');
 console.log('  }');
 console.log('\nExpected Database Changes:');
 console.log('  - New Referral record created');
-console.log('  - User B: +50 points (direct referral bonus)');
+console.log('  - User B: +150 points (direct referral bonus)');
 console.log('  - User A: +5 points (10% upline commission on 50 points)');
 
 console.log('\n📝 Test 2.3: Already Referred User');
@@ -178,7 +178,7 @@ console.log('\n\n✅ VERIFICATION SUMMARY');
 console.log('=' .repeat(70));
 console.log('1. ✅ All API responses are in English');
 console.log('2. ✅ Invalid Amazon data is rejected (no points awarded)');
-console.log('3. ✅ 50-point referral bonus is awarded immediately');
+console.log('3. ✅ Direct referral bonus is awarded immediately (150 pts standard)');
 console.log('4. ✅ Upline commissions (10%/5%/2%) work for all point events');
 console.log('5. ✅ All operations are atomic (use database transactions)');
 

@@ -13,6 +13,9 @@ const {
 
 const logger = createLogger('referralService');
 
+/** Standard (non-campaign) direct referral — immediate inviter bonus and upline distribution base */
+const DIRECT_REFERRAL_BONUS_POINTS = 150;
+
 async function fetchReferrals(userId, level, maxLevel) {
   if (level > maxLevel) return [];
   const refs = await prisma.referral.findMany({
@@ -97,8 +100,8 @@ async function getReferralOverview(userId) {
   function annotate(nodes) {
     nodes.forEach(n => {
       const cnt = n.referrals.length;
-      // theirPoints: child count * 50 (保留原有计算逻辑用于展示)
-      n.theirPoints = cnt * 50;
+      // theirPoints: estimated from direct children × standard direct bonus (display)
+      n.theirPoints = cnt * DIRECT_REFERRAL_BONUS_POINTS;
       // yourReward已移除：现在使用基于百分比的动态分润系统
       // 实际分润金额会根据下级完成的具体任务和其积分值来计算
       annotate(n.referrals);
@@ -199,33 +202,38 @@ async function processCampaignReferral(newUserId, inviterId, campaignSlug) {
 
 async function processReferral(newUserId, inviterId, referralCode) {
   try {
-    // Award immediate 50-point direct referral bonus
+    // Award immediate direct referral bonus (standard / non-campaign)
     await prisma.$transaction(async (tx) => {
       // Update inviter's total points
       await tx.user.update({
         where: { id: inviterId },
-        data: { totalPoints: { increment: 50 } }
+        data: { totalPoints: { increment: DIRECT_REFERRAL_BONUS_POINTS } }
       });
       
       // Create point record for the direct referral bonus
       await tx.point.create({
         data: {
           userId: inviterId,
-          amount: 50,
+          amount: DIRECT_REFERRAL_BONUS_POINTS,
           source: 'REFERRAL_DIRECT',
           sourceId: newUserId // Track who triggered this reward
         }
       });
       
-      logger.info(REFERRAL_MESSAGES.DIRECT_REWARD_AWARDED(inviterId, 50));
+      logger.info(REFERRAL_MESSAGES.DIRECT_REWARD_AWARDED(inviterId, DIRECT_REFERRAL_BONUS_POINTS));
       
-      // Distribute upline rewards for the 50-point direct referral bonus
+      // Distribute upline rewards on the same base amount
       try {
-        const distributionResult = await distributeUplineRewards(inviterId, 50, tx, `referral_direct_${newUserId}`);
+        const distributionResult = await distributeUplineRewards(
+          inviterId,
+          DIRECT_REFERRAL_BONUS_POINTS,
+          tx,
+          `referral_direct_${newUserId}`
+        );
         logger.info('Upline distribution completed for direct referral bonus', {
           inviterId,
           inviteeId: newUserId,
-          baseReward: 50,
+          baseReward: DIRECT_REFERRAL_BONUS_POINTS,
           distributionResult
         });
       } catch (distributionError) {
@@ -233,7 +241,7 @@ async function processReferral(newUserId, inviterId, referralCode) {
         logger.error('Upline distribution failed for direct referral bonus', {
           inviterId,
           inviteeId: newUserId,
-          baseReward: 50,
+          baseReward: DIRECT_REFERRAL_BONUS_POINTS,
           error: distributionError.message
         });
         // Continue execution without throwing
@@ -389,33 +397,27 @@ async function useReferralCode(userId, code, referralCampaignRaw = null) {
   }
 
   try {
-    // Create referral relationship and process rewards in a transaction
-    const referralData = await prisma.$transaction(async (tx) => {
-      // Create the referral record
-      const referral = await tx.referral.create({
-        data: {
-          inviterId: inviter.id,
-          inviteeId: userId,
-          code,
-          campaignSlug,
-        }
-      });
-      
-      if (campaignSlug === MOTHERS_DAY_2026_SLUG) {
-        await processCampaignReferral(userId, inviter.id, campaignSlug);
-      } else {
-        await processReferral(userId, inviter.id, code);
-      }
-      
-      return referral;
+    const referralData = await prisma.referral.create({
+      data: {
+        inviterId: inviter.id,
+        inviteeId: userId,
+        code,
+        campaignSlug,
+      },
     });
+
+    if (campaignSlug === MOTHERS_DAY_2026_SLUG) {
+      await processCampaignReferral(userId, inviter.id, campaignSlug);
+    } else {
+      await processReferral(userId, inviter.id, code);
+    }
 
     return {
       inviterId: inviter.id,
       inviterName: inviter.name,
       inviteeId: userId,
       code: code,
-      createdAt: referralData.createdAt
+      createdAt: referralData.createdAt,
     };
   } catch (error) {
     console.error('Transaction error in useReferralCode:', error);

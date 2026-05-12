@@ -261,7 +261,7 @@
       "status": "LIVE",
       "enabled": true,
       "tasks": [
-        { "id": "referral-1", "title": "Direct Invite Reward", "description": "Reward for directly inviting a user", "points": 50, "claimLimit": null },
+        { "id": "referral-1", "title": "Direct Invite Reward", "description": "Reward for directly inviting a user", "points": 150, "claimLimit": null },
         { "id": "referral-2", "title": "Level 2 Referral Bonus", "description": "Bonus for referrals made by your direct invitees", "points": 5, "claimLimit": null },
         { "id": "referral-3", "title": "Level 3 Referral Bonus", "description": "Bonus for referrals made at level 3", "points": 3, "claimLimit": null },
         { "id": "referral-4", "title": "Level 4 Referral Bonus", "description": "Bonus for referrals made at level 4", "points": 1, "claimLimit": null }

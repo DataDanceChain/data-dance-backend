@@ -3,7 +3,7 @@
  * 
  * This script performs comprehensive testing of:
  * 1. Amazon data collection with point validation
- * 2. Referral system with immediate 50-point rewards
+ * 2. Referral system with immediate 150-point standard direct rewards
  * 3. Universal upline commission distribution
  */
 
@@ -220,7 +220,7 @@ async function verifyInitialSetup() {
     console.log(`  ${ref.inviter.name} → ${ref.invitee.name}`);
   });
   
-  // Check initial points (should include 50-point bonuses)
+  // Check initial points (should include standard direct referral bonuses)
   console.log('\nInitial points after referral bonuses:');
   for (const [key, user] of Object.entries(createdUsers)) {
     const dbUser = await prisma.user.findUnique({ 
@@ -457,7 +457,7 @@ async function test2_1_RegistrationReferral() {
   console.log('\n📝 Test 2.1: Registration with Referral Code');
   console.log('(Already tested during setup - verifying results)');
   
-  // Check that User A received 50 points for inviting User B
+  // Check that User A received 150 points for inviting User B
   const pointRecords = await prisma.point.findMany({
     where: {
       userId: createdUsers.userA.id,
@@ -506,8 +506,8 @@ async function test2_2_InAppReferral() {
   console.log(`  User A: ${pointsBefore.userA} → ${pointsAfter.userA} (+${pointsAfter.userA - pointsBefore.userA})`);
   
   console.log('\nVerification:');
-  console.log(`  ✅ User B gained 50 points for direct referral`);
-  console.log(`  ✅ User A gained 5 points (10% upline commission)`);
+  console.log(`  ✅ User B gained 150 points for direct referral`);
+  console.log(`  ✅ User A gained 15 points (10% upline commission on 150)`);
   console.log(`  ✅ Message is in English: "${response.data.message}"`);
 }
 

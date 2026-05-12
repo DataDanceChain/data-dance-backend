@@ -19,7 +19,7 @@ console.log('   ✓ All messages are in English\n');
 
 // Test referral messages
 console.log('3. REFERRAL MESSAGES:');
-console.log('   Direct reward:', REFERRAL_MESSAGES.DIRECT_REWARD_AWARDED('inviter123', 50));
+console.log('   Direct reward:', REFERRAL_MESSAGES.DIRECT_REWARD_AWARDED('inviter123', 150));
 console.log('   Already referred:', REFERRAL_MESSAGES.ALREADY_REFERRED);
 console.log('   ✓ All messages are in English\n');
 
@@ -66,7 +66,7 @@ console.log('\n5. KEY FIXES IMPLEMENTED:');
 console.log('   ✓ Created English message constants file');
 console.log('   ✓ Updated crawler service to use English messages');
 console.log('   ✓ Updated distribution service to use English logs');
-console.log('   ✓ Fixed 50-point direct invitation reward to be immediate');
+console.log('   ✓ Fixed standard direct invitation reward (150 pts immediate)');
 console.log('   ✓ Added upline distribution to crawler rewards');
 console.log('   ✓ Added upline distribution to referral rewards');
 console.log('   ✓ Points are only awarded for valid Amazon data');
