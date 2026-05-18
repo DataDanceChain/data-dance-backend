@@ -1,6 +1,6 @@
 /**
  * Referral campaigns with distinct economics from standard referrals.
- * Mother's Day 2026: May 6 12:00 AM PT – May 10 11:59 PM PT (America/Los_Angeles).
+ * Mother's Day 2026: May 8 12:00 AM PT – May 10 11:59 PM PT (America/Los_Angeles).
  * Stored boundaries as UTC instants equivalent to those wall-clock times (May uses PDT, UTC-7).
  */
 
@@ -9,8 +9,8 @@ const MOTHERS_DAY_2026_SLUG = 'mothers-day-2026';
 /** Campaign window (UTC instant equivalents for PT civil times above). */
 const MOTHERS_DAY_2026 = {
   slug: MOTHERS_DAY_2026_SLUG,
-  /** May 6, 2026 00:00 America/Los_Angeles → UTC */
-  startUtc: new Date('2026-05-06T07:00:00.000Z'),
+  /** May 8, 2026 00:00 America/Los_Angeles → UTC */
+  startUtc: new Date('2026-05-08T07:00:00.000Z'),
   /** May 10, 2026 23:59:59.999 America/Los_Angeles → UTC */
   endUtc: new Date('2026-05-11T06:59:59.999Z'),
   inviterPoints: 300,

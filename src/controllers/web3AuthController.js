@@ -146,23 +146,22 @@ exports.web3authLogin = async (req, res) => {
           
           referrerId = referralData.referrerId;
           
-          // 创建邀请关系
-          await prisma.$transaction(async (tx) => {
-            await tx.referral.create({
-              data: {
-                inviterId: referrerId,
-                inviteeId: user.id,
-                code: referralCode,
-                campaignSlug,
-              }
-            });
-            
-            if (campaignSlug === MOTHERS_DAY_2026_SLUG) {
-              await referralService.processCampaignReferral(user.id, referrerId, campaignSlug);
-            } else {
-              await referralService.processReferral(user.id, referrerId, referralCode);
-            }
+          // Referral row + rewards cannot run in one interactive tx: processCampaignReferral
+          // opens its own transaction and UPDATEs the invitee row, which deadlocks with the
+          // uncommitted outer transaction that created the same user + referral.
+          await prisma.referral.create({
+            data: {
+              inviterId: referrerId,
+              inviteeId: user.id,
+              code: referralCode,
+              campaignSlug,
+            },
           });
+          if (campaignSlug === MOTHERS_DAY_2026_SLUG) {
+            await referralService.processCampaignReferral(user.id, referrerId, campaignSlug);
+          } else {
+            await referralService.processReferral(user.id, referrerId, referralCode);
+          }
           
           invitationStatus = {
             success: true,
@@ -276,9 +275,8 @@ exports.web3authLogin = async (req, res) => {
           }
         }
 
-    // 创建新用户
+    // Create user + referral in one tx; campaign rewards run after commit (see existing-user path).
         const result = await prisma.$transaction(async (tx) => {
-          // 创建用户
           const newUser = await tx.user.create({
             data: {
               email: userInfo.email,
@@ -287,16 +285,15 @@ exports.web3authLogin = async (req, res) => {
               walletAddress,
               authType: 'web3auth',
               userType: 'regular',
-          referralCode: generateReferralCode(),
+              referralCode: generateReferralCode(),
               ...(xid && { xid }),
-          ...(xUsername && { xUsername }),
+              ...(xUsername && { xUsername }),
               ...(xAccessToken && { xAccessToken }),
               ...(xRefreshToken && { xRefreshToken }),
-          profile: { create: { language: 'en' } }
-            }
+              profile: { create: { language: 'en' } },
+            },
           });
 
-          // 如果有邀请人，创建邀请关系
           if (referrerId) {
             await tx.referral.create({
               data: {
@@ -304,18 +301,20 @@ exports.web3authLogin = async (req, res) => {
                 inviteeId: newUser.id,
                 code: referralCode,
                 campaignSlug,
-              }
+              },
             });
-            
-            if (campaignSlug === MOTHERS_DAY_2026_SLUG) {
-              await referralService.processCampaignReferral(newUser.id, referrerId, campaignSlug);
-            } else {
-              await referralService.processReferral(newUser.id, referrerId, referralCode);
-            }
           }
 
           return newUser;
         });
+
+        if (referrerId) {
+          if (campaignSlug === MOTHERS_DAY_2026_SLUG) {
+            await referralService.processCampaignReferral(result.id, referrerId, campaignSlug);
+          } else {
+            await referralService.processReferral(result.id, referrerId, referralCode);
+          }
+        }
 
         const token = generateToken(result.id);
     const { password, privateKey, ...safeUser } = result;

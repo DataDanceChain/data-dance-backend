@@ -18,8 +18,10 @@ const DIRECT_REFERRAL_BONUS_POINTS = 150;
 
 async function fetchReferrals(userId, level, maxLevel) {
   if (level > maxLevel) return [];
+  // Standard referral rewards UI / tasks only apply to non-campaign invites.
+  // Mother's Day (campaignSlug set) uses separate Point sources and skips referral-* tasks.
   const refs = await prisma.referral.findMany({
-    where: { inviterId: userId },
+    where: { inviterId: userId, campaignSlug: null },
     include: { invitee: { select: { id: true, email: true, name: true } } }
   });
   const result = [];
@@ -108,7 +110,7 @@ async function getReferralOverview(userId) {
     });
   }
   annotate(referrals);
-  // compute networkActivity: totalReferralPoints + sum of levelCounts 2-4 * 50
+  // Display heuristic for downstream depth (not tied to direct-invite bonus amount).
   const lvl234Count = (levelCounts[2] || 0) + (levelCounts[3] || 0) + (levelCounts[4] || 0);
   const networkActivity = totalReferralPoints + lvl234Count * 50;
 
@@ -286,8 +288,9 @@ async function getReferralStatus(userId) {
   });
 
   // Get information about people this user has invited
+  // Invites listed for referral UX: standard links only (campaigns use separate economics).
   const asInviter = await prisma.referral.findMany({
-    where: { inviterId: userId },
+    where: { inviterId: userId, campaignSlug: null },
     select: {
       inviteeId: true,
       createdAt: true,
