@@ -31,6 +31,7 @@ const dataNFTRoutes = require('./routes/dataNFTRoutes');
 const promotionRoutes = require('./routes/promotionRoutes');
 const transactionRoutes = require('./routes/transactionRoutes');
 const ddcNFTMetadataRoutes = require('./routes/ddcNFTMetadataRoutes');
+const opsAdminRoutes = require('./routes/opsAdminRoutes');
 
 const app = express();
 
@@ -135,6 +136,7 @@ app.use('/data-pack', express.static(path.join(__dirname, '../public/data-pack')
 }));
 
 // 路由
+app.use('/api/ops', opsAdminRoutes);
 app.use('/api/auth', authRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/assets', assetRoutes);
