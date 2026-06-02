@@ -1,17 +1,19 @@
 /**
  * Referral campaigns with distinct economics from standard referrals.
- * Mother's Day 2026: May 8 12:00 AM PT – May 10 11:59 PM PT (America/Los_Angeles).
- * Stored boundaries as UTC instants equivalent to those wall-clock times (May uses PDT, UTC-7).
+ *
+ * Mother's Day 2026 — RETIRED (May 8–10 2026 PT). Old share links still work as
+ * standard referral only (campaign query ignored); API may still expose read-only metadata.
  */
 
 const MOTHERS_DAY_2026_SLUG = 'mothers-day-2026';
 
-/** Campaign window (UTC instant equivalents for PT civil times above). */
+/** Once true, mothers-day-2026 is not accepted as an active campaign; normalize drops it. */
+const MOTHERS_DAY_2026_RETIRED = true;
+
+/** Campaign window (UTC instant equivalents for PT civil times). Kept for historical payloads / stats. */
 const MOTHERS_DAY_2026 = {
   slug: MOTHERS_DAY_2026_SLUG,
-  /** May 8, 2026 00:00 America/Los_Angeles → UTC */
   startUtc: new Date('2026-05-08T07:00:00.000Z'),
-  /** May 10, 2026 23:59:59.999 America/Los_Angeles → UTC */
   endUtc: new Date('2026-05-11T06:59:59.999Z'),
   inviterPoints: 300,
   inviteePoints: 200,
@@ -23,6 +25,7 @@ function nowOrProvided(now) {
 }
 
 function isMothersDay2026Active(now) {
+  if (MOTHERS_DAY_2026_RETIRED) return false;
   const t = nowOrProvided(now);
   return t >= MOTHERS_DAY_2026.startUtc && t <= MOTHERS_DAY_2026.endUtc;
 }
@@ -35,7 +38,10 @@ function normalizeReferralCampaignInput(raw) {
   if (raw == null) return null;
   const s = String(raw).trim().toLowerCase();
   if (s === '') return null;
-  if (s === MOTHERS_DAY_2026_SLUG) return MOTHERS_DAY_2026_SLUG;
+  if (s === MOTHERS_DAY_2026_SLUG) {
+    if (MOTHERS_DAY_2026_RETIRED) return null;
+    return MOTHERS_DAY_2026_SLUG;
+  }
   const err = new Error(`Unknown referral campaign: ${raw}`);
   err.code = 'INVALID_CAMPAIGN';
   throw err;
@@ -49,6 +55,11 @@ function normalizeReferralCampaignInput(raw) {
 function assertCampaignActive(slug, now) {
   if (!slug) return;
   const t = nowOrProvided(now);
+  if (MOTHERS_DAY_2026_RETIRED && slug === MOTHERS_DAY_2026_SLUG) {
+    const err = new Error("Mother's Day Bonus has ended.");
+    err.code = 'CAMPAIGN_INACTIVE';
+    throw err;
+  }
   if (slug === MOTHERS_DAY_2026_SLUG) {
     if (!isMothersDay2026Active(t)) {
       const err = new Error("Mother's Day Bonus campaign is not active.");
@@ -81,6 +92,24 @@ function formatTimePt(dateUtc) {
 }
 
 function getMothersDay2026PublicPayload(now) {
+  if (MOTHERS_DAY_2026_RETIRED) {
+    return {
+      slug: MOTHERS_DAY_2026.slug,
+      title: "Mother's Day Bonus",
+      subtitle: 'This campaign has ended.',
+      isActive: false,
+      retired: true,
+      timezone: MOTHERS_DAY_2026.timezone,
+      startsAt: MOTHERS_DAY_2026.startUtc.toISOString(),
+      endsAt: MOTHERS_DAY_2026.endUtc.toISOString(),
+      startsAtDisplayPt: `${formatDatePt(MOTHERS_DAY_2026.startUtc)} ${formatTimePt(MOTHERS_DAY_2026.startUtc)}`,
+      endsAtDisplayPt: `${formatDatePt(MOTHERS_DAY_2026.endUtc)} ${formatTimePt(MOTHERS_DAY_2026.endUtc)}`,
+      endsOnShortLabel: formatDatePt(MOTHERS_DAY_2026.endUtc),
+      inviterPoints: MOTHERS_DAY_2026.inviterPoints,
+      inviteePoints: MOTHERS_DAY_2026.inviteePoints,
+      shareLinkPath: '/referral-redirect',
+    };
+  }
   const t = nowOrProvided(now);
   const active = isMothersDay2026Active(t);
   return {
@@ -88,6 +117,7 @@ function getMothersDay2026PublicPayload(now) {
     title: "Mother's Day Bonus",
     subtitle: 'For those who give. Earn 300, gift 200.',
     isActive: active,
+    retired: false,
     timezone: MOTHERS_DAY_2026.timezone,
     startsAt: MOTHERS_DAY_2026.startUtc.toISOString(),
     endsAt: MOTHERS_DAY_2026.endUtc.toISOString(),
@@ -103,6 +133,7 @@ function getMothersDay2026PublicPayload(now) {
 module.exports = {
   MOTHERS_DAY_2026_SLUG,
   MOTHERS_DAY_2026,
+  MOTHERS_DAY_2026_RETIRED,
   isMothersDay2026Active,
   normalizeReferralCampaignInput,
   assertCampaignActive,

@@ -6,7 +6,7 @@ const {
   useReferralCode,
   countCampaignInvitesAsInviter,
 } = require('../services/referralService');
-const { MOTHERS_DAY_2026_SLUG } = require('../constants/referralCampaigns');
+const { MOTHERS_DAY_2026_SLUG, MOTHERS_DAY_2026_RETIRED } = require('../constants/referralCampaigns');
 
 /**
  * Use referral code (previously invitation code)
@@ -147,6 +147,7 @@ exports.getMothersDay2026Stats = async (req, res) => {
         slug: MOTHERS_DAY_2026_SLUG,
         successfulInvites,
         ownReferralCode: user?.referralCode ?? '',
+        campaignRetired: MOTHERS_DAY_2026_RETIRED,
       },
     });
   } catch (error) {

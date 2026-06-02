@@ -10,6 +10,11 @@ const {
   normalizeReferralCampaignInput,
   assertCampaignActive,
 } = require('../constants/referralCampaigns');
+const { getReferralRulesPayload } = require('../constants/referralCopy');
+const {
+  hasCompletedFirstValidUpload,
+  getUsersWithValidUploads,
+} = require('../utils/firstValidUpload');
 
 const logger = createLogger('referralService');
 
@@ -24,6 +29,8 @@ async function fetchReferrals(userId, level, maxLevel) {
     where: { inviterId: userId, campaignSlug: null },
     include: { invitee: { select: { id: true, email: true, name: true } } }
   });
+  const inviteeIds = refs.map((r) => r.invitee.id);
+  const withUploads = await getUsersWithValidUploads(inviteeIds);
   const result = [];
   for (const r of refs) {
     const node = {
@@ -31,11 +38,28 @@ async function fetchReferrals(userId, level, maxLevel) {
       email: r.invitee.email,
       nickname: r.invitee.name,
       level,
+      qualified: withUploads.has(r.invitee.id),
       referrals: await fetchReferrals(r.invitee.id, level + 1, maxLevel)
     };
     result.push(node);
   }
   return result;
+}
+
+function countQualifiedReferralsByLevel(nodes, counts = { 1: 0, 2: 0, 3: 0, 4: 0 }) {
+  nodes.forEach((n) => {
+    if (n.qualified && counts[n.level] != null) counts[n.level]++;
+    countQualifiedReferralsByLevel(n.referrals, counts);
+  });
+  return counts;
+}
+
+async function hasReferralRewardsBeenProcessedForInvitee(inviteeId) {
+  const existing = await prisma.point.findFirst({
+    where: { source: 'REFERRAL_DIRECT', sourceId: inviteeId },
+    select: { id: true },
+  });
+  return Boolean(existing);
 }
 
 async function getReferralOverview(userId) {
@@ -52,6 +76,7 @@ async function getReferralOverview(userId) {
     });
   }
   countLevels(referrals);
+  const qualifiedLevelCounts = countQualifiedReferralsByLevel(referrals);
   // compute claimed points by level from point records
   const pointRecords = await prisma.point.findMany({
     where: { userId, source: { in: ['REFERRAL_DIRECT','REFERRAL_LEVEL_2','REFERRAL_LEVEL_3','REFERRAL_LEVEL_4'] } },
@@ -73,11 +98,11 @@ async function getReferralOverview(userId) {
     const lvl = parseInt(t.id.split('-')[1], 10) || 1;
     levelPoints[`level${lvl}`] = t.points;
   });
-  // compute unclaimed points per level based on referrals count
+  // compute unclaimed points per level based on qualified referrals (first valid upload)
   const unclaimedByLevel = {};
   [1,2,3,4].forEach(lvl => {
     const key = `level${lvl}`;
-    const totalRefs = levelCounts[lvl] || 0;
+    const totalRefs = qualifiedLevelCounts[lvl] || 0;
     const claimedCount = levelPoints[key] ? claimedByLevel[key] / levelPoints[key] : 0;
     const unclaimedCount = Math.max(totalRefs - claimedCount, 0);
     unclaimedByLevel[key] = unclaimedCount * (levelPoints[key] || 0);
@@ -101,11 +126,8 @@ async function getReferralOverview(userId) {
   // 注意：yourReward现在由新的通用分润系统在任务完成时动态计算，基于百分比而非固定分值
   function annotate(nodes) {
     nodes.forEach(n => {
-      const cnt = n.referrals.length;
-      // theirPoints: estimated from direct children × standard direct bonus (display)
-      n.theirPoints = cnt * DIRECT_REFERRAL_BONUS_POINTS;
-      // yourReward已移除：现在使用基于百分比的动态分润系统
-      // 实际分润金额会根据下级完成的具体任务和其积分值来计算
+      const qualifiedChildren = n.referrals.filter((child) => child.qualified).length;
+      n.theirPoints = qualifiedChildren * DIRECT_REFERRAL_BONUS_POINTS;
       annotate(n.referrals);
     });
   }
@@ -117,10 +139,12 @@ async function getReferralOverview(userId) {
   return {
     referrals,
     levelCounts,
+    qualifiedLevelCounts,
     earnedByLevel,
     totalReferralPoints,
     unclaimReferralAwards,
-    networkActivity
+    networkActivity,
+    rules: getReferralRulesPayload(),
   };
 }
 
@@ -202,29 +226,31 @@ async function processCampaignReferral(newUserId, inviterId, campaignSlug) {
   });
 }
 
-async function processReferral(newUserId, inviterId, referralCode) {
+async function processReferralRewardsForInvitee(newUserId, inviterId, referralCode) {
+  if (await hasReferralRewardsBeenProcessedForInvitee(newUserId)) {
+    logger.info('Referral rewards already processed for invitee', { newUserId, inviterId });
+    return { alreadyProcessed: true };
+  }
+
   try {
-    // Award immediate direct referral bonus (standard / non-campaign)
+    // Award direct referral bonus (standard / non-campaign) after first valid upload
     await prisma.$transaction(async (tx) => {
-      // Update inviter's total points
       await tx.user.update({
         where: { id: inviterId },
         data: { totalPoints: { increment: DIRECT_REFERRAL_BONUS_POINTS } }
       });
-      
-      // Create point record for the direct referral bonus
+
       await tx.point.create({
         data: {
           userId: inviterId,
           amount: DIRECT_REFERRAL_BONUS_POINTS,
           source: 'REFERRAL_DIRECT',
-          sourceId: newUserId // Track who triggered this reward
+          sourceId: newUserId
         }
       });
-      
+
       logger.info(REFERRAL_MESSAGES.DIRECT_REWARD_AWARDED(inviterId, DIRECT_REFERRAL_BONUS_POINTS));
-      
-      // Distribute upline rewards on the same base amount
+
       try {
         const distributionResult = await distributeUplineRewards(
           inviterId,
@@ -239,21 +265,17 @@ async function processReferral(newUserId, inviterId, referralCode) {
           distributionResult
         });
       } catch (distributionError) {
-        // Distribution failure should not affect the main referral process
         logger.error('Upline distribution failed for direct referral bonus', {
           inviterId,
           inviteeId: newUserId,
           baseReward: DIRECT_REFERRAL_BONUS_POINTS,
           error: distributionError.message
         });
-        // Continue execution without throwing
       }
     });
-    
-    // Also record the referral task for tracking (but it's already paid)
+
     await recordTaskProgress(inviterId, 'referral-1', 1);
-    
-    // Record multi-level referral tasks for levels 2–4
+
     let currentInvitee = newUserId;
     for (let level = 2; level <= 4; level++) {
       const parent = await prisma.referral.findUnique({ where: { inviteeId: currentInvitee }, select: { inviterId: true } });
@@ -262,10 +284,41 @@ async function processReferral(newUserId, inviterId, referralCode) {
       logger.info(REFERRAL_MESSAGES.MULTILEVEL_PROGRESS(parent.inviterId, level));
       currentInvitee = parent.inviterId;
     }
+
+    return { processed: true };
   } catch (error) {
-    logger.error('Error processing referral', { error: error.message, newUserId, inviterId });
+    logger.error('Error processing referral rewards for invitee', { error: error.message, newUserId, inviterId });
     throw error;
   }
+}
+
+/**
+ * Standard referral: link at signup, pay inviter only after invitee's first valid upload.
+ */
+async function tryProcessReferralRewardsIfEligible(newUserId, inviterId, referralCode) {
+  if (!(await hasCompletedFirstValidUpload(newUserId))) {
+    logger.info('Referral rewards deferred until invitee first valid upload', {
+      inviteeId: newUserId,
+      inviterId,
+    });
+    return { deferred: true };
+  }
+  return processReferralRewardsForInvitee(newUserId, inviterId, referralCode);
+}
+
+async function onInviteeFirstValidUpload(userId) {
+  const referral = await prisma.referral.findUnique({
+    where: { inviteeId: userId },
+    select: { inviterId: true, code: true, campaignSlug: true },
+  });
+  if (!referral || referral.campaignSlug) {
+    return { skipped: true };
+  }
+  return tryProcessReferralRewardsIfEligible(userId, referral.inviterId, referral.code);
+}
+
+async function processReferral(newUserId, inviterId, referralCode) {
+  return tryProcessReferralRewardsIfEligible(newUserId, inviterId, referralCode);
 }
 
 /**
@@ -329,7 +382,8 @@ async function getReferralStatus(userId) {
       id: ref.inviteeId,
       name: ref.invitee?.name || 'Unknown',
       inviteTime: ref.createdAt
-    }))
+    })),
+    rules: getReferralRulesPayload(),
   };
 }
 
@@ -437,6 +491,9 @@ module.exports = {
   getReferralOverview,
   claimReferralRewards,
   processReferral,
+  processReferralRewardsForInvitee,
+  tryProcessReferralRewardsIfEligible,
+  onInviteeFirstValidUpload,
   processCampaignReferral,
   getReferralStatus,
   useReferralCode,

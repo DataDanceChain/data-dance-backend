@@ -1,4 +1,6 @@
 /**
+ * @deprecated Mother's Day 2026 campaign has ended. Do not run except for historical replay in a dev DB.
+ *
  * Creates in-app Notification rows for all users (batched).
  * Run once per phase at the desired PT calendar date (or shortly after).
  *

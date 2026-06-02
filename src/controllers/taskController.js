@@ -1,4 +1,6 @@
 const { getTasksByAward, recordTaskProgress, claimTask } = require('../services/taskService');
+const prisma = require('../utils/prisma');
+const { isReferralRewardsFeaturesDisabled } = require('../constants/referralRewardsFeature');
 
 exports.getTasksByAward = async (req, res) => {
   const { awardId } = req.params;
@@ -14,7 +16,21 @@ exports.getTasksByAward = async (req, res) => {
 exports.recordTaskProgress = async (req, res) => {
   const { taskId } = req.params;
   const { delta } = req.body;
+
   try {
+    if (isReferralRewardsFeaturesDisabled()) {
+      const task = await prisma.task.findUnique({
+        where: { id: taskId },
+        select: { awardId: true },
+      });
+      if (task?.awardId === 'referral-rewards') {
+        return res.status(403).json({
+          status: 'fail',
+          code: 'REFERRAL_FEATURES_DISABLED',
+          message: 'Referral rewards are temporarily unavailable.',
+        });
+      }
+    }
     const ut = await recordTaskProgress(req.user.id, taskId, delta);
     // Return updated task status
     return res.json({ status: 'success', data: { taskId: ut.taskId, status: ut.status } });

@@ -48,7 +48,7 @@ exports.register = async (req, res) => {
         status: 'fail',
         code: 'CAMPAIGN_REQUIRES_REFERRAL_CODE',
         message:
-          "Mother's Day Bonus requires signing up through an invite link that includes your friend's referral code.",
+          'This campaign requires signing up through an invite link that includes a referral code.',
       });
     }
 

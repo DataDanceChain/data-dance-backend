@@ -4,6 +4,12 @@ const xService = require('./xService'); // New: use xService
 const { distributeUplineRewards } = require('./distributionService'); // Import distribution service
 const { TASK_TEMPLATES } = require('./crawlerService'); // For resolving crawler task URLs
 const { createLogger } = require('../utils/logger');
+const {
+  isReferralRewardsFeaturesDisabled,
+} = require('../constants/referralRewardsFeature');
+const {
+  isStandardReferralInvitee,
+} = require('../utils/firstValidUpload');
 const logger = createLogger('taskService');
 
 /**
@@ -123,11 +129,18 @@ const awardStrategies = {
       await recordTaskProgress(userId, 'referral-1', 1);
     },
     prepare: async (userId) => {
-      // dynamically require to avoid circular dependency
       const { getReferralOverview } = require('./referralService');
-      return { referralOverview: await getReferralOverview(userId) };
+      const referralOverview = await getReferralOverview(userId);
+      return {
+        referralOverview,
+        qualifiedLevelCounts: referralOverview.qualifiedLevelCounts || {},
+      };
     },
-    computeProgress: async (task, userId, { referralOverview }) => referralOverview.networkSize || 0
+    computeProgress: async (task, userId, { qualifiedLevelCounts }) => {
+      const level = parseInt(task.id.split('-')[1], 10) || 1;
+      const qualified = qualifiedLevelCounts?.[level] || 0;
+      return qualified > 0 ? 1 : 0;
+    }
   },
   'assets-collection': {
     unlock: async (userId) => { const count = await assetService.getUserNFTCount(userId);
@@ -203,8 +216,17 @@ const awardStrategies = {
         })
       );
       const distinctUploads = uploadedSources.filter(Boolean);
+      const isStandardInvitee = await isStandardReferralInvitee(userId);
+      const hasFirstUpload = distinctUploads.length >= 1;
 
-      return { campaignStart, campaignEnd, checkInCount, distinctUploadCount: distinctUploads.length };
+      return {
+        campaignStart,
+        campaignEnd,
+        checkInCount,
+        distinctUploadCount: distinctUploads.length,
+        isStandardInvitee,
+        hasFirstUpload,
+      };
     },
     unlock: async (userId, ctx) => {
       const now = new Date();
@@ -218,7 +240,12 @@ const awardStrategies = {
     computeProgress: async (task, userId, ctx) => {
       const now = new Date();
       if (now > ctx.campaignEnd) return 0;
-      if (task.id === 'new-user-welcome-bonus') return 1;
+      if (task.id === 'new-user-welcome-bonus') {
+        if (ctx.isStandardInvitee) {
+          return ctx.hasFirstUpload ? 1 : 0;
+        }
+        return 1;
+      }
       if (task.id === 'new-user-3day-checkin') {
         const required = task.requirementCount || 3;
         return required > 0 ? Math.min(ctx.checkInCount / required, 1) : 0;
@@ -525,6 +552,9 @@ const awardStrategies = {
 };
 
 async function getTasksByAward(userId, awardId) {
+  if (isReferralRewardsFeaturesDisabled() && awardId === 'referral-rewards') {
+    throw new Error('Referral rewards are temporarily unavailable.');
+  }
   const strategy = awardStrategies[awardId] || {};
   // Prepare context (e.g., ddcBalance) once
   const context = strategy.prepare ? await strategy.prepare(userId) : {};
@@ -780,6 +810,9 @@ async function claimTask(userId, taskId) {
       if (!task) {
         logger.error('Task not found during claim', { userId, taskId });
         throw new Error("Task not found");
+      }
+      if (isReferralRewardsFeaturesDisabled() && task.awardId === 'referral-rewards') {
+        throw new Error('Referral rewards are temporarily unavailable.');
       }
       // For recurring daily tasks, allow multiple claims over time but prevent duplicates in the same day.
       const isDailyRecurring = isRecurringDailyTask(task);

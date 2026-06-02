@@ -8,9 +8,11 @@ const {
   getMothersDay2026Stats,
 } = require('../controllers/referralController');
 const { protect } = require('../middlewares/authMiddleware');
+const { referralRewardsRouterGate } = require('../middlewares/referralRewardsApiGate');
 
 // All referral routes require authentication
 router.use(protect);
+router.use(referralRewardsRouterGate);
 
 // Use referral code
 router.post('/use-code', useReferralCode);

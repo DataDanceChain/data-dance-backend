@@ -1,6 +1,9 @@
 const prisma = require('../utils/prisma');
 const { getTasksByAward } = require('./taskService');
 const { getReferralOverview } = require('./referralService');
+const {
+  isReferralRewardsFeaturesDisabled,
+} = require('../constants/referralRewardsFeature');
 const { awards: awardConfig } = require('../../config/awards.json');
 
 /**
@@ -78,13 +81,15 @@ async function getAwardDefinitions() {
     }
   });
 
+  const rewardsOff = isReferralRewardsFeaturesDisabled();
+
   // Create a map for quick lookup
   const awardMap = new Map(awards.map(award => [award.id, award]));
 
   // Return awards in the order defined in awards.json, filtering out disabled awards and null values
   // Transform icon names to image paths
   return awardConfig
-    .filter(config => config.enabled !== false)
+    .filter(config => config.enabled !== false && !(rewardsOff && config.id === 'referral-rewards'))
     .map(config => awardMap.get(config.id))
     .filter(award => award !== null && award !== undefined) // Filter out null/undefined awards
     .map(award => transformAwardIcon(award)); // Transform icon to image path
@@ -96,9 +101,19 @@ async function getAwardDefinitions() {
  * Returns final award/task statuses and referral overview.
  */
 async function getUserAwards(userId) {
-  // progress updates delegated to taskService.updateProgressForAwardTasks in getTasksByAward
-  // fetch referral overview separately
-  const referralOverview = await getReferralOverview(userId);
+  const rewardsOff = isReferralRewardsFeaturesDisabled();
+
+  const referralOverview = rewardsOff
+    ? {
+        referrals: [],
+        earnedByLevel: [0, 0, 0, 0],
+        levelCounts: {},
+        qualifiedLevelCounts: {},
+        totalReferralPoints: 0,
+        unclaimReferralAwards: 0,
+        networkActivity: 0,
+      }
+    : await getReferralOverview(userId);
 
   // fetch all awards and user's awards
   const awardsRaw = await prisma.award.findMany({ 
@@ -117,6 +132,7 @@ async function getUserAwards(userId) {
   const result = [];
   for (const config of awardConfig) {
     if (config.enabled === false) continue; // Skip disabled awards
+    if (rewardsOff && config.id === 'referral-rewards') continue;
     const award = awardMap.get(config.id);
     if (!award) continue; // Skip if award not found in database
 

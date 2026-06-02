@@ -710,6 +710,18 @@ async function uploadCrawlerData(data, userId) {
 
     console.log(CRAWLER_MESSAGES.UPLOAD_SUCCESS(result.insertedCount, result.pointsEarned));
 
+    if (result.insertedCount > 0) {
+      try {
+        const { onInviteeFirstValidUpload } = require('./referralService');
+        await onInviteeFirstValidUpload(userId);
+      } catch (referralError) {
+        logger.error('Failed to process referral rewards after first valid upload', {
+          userId,
+          error: referralError.message,
+        });
+      }
+    }
+
     return {
       uploadedCount: result.insertedCount,
       duplicatesCount: result.duplicates.length,
