@@ -110,7 +110,7 @@ exports.getUserDetail = async (req, res) => {
       prisma.point.findMany({
         where: { userId },
         orderBy: { createdAt: 'desc' },
-        take: 50,
+        take: 20,
         select: { id: true, amount: true, source: true, sourceId: true, createdAt: true },
       }),
       prisma.crawlerData.count({ where: { userId } }),
@@ -227,7 +227,8 @@ exports.adjustPoints = async (req, res) => {
     }
 
     const slug = reason.replace(/[^a-zA-Z0-9]+/g, '-').slice(0, 40).toLowerCase() || 'adjustment';
-    const sourceId = `ops-${Date.now()}-${slug}`;
+    const admin = req.opsAdmin?.username || 'ops';
+    const sourceId = `ops-manual-${Date.now()}-${slug}__${admin}`;
 
     const result = await prisma.$transaction(async (tx) => {
       const point = await tx.point.create({
@@ -262,6 +263,100 @@ exports.adjustPoints = async (req, res) => {
     });
   } catch (error) {
     console.error('Ops adjust points error:', error);
+    return res.status(500).json({ status: 'error', message: 'Server error' });
+  }
+};
+
+const OPS_LEDGER_SOURCES = ['OPS_ADJUSTMENT', 'REWARD_REDEMPTION'];
+
+/** GET /api/ops/operations — global ops-relevant point ledger */
+exports.listOperations = async (req, res) => {
+  try {
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 100, 1), 200);
+    const offset = Math.max(parseInt(req.query.offset, 10) || 0, 0);
+    const userId = req.query.userId ? String(req.query.userId) : undefined;
+    const direction = String(req.query.direction || 'all'); // all | credit | debit
+
+    const where = {
+      source: { in: OPS_LEDGER_SOURCES },
+    };
+    if (userId) where.userId = userId;
+    if (direction === 'credit') where.amount = { gt: 0 };
+    if (direction === 'debit') where.amount = { lt: 0 };
+
+    const [total, rows] = await Promise.all([
+      prisma.point.count({ where }),
+      prisma.point.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        skip: offset,
+        take: limit,
+        include: {
+          user: { select: { id: true, email: true, walletAddress: true } },
+        },
+      }),
+    ]);
+
+    return res.json({
+      status: 'success',
+      data: {
+        total,
+        limit,
+        offset,
+        records: rows.map((r) => ({
+          id: r.id,
+          createdAt: r.createdAt,
+          amount: r.amount,
+          source: r.source,
+          sourceId: r.sourceId,
+          userId: r.userId,
+          email: r.user.email,
+          wallet: r.user.walletAddress,
+        })),
+      },
+    });
+  } catch (error) {
+    console.error('Ops list operations error:', error);
+    return res.status(500).json({ status: 'error', message: 'Server error' });
+  }
+};
+
+/** GET /api/ops/users/:userId/points/history — full paginated ledger for one user */
+exports.getUserPointHistory = async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 100, 1), 200);
+    const offset = Math.max(parseInt(req.query.offset, 10) || 0, 0);
+    const source = req.query.source ? String(req.query.source) : undefined;
+
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { id: true, email: true },
+    });
+    if (!user) {
+      return res.status(404).json({ status: 'fail', message: 'User not found' });
+    }
+
+    const where = { userId };
+    if (source) where.source = source;
+
+    const [total, rows] = await Promise.all([
+      prisma.point.count({ where }),
+      prisma.point.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        skip: offset,
+        take: limit,
+        select: { id: true, amount: true, source: true, sourceId: true, createdAt: true },
+      }),
+    ]);
+
+    return res.json({
+      status: 'success',
+      data: { userId, email: user.email, total, limit, offset, records: rows },
+    });
+  } catch (error) {
+    console.error('Ops user point history error:', error);
     return res.status(500).json({ status: 'error', message: 'Server error' });
   }
 };

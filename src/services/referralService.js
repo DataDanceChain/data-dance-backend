@@ -149,26 +149,37 @@ async function getReferralOverview(userId) {
 }
 
 async function claimReferralRewards(userId) {
-  // 批量领取所有已完成且未领取的邀请任务奖励
   const uts = await prisma.userTask.findMany({
     where: { userId, status: 'LIVE', claimed: false, task: { awardId: 'referral-rewards' } },
     include: { task: true }
   });
   if (uts.length === 0) throw new Error('No referral rewards to claim');
-  // 更新为已领取
-  await prisma.userTask.updateMany({
-    where: { userId, status: 'LIVE', claimed: false, task: { awardId: 'referral-rewards' } },
-    data: { claimed: true }
-  });
-  // 记录积分流水，按层级设置正确的 source
+
+  const totalAwarded = uts.reduce((sum, ut) => sum + ut.task.points, 0);
   const now = new Date();
-  for (const ut of uts) {
-    const [, levelStr] = ut.taskId.split('-');
-    const level = parseInt(levelStr, 10) || 1;
-    const source = level === 1 ? 'REFERRAL_DIRECT' : `REFERRAL_LEVEL_${level}`;
-    await prisma.point.create({ data: { userId, amount: ut.task.points, source, sourceId: ut.taskId, createdAt: now } });
-  }
-  return { claimedAt: now, totalPoints: uts.reduce((sum, ut) => sum + ut.task.points, 0), count: uts.length };
+
+  await prisma.$transaction(async (tx) => {
+    await tx.userTask.updateMany({
+      where: { userId, status: 'LIVE', claimed: false, task: { awardId: 'referral-rewards' } },
+      data: { claimed: true }
+    });
+    for (const ut of uts) {
+      const [, levelStr] = ut.taskId.split('-');
+      const level = parseInt(levelStr, 10) || 1;
+      const source = level === 1 ? 'REFERRAL_DIRECT' : `REFERRAL_LEVEL_${level}`;
+      await tx.point.create({
+        data: { userId, amount: ut.task.points, source, sourceId: ut.taskId, createdAt: now },
+      });
+    }
+    if (totalAwarded !== 0) {
+      await tx.user.update({
+        where: { id: userId },
+        data: { totalPoints: { increment: totalAwarded } },
+      });
+    }
+  });
+
+  return { claimedAt: now, totalPoints: totalAwarded, count: uts.length };
 }
 
 /**

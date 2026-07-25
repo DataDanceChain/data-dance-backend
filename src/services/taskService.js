@@ -9,6 +9,7 @@ const {
 } = require('../constants/referralRewardsFeature');
 const {
   isStandardReferralInvitee,
+  rewardEligibleUploadWhere,
 } = require('../utils/firstValidUpload');
 const logger = createLogger('taskService');
 
@@ -211,7 +212,9 @@ const awardStrategies = {
       const sources = ['amazon', 'booking', 'airbnb', 'luma'];
       const uploadedSources = await Promise.all(
         sources.map(async (source) => {
-          const count = await prisma.crawlerData.count({ where: { userId, source } });
+          const count = await prisma.crawlerData.count({
+            where: rewardEligibleUploadWhere({ userId, source }),
+          });
           return count > 0 ? source : null;
         })
       );
@@ -269,7 +272,7 @@ const awardStrategies = {
         getConsecutiveCheckInStreak(userId, today)
       ]);
       const uploadsToday = await prisma.crawlerData.count({
-        where: { userId, createdAt: { gte: today } }
+        where: rewardEligibleUploadWhere({ userId, createdAt: { gte: today } }),
       });
       return { today, checkedInToday, visitedToday, streak, uploadsToday };
     },
@@ -295,16 +298,16 @@ const awardStrategies = {
       let countByTaskId = 0;
       if (crawlerTask) {
         countByTaskId = await prisma.crawlerData.count({
-          where: {
+          where: rewardEligibleUploadWhere({
             userId,
             source: 'amazon',
-            taskId: crawlerTask.id
-          }
+            taskId: crawlerTask.id,
+          }),
         });
       }
       
       const totalCount = await prisma.crawlerData.count({
-        where: { userId, source: 'amazon' }
+        where: rewardEligibleUploadWhere({ userId, source: 'amazon' }),
       });
       
       // When no CrawlerTask with taskId exists, use totalCount so doneCount is not stuck at 0
@@ -477,16 +480,16 @@ const awardStrategies = {
       
       // Count orders where timestamp is in December 2025
       const decemberOrders = await prisma.crawlerData.findMany({
-        where: {
+        where: rewardEligibleUploadWhere({
           userId,
           source: 'amazon',
           type: 'order',
           timestamp: {
             gte: DECEMBER_2025_START,
-            lte: DECEMBER_2025_END
-          }
-        },
-        select: { id: true, timestamp: true }
+            lte: DECEMBER_2025_END,
+          },
+        }),
+        select: { id: true, timestamp: true },
       });
       
       // Check manual verification tasks (follow-x, join-telegram)
@@ -903,13 +906,17 @@ async function claimTask(userId, taskId) {
         pointsAwarded = Math.max(1, Math.min(streak, 7));
       }
 
-      // 发放积分流水
+      // 发放积分流水，并同步 User.totalPoints（与 Point 账簿一致）
       await tx.point.create({ data: {
         userId,
         amount: pointsAwarded,
         source: 'TASK_CLAIM',
         sourceId: taskId
       }});
+      await tx.user.update({
+        where: { id: userId },
+        data: { totalPoints: { increment: pointsAwarded } },
+      });
 
       // 新增: 处理上级分润奖励（所有任务都享受分润）
       try {
