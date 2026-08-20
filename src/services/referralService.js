@@ -7,6 +7,12 @@ const { distributeUplineRewards } = require('./distributionService');
 const {
   MOTHERS_DAY_2026_SLUG,
   MOTHERS_DAY_2026,
+  SUMMER_TRAVEL_2026_SLUG,
+  SUMMER_TRAVEL_2026,
+  POINT_SOURCE_SUMMER_TRAVEL_INVITER,
+  POINT_SOURCE_SUMMER_TRAVEL_INVITEE,
+  POINT_SOURCE_SUMMER_TRAVEL_BONUS,
+  isSummerTravel2026Active,
   normalizeReferralCampaignInput,
   assertCampaignActive,
 } = require('../constants/referralCampaigns');
@@ -15,6 +21,10 @@ const {
   hasCompletedFirstValidUpload,
   getUsersWithValidUploads,
 } = require('../utils/firstValidUpload');
+const {
+  hasCompletedFirstValidSummerOrder,
+  countUserSummerStayOrders,
+} = require('../utils/summerTravelEligibility');
 
 const logger = createLogger('referralService');
 
@@ -189,16 +199,44 @@ async function claimReferralRewards(userId) {
  * @param {string} referralCode - the referral code used
  */
 /**
- * Mother's Day (and similar) flat bonuses — no multi-level tasks or upline distribution.
+ * Campaign flat bonuses — no multi-level tasks or upline distribution.
+ * Mother's Day: immediate on signup. Summer Travel: call after first valid summer stay.
  */
 async function processCampaignReferral(newUserId, inviterId, campaignSlug) {
   let inviterAmount = 0;
   let inviteeAmount = 0;
+  let inviterSource = null;
+  let inviteeSource = null;
   if (campaignSlug === MOTHERS_DAY_2026_SLUG) {
     inviterAmount = MOTHERS_DAY_2026.inviterPoints;
     inviteeAmount = MOTHERS_DAY_2026.inviteePoints;
+    inviterSource = 'REFERRAL_CAMPAIGN_MOTHERS_DAY_INVITER';
+    inviteeSource = 'REFERRAL_CAMPAIGN_MOTHERS_DAY_INVITEE';
+  } else if (campaignSlug === SUMMER_TRAVEL_2026_SLUG) {
+    inviterAmount = SUMMER_TRAVEL_2026.inviterPoints;
+    inviteeAmount = SUMMER_TRAVEL_2026.inviteePoints;
+    inviterSource = POINT_SOURCE_SUMMER_TRAVEL_INVITER;
+    inviteeSource = POINT_SOURCE_SUMMER_TRAVEL_INVITEE;
   } else {
     throw new Error(`Unsupported campaign for referral rewards: ${campaignSlug}`);
+  }
+
+  // Idempotency: skip if inviter already credited for this invitee
+  const already = await prisma.point.findFirst({
+    where: {
+      userId: inviterId,
+      source: inviterSource,
+      sourceId: newUserId,
+    },
+    select: { id: true },
+  });
+  if (already) {
+    logger.info('Campaign referral rewards already issued', {
+      campaignSlug,
+      inviterId,
+      inviteeId: newUserId,
+    });
+    return { skipped: true, reason: 'already_processed' };
   }
 
   await prisma.$transaction(async (tx) => {
@@ -210,7 +248,7 @@ async function processCampaignReferral(newUserId, inviterId, campaignSlug) {
       data: {
         userId: inviterId,
         amount: inviterAmount,
-        source: 'REFERRAL_CAMPAIGN_MOTHERS_DAY_INVITER',
+        source: inviterSource,
         sourceId: newUserId,
       },
     });
@@ -222,7 +260,7 @@ async function processCampaignReferral(newUserId, inviterId, campaignSlug) {
       data: {
         userId: newUserId,
         amount: inviteeAmount,
-        source: 'REFERRAL_CAMPAIGN_MOTHERS_DAY_INVITEE',
+        source: inviteeSource,
         sourceId: inviterId,
       },
     });
@@ -235,6 +273,37 @@ async function processCampaignReferral(newUserId, inviterId, campaignSlug) {
     inviterAmount,
     inviteeAmount,
   });
+  return { skipped: false, inviterAmount, inviteeAmount };
+}
+
+/**
+ * Inviter must complete Task 01 (≥1 valid summer stay) before campaign invites unlock.
+ */
+async function assertSummerTravelInviterEligible(inviterId) {
+  const ok = await hasCompletedFirstValidSummerOrder(inviterId);
+  if (!ok) {
+    const err = new Error('Complete Task 01 first to unlock Summer Travel invites.');
+    err.code = 'CAMPAIGN_INVITER_LOCKED';
+    throw err;
+  }
+}
+
+async function tryProcessSummerTravelReferralRewards(inviteeId, inviterId) {
+  if (!isSummerTravel2026Active()) {
+    logger.info('Summer Travel referral settlement skipped — campaign inactive', {
+      inviteeId,
+      inviterId,
+    });
+    return { skipped: true, reason: 'campaign_inactive' };
+  }
+  if (!(await hasCompletedFirstValidSummerOrder(inviteeId))) {
+    logger.info('Summer Travel referral deferred until invitee summer stay upload', {
+      inviteeId,
+      inviterId,
+    });
+    return { deferred: true };
+  }
+  return processCampaignReferral(inviteeId, inviterId, SUMMER_TRAVEL_2026_SLUG);
 }
 
 async function processReferralRewardsForInvitee(newUserId, inviterId, referralCode) {
@@ -322,7 +391,14 @@ async function onInviteeFirstValidUpload(userId) {
     where: { inviteeId: userId },
     select: { inviterId: true, code: true, campaignSlug: true },
   });
-  if (!referral || referral.campaignSlug) {
+  if (!referral) {
+    return { skipped: true };
+  }
+  if (referral.campaignSlug === SUMMER_TRAVEL_2026_SLUG) {
+    return tryProcessSummerTravelReferralRewards(userId, referral.inviterId);
+  }
+  if (referral.campaignSlug) {
+    // Other campaigns (e.g. Mother's Day) settle at signup, not on upload.
     return { skipped: true };
   }
   return tryProcessReferralRewardsIfEligible(userId, referral.inviterId, referral.code);
@@ -411,6 +487,64 @@ async function countCampaignInvitesAsInviter(userId, campaignSlug) {
   });
 }
 
+/** Settled Summer Travel invites (inviter Point rows). */
+async function countSummerTravelSettledInvites(userId) {
+  return prisma.point.count({
+    where: {
+      userId,
+      source: POINT_SOURCE_SUMMER_TRAVEL_INVITER,
+    },
+  });
+}
+
+async function sumPointsBySource(userId, source) {
+  const agg = await prisma.point.aggregate({
+    where: { userId, source },
+    _sum: { amount: true },
+  });
+  return agg._sum.amount || 0;
+}
+
+/**
+ * Authenticated Summer Travel campaign stats for the campaign page.
+ */
+async function getSummerTravel2026Stats(userId) {
+  const [user, summerOrderCount, bonusPoints, successfulInvites, linkedInvites] =
+    await Promise.all([
+      prisma.user.findUnique({
+        where: { id: userId },
+        select: { referralCode: true },
+      }),
+      countUserSummerStayOrders(userId),
+      sumPointsBySource(userId, POINT_SOURCE_SUMMER_TRAVEL_BONUS),
+      countSummerTravelSettledInvites(userId),
+      countCampaignInvitesAsInviter(userId, SUMMER_TRAVEL_2026_SLUG),
+    ]);
+
+  const canInvite = summerOrderCount > 0;
+  const pointsPerOrder = SUMMER_TRAVEL_2026.pointsPerOrderDisplay;
+  const orderPointsEarned = summerOrderCount * pointsPerOrder;
+  const invitePointsEarned = successfulInvites * SUMMER_TRAVEL_2026.inviterPoints;
+  const pendingInvites = Math.max(0, linkedInvites - successfulInvites);
+
+  return {
+    slug: SUMMER_TRAVEL_2026_SLUG,
+    isActive: isSummerTravel2026Active(),
+    ownReferralCode: user?.referralCode ?? '',
+    canInvite,
+    summerOrderCount,
+    summerOrderBonusPoints: bonusPoints,
+    orderPointsEarned,
+    pointsPerOrder,
+    successfulInvites,
+    pendingInvites,
+    linkedInvites,
+    invitePointsEarned,
+    inviterPoints: SUMMER_TRAVEL_2026.inviterPoints,
+    inviteePoints: SUMMER_TRAVEL_2026.inviteePoints,
+  };
+}
+
 async function useReferralCode(userId, code, referralCampaignRaw = null) {
   let campaignSlug = null;
   try {
@@ -464,6 +598,10 @@ async function useReferralCode(userId, code, referralCampaignRaw = null) {
     throw error;
   }
 
+  if (campaignSlug === SUMMER_TRAVEL_2026_SLUG) {
+    await assertSummerTravelInviterEligible(inviter.id);
+  }
+
   try {
     const referralData = await prisma.referral.create({
       data: {
@@ -476,6 +614,8 @@ async function useReferralCode(userId, code, referralCampaignRaw = null) {
 
     if (campaignSlug === MOTHERS_DAY_2026_SLUG) {
       await processCampaignReferral(userId, inviter.id, campaignSlug);
+    } else if (campaignSlug === SUMMER_TRAVEL_2026_SLUG) {
+      // Relation only — settle after invitee's first valid summer stay upload.
     } else {
       await processReferral(userId, inviter.id, code);
     }
@@ -509,4 +649,8 @@ module.exports = {
   getReferralStatus,
   useReferralCode,
   countCampaignInvitesAsInviter,
+  countSummerTravelSettledInvites,
+  getSummerTravel2026Stats,
+  assertSummerTravelInviterEligible,
+  tryProcessSummerTravelReferralRewards,
 };

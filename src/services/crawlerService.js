@@ -4,6 +4,12 @@ const crypto = require('crypto');
 const { calculateAmazonDataPoints, calculateDataPoints } = require('./businessRulesService');
 const { CRAWLER_MESSAGES } = require('../constants/messages');
 const { distributeUplineRewards } = require('./distributionService');
+const {
+  SUMMER_TRAVEL_2026,
+  POINT_SOURCE_SUMMER_TRAVEL_BONUS,
+  isSummerTravel2026Active,
+} = require('../constants/referralCampaigns');
+const { countSummerBonusItems } = require('../utils/summerTravelEligibility');
 const logger = createLogger('crawlerService');
 
 // Data validation schema for different data types
@@ -658,6 +664,20 @@ async function uploadCrawlerData(data, userId) {
         actualPointsEarned += calculateDataPoints(source, count);
       }
 
+      // Summer Travel 2026: +10 bonus per newly inserted eligible stay (base 10 remains as crawler)
+      let summerBonusPoints = 0;
+      if (isSummerTravel2026Active() && actualInserted > 0) {
+        const newlyInsertedItems = [];
+        let attributedForBonus = 0;
+        for (let i = 0; i < validItems.length && attributedForBonus < actualInserted; i++) {
+          if (!itemTasks[i]) continue;
+          newlyInsertedItems.push(validItems[i]);
+          attributedForBonus += 1;
+        }
+        const bonusItems = countSummerBonusItems(newlyInsertedItems);
+        summerBonusPoints = bonusItems * (SUMMER_TRAVEL_2026.uploadBonusPerItem || 10);
+      }
+
       // Calculate and award points
       if (actualPointsEarned > 0) {
         // Update user total points
@@ -697,11 +717,31 @@ async function uploadCrawlerData(data, userId) {
         }
       }
 
+      if (summerBonusPoints > 0) {
+        await tx.user.update({
+          where: { id: userId },
+          data: { totalPoints: { increment: summerBonusPoints } },
+        });
+        await tx.point.create({
+          data: {
+            userId,
+            amount: summerBonusPoints,
+            source: POINT_SOURCE_SUMMER_TRAVEL_BONUS,
+            sourceId: 'summer_travel_2026',
+          },
+        });
+        logger.info('Summer Travel upload bonus awarded', {
+          userId,
+          summerBonusPoints,
+        });
+      }
+
       return { 
         insertedCount: actualInserted,
         validItems,
         duplicates,
-        pointsEarned: actualPointsEarned,
+        pointsEarned: actualPointsEarned + summerBonusPoints,
+        summerBonusPoints,
         validationErrors
       };
     }, {

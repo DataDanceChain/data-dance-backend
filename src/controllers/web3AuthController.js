@@ -6,6 +6,7 @@ const referralService = require('../services/referralService');
 const { generateReferralCode, validateReferralCode } = require('../utils/referralUtils');
 const {
   MOTHERS_DAY_2026_SLUG,
+  SUMMER_TRAVEL_2026_SLUG,
   normalizeReferralCampaignInput,
   assertCampaignActive,
 } = require('../constants/referralCampaigns');
@@ -145,6 +146,21 @@ exports.web3authLogin = async (req, res) => {
           }
           
           referrerId = referralData.referrerId;
+
+          if (campaignSlug === SUMMER_TRAVEL_2026_SLUG) {
+            try {
+              await referralService.assertSummerTravelInviterEligible(referrerId);
+            } catch (e) {
+              if (e.code === 'CAMPAIGN_INVITER_LOCKED') {
+                return res.status(403).json({
+                  status: 'fail',
+                  code: e.code,
+                  message: e.message,
+                });
+              }
+              throw e;
+            }
+          }
           
           // Referral row + rewards cannot run in one interactive tx: processCampaignReferral
           // opens its own transaction and UPDATEs the invitee row, which deadlocks with the
@@ -159,6 +175,8 @@ exports.web3authLogin = async (req, res) => {
           });
           if (campaignSlug === MOTHERS_DAY_2026_SLUG) {
             await referralService.processCampaignReferral(user.id, referrerId, campaignSlug);
+          } else if (campaignSlug === SUMMER_TRAVEL_2026_SLUG) {
+            // Relation only — settle after invitee's first valid summer stay upload.
           } else {
             await referralService.processReferral(user.id, referrerId, referralCode);
           }
@@ -265,6 +283,20 @@ exports.web3authLogin = async (req, res) => {
               });
             }
             referrerId = referralData.referrerId;
+            if (campaignSlug === SUMMER_TRAVEL_2026_SLUG) {
+              try {
+                await referralService.assertSummerTravelInviterEligible(referrerId);
+              } catch (e) {
+                if (e.code === 'CAMPAIGN_INVITER_LOCKED') {
+                  return res.status(403).json({
+                    status: 'fail',
+                    code: e.code,
+                    message: e.message,
+                  });
+                }
+                throw e;
+              }
+            }
           } catch (error) {
         logger.error('Referral code validation error', { error: error.message });
             return res.status(500).json({
@@ -311,6 +343,8 @@ exports.web3authLogin = async (req, res) => {
         if (referrerId) {
           if (campaignSlug === MOTHERS_DAY_2026_SLUG) {
             await referralService.processCampaignReferral(result.id, referrerId, campaignSlug);
+          } else if (campaignSlug === SUMMER_TRAVEL_2026_SLUG) {
+            // Relation only — settle after invitee's first valid summer stay upload.
           } else {
             await referralService.processReferral(result.id, referrerId, referralCode);
           }

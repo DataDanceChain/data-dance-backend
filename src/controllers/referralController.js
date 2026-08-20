@@ -5,6 +5,7 @@ const {
   getReferralStatus,
   useReferralCode,
   countCampaignInvitesAsInviter,
+  getSummerTravel2026Stats,
 } = require('../services/referralService');
 const { MOTHERS_DAY_2026_SLUG, MOTHERS_DAY_2026_RETIRED } = require('../constants/referralCampaigns');
 
@@ -66,6 +67,14 @@ exports.useReferralCode = async (req, res) => {
         status: 'fail',
         code: error.code,
         message: error.message
+      });
+    }
+
+    if (error.code === 'CAMPAIGN_INVITER_LOCKED') {
+      return res.status(403).json({
+        status: 'fail',
+        code: error.code,
+        message: error.message,
       });
     }
 
@@ -152,6 +161,21 @@ exports.getMothersDay2026Stats = async (req, res) => {
     });
   } catch (error) {
     console.error('getMothersDay2026Stats error', error);
+    return res.status(500).json({ status: 'error', message: 'Server error' });
+  }
+};
+
+/**
+ * Summer Travel campaign stats for current user
+ * @route GET /api/referrals/campaign/summer-travel-2026/stats
+ * @access Private
+ */
+exports.getSummerTravel2026Stats = async (req, res) => {
+  try {
+    const data = await getSummerTravel2026Stats(req.user.id);
+    return res.status(200).json({ status: 'success', data });
+  } catch (error) {
+    console.error('getSummerTravel2026Stats error', error);
     return res.status(500).json({ status: 'error', message: 'Server error' });
   }
 };

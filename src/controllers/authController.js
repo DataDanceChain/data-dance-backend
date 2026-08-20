@@ -5,6 +5,7 @@ const { generateReferralCode } = require('../utils/referralUtils');
 const referralService = require('../services/referralService');
 const {
   MOTHERS_DAY_2026_SLUG,
+  SUMMER_TRAVEL_2026_SLUG,
   normalizeReferralCampaignInput,
   assertCampaignActive,
 } = require('../constants/referralCampaigns');
@@ -85,6 +86,20 @@ exports.register = async (req, res) => {
         });
       }
       inviterId = inviter.id;
+      if (campaignSlug === SUMMER_TRAVEL_2026_SLUG) {
+        try {
+          await referralService.assertSummerTravelInviterEligible(inviterId);
+        } catch (e) {
+          if (e.code === 'CAMPAIGN_INVITER_LOCKED') {
+            return res.status(403).json({
+              status: 'fail',
+              code: e.code,
+              message: e.message,
+            });
+          }
+          throw e;
+        }
+      }
     }
 
     // 创建用户
@@ -121,6 +136,8 @@ exports.register = async (req, res) => {
 
       if (campaignSlug === MOTHERS_DAY_2026_SLUG) {
         await referralService.processCampaignReferral(user.id, inviterId, campaignSlug);
+      } else if (campaignSlug === SUMMER_TRAVEL_2026_SLUG) {
+        // Relation only — settle after invitee's first valid summer stay upload.
       } else {
         await referralService.processReferral(user.id, inviterId, referralCodeFromRequest);
       }
