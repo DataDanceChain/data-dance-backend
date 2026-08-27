@@ -35,4 +35,42 @@ const uploadNFTImage = multer({
   limits: { fileSize: 20 * 1024 * 1024 } // 20MB
 });
 
-module.exports = { uploadNFTImage }; 
+const commerceDirs = {
+  contracts: path.join(__dirname, '../../public/assets/commerce/contracts'),
+  slips: path.join(__dirname, '../../public/assets/commerce/slips'),
+  invoices: path.join(__dirname, '../../public/assets/commerce/invoices'),
+};
+
+Object.values(commerceDirs).forEach((dir) => {
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+});
+
+const commerceStorage = multer.diskStorage({
+  destination: function (req, file, cb) {
+    const folder = req.path.includes('/contract') ? 'contracts' : 'slips';
+    cb(null, commerceDirs[folder]);
+  },
+  filename: function (req, file, cb) {
+    const ext = path.extname(file.originalname);
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+    cb(null, `${req.user?.id || 'org'}-${uniqueSuffix}${ext}`);
+  }
+});
+
+const commerceFileFilter = (req, file, cb) => {
+  if (file.mimetype.startsWith('image/') || file.mimetype === 'application/pdf') {
+    cb(null, true);
+  } else {
+    cb(new Error('Only PDF or image files are allowed'), false);
+  }
+};
+
+const uploadCommerceFile = multer({
+  storage: commerceStorage,
+  fileFilter: commerceFileFilter,
+  limits: { fileSize: 20 * 1024 * 1024 }
+});
+
+module.exports = { uploadNFTImage, uploadCommerceFile }; 

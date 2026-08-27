@@ -56,6 +56,13 @@ model User {
   roles                    UserRole[]
   UserTasks                UserTask[]
   dailyEvents              UserDailyEvent[]
+  legalEntity              LegalEntity?
+  purchaseOrdersAsBuyer    PurchaseOrder[]           @relation("OrderBuyer")
+  purchaseOrdersAsSeller   PurchaseOrder[]           @relation("OrderSeller")
+  invoicesAsBuyer          Invoice[]                 @relation("InvoiceBuyer")
+  invoicesAsSeller         Invoice[]                 @relation("InvoiceSeller")
+  paymentsAsPayer          Payment[]                 @relation("PaymentPayer")
+  paymentsAsPayee          Payment[]                 @relation("PaymentPayee")
 }
 
 model UserProfile {
@@ -550,4 +557,134 @@ enum AwardStatus {
   LOCKED
   LIVE
   INVALID
+}
+
+model LegalEntity {
+  id          String   @id @default(uuid())
+  userId      String   @unique
+  companyName String
+  taxId       String?
+  address     String?
+  country     String?
+  email       String?
+  bankName    String?
+  bankAccount String?
+  currency    String   @default("USD")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  user        User     @relation(fields: [userId], references: [id])
+}
+
+model PurchaseOrder {
+  id             String          @id @default(uuid())
+  orderNumber    String          @unique
+  buyerId        String
+  sellerId       String
+  status         String          @default("confirmed")
+  currency       String          @default("USD")
+  subtotal       Float
+  taxAmount      Float           @default(0)
+  total          Float
+  paymentTerms   String          @default("Due on receipt")
+  notes          String?
+  contractFile   String?
+  contractStatus String          @default("none")
+  dataNFTId      String?
+  purchaseId     String?
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+  buyer          User            @relation("OrderBuyer", fields: [buyerId], references: [id])
+  seller         User            @relation("OrderSeller", fields: [sellerId], references: [id])
+  lineItems      OrderLineItem[]
+  invoices       Invoice[]
+  payments       Payment[]
+
+  @@index([buyerId])
+  @@index([sellerId])
+  @@index([createdAt])
+}
+
+model OrderLineItem {
+  id          String        @id @default(uuid())
+  orderId     String
+  description String
+  category    String?
+  quantity    Float
+  unit        String        @default("license")
+  unitPrice   Float
+  total       Float
+  order       PurchaseOrder @relation(fields: [orderId], references: [id], onDelete: Cascade)
+}
+
+model Invoice {
+  id             String            @id @default(uuid())
+  invoiceNumber  String            @unique
+  orderId        String
+  buyerId        String
+  sellerId       String
+  status         String            @default("issued")
+  currency       String            @default("USD")
+  subtotal       Float
+  taxAmount      Float             @default(0)
+  total          Float
+  paymentTerms   String?
+  issueDate      DateTime          @default(now())
+  dueDate        DateTime?
+  paidAt         DateTime?
+  pdfPath        String?
+  sellerSnapshot Json
+  buyerSnapshot  Json
+  createdAt      DateTime          @default(now())
+  updatedAt      DateTime          @updatedAt
+  order          PurchaseOrder     @relation(fields: [orderId], references: [id])
+  buyer          User              @relation("InvoiceBuyer", fields: [buyerId], references: [id])
+  seller         User              @relation("InvoiceSeller", fields: [sellerId], references: [id])
+  lineItems      InvoiceLineItem[]
+  payments       Payment[]
+
+  @@index([orderId])
+  @@index([buyerId])
+  @@index([sellerId])
+}
+
+model InvoiceLineItem {
+  id          String  @id @default(uuid())
+  invoiceId   String
+  description String
+  category    String?
+  quantity    Float
+  unit        String  @default("license")
+  unitPrice   Float
+  total       Float
+  invoice     Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+}
+
+model Payment {
+  id                        String         @id @default(uuid())
+  paymentNumber             String         @unique
+  orderId                   String?
+  invoiceId                 String?
+  payerId                   String
+  payeeId                   String
+  amount                    Float
+  currency                  String         @default("USD")
+  method                    String         @default("bank_transfer")
+  status                    String         @default("pending")
+  matchStatus               String         @default("unmatched")
+  paidAt                    DateTime?
+  reference                 String?
+  slipPath                  String?
+  notes                     String?
+  organizationTransactionId String?
+  createdAt                 DateTime       @default(now())
+  updatedAt                 DateTime       @updatedAt
+  order                     PurchaseOrder? @relation(fields: [orderId], references: [id])
+  invoice                   Invoice?       @relation(fields: [invoiceId], references: [id])
+  payer                     User           @relation("PaymentPayer", fields: [payerId], references: [id])
+  payee                     User           @relation("PaymentPayee", fields: [payeeId], references: [id])
+
+  @@index([orderId])
+  @@index([invoiceId])
+  @@index([payerId])
+  @@index([payeeId])
 }

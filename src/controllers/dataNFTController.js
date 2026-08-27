@@ -1,5 +1,6 @@
 const { PrismaClient } = require('@prisma/client');
 const prisma = new PrismaClient();
+const commerceService = require('../services/commerceService');
 
 // Create a DataNFT bundle from snapshots
 const mergeSnapshots = async (req, res) => {
@@ -412,135 +413,110 @@ const purchaseDataNFT = async (req, res) => {
 
     console.log('Current purchase count:', purchaseCount);
 
-    // Create purchase record (with quantity)
-    console.log('Creating purchase record...');
-    const purchase = await prisma.dataNFTPurchase.create({
-      data: {
-        dataNFTId: id,
-        buyerId,
-        quantity
-      },
-      include: {
-        dataNFT: {
-          include: {
-            snapshots: true,
-            tags: true
-          }
-        }
+    const totalAmount = dataNFT.price * quantity;
+    const buyer = await prisma.user.findUnique({
+      where: { id: buyerId },
+      select: {
+        id: true,
+        email: true,
+        isOrganization: true,
+        userType: true
       }
     });
-    console.log('Purchase record created:', { purchaseId: purchase.id, quantity });
+    const isOrgBuyer = Boolean(buyer && (buyer.isOrganization || buyer.userType === 'organization'));
 
-    // --- 新增：自动生成交易流水 ---
-    console.log('=== Starting Transaction Generation ===');
-    const totalAmount = dataNFT.price * quantity;
-    // 1. 生成商家收入流水
-    console.log('Creating merchant transaction...');
-    try {
-      const merchantTransaction = await prisma.organizationTransaction.create({
+    if (isOrgBuyer) {
+      const [depositSum, withdrawSum] = await Promise.all([
+        prisma.organizationTransaction.aggregate({
+          _sum: { amount: true },
+          where: { userId: buyerId, type: 'DEPOSIT', status: 'COMPLETED' }
+        }),
+        prisma.organizationTransaction.aggregate({
+          _sum: { amount: true },
+          where: { userId: buyerId, type: 'WITHDRAW', status: 'COMPLETED' }
+        })
+      ]);
+      const balance = (depositSum._sum.amount || 0) - (withdrawSum._sum.amount || 0);
+      if (balance < totalAmount) {
+        return res.status(400).json({ error: 'Insufficient balance to complete this purchase.' });
+      }
+    }
+
+    const result = await prisma.$transaction(async (tx) => {
+      const purchase = await tx.dataNFTPurchase.create({
+        data: {
+          dataNFTId: id,
+          buyerId,
+          quantity
+        },
+        include: {
+          dataNFT: {
+            include: {
+              snapshots: true,
+              tags: true
+            }
+          }
+        }
+      });
+
+      await tx.organizationTransaction.create({
         data: {
           amount: totalAmount,
           type: 'DEPOSIT',
           status: 'COMPLETED',
           description: `DataNFT sale: ${dataNFT.name} (Purchase #${purchaseCount + 1}, quantity: ${quantity})`,
           userId: dataNFT.merchantId,
-          metadata: { 
-            dataNFTId: dataNFT.id, 
+          metadata: {
+            dataNFTId: dataNFT.id,
             buyerId,
             purchaseCount: purchaseCount + 1,
             quantity
           }
         }
       });
-      console.log('Merchant transaction created:', {
-        id: merchantTransaction.id,
-        amount: merchantTransaction.amount,
-        type: merchantTransaction.type
-      });
-    } catch (merchantTxError) {
-      console.error('Error creating merchant transaction:', {
-        error: merchantTxError.message,
-        code: merchantTxError.code,
-        stack: merchantTxError.stack
-      });
-    }
 
-    // 2. 检查买家信息并生成买家支出流水
-    console.log('Checking buyer info...');
-    try {
-      const buyer = await prisma.user.findUnique({ 
-        where: { id: buyerId },
-        select: {
-          id: true,
-          email: true,
-          isOrganization: true,
-          userType: true
-        }
-      });
-      
-      console.log('Buyer details:', {
-        id: buyer?.id,
-        email: buyer?.email,
-        isOrganization: buyer?.isOrganization,
-        userType: buyer?.userType
-      });
-
-      if (buyer && (buyer.isOrganization || buyer.userType === 'organization')) {
-        // 新增：检查组织用户余额
-        const [depositSum, withdrawSum] = await Promise.all([
-          prisma.organizationTransaction.aggregate({
-            _sum: { amount: true },
-            where: { userId: buyerId, type: 'DEPOSIT', status: 'COMPLETED' }
-          }),
-          prisma.organizationTransaction.aggregate({
-            _sum: { amount: true },
-            where: { userId: buyerId, type: 'WITHDRAW', status: 'COMPLETED' }
-          })
-        ]);
-        const balance = (depositSum._sum.amount || 0) - (withdrawSum._sum.amount || 0);
-        console.log('Organization user balance:', balance, 'totalAmount:', totalAmount);
-        if (balance < totalAmount) {
-          return res.status(400).json({ error: 'Insufficient balance to complete this purchase.' });
-        }
-        // 余额充足才生成流水
-        console.log('Creating buyer transaction...');
-        const buyerTransaction = await prisma.organizationTransaction.create({
+      let buyerTransaction = null;
+      if (isOrgBuyer) {
+        buyerTransaction = await tx.organizationTransaction.create({
           data: {
             amount: totalAmount,
             type: 'WITHDRAW',
             status: 'COMPLETED',
             description: `Purchase DataNFT: ${dataNFT.name} (Purchase #${purchaseCount + 1}, quantity: ${quantity})`,
             userId: buyerId,
-            metadata: { 
-              dataNFTId: dataNFT.id, 
+            metadata: {
+              dataNFTId: dataNFT.id,
               merchantId: dataNFT.merchantId,
               purchaseCount: purchaseCount + 1,
               quantity
             }
           }
         });
-        console.log('Buyer transaction created:', {
-          id: buyerTransaction.id,
-          amount: buyerTransaction.amount,
-          type: buyerTransaction.type
-        });
-      } else {
-        console.log('Skipping buyer transaction - not an organization user');
       }
-    } catch (buyerTxError) {
-      console.error('Error processing buyer transaction:', {
-        error: buyerTxError.message,
-        code: buyerTxError.code,
-        stack: buyerTxError.stack
+
+      const commerce = await commerceService.createOrderFromPurchase(tx, {
+        buyerId,
+        sellerId: dataNFT.merchantId,
+        dataNFT,
+        purchase,
+        quantity,
+        totalAmount,
+        paidFromBalance: isOrgBuyer,
+        organizationTransactionId: buyerTransaction?.id,
       });
-    }
-    // --- end ---
+
+      return { purchase, commerce };
+    });
 
     console.log('=== Purchase Process Completed ===');
     res.status(201).json({
-      ...purchase,
+      ...result.purchase,
       purchaseCount: purchaseCount + 1,
-      quantity
+      quantity,
+      order: result.commerce.order,
+      invoice: result.commerce.invoice,
+      payment: result.commerce.payment,
+      status: 'success'
     });
   } catch (error) {
     console.error('Error in purchaseDataNFT:', {

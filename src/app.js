@@ -32,6 +32,7 @@ const promotionRoutes = require('./routes/promotionRoutes');
 const transactionRoutes = require('./routes/transactionRoutes');
 const ddcNFTMetadataRoutes = require('./routes/ddcNFTMetadataRoutes');
 const opsAdminRoutes = require('./routes/opsAdminRoutes');
+const commerceRoutes = require('./routes/commerceRoutes');
 
 const app = express();
 
@@ -72,8 +73,17 @@ const upload = multer({
 app.set('upload', upload);
 
 // CORS 配置
+const localFrontendOrigins = [
+  'http://localhost:8100',
+  'http://localhost:3000',
+  'http://localhost:3001',
+  'http://127.0.0.1:3000',
+  'http://127.0.0.1:3001',
+];
 const corsOptions = {
-  origin: process.env.FRONTEND_URL || (process.env.NODE_ENV === 'production' ? '*' : 'http://localhost:8100'),
+  origin: process.env.FRONTEND_URL
+    ? process.env.FRONTEND_URL.split(',').map((value) => value.trim())
+    : (process.env.NODE_ENV === 'production' ? '*' : localFrontendOrigins),
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
@@ -160,6 +170,7 @@ app.use('/api/snapshots', snapshotRoutes);
 app.use('/api/data-nfts', dataNFTRoutes);
 app.use('/api/promotions', promotionRoutes);
 app.use('/api/organization/transactions', transactionRoutes);
+app.use('/api/commerce', commerceRoutes);
 // DDC NFT Metadata API - 需要后端权限控制
 app.use('/metadata/ddcnft', ddcNFTMetadataRoutes);
 
