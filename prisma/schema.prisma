@@ -63,6 +63,8 @@ model User {
   invoicesAsSeller         Invoice[]                 @relation("InvoiceSeller")
   paymentsAsPayer          Payment[]                 @relation("PaymentPayer")
   paymentsAsPayee          Payment[]                 @relation("PaymentPayee")
+  procurementAllocations   ProcurementAllocation[]
+  pointsRedemptions        PointsRedemption[]
 }
 
 model UserProfile {
@@ -587,17 +589,26 @@ model PurchaseOrder {
   total          Float
   paymentTerms   String          @default("Due on receipt")
   notes          String?
-  contractFile   String?
-  contractStatus String          @default("none")
-  dataNFTId      String?
-  purchaseId     String?
-  createdAt      DateTime        @default(now())
-  updatedAt      DateTime        @updatedAt
-  buyer          User            @relation("OrderBuyer", fields: [buyerId], references: [id])
-  seller         User            @relation("OrderSeller", fields: [sellerId], references: [id])
-  lineItems      OrderLineItem[]
-  invoices       Invoice[]
-  payments       Payment[]
+  contractFile         String?
+  contractStatus       String          @default("none")
+  dataNFTId            String?
+  purchaseId           String?
+  attestationHash      String?
+  attestationTxHash    String?
+  attestedAt           DateTime?
+  attestationPayload   Json?
+  pointsUnitPriceUsd   Float?
+  serviceFeeAmount     Float           @default(0)
+  createdAt            DateTime        @default(now())
+  updatedAt            DateTime        @updatedAt
+  buyer                User            @relation("OrderBuyer", fields: [buyerId], references: [id])
+  seller               User            @relation("OrderSeller", fields: [sellerId], references: [id])
+  lineItems            OrderLineItem[]
+  invoices             Invoice[]
+  payments             Payment[]
+  allocations          ProcurementAllocation[]
+  costItems            ProcurementCostItem[]
+  redemptions          PointsRedemption[]
 
   @@index([buyerId])
   @@index([sellerId])
@@ -687,4 +698,76 @@ model Payment {
   @@index([invoiceId])
   @@index([payerId])
   @@index([payeeId])
+}
+
+model CommerceSettings {
+  id                 String   @id @default("default")
+  pointsUnitPriceUsd Float    @default(0.01)
+  updatedAt          DateTime @updatedAt
+}
+
+model ProcurementAllocation {
+  id              String        @id @default(uuid())
+  orderId         String
+  kind            String
+  email           String
+  emailNormalized String
+  displayName     String?
+  role            String?
+  points          Float         @default(0)
+  userId          String?
+  claimStatus     String        @default("reserved")
+  note            String?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+  order           PurchaseOrder @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  user            User?         @relation(fields: [userId], references: [id])
+
+  @@index([orderId])
+  @@index([kind])
+  @@index([emailNormalized])
+}
+
+model ProcurementCostItem {
+  id          String        @id @default(uuid())
+  orderId     String
+  kind        String
+  description String
+  points      Float
+  unitPriceUsd Float
+  amountUsd   Float
+  sourceType  String?
+  sourceId    String?
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+  order       PurchaseOrder @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([orderId])
+  @@index([kind])
+}
+
+model PointsRedemption {
+  id              String         @id @default(uuid())
+  orderId         String?
+  createdById     String?
+  email           String
+  emailNormalized String
+  userId          String?
+  points          Float
+  asset           String         @default("USDT")
+  amount          Float
+  vendor          String?
+  vendorReference String?
+  proofPath       String?
+  status          String         @default("pending")
+  paidAt          DateTime?
+  notes           String?
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+  order           PurchaseOrder? @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  user            User?          @relation(fields: [userId], references: [id])
+
+  @@index([orderId])
+  @@index([emailNormalized])
+  @@index([status])
 }

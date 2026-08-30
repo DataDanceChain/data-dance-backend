@@ -30,4 +30,19 @@ router.get('/payments/:id', commerceController.getPayment);
 router.post('/payments/:id/confirm', commerceController.confirmPayment);
 router.post('/payments/:id/reject', commerceController.rejectPayment);
 
+router.get('/settings', commerceController.getSettings);
+router.put('/settings', commerceController.updateSettings);
+
+router.get('/allocations', commerceController.listAllocations);
+router.post('/orders/:id/allocations', commerceController.addAllocations);
+router.delete('/allocations/:id', commerceController.deleteAllocation);
+router.post('/orders/:id/attest', commerceController.attestOrder);
+
+router.get('/cost-items', commerceController.listCostItems);
+
+router.get('/redemptions', commerceController.listRedemptions);
+router.post('/redemptions', uploadCommerceFile.single('file'), commerceController.createRedemption);
+router.post('/redemptions/:id/proof', uploadCommerceFile.single('file'), commerceController.attachRedemptionProof);
+router.post('/redemptions/:id/confirm', commerceController.confirmRedemption);
+
 module.exports = router;

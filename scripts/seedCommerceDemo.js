@@ -214,6 +214,74 @@ async function createDeal({
   return { order, invoice };
 }
 
+async function seedAllocation(order, row) {
+  const email = String(row.email).toLowerCase();
+  const user = await prisma.user.findUnique({ where: { email }, select: { id: true } });
+  const allocation = await prisma.procurementAllocation.create({
+    data: {
+      orderId: order.id,
+      kind: row.kind,
+      email,
+      emailNormalized: email,
+      displayName: row.displayName,
+      role: row.role || (row.kind === 'referral' ? 'referrer' : 'data_contributor'),
+      points: row.points,
+      userId: user?.id || null,
+      claimStatus: user ? 'claimable' : 'reserved',
+      note: row.note || `${SEED_TAG} reserved for later DDC claim`,
+    },
+  });
+  const unitPrice = row.unitPrice || 0.01;
+  await prisma.procurementCostItem.create({
+    data: {
+      orderId: order.id,
+      kind: 'points_issue',
+      description: `${row.kind === 'referral' ? 'Referral points' : 'User points'} reserved for ${email.replace(/^(.{2}).+@/, '$1***@')}`,
+      points: row.points,
+      unitPriceUsd: unitPrice,
+      amountUsd: Number((row.points * unitPrice).toFixed(4)),
+      sourceType: 'allocation',
+      sourceId: allocation.id,
+    },
+  });
+  return allocation;
+}
+
+async function seedRedemption(order, createdById, row) {
+  const email = String(row.email).toLowerCase();
+  const user = await prisma.user.findUnique({ where: { email }, select: { id: true } });
+  const redemption = await prisma.pointsRedemption.create({
+    data: {
+      orderId: order.id,
+      createdById,
+      email,
+      emailNormalized: email,
+      userId: user?.id || null,
+      points: row.points,
+      asset: row.asset || 'USDT',
+      amount: row.amount,
+      vendor: row.vendor || 'External payout desk',
+      vendorReference: row.vendorReference,
+      status: row.status || 'paid',
+      paidAt: row.paidAt || new Date(),
+      notes: `${SEED_TAG} ${row.notes || 'Vendor payout voucher'}`,
+    },
+  });
+  await prisma.procurementCostItem.create({
+    data: {
+      orderId: order.id,
+      kind: 'points_redeem',
+      description: `Points redeemed to ${redemption.asset} via ${redemption.vendor}`,
+      points: redemption.points,
+      unitPriceUsd: Number((redemption.amount / redemption.points).toFixed(6)),
+      amountUsd: redemption.amount,
+      sourceType: 'redemption',
+      sourceId: redemption.id,
+    },
+  });
+  return redemption;
+}
+
 async function seedTopUp(buyer, payee, amount, status, days) {
   const createdAt = daysAgo(days, 9);
   const ledger = await prisma.organizationTransaction.create({
@@ -301,7 +369,13 @@ async function main() {
 
   await clearPreviousSeed();
 
-  await createDeal({
+  await prisma.commerceSettings.upsert({
+    where: { id: 'default' },
+    update: { pointsUnitPriceUsd: 0.01 },
+    create: { id: 'default', pointsUnitPriceUsd: 0.01 },
+  });
+
+  const firstDeal = await createDeal({
     buyer,
     seller: official,
     buyerEntity,
@@ -338,6 +412,39 @@ async function main() {
         daysAfter: 1,
       },
     ],
+  });
+
+  await prisma.purchaseOrder.update({
+    where: { id: firstDeal.order.id },
+    data: { pointsUnitPriceUsd: 0.01, serviceFeeAmount: 960 },
+  });
+  await seedAllocation(firstDeal.order, {
+    kind: 'user',
+    email: 'maya.chen@example.com',
+    displayName: 'Maya Chen',
+    points: 2400,
+  });
+  await seedAllocation(firstDeal.order, {
+    kind: 'user',
+    email: 'leo.park@example.com',
+    displayName: 'Leo Park',
+    points: 1800,
+  });
+  await seedAllocation(firstDeal.order, {
+    kind: 'referral',
+    email: 'nina.reyes@example.com',
+    displayName: 'Nina Reyes',
+    role: 'referrer',
+    points: 420,
+  });
+  await seedRedemption(firstDeal.order, official.id, {
+    email: 'maya.chen@example.com',
+    points: 500,
+    amount: 5,
+    vendor: 'External payout desk',
+    vendorReference: 'USDT-PAY-20260829-0041',
+    notes: 'User redeemed 500 points to 5 USDT',
+    paidAt: daysAgo(3, 16),
   });
 
   await createDeal({

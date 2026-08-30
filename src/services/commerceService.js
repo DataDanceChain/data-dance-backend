@@ -1,5 +1,7 @@
 const prisma = require('../utils/prisma');
 
+const { maskEmail, stripEmail } = require('../utils/emailMask');
+
 const ORDER_INCLUDE = {
   lineItems: true,
   buyer: { select: { id: true, name: true, email: true } },
@@ -9,6 +11,9 @@ const ORDER_INCLUDE = {
     orderBy: { createdAt: 'desc' },
   },
   payments: { orderBy: { createdAt: 'desc' } },
+  allocations: { orderBy: { createdAt: 'asc' } },
+  costItems: { orderBy: { createdAt: 'asc' } },
+  redemptions: { orderBy: { createdAt: 'desc' } },
 };
 
 const INVOICE_INCLUDE = {
@@ -212,17 +217,42 @@ async function refreshInvoiceSettlement(db, invoiceId) {
   return updated;
 }
 
+function maskParty(party) {
+  if (!party) return party;
+  return {
+    ...party,
+    email: party.email ? maskEmail(party.email) : party.email,
+  };
+}
+
 function serializeOrder(order) {
   if (!order) return null;
   const latestInvoice = order.invoices?.[0] || null;
   const confirmedPaid = (order.payments || [])
     .filter((payment) => payment.status === 'confirmed')
     .reduce((sum, payment) => sum + Number(payment.amount), 0);
+  const allocations = (order.allocations || []).map(stripEmail);
+  const users = allocations.filter((row) => row.kind === 'user');
+  const referrals = allocations.filter((row) => row.kind === 'referral');
+  const costItems = order.costItems || [];
   return {
     ...order,
+    buyer: maskParty(order.buyer),
+    seller: maskParty(order.seller),
+    allocations,
+    users,
+    referrals,
+    redemptions: (order.redemptions || []).map(stripEmail),
     paidAmount: Number(confirmedPaid.toFixed(2)),
     outstandingAmount: Number((order.total - confirmedPaid).toFixed(2)),
     latestInvoice,
+    userCount: users.length,
+    referralCount: referrals.length,
+    pointsReserved: users.reduce((sum, row) => sum + Number(row.points || 0), 0),
+    referralPointsReserved: referrals.reduce((sum, row) => sum + Number(row.points || 0), 0),
+    costIssuedUsd: Number(costItems.filter((row) => row.kind === 'points_issue').reduce((sum, row) => sum + Number(row.amountUsd || 0), 0).toFixed(2)),
+    costRedeemedUsd: Number(costItems.filter((row) => row.kind === 'points_redeem').reduce((sum, row) => sum + Number(row.amountUsd || 0), 0).toFixed(2)),
+    attested: Boolean(order.attestationHash),
   };
 }
 
@@ -276,6 +306,8 @@ async function createOrderBundle(db, {
   lineItems,
   paidFromBalance = false,
   organizationTransactionId,
+  pointsUnitPriceUsd,
+  serviceFeeAmount = 0,
 }) {
   const items = normalizeLineItems(lineItems);
   if (!items.length) {
@@ -321,6 +353,8 @@ async function createOrderBundle(db, {
       notes: notes || null,
       dataNFTId: dataNFTId || null,
       purchaseId: purchaseId || null,
+      pointsUnitPriceUsd: pointsUnitPriceUsd != null ? Number(pointsUnitPriceUsd) : null,
+      serviceFeeAmount: Number(serviceFeeAmount || 0),
       lineItems: { create: items },
     },
     include: { lineItems: true },
@@ -467,7 +501,13 @@ async function listInvoices(userId, { page = 1, limit = 10, status } = {}) {
     prisma.invoice.count({ where }),
   ]);
   return {
-    items,
+    items: items.map((invoice) => ({
+      ...invoice,
+      buyer: maskParty(invoice.buyer),
+      seller: maskParty(invoice.seller),
+      buyerSnapshot: maskParty(invoice.buyerSnapshot),
+      sellerSnapshot: maskParty(invoice.sellerSnapshot),
+    })),
     pagination: {
       total,
       page: Number(page),
@@ -493,6 +533,10 @@ async function getInvoiceById(id, user) {
     .reduce((sum, payment) => sum + Number(payment.amount), 0);
   return {
     ...invoice,
+    buyer: maskParty(invoice.buyer),
+    seller: maskParty(invoice.seller),
+    buyerSnapshot: maskParty(invoice.buyerSnapshot),
+    sellerSnapshot: maskParty(invoice.sellerSnapshot),
     paidAmount: Number(confirmedPaid.toFixed(2)),
     outstandingAmount: Number((invoice.total - confirmedPaid).toFixed(2)),
   };
@@ -515,7 +559,11 @@ async function listPayments(userId, { page = 1, limit = 10, status } = {}) {
     prisma.payment.count({ where }),
   ]);
   return {
-    items,
+    items: items.map((payment) => ({
+      ...payment,
+      payer: maskParty(payment.payer),
+      payee: maskParty(payment.payee),
+    })),
     pagination: {
       total,
       page: Number(page),
@@ -536,7 +584,11 @@ async function getPaymentById(id, user) {
   if (!canAccessRecord(user, payment)) {
     throw Object.assign(new Error('Not authorized to view this payment'), { statusCode: 403 });
   }
-  return payment;
+  return {
+    ...payment,
+    payer: maskParty(payment.payer),
+    payee: maskParty(payment.payee),
+  };
 }
 
 async function recordPayment(user, {

@@ -1,5 +1,6 @@
 const path = require('path');
 const commerceService = require('../services/commerceService');
+const procurementService = require('../services/procurementService');
 const { getOrCreateInvoicePdf } = require('../services/invoicePdfService');
 const prisma = require('../utils/prisma');
 
@@ -94,6 +95,9 @@ exports.createOrder = async (req, res) => {
       notes,
       dataNFTId,
       lineItems,
+      allocations,
+      pointsUnitPriceUsd,
+      serviceFeeAmount,
     } = req.body;
 
     let items = Array.isArray(lineItems) ? lineItems : [];
@@ -132,7 +136,14 @@ exports.createOrder = async (req, res) => {
       notes,
       dataNFTId,
       lineItems: items,
+      pointsUnitPriceUsd,
+      serviceFeeAmount,
     });
+
+    if (Array.isArray(allocations) && allocations.length) {
+      await procurementService.addAllocations(req.user, bundle.order.id, allocations);
+      bundle.order = await commerceService.getOrderById(bundle.order.id, req.user);
+    }
 
     res.status(201).json({ status: 'success', data: bundle });
   } catch (error) {
@@ -233,6 +244,118 @@ exports.confirmPayment = async (req, res) => {
 exports.rejectPayment = async (req, res) => {
   try {
     const data = await commerceService.rejectPayment(req.user, req.params.id, req.body.notes);
+    res.json({ status: 'success', data });
+  } catch (error) {
+    sendError(res, error);
+  }
+};
+
+exports.getSettings = async (req, res) => {
+  try {
+    const data = await procurementService.getSettings();
+    res.json({ status: 'success', data });
+  } catch (error) {
+    sendError(res, error);
+  }
+};
+
+exports.updateSettings = async (req, res) => {
+  try {
+    const data = await procurementService.updateSettings(req.body.pointsUnitPriceUsd);
+    res.json({ status: 'success', data });
+  } catch (error) {
+    sendError(res, error);
+  }
+};
+
+exports.listAllocations = async (req, res) => {
+  try {
+    const data = await procurementService.listAllocations(req.user.id, req.query);
+    res.json({ status: 'success', data });
+  } catch (error) {
+    sendError(res, error);
+  }
+};
+
+exports.addAllocations = async (req, res) => {
+  try {
+    const rows = Array.isArray(req.body) ? req.body : (req.body.allocations || [req.body]);
+    const data = await procurementService.addAllocations(req.user, req.params.id, rows);
+    res.status(201).json({ status: 'success', data });
+  } catch (error) {
+    sendError(res, error);
+  }
+};
+
+exports.deleteAllocation = async (req, res) => {
+  try {
+    const data = await procurementService.deleteAllocation(req.user, req.params.id);
+    res.json({ status: 'success', data });
+  } catch (error) {
+    sendError(res, error);
+  }
+};
+
+exports.attestOrder = async (req, res) => {
+  try {
+    const data = await procurementService.attestOrder(req.user, req.params.id, {
+      txHash: req.body.txHash,
+    });
+    res.json({ status: 'success', data });
+  } catch (error) {
+    sendError(res, error);
+  }
+};
+
+exports.listCostItems = async (req, res) => {
+  try {
+    const data = await procurementService.listCostItems(req.user.id, req.query);
+    res.json({ status: 'success', data });
+  } catch (error) {
+    sendError(res, error);
+  }
+};
+
+exports.listRedemptions = async (req, res) => {
+  try {
+    const data = await procurementService.listRedemptions(req.user.id, req.query);
+    res.json({ status: 'success', data });
+  } catch (error) {
+    sendError(res, error);
+  }
+};
+
+exports.createRedemption = async (req, res) => {
+  try {
+    const data = await procurementService.createRedemption(req.user, {
+      ...req.body,
+      proofPath: publicFilePath(req.file, 'slips'),
+    });
+    res.status(201).json({ status: 'success', data });
+  } catch (error) {
+    sendError(res, error);
+  }
+};
+
+exports.attachRedemptionProof = async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ status: 'fail', message: 'Payment proof is required' });
+    }
+    const data = await procurementService.attachRedemptionProof(
+      req.user,
+      req.params.id,
+      publicFilePath(req.file, 'slips'),
+    );
+    res.json({ status: 'success', data });
+  } catch (error) {
+    sendError(res, error);
+  }
+};
+
+exports.confirmRedemption = async (req, res) => {
+  try {
+    const data = await procurementService.confirmRedemption(req.user, req.params.id, req.body);
     res.json({ status: 'success', data });
   } catch (error) {
     sendError(res, error);
