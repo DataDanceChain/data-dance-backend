@@ -98,6 +98,15 @@ docker compose up -d
 - 智能去重机制
 - 数据质量评分
 
+### Connect AI (MCP + OAuth)
+- Life Capsule 画像：`GET /api/life-context`，分享档 public / transparent / intimate
+- MCP 工具：`POST /mcp`（`get_public_profile`、`get_boundaries`、`get_life_capsule`、`search_life_signals`）
+- ChatGPT / Claude 走 **OAuth 2.1 + PKCE**（CIMD 或 `POST /oauth/register`），同意页用现有 Web3Auth 登录
+- 发现文档：`/.well-known/oauth-protected-resource`、`/.well-known/oauth-authorization-server`
+- 环境变量：`PUBLIC_BASE_URL`（API / issuer）、`APP_PUBLIC_URL`（钱包同意页）
+- 迁移：`20260903090000_add_mcp_oauth`；说明见 [docs/LIFE_CONTEXT_MCP.md](docs/LIFE_CONTEXT_MCP.md)
+- Web3Auth 只负责人登录钱包，不当 ChatGPT / Claude 的授权服务器
+
 ## 🛠 开发环境
 
 ### Docker开发（推荐）
@@ -147,6 +156,7 @@ npm run dev
 ## 📚 文档
 
 - [API接口文档](api-doc.md) - 完整的API参考
+- [Connect AI / MCP](docs/LIFE_CONTEXT_MCP.md) - Life Capsule 工具、OAuth 2.1 + PKCE、ChatGPT / Claude 接入
 
 ## �� 许可证
 

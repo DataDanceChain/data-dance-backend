@@ -65,6 +65,10 @@ model User {
   paymentsAsPayee          Payment[]                 @relation("PaymentPayee")
   procurementAllocations   ProcurementAllocation[]
   pointsRedemptions        PointsRedemption[]
+  lifeContextSettings      LifeContextSettings?
+  mcpTokens                McpToken[]
+  oauthAuthorizations      OAuthAuthorization[]
+  oauthRefreshTokens       OAuthRefreshToken[]
 }
 
 model UserProfile {
@@ -770,4 +774,86 @@ model PointsRedemption {
   @@index([orderId])
   @@index([emailNormalized])
   @@index([status])
+}
+
+/// Distilled lifestyle share settings for Connect AI (ChatGPT / Claude MCP).
+model LifeContextSettings {
+  userId           String    @id
+  privacyLevel     String    @default("transparent")
+  customBoundaries String    @default("")
+  aboutMe          String    @default("")
+  refinedJson      Json?
+  refinedAt        DateTime?
+  refinedModel     String    @default("")
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+  user             User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+/// Personal access tokens Claude / ChatGPT send as Bearer on /mcp.
+model McpToken {
+  id          String    @id @default(uuid())
+  userId      String
+  tokenHash   String    @unique
+  tokenPrefix String
+  label       String
+  source      String    @default("manual")
+  clientId    String    @default("")
+  resource    String    @default("")
+  scope       String    @default("")
+  expiresAt   DateTime?
+  createdAt   DateTime  @default(now())
+  lastUsedAt  DateTime?
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  refreshTokens OAuthRefreshToken[]
+
+  @@index([userId])
+}
+
+/// Public OAuth clients from DCR or CIMD (ChatGPT / Claude).
+model OAuthClient {
+  id                       String   @id @default(uuid())
+  clientId                 String   @unique
+  clientName               String
+  redirectUris             String[]
+  tokenEndpointAuthMethod  String   @default("none")
+  clientUri                String   @default("")
+  createdAt                DateTime @default(now())
+}
+
+/// In-flight authorization-code + PKCE request.
+model OAuthAuthorization {
+  id                  String    @id @default(uuid())
+  clientId            String
+  redirectUri         String
+  state               String    @default("")
+  codeChallenge       String
+  codeChallengeMethod String
+  resource            String
+  scope               String
+  codeHash            String?   @unique
+  userId              String?
+  expiresAt           DateTime
+  consumedAt          DateTime?
+  createdAt           DateTime  @default(now())
+  user                User?     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([clientId])
+}
+
+model OAuthRefreshToken {
+  id         String    @id @default(uuid())
+  tokenHash  String    @unique
+  userId     String
+  clientId   String
+  mcpTokenId String
+  resource   String
+  scope      String
+  expiresAt  DateTime
+  revokedAt  DateTime?
+  createdAt  DateTime  @default(now())
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  mcpToken   McpToken  @relation(fields: [mcpTokenId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
 }

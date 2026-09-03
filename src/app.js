@@ -33,6 +33,9 @@ const transactionRoutes = require('./routes/transactionRoutes');
 const ddcNFTMetadataRoutes = require('./routes/ddcNFTMetadataRoutes');
 const opsAdminRoutes = require('./routes/opsAdminRoutes');
 const commerceRoutes = require('./routes/commerceRoutes');
+const lifeContextRoutes = require('./routes/lifeContextRoutes');
+const mcpRoutes = require('./routes/mcpRoutes');
+const oauthRoutes = require('./routes/oauthRoutes');
 
 const app = express();
 
@@ -86,8 +89,17 @@ const corsOptions = {
     : (process.env.NODE_ENV === 'production' ? '*' : localFrontendOrigins),
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
-  exposedHeaders: ['Content-Range', 'X-Content-Range']
+  allowedHeaders: [
+    'Content-Type',
+    'Authorization',
+    'Accept',
+    'MCP-Protocol-Version',
+    'Mcp-Protocol-Version',
+    'Mcp-Session-Id',
+    'Mcp-Method',
+    'Mcp-Name',
+  ],
+  exposedHeaders: ['Content-Range', 'X-Content-Range', 'WWW-Authenticate']
 };
 
 // 中间件 - 生产环境也需要 CORS
@@ -171,6 +183,9 @@ app.use('/api/data-nfts', dataNFTRoutes);
 app.use('/api/promotions', promotionRoutes);
 app.use('/api/organization/transactions', transactionRoutes);
 app.use('/api/commerce', commerceRoutes);
+app.use('/api/life-context', lifeContextRoutes);
+app.use('/mcp', mcpRoutes);
+app.use('/', oauthRoutes);
 // DDC NFT Metadata API - 需要后端权限控制
 app.use('/metadata/ddcnft', ddcNFTMetadataRoutes);
 
