@@ -384,7 +384,7 @@ function renderLifeCapsule(settings, portrait) {
     '## Event themes',
     '',
     formatThemes(portrait.eventThemes, '_No event traces._'),
-  ];
+  );
 
   if (level === 'intimate' && portrait.sampleTitles.length) {
     body.push('', '## Example titles (no prices or IDs)', '', ...portrait.sampleTitles.map((t) => `- ${t}`));
