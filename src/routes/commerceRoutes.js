@@ -14,6 +14,7 @@ router.get('/counterparties', commerceController.listCounterparties);
 router.get('/orders', commerceController.listOrders);
 router.post('/orders', commerceController.createOrder);
 router.get('/orders/:id', commerceController.getOrder);
+router.post('/orders/:id/licence', commerceController.acceptBuyerLicence);
 router.post(
   '/orders/:id/contract',
   uploadCommerceFile.single('file'),

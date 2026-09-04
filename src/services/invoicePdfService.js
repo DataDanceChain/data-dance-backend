@@ -11,9 +11,9 @@ function ensureDir(dir) {
   }
 }
 
-function money(amount, currency = 'USD') {
+function money(amount) {
   const value = Number(amount || 0).toFixed(2);
-  return `${currency} ${value}`;
+  return `USD ${value}`;
 }
 
 function formatDate(value) {
@@ -24,7 +24,7 @@ function formatDate(value) {
 function partyBlock(party = {}) {
   return [
     party.companyName || '-',
-    party.taxId ? `Tax ID: ${party.taxId}` : null,
+    party.brNumber || party.taxId ? `BR / Tax ID: ${party.brNumber || party.taxId}` : null,
     party.address || null,
     party.country || null,
     party.email || null,
@@ -54,7 +54,7 @@ async function generateInvoicePdf(invoice) {
     doc.text(`Order No.    ${invoice.order?.orderNumber || '-'}`);
     doc.text(`Issue Date   ${formatDate(invoice.issueDate)}`);
     doc.text(`Due Date     ${formatDate(invoice.dueDate)}`);
-    doc.text(`Currency     ${invoice.currency}`);
+    doc.text('Currency     USD');
     doc.text(`Payment Terms ${invoice.paymentTerms || 'Due on receipt'}`);
     doc.text(`Status       ${String(invoice.status || '').toUpperCase()}`);
     doc.moveDown(1);

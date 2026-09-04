@@ -1,4 +1,5 @@
 const prisma = require('../utils/prisma');
+const { BUYER_LICENCE_VERSION, BUYER_LICENCE_TERMS, hasAcceptedBuyerLicence } = require('../constants/buyerLicence');
 
 const { maskEmail, stripEmail } = require('../utils/emailMask');
 
@@ -106,13 +107,14 @@ async function snapshotParty(db, userId) {
   return {
     userId: user.id,
     companyName: entity?.companyName || user.name || user.email,
-    taxId: entity?.taxId || '',
+    taxId: entity?.taxId || entity?.brNumber || '',
+    brNumber: entity?.brNumber || entity?.taxId || '',
     address: entity?.address || '',
     country: entity?.country || '',
     email: entity?.email || user.email || '',
     bankName: entity?.bankName || '',
     bankAccount: entity?.bankAccount || '',
-    currency: entity?.currency || 'USD',
+    currency: 'USD',
   };
 }
 
@@ -122,9 +124,10 @@ async function getOrCreateLegalEntity(db, user) {
   return db.legalEntity.create({
     data: {
       userId: user.id,
-      companyName: user.name || user.email,
+      companyName: user.name && user.name !== user.email ? user.name : '',
       email: user.email,
       currency: 'USD',
+      kycStatus: 'incomplete',
     },
   });
 }
@@ -253,6 +256,9 @@ function serializeOrder(order) {
     costIssuedUsd: Number(costItems.filter((row) => row.kind === 'points_issue').reduce((sum, row) => sum + Number(row.amountUsd || 0), 0).toFixed(2)),
     costRedeemedUsd: Number(costItems.filter((row) => row.kind === 'points_redeem').reduce((sum, row) => sum + Number(row.amountUsd || 0), 0).toFixed(2)),
     attested: Boolean(order.attestationHash),
+    licenceAccepted: hasAcceptedBuyerLicence(order),
+    buyerLicenceVersion: BUYER_LICENCE_VERSION,
+    buyerLicenceTerms: BUYER_LICENCE_TERMS,
   };
 }
 
@@ -338,6 +344,7 @@ async function createOrderBundle(db, {
     snapshotParty(db, sellerId),
   ]);
   const totals = totalsFromLineItems(items, taxRate);
+  const bookCurrency = 'USD';
 
   const order = await db.purchaseOrder.create({
     data: {
@@ -345,7 +352,7 @@ async function createOrderBundle(db, {
       buyerId,
       sellerId,
       status: paidFromBalance ? 'paid' : 'confirmed',
-      currency,
+      currency: bookCurrency,
       subtotal: totals.subtotal,
       taxAmount: totals.taxAmount,
       total: totals.total,
@@ -372,7 +379,7 @@ async function createOrderBundle(db, {
         payerId: buyerId,
         payeeId: sellerId,
         amount: totals.total,
-        currency,
+        currency: bookCurrency,
         method: 'account_balance',
         status: 'confirmed',
         matchStatus: 'matched',
@@ -671,7 +678,7 @@ async function recordPayment(user, {
       payerId,
       payeeId,
       amount: parsedAmount,
-      currency: currency || invoice?.currency || order?.currency || 'USD',
+      currency: 'USD',
       method,
       status: 'pending',
       matchStatus,
@@ -700,9 +707,10 @@ async function confirmPayment(user, paymentId) {
   }
 
   const isTopUp = payment.method === 'top_up';
-  const canConfirm = isTopUp
-    ? payment.payerId === user.id || payment.payeeId === user.id
-    : payment.payeeId === user.id;
+  if (isTopUp) {
+    throw Object.assign(new Error('Top-ups are confirmed by DataDance ops'), { statusCode: 403 });
+  }
+  const canConfirm = payment.payeeId === user.id;
   if (!canConfirm) {
     throw Object.assign(new Error('Only the receiving party can confirm this payment'), { statusCode: 403 });
   }
@@ -735,6 +743,106 @@ async function confirmPayment(user, paymentId) {
   }
 
   return getPaymentById(updated.id, user);
+}
+
+async function loadOpsPayment(paymentId) {
+  const payment = await prisma.payment.findUnique({
+    where: { id: paymentId },
+    include: PAYMENT_INCLUDE,
+  });
+  if (!payment) {
+    throw Object.assign(new Error('Payment not found'), { statusCode: 404 });
+  }
+  return payment;
+}
+
+function mergeLedgerMeta(existing, extra) {
+  const base = existing && typeof existing === 'object' && !Array.isArray(existing) ? existing : {};
+  return { ...base, ...extra };
+}
+
+async function confirmPaymentByOps(paymentId, operator = 'ops') {
+  const payment = await prisma.payment.findUnique({
+    where: { id: paymentId },
+    include: { invoice: true },
+  });
+  if (!payment) {
+    throw Object.assign(new Error('Payment not found'), { statusCode: 404 });
+  }
+  if (payment.status === 'confirmed') {
+    return loadOpsPayment(paymentId);
+  }
+
+  if (payment.invoiceId) {
+    const confirmedPaid = await confirmedPaidForInvoice(prisma, payment.invoiceId, payment.id);
+    payment.matchStatus = computeMatchStatus(payment.invoice.total, confirmedPaid, payment.amount);
+  } else if (payment.method === 'top_up') {
+    payment.matchStatus = 'matched';
+  }
+
+  const confirmedAt = new Date();
+  await prisma.payment.update({
+    where: { id: paymentId },
+    data: {
+      status: 'confirmed',
+      matchStatus: payment.matchStatus,
+      paidAt: payment.paidAt || confirmedAt,
+    },
+  });
+
+  if (payment.organizationTransactionId) {
+    const row = await prisma.organizationTransaction.findUnique({
+      where: { id: payment.organizationTransactionId },
+    });
+    await prisma.organizationTransaction.update({
+      where: { id: payment.organizationTransactionId },
+      data: {
+        status: 'COMPLETED',
+        metadata: mergeLedgerMeta(row?.metadata, {
+          confirmedBy: operator,
+          confirmedAt: confirmedAt.toISOString(),
+        }),
+      },
+    });
+  }
+  if (payment.invoiceId) {
+    await refreshInvoiceSettlement(prisma, payment.invoiceId);
+  }
+  return loadOpsPayment(paymentId);
+}
+
+async function rejectPaymentByOps(paymentId, notes, operator = 'ops') {
+  const payment = await prisma.payment.findUnique({ where: { id: paymentId } });
+  if (!payment) {
+    throw Object.assign(new Error('Payment not found'), { statusCode: 404 });
+  }
+  await prisma.payment.update({
+    where: { id: paymentId },
+    data: {
+      status: 'rejected',
+      matchStatus: 'unmatched',
+      notes: notes || payment.notes,
+    },
+  });
+  if (payment.organizationTransactionId) {
+    const row = await prisma.organizationTransaction.findUnique({
+      where: { id: payment.organizationTransactionId },
+    });
+    await prisma.organizationTransaction.update({
+      where: { id: payment.organizationTransactionId },
+      data: {
+        status: 'FAILED',
+        metadata: mergeLedgerMeta(row?.metadata, {
+          rejectedBy: operator,
+          rejectedAt: new Date().toISOString(),
+        }),
+      },
+    });
+  }
+  if (payment.invoiceId) {
+    await refreshInvoiceSettlement(prisma, payment.invoiceId);
+  }
+  return loadOpsPayment(paymentId);
 }
 
 async function rejectPayment(user, paymentId, notes) {
@@ -818,7 +926,9 @@ module.exports = {
   getPaymentById,
   recordPayment,
   confirmPayment,
+  confirmPaymentByOps,
   rejectPayment,
+  rejectPaymentByOps,
   attachContract,
   listCounterparties,
   getOrCreateLegalEntity,

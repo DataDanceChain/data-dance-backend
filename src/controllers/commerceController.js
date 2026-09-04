@@ -2,12 +2,16 @@ const path = require('path');
 const commerceService = require('../services/commerceService');
 const procurementService = require('../services/procurementService');
 const { getOrCreateInvoicePdf } = require('../services/invoicePdfService');
+const { assertPackHasLicensableRecords } = require('../services/dataLicenceConsent');
+const { stampBuyerLicence } = require('../services/buyerLicence');
+const { nextMerchantKycFields, presentLegalEntity } = require('../services/merchantKyc');
 const prisma = require('../utils/prisma');
 
 function sendError(res, error) {
   const status = error.statusCode || 500;
   return res.status(status).json({
     status: status >= 500 ? 'error' : 'fail',
+    code: error.code,
     message: error.message || 'Server error',
   });
 }
@@ -20,7 +24,7 @@ function publicFilePath(file, folder) {
 exports.getLegalEntity = async (req, res) => {
   try {
     const entity = await commerceService.getOrCreateLegalEntity(prisma, req.user);
-    res.json({ status: 'success', data: entity });
+    res.json({ status: 'success', data: presentLegalEntity(entity) });
   } catch (error) {
     sendError(res, error);
   }
@@ -28,31 +32,12 @@ exports.getLegalEntity = async (req, res) => {
 
 exports.updateLegalEntity = async (req, res) => {
   try {
-    const {
-      companyName,
-      taxId,
-      address,
-      country,
-      email,
-      bankName,
-      bankAccount,
-      currency,
-    } = req.body;
-    await commerceService.getOrCreateLegalEntity(prisma, req.user);
+    const previous = await commerceService.getOrCreateLegalEntity(prisma, req.user);
     const entity = await prisma.legalEntity.update({
       where: { userId: req.user.id },
-      data: {
-        ...(companyName !== undefined ? { companyName } : {}),
-        ...(taxId !== undefined ? { taxId } : {}),
-        ...(address !== undefined ? { address } : {}),
-        ...(country !== undefined ? { country } : {}),
-        ...(email !== undefined ? { email } : {}),
-        ...(bankName !== undefined ? { bankName } : {}),
-        ...(bankAccount !== undefined ? { bankAccount } : {}),
-        ...(currency !== undefined ? { currency } : {}),
-      },
+      data: nextMerchantKycFields(req.body, previous),
     });
-    res.json({ status: 'success', data: entity });
+    res.json({ status: 'success', data: presentLegalEntity(entity) });
   } catch (error) {
     sendError(res, error);
   }
@@ -85,11 +70,36 @@ exports.getOrder = async (req, res) => {
   }
 };
 
+exports.acceptBuyerLicence = async (req, res) => {
+  try {
+    if (req.body?.accepted !== true) {
+      return res.status(400).json({
+        status: 'fail',
+        message: 'Accept the buyer licence to continue.',
+      });
+    }
+    const order = await commerceService.getOrderById(req.params.id, req.user);
+    if (order.buyerId !== req.user.id) {
+      return res.status(403).json({ status: 'fail', message: 'Only the buyer can accept this licence.' });
+    }
+    const stamped = await stampBuyerLicence({
+      orderId: order.id,
+      buyerId: req.user.id,
+    });
+    if (!stamped) {
+      return res.status(404).json({ status: 'fail', message: 'Order not found' });
+    }
+    const data = await commerceService.getOrderById(order.id, req.user);
+    res.json({ status: 'success', data });
+  } catch (error) {
+    sendError(res, error);
+  }
+};
+
 exports.createOrder = async (req, res) => {
   try {
     const {
       sellerId,
-      currency,
       paymentTerms,
       taxRate,
       notes,
@@ -107,6 +117,14 @@ exports.createOrder = async (req, res) => {
       const dataNFT = await prisma.dataNFT.findUnique({ where: { id: dataNFTId } });
       if (!dataNFT || !dataNFT.isPublished) {
         return res.status(404).json({ status: 'fail', message: 'Published dataset not found' });
+      }
+      const licence = await assertPackHasLicensableRecords(dataNFT);
+      if (!licence.ok) {
+        return res.status(403).json({
+          status: 'fail',
+          code: 'subject_consent_required',
+          message: 'This pack can only include records from people who granted consent in the Wallet app.',
+        });
       }
       resolvedSellerId = resolvedSellerId || dataNFT.merchantId;
       if (!items.length) {
@@ -130,7 +148,7 @@ exports.createOrder = async (req, res) => {
     const bundle = await commerceService.createOrderBundle(prisma, {
       buyerId: req.user.id,
       sellerId: resolvedSellerId,
-      currency,
+      currency: 'USD',
       paymentTerms,
       taxRate,
       notes,
@@ -219,7 +237,7 @@ exports.createPayment = async (req, res) => {
       invoiceId: req.body.invoiceId,
       orderId: req.body.orderId,
       amount: req.body.amount,
-      currency: req.body.currency,
+      currency: 'USD',
       method: req.body.method,
       reference: req.body.reference,
       notes: req.body.notes,

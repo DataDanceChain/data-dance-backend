@@ -83,10 +83,20 @@ const localFrontendOrigins = [
   'http://127.0.0.1:3000',
   'http://127.0.0.1:3001',
 ];
+const configuredOrigins = (process.env.FRONTEND_URL || '')
+  .split(',')
+  .map((value) => value.trim())
+  .filter(Boolean);
+const publicOrigins = [
+  'https://app.datadance.ai',
+  'https://business.datadance.ai',
+  'https://admin.datadance.ai',
+  'http://localhost:5174',
+];
 const corsOptions = {
-  origin: process.env.FRONTEND_URL
-    ? process.env.FRONTEND_URL.split(',').map((value) => value.trim())
-    : (process.env.NODE_ENV === 'production' ? '*' : localFrontendOrigins),
+  origin: configuredOrigins.length || process.env.NODE_ENV === 'production'
+    ? [...new Set([...configuredOrigins, ...publicOrigins])]
+    : localFrontendOrigins,
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
   allowedHeaders: [

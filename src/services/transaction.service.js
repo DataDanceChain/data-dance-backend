@@ -62,7 +62,7 @@ class TransactionService {
 
     return {
       balance,
-      currency: 'USDT',
+      currency: 'USD',
       lastUpdated: new Date(),
     };
   }

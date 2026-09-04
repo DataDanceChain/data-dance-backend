@@ -99,6 +99,7 @@ function extractCategory(dataNFT) {
 // Check if image needs to be updated
 function needsImageUpdate(image) {
   if (!image) return true;
+  if (String(image).includes('/data-pack/covers/')) return false;
   return defaultImages.includes(image);
 }
 

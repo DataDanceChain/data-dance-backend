@@ -18,6 +18,15 @@ const {
   checkIn,
   recordRewardsHubVisit
 } = require('../controllers/userController');
+const {
+  getDataLicence,
+  grantDataLicence,
+  withdrawDataLicence,
+} = require('../controllers/dataLicenceController');
+const {
+  listPrivacyRequests,
+  createPrivacyRequest,
+} = require('../controllers/privacyRequestController');
 // Referral endpoints are now centralized under /api/referrals via referralRoutes.js
 const { protect } = require('../middlewares/authMiddleware');
 const router = express.Router();
@@ -66,5 +75,12 @@ router.post('/christmas-shopping/verify-telegram-join', verifyTelegramJoin);
 // Daily events for reward campaigns
 router.post('/check-in', checkIn);
 router.post('/rewards-hub-visit', recordRewardsHubVisit);
+
+router.get('/data-licence-consent', getDataLicence);
+router.post('/data-licence-consent', grantDataLicence);
+router.delete('/data-licence-consent', withdrawDataLicence);
+
+router.get('/privacy-requests', listPrivacyRequests);
+router.post('/privacy-requests', createPrivacyRequest);
 
 module.exports = router;

@@ -13,6 +13,8 @@ router.get('/', protect, dataNFTController.getDataNFTs);
 // 静态路由优先
 router.get('/merchant/:merchantId', protect, dataNFTController.getDataNFTsByMerchant);
 router.get('/purchased', protect, dataNFTController.getPurchasedDataNFTs);
+router.get('/purchased/:purchaseId/export', protect, dataNFTController.exportPurchasedDataNFT);
+router.post('/purchased/:purchaseId/licence', protect, dataNFTController.acceptPurchasedLicence);
 
 // 动态路由最后
 router.get('/:id', protect, dataNFTController.getDataNFTById);

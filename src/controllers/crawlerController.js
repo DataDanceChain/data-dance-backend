@@ -10,6 +10,7 @@ const {
   getDataRules
 } = require('../services/businessRulesService');
 const logger = createLogger('crawlerController');
+const { hasActiveConsent, isCEndSubject } = require('../services/dataLicenceConsent');
 
 /**
  * GET /api/crawler-tasks
@@ -158,6 +159,20 @@ async function createCrawlerTask(req, res) {
 async function uploadData(req, res) {
   try {
     const userId = req.user.id;
+    if (!isCEndSubject(req.user)) {
+      return res.status(403).json({
+        status: 'fail',
+        code: 'subject_consent_required',
+        message: 'Only the data subject can upload Connect records from the Wallet app.',
+      });
+    }
+    if (!(await hasActiveConsent(userId))) {
+      return res.status(403).json({
+        status: 'fail',
+        code: 'data_licence_required',
+        message: 'Connect needs your data licence consent before we can save records.',
+      });
+    }
     
     // Handle both {"data": [...]} and direct [...] formats
     let dataItems;

@@ -64,7 +64,7 @@ exports.getBalance = async (req, res) => {
       status: 'success',
       data: {
         balance,
-        currency: 'USDT',
+        currency: 'USD',
         lastUpdated: new Date(),
       },
     });
@@ -103,8 +103,10 @@ exports.createDepositTransaction = async (req, res) => {
       data: transaction,
     });
   } catch (error) {
-    res.status(500).json({
-      status: 'error',
+    const status = error.statusCode || 500;
+    res.status(status).json({
+      status: status >= 500 ? 'error' : 'fail',
+      code: error.code,
       message: error.message,
     });
   }
@@ -112,58 +114,11 @@ exports.createDepositTransaction = async (req, res) => {
 
 // 创建提现交易
 exports.createWithdrawTransaction = async (req, res) => {
-  try {
-    const { amount, description } = req.body;
-
-    if (!amount || amount <= 0) {
-      return res.status(400).json({
-        status: 'fail',
-        message: 'Invalid amount',
-      });
-    }
-
-    // 检查余额
-    const transactions = await prisma.organizationTransaction.findMany({
-      where: {
-        userId: req.user.id,
-        status: 'COMPLETED',
-      },
-    });
-
-    const balance = transactions.reduce((acc, tx) => {
-      if (tx.type === 'WITHDRAW') {
-        return acc - Number(tx.amount);
-      }
-      return acc + Number(tx.amount);
-    }, 0);
-
-    if (balance < amount) {
-      return res.status(400).json({
-        status: 'fail',
-        message: 'Insufficient balance',
-      });
-    }
-
-    const transaction = await prisma.organizationTransaction.create({
-      data: {
-        amount,
-        type: 'WITHDRAW',
-        status: 'PENDING',
-        description,
-        userId: req.user.id,
-      },
-    });
-
-    res.status(201).json({
-      status: 'success',
-      data: transaction,
-    });
-  } catch (error) {
-    res.status(500).json({
-      status: 'error',
-      message: error.message,
-    });
-  }
+  return res.status(403).json({
+    status: 'fail',
+    code: 'withdrawal_disabled',
+    message: 'Cash-out is not available. Prepaid USD balance can only be spent on dataset licences.',
+  });
 };
 
 // 更新交易状态
@@ -197,14 +152,9 @@ exports.updateTransactionStatus = async (req, res) => {
       });
     }
 
-    const updatedTransaction = await prisma.organizationTransaction.update({
-      where: { id },
-      data: { status },
-    });
-
-    res.status(200).json({
-      status: 'success',
-      data: updatedTransaction,
+    return res.status(403).json({
+      status: 'fail',
+      message: 'DataDance staff confirm credits. Merchants cannot change transaction status.',
     });
   } catch (error) {
     res.status(500).json({

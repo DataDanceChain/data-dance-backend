@@ -66,6 +66,8 @@ model User {
   procurementAllocations   ProcurementAllocation[]
   pointsRedemptions        PointsRedemption[]
   lifeContextSettings      LifeContextSettings?
+  dataLicenceConsent       DataLicenceConsent?
+  privacyRequests          PrivacyRequest[]
   mcpTokens                McpToken[]
   oauthAuthorizations      OAuthAuthorization[]
   oauthRefreshTokens       OAuthRefreshToken[]
@@ -535,13 +537,15 @@ model DataNFT {
 }
 
 model DataNFTPurchase {
-  id        String   @id @default(uuid())
-  createdAt DateTime @default(now())
-  dataNFTId String
-  buyerId   String
-  quantity  Int      @default(1)
-  buyer     User     @relation(fields: [buyerId], references: [id])
-  dataNFT   DataNFT  @relation(fields: [dataNFTId], references: [id])
+  id                 String    @id @default(uuid())
+  createdAt          DateTime  @default(now())
+  dataNFTId          String
+  buyerId            String
+  quantity           Int       @default(1)
+  licenceAcceptedAt  DateTime?
+  licenceVersion     String?
+  buyer              User      @relation(fields: [buyerId], references: [id])
+  dataNFT            DataNFT   @relation(fields: [dataNFTId], references: [id])
 
   @@index([dataNFTId, buyerId])
 }
@@ -566,19 +570,26 @@ enum AwardStatus {
 }
 
 model LegalEntity {
-  id          String   @id @default(uuid())
-  userId      String   @unique
-  companyName String
-  taxId       String?
-  address     String?
-  country     String?
-  email       String?
-  bankName    String?
-  bankAccount String?
-  currency    String   @default("USD")
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-  user        User     @relation(fields: [userId], references: [id])
+  id               String    @id @default(uuid())
+  userId           String    @unique
+  companyName      String
+  taxId            String?
+  brNumber         String?
+  beneficialOwner  String?
+  address          String?
+  country          String?
+  email            String?
+  bankName         String?
+  bankAccount      String?
+  currency         String    @default("USD")
+  kycStatus        String    @default("incomplete")
+  kycSubmittedAt   DateTime?
+  kycReviewedAt    DateTime?
+  kycReviewedBy    String?
+  kycNote          String?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+  user             User      @relation(fields: [userId], references: [id])
 }
 
 model PurchaseOrder {
@@ -595,6 +606,8 @@ model PurchaseOrder {
   notes          String?
   contractFile         String?
   contractStatus       String          @default("none")
+  licenceAcceptedAt    DateTime?
+  licenceVersion       String?
   dataNFTId            String?
   purchaseId           String?
   attestationHash      String?
@@ -788,6 +801,36 @@ model LifeContextSettings {
   createdAt        DateTime  @default(now())
   updatedAt        DateTime  @updatedAt
   user             User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+/// C-end request to access, correct, or erase personal data (PDPO DPP6).
+model PrivacyRequest {
+  id         String    @id @default(uuid())
+  userId     String
+  kind       String
+  detail     String?
+  status     String    @default("open")
+  opsNote    String?
+  resolvedAt DateTime?
+  resolvedBy String?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@index([status, createdAt])
+}
+
+/// Express consent to license Connect records to business customers (HK PDPO).
+model DataLicenceConsent {
+  userId        String    @id
+  policyVersion String
+  grantedAt     DateTime  @default(now())
+  withdrawnAt   DateTime?
+  source        String    @default("connect")
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
 }
 
 /// Personal access tokens Claude / ChatGPT send as Bearer on /mcp.

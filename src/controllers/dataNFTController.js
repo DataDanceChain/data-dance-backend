@@ -1,6 +1,45 @@
 const { PrismaClient } = require('@prisma/client');
 const prisma = new PrismaClient();
 const commerceService = require('../services/commerceService');
+const { filterLicensableRecords, assertPackHasLicensableRecords } = require('../services/dataLicenceConsent');
+const { BUYER_LICENCE_VERSION, BUYER_LICENCE_TERMS, licenceTerms, hasAcceptedBuyerLicence } = require('../constants/buyerLicence');
+const { stampBuyerLicence } = require('../services/buyerLicence');
+const { resolveLocale, localizeHeaders, csvNotice } = require('../i18n/merchantLocale');
+
+const SUBJECT_CONSENT_ERROR = 'This pack can only include records from people who granted consent in the Wallet app.';
+
+function withoutRecords(nft) {
+  if (!nft) return nft;
+  const { dataRecords, ...rest } = nft;
+  return rest;
+}
+
+function csvCell(value) {
+  const text = value == null ? '' : String(value);
+  if (/[",\n\r]/.test(text)) return `"${text.replace(/"/g, '""')}"`;
+  return text;
+}
+
+function packToCsv(dataNFT, locale = 'en') {
+  const raw = dataNFT?.dataRecords;
+  const records = raw && typeof raw === 'object' ? raw : {};
+  const rows = Array.isArray(records.records)
+    ? records.records
+    : Array.isArray(raw)
+      ? raw
+      : [];
+  if (!rows.length) return null;
+  const headers = Array.isArray(records.headers) && records.headers.length
+    ? records.headers
+    : Object.keys(rows[0] || {});
+  if (!headers.length) return null;
+  const displayHeaders = localizeHeaders(headers, locale);
+  const lines = [
+    displayHeaders.map(csvCell).join(','),
+    ...rows.map((row) => headers.map((key) => csvCell(row?.[key])).join(',')),
+  ];
+  return lines.join('\n');
+}
 
 // Create a DataNFT bundle from snapshots
 const mergeSnapshots = async (req, res) => {
@@ -26,6 +65,21 @@ const mergeSnapshots = async (req, res) => {
 
     if (snapshots.length !== snapshotIds.length) {
       return res.status(400).json({ error: 'Some snapshots not found or not owned by merchant' });
+    }
+
+    const claimRows = snapshots.flatMap((snapshot) => {
+      const claims = snapshot.claims;
+      if (Array.isArray(claims)) return claims;
+      if (claims && Array.isArray(claims.records)) return claims.records;
+      return [];
+    });
+    const licensable = await filterLicensableRecords(claimRows);
+    if (!licensable.length) {
+      return res.status(403).json({
+        status: 'fail',
+        code: 'subject_consent_required',
+        error: SUBJECT_CONSENT_ERROR,
+      });
     }
 
     // Create DataNFT
@@ -123,8 +177,24 @@ const getDataNFTs = async (req, res) => {
       prisma.dataNFT.count({ where })
     ]);
 
+    let listed = dataNFTs;
+    if (allMine !== 'true') {
+      const retireIds = [];
+      for (const nft of dataNFTs) {
+        const check = await assertPackHasLicensableRecords(nft);
+        if (!check.ok) retireIds.push(nft.id);
+      }
+      if (retireIds.length) {
+        await prisma.dataNFT.updateMany({
+          where: { id: { in: retireIds }, isPublished: true },
+          data: { isPublished: false },
+        });
+        listed = dataNFTs.filter((nft) => !retireIds.includes(nft.id));
+      }
+    }
+
     // 为每个 DataNFT 计算 size 字段
-    const dataWithSize = dataNFTs.map(nft => {
+    const dataWithSize = listed.map(nft => {
       let size = 0;
       
       if (nft.dataSource === 'upload' && nft.dataRecords) {
@@ -138,7 +208,7 @@ const getDataNFTs = async (req, res) => {
         size = uniqueUserIds.length;
       }
       
-      return { ...nft, size };
+      return { ...withoutRecords(nft), size };
     });
 
     res.json({
@@ -196,7 +266,7 @@ const getDataNFTById = async (req, res) => {
       size = uniqueUserIds.length;
     }
     
-    res.json({ ...dataNFT, size });
+    res.json({ ...withoutRecords(dataNFT), size });
   } catch (error) {
     console.error('Error fetching DataNFT:', error);
     res.status(500).json({ error: 'Failed to fetch DataNFT' });
@@ -305,6 +375,19 @@ const publishDataNFT = async (req, res) => {
       return res.status(403).json({ error: 'Not authorized to publish this DataNFT' });
     }
 
+    if (dataNFT.dataSource === 'upload') {
+      const raw = dataNFT.dataRecords && typeof dataNFT.dataRecords === 'object' ? dataNFT.dataRecords : {};
+      const rows = Array.isArray(raw.records) ? raw.records : Array.isArray(raw) ? raw : [];
+      const licensable = await filterLicensableRecords(rows);
+      if (!licensable.length) {
+        return res.status(403).json({
+          status: 'fail',
+          code: 'subject_consent_required',
+          error: SUBJECT_CONSENT_ERROR,
+        });
+      }
+    }
+
     const publishedDataNFT = await prisma.dataNFT.update({
       where: { id },
       data: { isPublished: true },
@@ -395,6 +478,15 @@ const purchaseDataNFT = async (req, res) => {
       return res.status(400).json({ error: 'DataNFT is not published' });
     }
 
+    const licence = await assertPackHasLicensableRecords(dataNFT);
+    if (!licence.ok) {
+      return res.status(403).json({
+        status: 'fail',
+        code: 'subject_consent_required',
+        error: SUBJECT_CONSENT_ERROR,
+      });
+    }
+
     if (dataNFT.merchantId === buyerId) {
       console.log('Error: Attempting to purchase own DataNFT', {
         merchantId: dataNFT.merchantId,
@@ -424,22 +516,27 @@ const purchaseDataNFT = async (req, res) => {
       }
     });
     const isOrgBuyer = Boolean(buyer && (buyer.isOrganization || buyer.userType === 'organization'));
-
-    if (isOrgBuyer) {
-      const [depositSum, withdrawSum] = await Promise.all([
-        prisma.organizationTransaction.aggregate({
-          _sum: { amount: true },
-          where: { userId: buyerId, type: 'DEPOSIT', status: 'COMPLETED' }
-        }),
-        prisma.organizationTransaction.aggregate({
-          _sum: { amount: true },
-          where: { userId: buyerId, type: 'WITHDRAW', status: 'COMPLETED' }
-        })
-      ]);
-      const balance = (depositSum._sum.amount || 0) - (withdrawSum._sum.amount || 0);
-      if (balance < totalAmount) {
-        return res.status(400).json({ error: 'Insufficient balance to complete this purchase.' });
-      }
+    if (!isOrgBuyer) {
+      return res.status(403).json({
+        status: 'fail',
+        code: 'org_buyer_required',
+        error: 'Only a merchant account can buy a dataset licence.',
+        message: 'Only a merchant account can buy a dataset licence.',
+      });
+    }
+    const [depositSum, withdrawSum] = await Promise.all([
+      prisma.organizationTransaction.aggregate({
+        _sum: { amount: true },
+        where: { userId: buyerId, type: 'DEPOSIT', status: 'COMPLETED' }
+      }),
+      prisma.organizationTransaction.aggregate({
+        _sum: { amount: true },
+        where: { userId: buyerId, type: 'WITHDRAW', status: 'COMPLETED' }
+      })
+    ]);
+    const balance = (depositSum._sum.amount || 0) - (withdrawSum._sum.amount || 0);
+    if (balance < totalAmount) {
+      return res.status(400).json({ error: 'Insufficient balance to complete this purchase.' });
     }
 
     const result = await prisma.$transaction(async (tx) => {
@@ -475,24 +572,21 @@ const purchaseDataNFT = async (req, res) => {
         }
       });
 
-      let buyerTransaction = null;
-      if (isOrgBuyer) {
-        buyerTransaction = await tx.organizationTransaction.create({
-          data: {
-            amount: totalAmount,
-            type: 'WITHDRAW',
-            status: 'COMPLETED',
-            description: `Purchase DataNFT: ${dataNFT.name} (Purchase #${purchaseCount + 1}, quantity: ${quantity})`,
-            userId: buyerId,
-            metadata: {
-              dataNFTId: dataNFT.id,
-              merchantId: dataNFT.merchantId,
-              purchaseCount: purchaseCount + 1,
-              quantity
-            }
+      const buyerTransaction = await tx.organizationTransaction.create({
+        data: {
+          amount: totalAmount,
+          type: 'WITHDRAW',
+          status: 'COMPLETED',
+          description: `Purchase DataNFT: ${dataNFT.name} (Purchase #${purchaseCount + 1}, quantity: ${quantity})`,
+          userId: buyerId,
+          metadata: {
+            dataNFTId: dataNFT.id,
+            merchantId: dataNFT.merchantId,
+            purchaseCount: purchaseCount + 1,
+            quantity
           }
-        });
-      }
+        }
+      });
 
       const commerce = await commerceService.createOrderFromPurchase(tx, {
         buyerId,
@@ -501,8 +595,8 @@ const purchaseDataNFT = async (req, res) => {
         purchase,
         quantity,
         totalAmount,
-        paidFromBalance: isOrgBuyer,
-        organizationTransactionId: buyerTransaction?.id,
+        paidFromBalance: true,
+        organizationTransactionId: buyerTransaction.id,
       });
 
       return { purchase, commerce };
@@ -519,6 +613,14 @@ const purchaseDataNFT = async (req, res) => {
       status: 'success'
     });
   } catch (error) {
+    if (error.statusCode && error.statusCode < 500) {
+      return res.status(error.statusCode).json({
+        status: 'fail',
+        code: error.code,
+        error: error.message,
+        message: error.message,
+      });
+    }
     console.error('Error in purchaseDataNFT:', {
       message: error.message,
       code: error.code,
@@ -629,7 +731,13 @@ const getPurchasedDataNFTs = async (req, res) => {
     }
 
     res.json({
-      data: purchases,
+      data: purchases.map((purchase) => ({
+        ...purchase,
+        dataNFT: withoutRecords(purchase.dataNFT),
+        licenceAccepted: hasAcceptedBuyerLicence(purchase),
+        buyerLicenceVersion: BUYER_LICENCE_VERSION,
+        buyerLicenceTerms: BUYER_LICENCE_TERMS,
+      })),
       pagination: {
         total,
         page: parseInt(page),
@@ -640,6 +748,69 @@ const getPurchasedDataNFTs = async (req, res) => {
   } catch (error) {
     console.error('Error fetching purchased DataNFTs:', error);
     res.status(500).json({ error: 'Failed to fetch purchased DataNFTs' });
+  }
+};
+
+const exportPurchasedDataNFT = async (req, res) => {
+  try {
+    const purchase = await prisma.dataNFTPurchase.findFirst({
+      where: { id: req.params.purchaseId, buyerId: req.user.id },
+      include: { dataNFT: true },
+    });
+    if (!purchase?.dataNFT) {
+      return res.status(404).json({ error: 'Purchase not found' });
+    }
+    if (!hasAcceptedBuyerLicence(purchase)) {
+      return res.status(403).json({
+        status: 'fail',
+        code: 'buyer_licence_required',
+        error: 'Accept the buyer licence before download.',
+        licenceVersion: BUYER_LICENCE_VERSION,
+        buyerLicenceTerms: BUYER_LICENCE_TERMS,
+      });
+    }
+
+    const raw = purchase.dataNFT.dataRecords && typeof purchase.dataNFT.dataRecords === 'object'
+      ? purchase.dataNFT.dataRecords
+      : {};
+    const rows = Array.isArray(raw.records) ? raw.records : Array.isArray(raw) ? raw : [];
+    const licensable = await filterLicensableRecords(rows);
+    if (!licensable.length) {
+      return res.status(403).json({
+        status: 'fail',
+        code: 'subject_consent_required',
+        error: SUBJECT_CONSENT_ERROR,
+      });
+    }
+    const csv = packToCsv({
+      ...purchase.dataNFT,
+      dataRecords: {
+        ...raw,
+        records: licensable,
+        recordCount: licensable.length,
+        headers: Array.isArray(raw.headers) && raw.headers.length
+          ? raw.headers
+          : Object.keys(licensable[0] || {}),
+      },
+    });
+    if (!csv) {
+      return res.status(404).json({ error: 'This pack has no downloadable table yet.' });
+    }
+
+    const safeName = String(purchase.dataNFT.name || 'data-pack').replace(/[^\w.-]+/g, '_');
+    const buyer = req.user?.email || req.user?.id || 'buyer';
+    const notice = [
+      `# DataDance buyer licence ${BUYER_LICENCE_VERSION}`,
+      `# buyer=${buyer}; purchase=${purchase.id}; purpose=analysis-and-research; direct-marketing=no`,
+    ].join('\n');
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${safeName}.csv"`);
+    res.setHeader('X-Licence-Purpose', 'analysis-research; no-direct-marketing');
+    res.setHeader('X-Licence-Version', BUYER_LICENCE_VERSION);
+    return res.send(`\uFEFF${notice}\n${csv}`);
+  } catch (error) {
+    console.error('Error exporting purchased DataNFT:', error);
+    return res.status(500).json({ error: 'Failed to export data pack' });
   }
 };
 
@@ -713,6 +884,36 @@ const getDataNFTHolders = async (req, res) => {
   }
 };
 
+const acceptPurchasedLicence = async (req, res) => {
+  try {
+    if (req.body?.accepted !== true) {
+      return res.status(400).json({
+        status: 'fail',
+        error: 'Accept the buyer licence to continue.',
+      });
+    }
+    const stamped = await stampBuyerLicence({
+      purchaseId: req.params.purchaseId,
+      buyerId: req.user.id,
+    });
+    if (!stamped) {
+      return res.status(404).json({ error: 'Purchase not found' });
+    }
+    return res.json({
+      status: 'success',
+      data: {
+        licenceAccepted: true,
+        licenceVersion: BUYER_LICENCE_VERSION,
+        licenceAcceptedAt: stamped.licenceAcceptedAt,
+        buyerLicenceTerms: BUYER_LICENCE_TERMS,
+      },
+    });
+  } catch (error) {
+    console.error('Error accepting buyer licence:', error);
+    return res.status(500).json({ error: 'Failed to accept buyer licence' });
+  }
+};
+
 module.exports = {
   mergeSnapshots,
   getDataNFTs,
@@ -724,5 +925,7 @@ module.exports = {
   purchaseDataNFT,
   getDataNFTsByMerchant,
   getPurchasedDataNFTs,
+  exportPurchasedDataNFT,
+  acceptPurchasedLicence,
   getDataNFTHolders
 }; 
