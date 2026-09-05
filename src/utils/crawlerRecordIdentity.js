@@ -1,13 +1,17 @@
 /**
  * Connect Earn identity after the Wallet client extracts and cleans rows.
  * Catalog uploads (shop / social / travel / life) are title-first (order
- * id optional). Core platforms keep their official ids so existing Amazon /
- * Luma / Airbnb / Booking sourceId values stay stable.
+ * id optional). Core Luma / Airbnb / Booking keep official ids when present;
+ * client-smoothed generic fallbacks may use a title: key. Amazon stays
+ * official-id only.
  */
 
 const { isCatalogCrawlerSource } = require('../constants/crawlerSources');
 
 const TITLE_BACKED_PREFIX = 'title:';
+
+/** Core hosts that may fall back to title: when the client sent a smoothed row. */
+const TITLE_BACKED_SMOOTHED_CORE = new Set(['luma', 'airbnb', 'booking']);
 
 function asRecord(value) {
   return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
@@ -32,6 +36,7 @@ function payloadTitle(payload) {
       row.eventName ||
       row.caption ||
       row.text ||
+      row.handle ||
       '',
   );
 }
@@ -87,17 +92,24 @@ function sourceIdentityKey(source, sourceId) {
   return `${source}:${sourceId}`;
 }
 
+function allowsTitleBackedIdentity(source, metadata = {}) {
+  if (isCatalogCrawlerSource(source)) return true;
+  if (!TITLE_BACKED_SMOOTHED_CORE.has(source)) return false;
+  return isClientSmoothedRecord({ source, metadata });
+}
+
 /**
  * Dedup key matching the client after clean: host + orderId / title / date.
  * Official ids stay unprefixed so already-stored Amazon (and other core)
- * sourceId values keep matching. Title-only catalog rows use a title: key
- * that is unique per host, not globally across sources.
+ * sourceId values keep matching. Title-only catalog rows and smoothed
+ * Luma / Airbnb / Booking generic fallbacks use a title: key unique per
+ * host (not collapsed into amazon).
  */
 function extractSourceId(source, payload, metadata = {}) {
   const official = officialRecordId(source, payload);
   if (official) return official;
 
-  if (!isCatalogCrawlerSource(source)) return null;
+  if (!allowsTitleBackedIdentity(source, metadata)) return null;
 
   const title = payloadTitle(payload);
   if (!title) return null;

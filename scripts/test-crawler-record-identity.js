@@ -86,6 +86,15 @@ const amazonMissing = validateDataItem({
   metadata: { sourceUrl: 'https://www.amazon.com/your-orders' },
 });
 assert.ok(amazonMissing.errors.some((row) => /orderid/i.test(row)));
+assert.strictEqual(
+  extractSourceId(
+    'amazon',
+    { title: 'Headphones' },
+    { extract: 'generic', cleaned: true, host: 'amazon.com' },
+  ),
+  null,
+  'amazon stays official-id only even when client-smoothed',
+);
 
 const sheinValid = validateDataItem(titleOnly);
 assert.deepStrictEqual(sheinValid.errors, []);
@@ -151,6 +160,42 @@ assert.strictEqual(
 );
 assert.ok(calculateDataQuality(socialTitleOnly).score >= 50);
 assert.strictEqual(isClientSmoothedRecord(socialTitleOnly), true);
+
+const smoothedAirbnbTitleOnly = {
+  source: 'airbnb',
+  type: 'trip',
+  timestamp: '2026-09-05T00:00:00.000Z',
+  payload: { title: 'Beach house stay', date: '2026-06-01' },
+  metadata: {
+    sourceUrl: 'https://www.airbnb.com/trips/v1',
+    host: 'airbnb.com',
+    extract: 'generic',
+    cleaned: true,
+  },
+};
+assert.strictEqual(isClientSmoothedRecord(smoothedAirbnbTitleOnly), true);
+assert.strictEqual(
+  extractSourceId(
+    'airbnb',
+    smoothedAirbnbTitleOnly.payload,
+    smoothedAirbnbTitleOnly.metadata,
+  ),
+  'title:airbnb.com:beach house stay:2026-06-01',
+);
+assert.deepStrictEqual(validateDataItem(smoothedAirbnbTitleOnly).errors, []);
+assert.strictEqual(
+  extractSourceId('airbnb', { title: 'Beach house stay', date: '2026-06-01' }, {}),
+  null,
+  'unsmoothed airbnb without tripId stays official-id only',
+);
+assert.strictEqual(
+  extractSourceId(
+    'airbnb',
+    { title: 'Beach house stay', tripId: 'HMABC123', date: '2026-06-01' },
+    smoothedAirbnbTitleOnly.metadata,
+  ),
+  'HMABC123',
+);
 
 const twitterAlias = {
   ...socialTitleOnly,

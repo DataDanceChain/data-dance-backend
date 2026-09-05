@@ -20,7 +20,7 @@
 | GET | `/api/crawler-tasks` | 任务列表，query: `source`、`status`、`search`、`page`、`limit`（最大 100） |
 | POST | `/api/crawler-tasks` | 创建任务，body 可带 `source`、`taskId` |
 | GET | `/api/crawler-tasks/:taskId/data` | 某任务下的数据列表，query: `page`、`limit`（最大 100） |
-| POST | `/api/upload` | 上传数据，每条可带 `taskId` 归属到对应任务 |
+| POST | `/api/crawler/upload` | 上传数据，每条可带 `taskId` 归属到对应任务 |
 
 **约定**：Base URL 以项目/环境配置为准；鉴权统一用请求头 `Authorization: Bearer <token>`。错误响应格式统一为 `{ "status": "error", "message": "..." }`，必要时带 `details` 或 `data`。
 
@@ -261,7 +261,7 @@
 
 ## 四、上传接口（后端接收）与任务 id、分数归集
 
-**接口**: `POST /api/upload`  
+**接口**: `POST /api/crawler/upload`  
 **鉴权**: 需要登录。  
 **Body**: `{ "data": [ item1, item2, ... ] }` 或直接 `[ item1, item2, ... ]`
 
@@ -269,10 +269,10 @@
 
 ```json
 {
-  "source": "amazon|luma|airbnb|booking",
-  "type": "order|product|event|trip|booking|...",
+  "source": "amazon|luma|airbnb|booking|shein|instagram|expedia|uber|...",
+  "type": "order|product|event|trip|booking|post|...",
   "timestamp": "ISO8601",
-  "metadata": { "sourceUrl": "..." },
+  "metadata": { "sourceUrl": "...", "host": "...", "extract": "generic", "cleaned": true },
   "payload": { ... },
   "taskId": "airbnb_current_trips"
 }
@@ -280,7 +280,9 @@
 
 - **source** / **type** / **payload** 必填；**metadata** 建议含 `sourceUrl`。
 - **taskId**（可选）：任务模板 id，如 `luma_events`、`airbnb_trips`、`airbnb_current_trips`、`booking_past_bookings`、`amazon_orders`。带上后，本条数据会归到该任务下，该任务的 **recordCount** 与奖 progress（doneCount）会正确累加；不传则按该 source 的第一个任务归集（兼容旧行为）。
-- Amazon 必须带 `payload.orderid` 或 `payload.orderId`。
+- Amazon 必须带 `payload.orderid` 或 `payload.orderId`（no title-only fallback）。
+- Catalog shop / social / travel / life：title-backed identity `title:host:title:date` when official id missing。
+- Smoothed Luma / Airbnb / Booking (`metadata.extract=generic` or `cleaned=true`) may also use title-backed identity; Amazon does not.
 - Luma 建议带 `payload.eventId` 或 `taskId` 或 `id` 之一。
 
 **任务 id 与分数归集**:
@@ -305,9 +307,9 @@
 
 去重规则:
 
-- **Amazon**: 按 `orderid`/`orderId`。
-- **Luma**: 按 `eventId` → `taskId` → `id`。
-- **Airbnb / Booking**: 当前无后端专用 sourceId 提取，按 contentHash 等通用去重。
+- **Amazon**: 按 `orderid`/`orderId` only。
+- **Luma / Airbnb / Booking**: official id when present; smoothed generic rows may use `title:host:title:date`。
+- **Catalog** (shop / social / travel / life): official id when present, else title-backed `title:host:title:date`（sources stay distinct; never collapsed into amazon）。
 
 ---
 
@@ -316,8 +318,9 @@
 | source | taskId | type 建议 | payload 必填/建议 | 唯一标识（后端用） |
 |--------|--------|-----------|-------------------|--------------------|
 | amazon | amazon_orders | order / product | orderid 必填；title, price, currency 建议 | orderid / orderId |
-| luma | luma_events | event | eventId/taskId/id 建议；title, date 建议 | eventId → taskId → id |
-| airbnb | airbnb_trips / airbnb_current_trips | trip | 无强制；建议 id、标题、日期 | 无专用，靠 contentHash |
-| booking | booking_past_bookings | booking | 无强制；建议 id、标题、日期 | 无专用，靠 contentHash |
+| luma | luma_events | event | eventId/taskId/id 建议；title, date 建议 | eventId → taskId → id；smoothed title fallback |
+| airbnb | airbnb_trips / airbnb_current_trips | trip | 建议 tripId/id、标题、日期 | tripId / id；smoothed title fallback |
+| booking | booking_past_bookings | booking | 建议 bookingId/id、标题、日期 | bookingId / id；smoothed title fallback |
+| catalog | per-source templates | order / post / trip / … | title（or order id） | title:host:title:date |
 
-所有任务的数据在 **GET 任务列表** 和 **GET 任务数据** 中均使用上述结构；**POST /api/upload** 也按同一 payload/metadata 格式提交即可。
+所有任务的数据在 **GET 任务列表** 和 **GET 任务数据** 中均使用上述结构；**POST /api/crawler/upload** 也按同一 payload/metadata 格式提交即可。
