@@ -1,0 +1,1 @@
+[{"anonymous":false,"inputs":[{"indexed":true,"internalType":"bytes32","name":"hash","type":"bytes32"},{"indexed":true,"internalType":"address","name":"sender","type":"address"}],"name":"Attested","type":"event"},{"inputs":[{"internalType":"bytes32","name":"hash","type":"bytes32"}],"name":"attest","outputs":[],"stateMutability":"nonpayable","type":"function"}]

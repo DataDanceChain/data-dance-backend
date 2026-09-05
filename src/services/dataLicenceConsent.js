@@ -78,15 +78,22 @@ function recordEmail(record) {
   return key ? String(record[key] || '').trim().toLowerCase() : '';
 }
 
+const EMAIL_LOOKUP_CHUNK = 80;
+
 async function consentedEmailSet(emails = []) {
   const normalized = [...new Set(emails.map((email) => String(email || '').trim().toLowerCase()).filter(Boolean))];
   if (!normalized.length) return new Set();
-  const users = await prisma.user.findMany({
-    where: {
-      OR: normalized.map((email) => ({ email: { equals: email, mode: 'insensitive' } })),
-    },
-    select: { id: true, email: true },
-  });
+  const users = [];
+  for (let i = 0; i < normalized.length; i += EMAIL_LOOKUP_CHUNK) {
+    const chunk = normalized.slice(i, i + EMAIL_LOOKUP_CHUNK);
+    const found = await prisma.user.findMany({
+      where: {
+        OR: chunk.map((email) => ({ email: { equals: email, mode: 'insensitive' } })),
+      },
+      select: { id: true, email: true },
+    });
+    users.push(...found);
+  }
   const allowedIds = await consentedUserIdSet(users.map((user) => user.id));
   return new Set(
     users
@@ -102,13 +109,22 @@ function recordsFromPack(dataNFT) {
   return [];
 }
 
+function isMerchantUploadPack(dataNFT) {
+  return dataNFT?.dataSource === 'upload';
+}
+
 async function assertPackHasLicensableRecords(dataNFT) {
   const rows = recordsFromPack(dataNFT);
-  if (dataNFT?.dataSource === 'upload' || rows.length) {
-    const licensable = await filterLicensableRecords(rows);
-    return { ok: licensable.length > 0, licensable };
+  // Merchant-uploaded market datasets are the seller's product. C-end Wallet
+  // consent applies to connect/activity subject records, not export CSVs.
+  if (isMerchantUploadPack(dataNFT)) {
+    return { ok: rows.length > 0, licensable: rows };
   }
-  return { ok: true, licensable: [] };
+  if (!rows.length) {
+    return { ok: true, licensable: [] };
+  }
+  const licensable = await filterLicensableRecords(rows);
+  return { ok: licensable.length > 0, licensable };
 }
 
 async function filterLicensableRecords(records = []) {
@@ -138,6 +154,7 @@ module.exports = {
   consentedEmailSet,
   filterLicensableRecords,
   recordsFromPack,
+  isMerchantUploadPack,
   assertPackHasLicensableRecords,
   recordEmail,
 };

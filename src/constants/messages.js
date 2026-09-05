@@ -2,11 +2,13 @@
 
 const CRAWLER_MESSAGES = {
   // Validation errors
-  INVALID_SOURCE: 'Data source must be amazon, luma, airbnb, or booking',
+  INVALID_SOURCE: 'Data source must be a supported Connect source',
   INVALID_TYPE: 'Data type cannot be empty',
   INVALID_PAYLOAD: 'Payload data must be a valid object',
   AMAZON_ORDERID_REQUIRED: 'Amazon data must include orderid field',
   AMAZON_ORDER_FORMAT_WARNING: 'Amazon order ID format should be: 123-1234567-1234567',
+  SHOP_IDENTITY_REQUIRED: 'Shop records need an order id or a title',
+  CONNECT_IDENTITY_REQUIRED: 'Connect records need an order id or a title',
   
   // Suggestions
   SUGGEST_TITLE: 'Product title is recommended',

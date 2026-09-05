@@ -3,6 +3,21 @@ const { createLogger } = require('../utils/logger');
 const crypto = require('crypto');
 const { calculateAmazonDataPoints, calculateDataPoints } = require('./businessRulesService');
 const { CRAWLER_MESSAGES } = require('../constants/messages');
+const {
+  CORE_SOURCES,
+  isAcceptedCrawlerSource,
+  isCatalogCrawlerSource,
+  normalizeCrawlerSource,
+  catalogTaskTemplates,
+} = require('../constants/crawlerSources');
+const {
+  calculateDataQuality,
+  extractSourceId,
+  hasRecordIdentity,
+  isClientSmoothedRecord,
+  isTitleBackedSourceId,
+  sourceIdentityKey,
+} = require('../utils/crawlerRecordIdentity');
 const { distributeUplineRewards } = require('./distributionService');
 const {
   SUMMER_TRAVEL_2026,
@@ -72,17 +87,18 @@ const TASK_TEMPLATES = {
       origin: 'https://secure.booking.com',
       path: '/mytrips.en-gb.html'
     }
-  ]
+  ],
+  ...catalogTaskTemplates(),
 };
 
 // Helper function to get all task templates for a source
 function getTaskTemplatesForSource(source) {
-  return TASK_TEMPLATES[source] || [];
+  return TASK_TEMPLATES[normalizeCrawlerSource(source)] || [];
 }
 
 // Helper function to get a specific task template by source and taskId
 function getTaskTemplate(source, taskId) {
-  const templates = TASK_TEMPLATES[source] || [];
+  const templates = TASK_TEMPLATES[normalizeCrawlerSource(source)] || [];
   return templates.find(t => t.taskId === taskId) || templates[0];
 }
 
@@ -96,7 +112,7 @@ const LIMITS = {
  * Initialize default crawler tasks for a new user
  */
 async function initializeDefaultTasks(userId) {
-  const sources = ['amazon', 'luma', 'airbnb', 'booking'];
+  const sources = CORE_SOURCES;
   const tasks = [];
   
   for (const source of sources) {
@@ -148,7 +164,7 @@ async function getCrawlerTasks(userId, filters = {}) {
 
   // Build where clause
   const where = { userId };
-  if (source) where.source = source;
+  if (source) where.source = normalizeCrawlerSource(source);
   if (status) where.status = status;
   if (search) {
     where.OR = [
@@ -210,10 +226,11 @@ async function getCrawlerTasks(userId, filters = {}) {
 /**
  * Create or get existing crawler task for user
  * @param {string} userId - User ID
- * @param {string} source - Data source (amazon, luma, airbnb, booking)
+ * @param {string} source - Data source (accepted Connect source)
  * @param {string} taskId - Optional task ID to get specific task (e.g., 'airbnb_trips', 'booking_past_trips')
  */
 async function getOrCreateCrawlerTask(userId, source, taskId = null) {
+  source = normalizeCrawlerSource(source);
   // Get task template
   const template = taskId 
     ? getTaskTemplate(source, taskId)
@@ -264,7 +281,7 @@ async function getOrCreateCrawlerTask(userId, source, taskId = null) {
  * Get or create user tasks for all sources
  */
 async function getOrCreateUserTasks(userId) {
-  const sources = ['amazon', 'luma', 'airbnb', 'booking'];
+  const sources = CORE_SOURCES;
   const tasks = [];
 
   for (const source of sources) {
@@ -302,8 +319,12 @@ function validateDataItem(item) {
   const errors = [];
   const warnings = [];
 
+  if (item && item.source) {
+    item.source = normalizeCrawlerSource(item.source);
+  }
+
   // Basic validation
-  if (!item.source || !['amazon', 'luma', 'airbnb', 'booking'].includes(item.source)) {
+  if (!item.source || !isAcceptedCrawlerSource(item.source)) {
     errors.push(CRAWLER_MESSAGES.INVALID_SOURCE);
   }
 
@@ -315,39 +336,44 @@ function validateDataItem(item) {
     errors.push(CRAWLER_MESSAGES.INVALID_PAYLOAD);
   }
 
+  const payload = item.payload && typeof item.payload === 'object' ? item.payload : {};
+
   // Amazon-specific validation
   if (item.source === 'amazon') {
     // orderid is now a required field
-    if (!item.payload.orderid && !item.payload.orderId) {
+    if (!payload.orderid && !payload.orderId) {
       errors.push(CRAWLER_MESSAGES.AMAZON_ORDERID_REQUIRED);
     }
     
     // Validate orderid format (Amazon order ID format: 123-1234567-1234567)
-    const orderid = item.payload.orderid || item.payload.orderId;
+    const orderid = payload.orderid || payload.orderId;
     if (orderid && !/^\d{3}-\d{7}-\d{7}$/.test(orderid)) {
       warnings.push(CRAWLER_MESSAGES.AMAZON_ORDER_FORMAT_WARNING);
     }
 
     if (item.type === 'order' || item.type === 'product') {
-      if (!item.payload.title) {
+      if (!payload.title) {
         warnings.push(CRAWLER_MESSAGES.SUGGEST_TITLE);
       }
-      if (!item.payload.price) {
+      if (!payload.price) {
         warnings.push(CRAWLER_MESSAGES.SUGGEST_PRICE);
       }
-      if (item.payload.price && !item.payload.currency) {
+      if (payload.price && !payload.currency) {
         warnings.push(CRAWLER_MESSAGES.SUGGEST_CURRENCY);
       }
     }
+  } else if (isCatalogCrawlerSource(item.source) && !hasRecordIdentity(item.source, payload)) {
+    // Client Earn upload already dropped dirty rows; accept title-only catalog shapes.
+    errors.push(CRAWLER_MESSAGES.CONNECT_IDENTITY_REQUIRED);
   }
 
   // Luma-specific validation
   if (item.source === 'luma') {
-    if (!item.payload.eventId && !item.payload.taskId && !item.payload.id) {
+    if (!payload.eventId && !payload.taskId && !payload.id) {
       warnings.push(CRAWLER_MESSAGES.SUGGEST_LUMA_ID);
     }
 
-    if (!item.payload.title) {
+    if (!payload.title) {
       warnings.push(CRAWLER_MESSAGES.SUGGEST_TITLE);
     }
   }
@@ -357,9 +383,10 @@ function validateDataItem(item) {
     warnings.push(CRAWLER_MESSAGES.SUGGEST_SOURCE_URL);
   }
 
-  // Calculate quality score
+  // Calculate quality score. Client-smoothed shop rows are not Amazon HTML —
+  // do not warn for missing Amazon-only fields once a title or order id exists.
   const quality = calculateDataQuality(item);
-  if (quality.score < 50) {
+  if (quality.score < 50 && !(isClientSmoothedRecord(item) && quality.details.hasOfficialId)) {
     warnings.push(CRAWLER_MESSAGES.LOW_QUALITY_SCORE(quality.score));
   }
 
@@ -447,7 +474,7 @@ async function uploadCrawlerData(data, userId) {
       
       // Generate content hash and source ID
       item.contentHash = generateContentHash(item.payload);
-      item.sourceId = extractSourceId(item.source, item.payload);
+      item.sourceId = extractSourceId(item.source, item.payload, item.metadata);
       item.originalIndex = i;
       
       preValidatedItems.push(item);
@@ -500,22 +527,33 @@ async function uploadCrawlerData(data, userId) {
       // Check for duplicates inside transaction
       const validItems = [];
       const duplicates = [];
-      const sourceIdsToCheck = preValidatedItems
-        .filter(item => item.sourceId)
-        .map(item => item.sourceId);
+      const officialPairs = preValidatedItems
+        .filter((item) => item.sourceId && !isTitleBackedSourceId(item.sourceId))
+        .map((item) => ({ source: item.source, sourceId: item.sourceId }));
+      const titlePairs = preValidatedItems
+        .filter((item) => isTitleBackedSourceId(item.sourceId))
+        .map((item) => ({ source: item.source, sourceId: item.sourceId }));
       const contentHashesToCheck = preValidatedItems.map(item => item.contentHash);
       
-      // Batch check for existing duplicates
-      console.log(`[DEBUG] Checking for duplicates - sourceIds: [${sourceIdsToCheck.join(', ')}]`);
-      console.log(`[DEBUG] Checking ${contentHashesToCheck.length} content hashes`);
-      
-      // sourceId check is global (same order/trip should not be submitted by different accounts)
-      // contentHash check is per-user (same content structure from different users is expected)
-      const [existingBySourceId, existingByHash] = await Promise.all([
-        sourceIdsToCheck.length > 0
+      // Official ids are global within a source (same SHEIN order cannot be
+      // claimed twice). Title-backed shop ids and content hashes are per-user
+      // so two people buying "Linen shirt" do not collide.
+      const [existingOfficial, existingTitle, existingByHash] = await Promise.all([
+        officialPairs.length > 0
           ? tx.crawlerData.findMany({
-              where: { sourceId: { in: sourceIdsToCheck } },
-              select: { sourceId: true }
+              where: {
+                OR: officialPairs.map(({ source, sourceId }) => ({ source, sourceId })),
+              },
+              select: { source: true, sourceId: true },
+            })
+          : [],
+        titlePairs.length > 0
+          ? tx.crawlerData.findMany({
+              where: {
+                userId,
+                OR: titlePairs.map(({ source, sourceId }) => ({ source, sourceId })),
+              },
+              select: { source: true, sourceId: true },
             })
           : [],
         tx.crawlerData.findMany({
@@ -523,21 +561,30 @@ async function uploadCrawlerData(data, userId) {
           select: { contentHash: true }
         })
       ]);
-      const existingData = [
-        ...existingBySourceId.map(d => ({ sourceId: d.sourceId, contentHash: null })),
-        ...existingByHash.map(d => ({ sourceId: null, contentHash: d.contentHash }))
-      ];
       
-      console.log(`[DEBUG] Found ${existingData.length} existing records:`, existingData);
-      
-      const existingSourceIds = new Set(existingData.map(d => d.sourceId).filter(Boolean));
-      const existingHashes = new Set(existingData.map(d => d.contentHash));
+      const existingOfficialKeys = new Set(
+        existingOfficial.map((row) => sourceIdentityKey(row.source, row.sourceId)),
+      );
+      const existingTitleKeys = new Set(
+        existingTitle.map((row) => sourceIdentityKey(row.source, row.sourceId)),
+      );
+      const existingHashes = new Set(existingByHash.map((row) => row.contentHash));
+      const seenSourceKeys = new Set();
+      const seenHashes = new Set();
       
       // Filter out duplicates
       for (const item of preValidatedItems) {
-        if ((item.sourceId && existingSourceIds.has(item.sourceId)) || 
-            existingHashes.has(item.contentHash)) {
-          const duplicateType = item.sourceId && existingSourceIds.has(item.sourceId) ? 'order' : 'content';
+        const identityKey = sourceIdentityKey(item.source, item.sourceId);
+        const officialHit =
+          item.sourceId &&
+          !isTitleBackedSourceId(item.sourceId) &&
+          (existingOfficialKeys.has(identityKey) || seenSourceKeys.has(identityKey));
+        const titleHit =
+          isTitleBackedSourceId(item.sourceId) &&
+          (existingTitleKeys.has(identityKey) || seenSourceKeys.has(identityKey));
+        const hashHit = existingHashes.has(item.contentHash) || seenHashes.has(item.contentHash);
+        if (officialHit || titleHit || hashHit) {
+          const duplicateType = officialHit || titleHit ? 'order' : 'content';
           duplicates.push({
             index: item.originalIndex,
             reason: 'duplicate_data',
@@ -548,6 +595,8 @@ async function uploadCrawlerData(data, userId) {
             contentHash: item.contentHash
           });
         } else {
+          if (identityKey) seenSourceKeys.add(identityKey);
+          seenHashes.add(item.contentHash);
           validItems.push(item);
         }
       }
@@ -910,29 +959,6 @@ function normalizeObject(obj) {
 }
 
 /**
- * Extract source-specific ID from payload data
- */
-function extractSourceId(source, payload) {
-  if (source === 'amazon') {
-    // Amazon now only uses orderid as unique identifier
-    return payload.orderid || payload.orderId || null;
-  } else if (source === 'luma') {
-    // Luma identifier priority: eventId > taskId > id
-    return payload.eventId || 
-           payload.taskId || 
-           payload.id ||
-           null;
-  } else if (source === 'airbnb') {
-    // Airbnb uses tripId as unique identifier (e.g. "2023-Singapore-15 – 18 Sep 2023")
-    return payload.tripId || null;
-  } else if (source === 'booking') {
-    // Booking uses bookingId as unique identifier (e.g. "Hotel Scheuble-10 Oct 2019")
-    return payload.bookingId || null;
-  }
-  return null;
-}
-
-/**
  * Check for duplicate data before upload
  */
 async function checkDuplicates(items, userId) {
@@ -991,7 +1017,7 @@ async function checkDuplicates(items, userId) {
 
     // Generate content hash and extract source ID
     currentItem.contentHash = generateContentHash(currentItem.payload);
-    currentItem.sourceId = extractSourceId(currentItem.source, currentItem.payload);
+    currentItem.sourceId = extractSourceId(currentItem.source, currentItem.payload, currentItem.metadata);
     currentItem.originalIndex = i; // Save original index
 
     // Check for duplicates with previous items
@@ -1019,9 +1045,12 @@ async function checkDuplicates(items, userId) {
   // 2. Check duplicates against existing database data
   if (validItems.length > 0) {
     const contentHashes = validItems.map(item => item.contentHash);
-    const sourceIds = validItems
-      .filter(item => item.sourceId)
-      .map(item => ({ source: item.source, sourceId: item.sourceId }));
+    const officialSourceIds = validItems
+      .filter((item) => item.sourceId && !isTitleBackedSourceId(item.sourceId))
+      .map((item) => ({ source: item.source, sourceId: item.sourceId }));
+    const titleSourceIds = validItems
+      .filter((item) => isTitleBackedSourceId(item.sourceId))
+      .map((item) => ({ source: item.source, sourceId: item.sourceId }));
 
     // Query possible duplicates
     const existingByHash = await prisma.crawlerData.findMany({
@@ -1031,15 +1060,25 @@ async function checkDuplicates(items, userId) {
       select: { contentHash: true, userId: true, createdAt: true }
     });
 
-    // sourceId check is global: same order/trip/booking should not be submitted by any user
-    const existingBySourceId = sourceIds.length > 0 ? await prisma.crawlerData.findMany({
+    // Official ids are global within a source. Title-backed shop ids are per-user.
+    const existingBySourceId = officialSourceIds.length > 0 ? await prisma.crawlerData.findMany({
       where: {
-        OR: sourceIds.map(({ source, sourceId }) => ({
+        OR: officialSourceIds.map(({ source, sourceId }) => ({
           source: source,
           sourceId: sourceId
         }))
       },
       select: { source: true, sourceId: true, userId: true, createdAt: true }
+    }) : [];
+    const existingTitleBySourceId = titleSourceIds.length > 0 ? await prisma.crawlerData.findMany({
+      where: {
+        userId,
+        OR: titleSourceIds.map(({ source, sourceId }) => ({
+          source,
+          sourceId,
+        })),
+      },
+      select: { source: true, sourceId: true, userId: true, createdAt: true },
     }) : [];
 
     // Mark database duplicates
@@ -1066,7 +1105,10 @@ async function checkDuplicates(items, userId) {
 
       // Check source ID duplicates
       if (!isDuplicate && item.sourceId) {
-        const sourceIdDuplicate = existingBySourceId.find(existing =>
+        const sourcePool = isTitleBackedSourceId(item.sourceId)
+          ? existingTitleBySourceId
+          : existingBySourceId;
+        const sourceIdDuplicate = sourcePool.find((existing) =>
           existing.source === item.source && existing.sourceId === item.sourceId
         );
         
@@ -1099,60 +1141,6 @@ async function checkDuplicates(items, userId) {
     duplicates,
     qualityReports 
   };
-}
-
-// Data quality scoring system
-function calculateDataQuality(item) {
-  let score = 0;
-  let details = {
-    hasOfficialId: false,
-    hasMetadata: false,
-    hasStandardFields: false,
-    formatCompliance: false
-  };
-
-  // Official identifiers (40 points)
-  if (item.source === 'amazon') {
-    if (item.payload.orderid || item.payload.orderId) {
-      score += 40;
-      details.hasOfficialId = true;
-    }
-  } else if (item.source === 'luma') {
-    if (item.payload.eventId || item.payload.taskId || item.payload.id) {
-      score += 40;
-      details.hasOfficialId = true;
-    }
-  }
-
-  // Metadata completeness (25 points)
-  if (item.metadata && typeof item.metadata === 'object') {
-    if (item.metadata.sourceUrl) score += 15;
-    if (item.metadata.category) score += 10;
-    details.hasMetadata = score >= 15;
-  }
-
-  // Standard fields (25 points)
-  if (item.source === 'amazon' && item.type === 'product') {
-    if (item.payload.title && item.payload.price) score += 15;
-    if (item.payload.currency) score += 10;
-    details.hasStandardFields = score >= 15;
-  } else if (item.source === 'luma') {
-    if (item.payload.title) score += 15;
-    if (item.payload.date || item.payload.dueDate) score += 10;
-    details.hasStandardFields = score >= 15;
-  }
-
-  // Format standards (10 points)
-  try {
-    if (item.timestamp && new Date(item.timestamp).toISOString()) {
-      score += 10;
-      details.formatCompliance = true;
-    }
-  } catch (e) {
-    // Invalid timestamp format
-  }
-
-  return { score, details };
 }
 
 // Intelligent duplicate detection algorithm
@@ -1263,5 +1251,10 @@ module.exports = {
   initializeDefaultTasks,
   LIMITS,
   TASK_TEMPLATES,
-  generateContentHash
+  generateContentHash,
+  extractSourceId,
+  calculateDataQuality,
+  isAcceptedCrawlerSource,
+  normalizeCrawlerSource,
+  isCatalogCrawlerSource,
 }; 

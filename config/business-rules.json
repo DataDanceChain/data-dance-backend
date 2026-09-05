@@ -63,6 +63,139 @@
         "duplicateData": "Duplicate data detected, no points awarded",
         "invalidData": "Invalid data format, please check and resubmit"
       }
+    },
+    "shein": {
+      "pointsPerItem": 10,
+      "dailyLimit": 1000,
+      "monthlyLimit": 10000,
+      "rewardRule": "Earn 10 points for each valid data item submitted",
+      "validationRules": [
+        "Duplicate data will not be counted",
+        "Invalid data will not be counted"
+      ],
+      "errors": {
+        "dailyLimitExceeded": "Daily submission limit reached (1,000 items), please try again tomorrow",
+        "monthlyLimitExceeded": "Monthly submission limit reached (10,000 items), please try again next month",
+        "duplicateData": "Duplicate data detected, no points awarded",
+        "invalidData": "Invalid data format, please check and resubmit"
+      }
+    },
+    "temu": {
+      "pointsPerItem": 10,
+      "dailyLimit": 1000,
+      "monthlyLimit": 10000,
+      "rewardRule": "Earn 10 points for each valid data item submitted",
+      "validationRules": [
+        "Duplicate data will not be counted",
+        "Invalid data will not be counted"
+      ],
+      "errors": {
+        "dailyLimitExceeded": "Daily submission limit reached (1,000 items), please try again tomorrow",
+        "monthlyLimitExceeded": "Monthly submission limit reached (10,000 items), please try again next month",
+        "duplicateData": "Duplicate data detected, no points awarded",
+        "invalidData": "Invalid data format, please check and resubmit"
+      }
+    },
+    "shopee": {
+      "pointsPerItem": 10,
+      "dailyLimit": 1000,
+      "monthlyLimit": 10000,
+      "rewardRule": "Earn 10 points for each valid data item submitted",
+      "validationRules": [
+        "Duplicate data will not be counted",
+        "Invalid data will not be counted"
+      ],
+      "errors": {
+        "dailyLimitExceeded": "Daily submission limit reached (1,000 items), please try again tomorrow",
+        "monthlyLimitExceeded": "Monthly submission limit reached (10,000 items), please try again next month",
+        "duplicateData": "Duplicate data detected, no points awarded",
+        "invalidData": "Invalid data format, please check and resubmit"
+      }
+    },
+    "generic": {
+      "pointsPerItem": 10,
+      "dailyLimit": 1000,
+      "monthlyLimit": 10000,
+      "rewardRule": "Earn 10 points for each valid data item submitted",
+      "validationRules": [
+        "Duplicate data will not be counted",
+        "Invalid data will not be counted"
+      ],
+      "errors": {
+        "dailyLimitExceeded": "Daily submission limit reached (1,000 items), please try again tomorrow",
+        "monthlyLimitExceeded": "Monthly submission limit reached (10,000 items), please try again next month",
+        "duplicateData": "Duplicate data detected, no points awarded",
+        "invalidData": "Invalid data format, please check and resubmit",
+        "unsupportedSource": "Data source must be a supported Connect source"
+      }
+    },
+    "shop": {
+      "pointsPerItem": 10,
+      "dailyLimit": 1000,
+      "monthlyLimit": 10000,
+      "rewardRule": "Earn 10 points for each valid data item submitted",
+      "validationRules": [
+        "Duplicate data will not be counted",
+        "Invalid data will not be counted"
+      ],
+      "errors": {
+        "dailyLimitExceeded": "Daily submission limit reached (1,000 items), please try again tomorrow",
+        "monthlyLimitExceeded": "Monthly submission limit reached (10,000 items), please try again next month",
+        "duplicateData": "Duplicate data detected, no points awarded",
+        "invalidData": "Invalid data format, please check and resubmit",
+        "unsupportedSource": "Data source must be a supported Connect source"
+      }
+    },
+    "social": {
+      "pointsPerItem": 10,
+      "dailyLimit": 1000,
+      "monthlyLimit": 10000,
+      "rewardRule": "Earn 10 points for each valid data item submitted",
+      "validationRules": [
+        "Duplicate data will not be counted",
+        "Invalid data will not be counted"
+      ],
+      "errors": {
+        "dailyLimitExceeded": "Daily submission limit reached (1,000 items), please try again tomorrow",
+        "monthlyLimitExceeded": "Monthly submission limit reached (10,000 items), please try again next month",
+        "duplicateData": "Duplicate data detected, no points awarded",
+        "invalidData": "Invalid data format, please check and resubmit",
+        "unsupportedSource": "Data source must be a supported Connect source"
+      }
+    },
+    "travel": {
+      "pointsPerItem": 10,
+      "dailyLimit": 1000,
+      "monthlyLimit": 10000,
+      "rewardRule": "Earn 10 points for each valid data item submitted",
+      "validationRules": [
+        "Duplicate data will not be counted",
+        "Invalid data will not be counted"
+      ],
+      "errors": {
+        "dailyLimitExceeded": "Daily submission limit reached (1,000 items), please try again tomorrow",
+        "monthlyLimitExceeded": "Monthly submission limit reached (10,000 items), please try again next month",
+        "duplicateData": "Duplicate data detected, no points awarded",
+        "invalidData": "Invalid data format, please check and resubmit",
+        "unsupportedSource": "Data source must be a supported Connect source"
+      }
+    },
+    "life": {
+      "pointsPerItem": 10,
+      "dailyLimit": 1000,
+      "monthlyLimit": 10000,
+      "rewardRule": "Earn 10 points for each valid data item submitted",
+      "validationRules": [
+        "Duplicate data will not be counted",
+        "Invalid data will not be counted"
+      ],
+      "errors": {
+        "dailyLimitExceeded": "Daily submission limit reached (1,000 items), please try again tomorrow",
+        "monthlyLimitExceeded": "Monthly submission limit reached (10,000 items), please try again next month",
+        "duplicateData": "Duplicate data detected, no points awarded",
+        "invalidData": "Invalid data format, please check and resubmit",
+        "unsupportedSource": "Data source must be a supported Connect source"
+      }
     }
   },
   "rewardDistribution": {

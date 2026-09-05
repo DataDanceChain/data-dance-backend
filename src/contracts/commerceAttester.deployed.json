@@ -1,0 +1,11 @@
+{
+  "chainId": 44508,
+  "address": "0xE0fFF93Ae34D87E6393242b7BbB46029E8d02FeC",
+  "deployTxHash": "0xcfc3a95814474230d01430efc5c40c8a051969ddc8ccc9f5cffd3107b39b8238",
+  "name": "CommerceAttester",
+  "abi": [
+    "function attest(bytes32 hash)",
+    "event Attested(bytes32 indexed hash, address indexed sender)"
+  ],
+  "note": "Live CommerceAttester on DDC chain. Backend calls attest(bytes32)."
+}

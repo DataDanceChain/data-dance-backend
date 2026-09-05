@@ -1,0 +1,37 @@
+{
+  "abi": [
+    {
+      "anonymous": false,
+      "inputs": [
+        {
+          "indexed": true,
+          "internalType": "bytes32",
+          "name": "hash",
+          "type": "bytes32"
+        },
+        {
+          "indexed": true,
+          "internalType": "address",
+          "name": "sender",
+          "type": "address"
+        }
+      ],
+      "name": "Attested",
+      "type": "event"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "bytes32",
+          "name": "hash",
+          "type": "bytes32"
+        }
+      ],
+      "name": "attest",
+      "outputs": [],
+      "stateMutability": "nonpayable",
+      "type": "function"
+    }
+  ],
+  "bytecode": "0x608060405234801561000f575f80fd5b5060b68061001c5f395ff3fe6080604052348015600e575f80fd5b50600436106026575f3560e01c806323c3617f14602a575b5f80fd5b60396035366004606a565b603b565b005b604051339082907f3d83c7bc55c269e0bc853ddc0d7b9fca30216ecc43779acb4e36b7e0ad1c71e4905f90a350565b5f602082840312156079575f80fd5b503591905056fea264697066735822122075549f01b95ef33d9576a4ed015e9d87fdeabcf85d505323bd201136bddd809c64736f6c63430008140033"
+}

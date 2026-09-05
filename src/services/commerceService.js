@@ -2,6 +2,7 @@ const prisma = require('../utils/prisma');
 const { BUYER_LICENCE_VERSION, BUYER_LICENCE_TERMS, hasAcceptedBuyerLicence } = require('../constants/buyerLicence');
 
 const { maskEmail, stripEmail } = require('../utils/emailMask');
+const { omitAttestationPayload, publicAttestation } = require('./commerceAttest');
 
 const ORDER_INCLUDE = {
   lineItems: true,
@@ -239,7 +240,7 @@ function serializeOrder(order) {
   const referrals = allocations.filter((row) => row.kind === 'referral');
   const costItems = order.costItems || [];
   return {
-    ...order,
+    ...omitAttestationPayload(order),
     buyer: maskParty(order.buyer),
     seller: maskParty(order.seller),
     allocations,
@@ -255,7 +256,7 @@ function serializeOrder(order) {
     referralPointsReserved: referrals.reduce((sum, row) => sum + Number(row.points || 0), 0),
     costIssuedUsd: Number(costItems.filter((row) => row.kind === 'points_issue').reduce((sum, row) => sum + Number(row.amountUsd || 0), 0).toFixed(2)),
     costRedeemedUsd: Number(costItems.filter((row) => row.kind === 'points_redeem').reduce((sum, row) => sum + Number(row.amountUsd || 0), 0).toFixed(2)),
-    attested: Boolean(order.attestationHash),
+    ...publicAttestation(order),
     licenceAccepted: hasAcceptedBuyerLicence(order),
     buyerLicenceVersion: BUYER_LICENCE_VERSION,
     buyerLicenceTerms: BUYER_LICENCE_TERMS,

@@ -1,6 +1,29 @@
 const prisma = require('../utils/prisma');
 const commerceService = require('../services/commerceService');
+const { publicAttestation } = require('../services/commerceAttest');
 const { kycComplete, presentKyc, presentLegalEntity } = require('../services/merchantKyc');
+
+const ORDER_ATTEST_SELECT = {
+  id: true,
+  orderNumber: true,
+  status: true,
+  total: true,
+  currency: true,
+  purchaseId: true,
+  dataNFTId: true,
+  attestationHash: true,
+  attestationTxHash: true,
+  attestedAt: true,
+  createdAt: true,
+};
+
+function presentOpsOrder(order) {
+  if (!order) return order;
+  return {
+    ...order,
+    ...publicAttestation(order),
+  };
+}
 
 function asInt(value, fallback) {
   const n = Number(value);
@@ -23,10 +46,13 @@ async function orgBalance(userId) {
 
 exports.overview = async (req, res) => {
   try {
-    const [pendingTopUps, merchants, pendingCredits] = await Promise.all([
+    const [pendingTopUps, merchants, pendingCredits, pendingAttestations] = await Promise.all([
       prisma.payment.count({ where: { method: 'top_up', status: 'pending' } }),
       prisma.user.count({ where: { isOrganization: true } }),
       prisma.organizationTransaction.count({ where: { type: 'DEPOSIT', status: 'PENDING' } }),
+      prisma.purchaseOrder.count({
+        where: { attestationHash: { not: null }, attestationTxHash: null },
+      }),
     ]);
     let openPrivacyRequests = 0;
     try {
@@ -36,7 +62,7 @@ exports.overview = async (req, res) => {
     }
     return res.json({
       status: 'success',
-      data: { pendingTopUps, pendingCredits, merchants, openPrivacyRequests },
+      data: { pendingTopUps, pendingCredits, merchants, openPrivacyRequests, pendingAttestations },
     });
   } catch (error) {
     console.error('Ops overview error:', error);
@@ -56,7 +82,7 @@ exports.listPayments = async (req, res) => {
       prisma.payment.findMany({
         where,
         include: {
-          order: { select: { id: true, orderNumber: true, status: true } },
+          order: { select: ORDER_ATTEST_SELECT },
           invoice: { select: { id: true, invoiceNumber: true, status: true, total: true, currency: true } },
           payer: {
             select: {
@@ -81,6 +107,7 @@ exports.listPayments = async (req, res) => {
         items: items.map((item) => ({
           ...item,
           currency: 'USD',
+          order: presentOpsOrder(item.order),
           payer: item.payer
             ? {
                 id: item.payer.id,
@@ -106,6 +133,11 @@ exports.confirmPayment = async (req, res) => {
       req.params.id,
       req.opsAdmin?.username || 'ops',
     );
+    const orderId = payment?.orderId || payment?.order?.id;
+    if (orderId) {
+      const commerceAttest = require('../services/commerceAttest');
+      await commerceAttest.attestPaidOrderSafe(orderId);
+    }
     return res.json({ status: 'success', data: payment });
   } catch (error) {
     const code = error.statusCode || 500;
@@ -201,7 +233,7 @@ exports.getMerchant = async (req, res) => {
       return res.status(404).json({ status: 'fail', message: 'Merchant not found' });
     }
     const { legalEntity, ...merchant } = user;
-    const [balance, transactions, pendingPayments] = await Promise.all([
+    const [balance, transactions, pendingPayments, orders] = await Promise.all([
       orgBalance(user.id),
       prisma.organizationTransaction.findMany({
         where: { userId: user.id },
@@ -210,6 +242,12 @@ exports.getMerchant = async (req, res) => {
       }),
       prisma.payment.findMany({
         where: { payerId: user.id, method: 'top_up' },
+        orderBy: { createdAt: 'desc' },
+        take: 20,
+      }),
+      prisma.purchaseOrder.findMany({
+        where: { OR: [{ buyerId: user.id }, { sellerId: user.id }] },
+        select: ORDER_ATTEST_SELECT,
         orderBy: { createdAt: 'desc' },
         take: 20,
       }),
@@ -224,6 +262,7 @@ exports.getMerchant = async (req, res) => {
         currency: 'USD',
         transactions,
         pendingPayments,
+        orders: orders.map(presentOpsOrder),
       },
     });
   } catch (error) {
@@ -273,6 +312,57 @@ exports.creditMerchant = async (req, res) => {
     }
     console.error('Ops credit error:', error);
     return res.status(500).json({ status: 'error', message: 'Server error' });
+  }
+};
+
+exports.listOrders = async (req, res) => {
+  try {
+    const page = asInt(req.query.page, 1);
+    const limit = Math.min(asInt(req.query.limit, 20), 100);
+    const attestation = String(req.query.attestation || '').trim();
+    const where = {
+      ...(req.query.status ? { status: String(req.query.status) } : {}),
+      ...(attestation === 'pending'
+        ? { attestationHash: { not: null }, attestationTxHash: null }
+        : attestation === 'on_chain'
+          ? { attestationTxHash: { not: null } }
+          : attestation === 'recorded'
+            ? { attestationHash: { not: null }, attestationTxHash: null }
+            : {}),
+    };
+    const [items, total] = await Promise.all([
+      prisma.purchaseOrder.findMany({
+        where,
+        select: ORDER_ATTEST_SELECT,
+        orderBy: { createdAt: 'desc' },
+        skip: (page - 1) * limit,
+        take: limit,
+      }),
+      prisma.purchaseOrder.count({ where }),
+    ]);
+    return res.json({
+      status: 'success',
+      data: {
+        items: items.map(presentOpsOrder),
+        pagination: { total, page, limit, pages: Math.ceil(total / limit) || 1 },
+      },
+    });
+  } catch (error) {
+    console.error('Ops orders error:', error);
+    return res.status(500).json({ status: 'error', message: 'Server error' });
+  }
+};
+
+exports.attestOrder = async (req, res) => {
+  try {
+    const commerceAttest = require('../services/commerceAttest');
+    const data = await commerceAttest.attestPaidOrder(req.params.id, {
+      txHash: req.body?.txHash,
+    });
+    return res.json({ status: 'success', data });
+  } catch (error) {
+    const code = error.statusCode || 500;
+    return res.status(code).json({ status: code >= 500 ? 'error' : 'fail', message: error.message });
   }
 };
 

@@ -26,6 +26,8 @@ router.get('/merchants', opsCommerce.listMerchants);
 router.get('/merchants/:userId', opsCommerce.getMerchant);
 router.post('/merchants/:userId/credit', opsCommerce.creditMerchant);
 router.post('/merchants/:userId/kyc', opsCommerce.reviewMerchantKyc);
+router.get('/orders', opsCommerce.listOrders);
+router.post('/orders/:id/attest', opsCommerce.attestOrder);
 router.get('/privacy-requests', listPrivacyRequests);
 router.post('/privacy-requests/:id', resolvePrivacyRequest);
 router.get('/operations', listOperations);

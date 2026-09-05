@@ -249,34 +249,50 @@ function buildAttestationPayload(order, allocations) {
     allocationEmailsHash: emailsHash,
     datasetBytesExcluded: true,
     note: 'On-chain attestation stores order metadata only. The AI dataset itself is not written to the chain.',
-    attestedAt: new Date().toISOString(),
   };
 }
 
 async function attestOrder(user, orderId, { txHash } = {}) {
   const order = await requireOrder(user, orderId);
+  const commerceAttest = require('./commerceAttest');
+  if (order.purchaseId || order.dataNFTId) {
+    const attested = await commerceAttest.attestPaidOrder(order.id, { txHash });
+    return {
+      id: order.id,
+      orderNumber: attested.orderNumber || order.orderNumber,
+      ...attested,
+    };
+  }
   const full = await prisma.purchaseOrder.findUnique({
     where: { id: order.id },
     include: { lineItems: true, allocations: true },
   });
-  const payload = buildAttestationPayload(full, full.allocations || []);
+  const existing = full.attestationPayload && full.attestationPayload.type === 'datadance.procurement.metadata.v1'
+    ? full.attestationPayload
+    : null;
+  const payload = existing || buildAttestationPayload(full, full.allocations || []);
   const attestationHash = sha256(JSON.stringify(payload));
+  let attestationTxHash = txHash && /^0x[0-9a-fA-F]{64}$/.test(String(txHash).trim())
+    ? String(txHash).trim()
+    : (full.attestationTxHash && /^0x[0-9a-fA-F]{64}$/.test(full.attestationTxHash) ? full.attestationTxHash : null);
+  if (!attestationTxHash) {
+    const { attestHashOnChain } = require('../utils/commerceAttestChain');
+    const chain = await attestHashOnChain(attestationHash);
+    if (chain.ok && chain.txHash) attestationTxHash = chain.txHash;
+  }
   const updated = await prisma.purchaseOrder.update({
     where: { id: order.id },
     data: {
       attestationPayload: payload,
       attestationHash,
-      attestationTxHash: txHash ? String(txHash).trim() : full.attestationTxHash,
+      attestationTxHash,
       attestedAt: new Date(),
     },
   });
   return {
     id: updated.id,
     orderNumber: updated.orderNumber,
-    attestationHash: updated.attestationHash,
-    attestationTxHash: updated.attestationTxHash,
-    attestedAt: updated.attestedAt,
-    attestationPayload: updated.attestationPayload,
+    ...commerceAttest.publicAttestation(updated),
   };
 }
 

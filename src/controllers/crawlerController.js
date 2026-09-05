@@ -28,11 +28,14 @@ async function getCrawlerTasks(req, res) {
     };
 
     // Validate filters
-    if (filters.source && !['amazon', 'luma', 'airbnb', 'booking'].includes(filters.source)) {
-      return res.status(400).json({
-        status: 'error',
-        message: 'Invalid source. Must be "amazon", "luma", "airbnb", or "booking"'
-      });
+    if (filters.source) {
+      filters.source = crawlerService.normalizeCrawlerSource(filters.source);
+      if (!crawlerService.isAcceptedCrawlerSource(filters.source)) {
+        return res.status(400).json({
+          status: 'error',
+          message: 'Invalid source. Must be a supported Connect source'
+        });
+      }
     }
 
     if (filters.status && !['pending', 'running', 'done', 'error'].includes(filters.status)) {
@@ -100,16 +103,17 @@ async function createCrawlerTask(req, res) {
       });
     }
 
-    if (!['amazon', 'luma', 'airbnb', 'booking'].includes(source)) {
+    const canonicalSource = crawlerService.normalizeCrawlerSource(source);
+    if (!crawlerService.isAcceptedCrawlerSource(canonicalSource)) {
       return res.status(400).json({
         status: 'error',
-        message: 'Invalid source. Must be "amazon", "luma", "airbnb", or "booking"'
+        message: 'Invalid source. Must be a supported Connect source'
       });
     }
 
-    const task = await crawlerService.getOrCreateCrawlerTask(userId, source, taskId || null);
+    const task = await crawlerService.getOrCreateCrawlerTask(userId, canonicalSource, taskId || null);
 
-    const template = task.taskId ? crawlerService.getTaskTemplate(source, task.taskId) : null;
+    const template = task.taskId ? crawlerService.getTaskTemplate(canonicalSource, task.taskId) : null;
     res.status(201).json({
       status: 'success',
       data: {
@@ -197,10 +201,11 @@ async function uploadData(req, res) {
 
     for (let i = 0; i < dataItems.length; i++) {
       const item = dataItems[i];
-      const errors = crawlerService.validateDataItem(item);
+      const validation = crawlerService.validateDataItem(item);
+      const itemErrors = validation.errors || [];
       
-      if (errors.length > 0) {
-        validationErrors.push(`Item ${i + 1}: ${errors.join(', ')}`);
+      if (itemErrors.length > 0) {
+        validationErrors.push(`Item ${i + 1}: ${itemErrors.join(', ')}`);
         continue;
       }
 
@@ -215,12 +220,11 @@ async function uploadData(req, res) {
       });
     }
 
-    // Check for data limits by source (Amazon, Airbnb, Booking)
-    const itemsBySource = {
-      amazon: validItems.filter(item => item.source === 'amazon'),
-      airbnb: validItems.filter(item => item.source === 'airbnb'),
-      booking: validItems.filter(item => item.source === 'booking')
-    };
+    const itemsBySource = validItems.reduce((acc, item) => {
+      if (!acc[item.source]) acc[item.source] = [];
+      acc[item.source].push(item);
+      return acc;
+    }, {});
     
     const sourceLimits = {};
     

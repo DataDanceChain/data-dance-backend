@@ -376,14 +376,11 @@ const publishDataNFT = async (req, res) => {
     }
 
     if (dataNFT.dataSource === 'upload') {
-      const raw = dataNFT.dataRecords && typeof dataNFT.dataRecords === 'object' ? dataNFT.dataRecords : {};
-      const rows = Array.isArray(raw.records) ? raw.records : Array.isArray(raw) ? raw : [];
-      const licensable = await filterLicensableRecords(rows);
-      if (!licensable.length) {
-        return res.status(403).json({
+      const licence = await assertPackHasLicensableRecords(dataNFT);
+      if (!licence.ok) {
+        return res.status(400).json({
           status: 'fail',
-          code: 'subject_consent_required',
-          error: SUBJECT_CONSENT_ERROR,
+          error: 'This pack has no downloadable records yet.',
         });
       }
     }
@@ -480,6 +477,10 @@ const purchaseDataNFT = async (req, res) => {
 
     const licence = await assertPackHasLicensableRecords(dataNFT);
     if (!licence.ok) {
+      console.log('Purchase blocked: pack has no licensable records', {
+        nftId: id,
+        dataSource: dataNFT.dataSource,
+      });
       return res.status(403).json({
         status: 'fail',
         code: 'subject_consent_required',
@@ -602,14 +603,24 @@ const purchaseDataNFT = async (req, res) => {
       return { purchase, commerce };
     });
 
+    const commerceAttest = require('../services/commerceAttest');
+    const attestation = result.commerce?.order?.id
+      ? await commerceAttest.attestPaidOrderSafe(result.commerce.order.id)
+      : null;
+    const publicView = commerceAttest.publicAttestation(attestation || result.commerce?.order);
+    const order = result.commerce.order
+      ? { ...commerceAttest.omitAttestationPayload(result.commerce.order), ...publicView }
+      : result.commerce.order;
+
     console.log('=== Purchase Process Completed ===');
     res.status(201).json({
       ...result.purchase,
       purchaseCount: purchaseCount + 1,
       quantity,
-      order: result.commerce.order,
+      order,
       invoice: result.commerce.invoice,
       payment: result.commerce.payment,
+      attestation: publicView,
       status: 'success'
     });
   } catch (error) {
@@ -716,6 +727,21 @@ const getPurchasedDataNFTs = async (req, res) => {
         where: { buyerId }
       })
     ]);
+    const { publicAttestation } = require('../services/commerceAttest');
+    const orders = purchases.length
+      ? await prisma.purchaseOrder.findMany({
+        where: { purchaseId: { in: purchases.map((row) => row.id) } },
+        select: {
+          id: true,
+          purchaseId: true,
+          orderNumber: true,
+          attestationHash: true,
+          attestationTxHash: true,
+          attestedAt: true,
+        },
+      })
+      : [];
+    const orderByPurchase = new Map(orders.map((row) => [row.purchaseId, row]));
 
     // 调试信息
     console.log('buyerId:', buyerId);
@@ -731,13 +757,19 @@ const getPurchasedDataNFTs = async (req, res) => {
     }
 
     res.json({
-      data: purchases.map((purchase) => ({
-        ...purchase,
-        dataNFT: withoutRecords(purchase.dataNFT),
-        licenceAccepted: hasAcceptedBuyerLicence(purchase),
-        buyerLicenceVersion: BUYER_LICENCE_VERSION,
-        buyerLicenceTerms: BUYER_LICENCE_TERMS,
-      })),
+      data: purchases.map((purchase) => {
+        const order = orderByPurchase.get(purchase.id);
+        return {
+          ...purchase,
+          dataNFT: withoutRecords(purchase.dataNFT),
+          licenceAccepted: hasAcceptedBuyerLicence(purchase),
+          buyerLicenceVersion: BUYER_LICENCE_VERSION,
+          buyerLicenceTerms: BUYER_LICENCE_TERMS,
+          orderId: order?.id || null,
+          orderNumber: order?.orderNumber || null,
+          ...publicAttestation(order),
+        };
+      }),
       pagination: {
         total,
         page: parseInt(page),
@@ -773,15 +805,15 @@ const exportPurchasedDataNFT = async (req, res) => {
     const raw = purchase.dataNFT.dataRecords && typeof purchase.dataNFT.dataRecords === 'object'
       ? purchase.dataNFT.dataRecords
       : {};
-    const rows = Array.isArray(raw.records) ? raw.records : Array.isArray(raw) ? raw : [];
-    const licensable = await filterLicensableRecords(rows);
-    if (!licensable.length) {
+    const licence = await assertPackHasLicensableRecords(purchase.dataNFT);
+    if (!licence.ok) {
       return res.status(403).json({
         status: 'fail',
         code: 'subject_consent_required',
         error: SUBJECT_CONSENT_ERROR,
       });
     }
+    const licensable = licence.licensable;
     const csv = packToCsv({
       ...purchase.dataNFT,
       dataRecords: {

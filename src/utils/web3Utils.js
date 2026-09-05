@@ -64,6 +64,12 @@ exports.createActivityNFTContract = async (activityId, owner) => {
     return receipt.logs;
 }
 
+exports.getDdcProvider = () => provider;
+
+exports.getBackendWallet = (overrideProvider) => {
+    return new ethers.Wallet(mainPrivateKey, overrideProvider || provider);
+};
+
 exports.createDataNFTContract = async (collectionId, owner) => {
     const wallet = new ethers.Wallet(mainPrivateKey, provider);
     const dataNFTFactoryWithSigner = dataNFTFactoryContract.connect(wallet);

@@ -1,5 +1,6 @@
 const businessRules = require('../../config/business-rules.json');
 const prisma = require('../utils/prisma');
+const { normalizeCrawlerSource, sourceRuleGroup } = require('../constants/crawlerSources');
 
 /**
  * 检查Amazon数据提交限制
@@ -73,19 +74,20 @@ function calculateAmazonDataPoints(validItemCount) {
   return validItemCount * amazonRules.pointsPerItem;
 }
 
+function rulesForSource(source) {
+  const canonical = normalizeCrawlerSource(source);
+  const group = sourceRuleGroup(canonical);
+  return businessRules.dataCollection[canonical]
+    || businessRules.dataCollection[group]
+    || businessRules.dataCollection.generic
+    || businessRules.dataCollection.amazon;
+}
+
 /**
- * 计算数据提交应获得的积分（通用函数，支持所有数据源）
- * @param {string} source - 数据源 ('amazon', 'luma', 'airbnb', 'booking')
- * @param {number} validItemCount - 有效数据条数
- * @returns {number} 应获得的积分
+ * Points for a valid upload batch. Shop sources without a named rule use generic (10 pts/item).
  */
 function calculateDataPoints(source, validItemCount) {
-  const sourceRules = businessRules.dataCollection[source];
-  if (!sourceRules) {
-    // 如果没有特定规则，使用 Amazon 规则作为默认值
-    const amazonRules = businessRules.dataCollection.amazon;
-    return validItemCount * amazonRules.pointsPerItem;
-  }
+  const sourceRules = rulesForSource(source);
   return validItemCount * sourceRules.pointsPerItem;
 }
 
@@ -97,12 +99,7 @@ function calculateDataPoints(source, validItemCount) {
  * @returns {Promise<{allowed: boolean, error?: string, remainingDaily?: number, remainingMonthly?: number}>}
  */
 async function checkDataLimits(userId, source, itemCount) {
-  const sourceRules = businessRules.dataCollection[source];
-  if (!sourceRules) {
-    // 如果没有特定规则，使用 Amazon 规则作为默认值
-    const amazonRules = businessRules.dataCollection.amazon;
-    return checkAmazonDataLimits(userId, itemCount);
-  }
+  const sourceRules = rulesForSource(source);
   
   // 获取今日和本月的提交统计
   const today = new Date();
@@ -163,11 +160,7 @@ async function checkDataLimits(userId, source, itemCount) {
  * @returns {object} 规则信息
  */
 function getDataRules(source) {
-  const sourceRules = businessRules.dataCollection[source];
-  if (!sourceRules) {
-    // 如果没有特定规则，使用 Amazon 规则作为默认值
-    return getAmazonDataRules();
-  }
+  const sourceRules = rulesForSource(source);
   return {
     pointsPerItem: sourceRules.pointsPerItem,
     dailyLimit: sourceRules.dailyLimit,

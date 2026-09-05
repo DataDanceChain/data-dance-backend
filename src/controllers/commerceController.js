@@ -253,6 +253,11 @@ exports.createPayment = async (req, res) => {
 exports.confirmPayment = async (req, res) => {
   try {
     const data = await commerceService.confirmPayment(req.user, req.params.id);
+    const orderId = data?.orderId || data?.order?.id;
+    if (orderId) {
+      const commerceAttest = require('../services/commerceAttest');
+      await commerceAttest.attestPaidOrderSafe(orderId);
+    }
     res.json({ status: 'success', data });
   } catch (error) {
     sendError(res, error);
