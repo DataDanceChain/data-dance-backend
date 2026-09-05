@@ -140,6 +140,14 @@ const rateLimiters = {
     windowMs: 60 * 1000, // 1 minute
     max: 200, // 200 requests per minute
     message: 'Too many requests, please try again later.'
+  }),
+
+  // Membership check — enough for a known email, not a scrape of the list
+  verify: createRateLimiter({
+    windowMs: 60 * 1000,
+    max: 10,
+    message: 'Too many membership checks. Please wait a minute.',
+    keyGenerator: (req) => req.user?.id || req.ip
   })
 };
 

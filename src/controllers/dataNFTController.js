@@ -5,6 +5,7 @@ const { filterLicensableRecords, assertPackHasLicensableRecords } = require('../
 const { BUYER_LICENCE_VERSION, BUYER_LICENCE_TERMS, licenceTerms, hasAcceptedBuyerLicence } = require('../constants/buyerLicence');
 const { stampBuyerLicence } = require('../services/buyerLicence');
 const { resolveLocale, localizeHeaders, csvNotice } = require('../i18n/merchantLocale');
+const { verifyPackMembership } = require('../services/packVerify');
 
 const SUBJECT_CONSENT_ERROR = 'This pack can only include records from people who granted consent in the Wallet app.';
 
@@ -738,6 +739,11 @@ const getPurchasedDataNFTs = async (req, res) => {
           attestationHash: true,
           attestationTxHash: true,
           attestedAt: true,
+          invoices: {
+            select: { id: true, invoiceNumber: true },
+            orderBy: { createdAt: 'desc' },
+            take: 1,
+          },
         },
       })
       : [];
@@ -767,6 +773,8 @@ const getPurchasedDataNFTs = async (req, res) => {
           buyerLicenceTerms: BUYER_LICENCE_TERMS,
           orderId: order?.id || null,
           orderNumber: order?.orderNumber || null,
+          invoiceId: order?.invoices?.[0]?.id || null,
+          invoiceNumber: order?.invoices?.[0]?.invoiceNumber || null,
           ...publicAttestation(order),
         };
       }),
@@ -946,6 +954,61 @@ const acceptPurchasedLicence = async (req, res) => {
   }
 };
 
+function verifyBody(req) {
+  return {
+    email: req.body?.email,
+    recordId: req.body?.recordId ?? req.body?.externalId ?? req.body?.id,
+  };
+}
+
+function sendVerifyResult(res, result) {
+  return res.json(result);
+}
+
+function sendVerifyError(res, error) {
+  if (error.status === 400) {
+    return res.status(400).json({
+      status: 'fail',
+      code: error.code,
+      message: error.message,
+    });
+  }
+  console.error('Error verifying pack membership:', error);
+  return res.status(500).json({ status: 'error', message: 'Could not verify membership' });
+}
+
+const verifyDataNFTMembership = async (req, res) => {
+  try {
+    const dataNFT = await prisma.dataNFT.findUnique({
+      where: { id: req.params.id },
+      select: { id: true, updatedAt: true, isPublished: true, dataRecords: true },
+    });
+    if (!dataNFT || !dataNFT.isPublished) {
+      return res.status(404).json({ status: 'fail', message: 'Pack not found' });
+    }
+    return sendVerifyResult(res, verifyPackMembership(dataNFT, verifyBody(req)));
+  } catch (error) {
+    return sendVerifyError(res, error);
+  }
+};
+
+const verifyPurchasedMembership = async (req, res) => {
+  try {
+    const purchase = await prisma.dataNFTPurchase.findFirst({
+      where: { id: req.params.purchaseId, buyerId: req.user.id },
+      select: {
+        dataNFT: { select: { id: true, updatedAt: true, dataRecords: true } },
+      },
+    });
+    if (!purchase?.dataNFT) {
+      return res.status(404).json({ status: 'fail', message: 'Purchase not found' });
+    }
+    return sendVerifyResult(res, verifyPackMembership(purchase.dataNFT, verifyBody(req)));
+  } catch (error) {
+    return sendVerifyError(res, error);
+  }
+};
+
 module.exports = {
   mergeSnapshots,
   getDataNFTs,
@@ -959,5 +1022,7 @@ module.exports = {
   getPurchasedDataNFTs,
   exportPurchasedDataNFT,
   acceptPurchasedLicence,
+  verifyDataNFTMembership,
+  verifyPurchasedMembership,
   getDataNFTHolders
 }; 

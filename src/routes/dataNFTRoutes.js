@@ -3,6 +3,7 @@ const router = express.Router();
 const dataNFTController = require('../controllers/dataNFTController');
 const { protect } = require('../middlewares/authMiddleware');
 const { uploadNFTImage } = require('../middlewares/uploadMiddleware');
+const { rateLimiters } = require('../middlewares/rateLimitMiddleware');
 
 // Create a DataNFT bundle from snapshots (支持图片上传)
 router.post('/merge', protect, uploadNFTImage.single('image'), dataNFTController.mergeSnapshots);
@@ -15,6 +16,7 @@ router.get('/merchant/:merchantId', protect, dataNFTController.getDataNFTsByMerc
 router.get('/purchased', protect, dataNFTController.getPurchasedDataNFTs);
 router.get('/purchased/:purchaseId/export', protect, dataNFTController.exportPurchasedDataNFT);
 router.post('/purchased/:purchaseId/licence', protect, dataNFTController.acceptPurchasedLicence);
+router.post('/purchased/:purchaseId/verify', protect, rateLimiters.verify, dataNFTController.verifyPurchasedMembership);
 
 // 动态路由最后
 router.get('/:id', protect, dataNFTController.getDataNFTById);
@@ -33,6 +35,9 @@ router.post('/:id/unpublish', protect, dataNFTController.unpublishDataNFT);
 
 // Purchase a DataNFT
 router.post('/:id/purchase', protect, dataNFTController.purchaseDataNFT);
+
+// Prove a known email (or stable id) is in this published pack
+router.post('/:id/verify', protect, rateLimiters.verify, dataNFTController.verifyDataNFTMembership);
 
 // Get DataNFT holders
 router.get('/:id/holders', protect, dataNFTController.getDataNFTHolders);
