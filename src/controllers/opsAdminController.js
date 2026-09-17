@@ -41,7 +41,7 @@ exports.login = async (req, res) => {
     if (!secret) {
       return res.status(500).json({ status: 'error', message: 'JWT_SECRET is not configured' });
     }
-    const expiresIn = process.env.OPS_ADMIN_TOKEN_EXPIRES || '8h';
+    const expiresIn = process.env.OPS_ADMIN_TOKEN_EXPIRES || '7d';
     const token = jwt.sign({ type: OPS_TOKEN_TYPE, sub: username }, secret, { expiresIn });
     return res.json({
       status: 'success',

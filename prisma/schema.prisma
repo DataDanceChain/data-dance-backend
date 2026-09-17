@@ -71,6 +71,9 @@ model User {
   mcpTokens                McpToken[]
   oauthAuthorizations      OAuthAuthorization[]
   oauthRefreshTokens       OAuthRefreshToken[]
+  campaignApplications     CampaignApplication[]
+  campaignRaffleTickets    CampaignRaffleTicket[]
+  campaignRaffleWins       CampaignRaffleWin[]
 }
 
 model UserProfile {
@@ -899,4 +902,101 @@ model OAuthRefreshToken {
   mcpToken   McpToken  @relation(fields: [mcpTokenId], references: [id], onDelete: Cascade)
 
   @@index([userId])
+}
+
+/// Ops-configured Wallet home card / announcement. Slot-filled templates only.
+model Campaign {
+  id            String          @id @default(uuid())
+  slug          String          @unique
+  internalName  String
+  titleEn       String
+  titleZh       String
+  blurbEn       String
+  blurbZh       String
+  pillEn        String?
+  pillZh        String?
+  template      String
+  status        String
+  startsAt      DateTime
+  endsAt        DateTime
+  timezone      String          @default("UTC")
+  ctaKind       String
+  ctaValue      String
+  purpose       String          @default("")
+  legalText     String          @default("")
+  legalVersion  Int             @default(1)
+  coverImageUrl String?
+  config        Json            @default("{}")
+  createdBy     String
+  updatedBy     String
+  publishedBy   String?
+  publishedAt   DateTime?
+  createdAt     DateTime        @default(now())
+  updatedAt     DateTime        @updatedAt
+  events        CampaignEvent[]
+  applications  CampaignApplication[]
+  raffleTickets CampaignRaffleTicket[]
+  raffleWins    CampaignRaffleWin[]
+
+  @@index([status, startsAt, endsAt])
+}
+
+model CampaignApplication {
+  id         String   @id @default(uuid())
+  campaignId String
+  userId     String
+  answers    Json
+  status     String   @default("pending")
+  opsNote    String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  campaign   Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([campaignId, userId])
+  @@index([campaignId, status])
+}
+
+model CampaignRaffleTicket {
+  id         String   @id @default(uuid())
+  campaignId String
+  userId     String
+  tickets    Int
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  campaign   Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([campaignId, userId])
+}
+
+model CampaignRaffleWin {
+  id         String   @id @default(uuid())
+  campaignId String
+  userId     String
+  prizeIndex Int
+  prizeKind  String
+  points     Int      @default(0)
+  labelEn    String
+  labelZh    String
+  fulfilled  Boolean  @default(false)
+  createdAt  DateTime @default(now())
+  campaign   Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([campaignId])
+}
+
+model CampaignEvent {
+  id         String   @id @default(uuid())
+  campaignId String
+  actor      String
+  action     String
+  fromStatus String?
+  toStatus   String?
+  note       String?
+  createdAt  DateTime @default(now())
+  campaign   Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  @@index([campaignId, createdAt])
 }

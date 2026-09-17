@@ -293,8 +293,10 @@ async function generateRefinedPortrait(brief, locale) {
 
 module.exports = {
   asRefined,
+  callGeminiJson,
   cleanCrawlerTraces,
   defaultGeminiModel,
   generateRefinedPortrait,
+  languageHint,
   refinePrompt,
 };

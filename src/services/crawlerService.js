@@ -19,12 +19,10 @@ const {
   sourceIdentityKey,
 } = require('../utils/crawlerRecordIdentity');
 const { distributeUplineRewards } = require('./distributionService');
-const {
-  SUMMER_TRAVEL_2026,
-  POINT_SOURCE_SUMMER_TRAVEL_BONUS,
-  isSummerTravel2026Active,
-} = require('../constants/referralCampaigns');
-const { countSummerBonusItems } = require('../utils/summerTravelEligibility');
+const { POINT_SOURCE_SUMMER_TRAVEL_BONUS } = require('../constants/referralCampaigns');
+const { countStayBonusItems } = require('../utils/summerTravelEligibility');
+const { resolveStayBonusRules } = require('../utils/stayBonus');
+const { awardConnectBoosts } = require('./campaignEffects');
 const logger = createLogger('crawlerService');
 
 // Data validation schema for different data types
@@ -491,6 +489,8 @@ async function uploadCrawlerData(data, userId) {
       };
     }
 
+    const stayRules = await resolveStayBonusRules();
+
     // Execute database transaction with all checks inside
     const result = await prisma.$transaction(async (tx) => {
       // Check upload limits inside transaction
@@ -709,13 +709,16 @@ async function uploadCrawlerData(data, userId) {
 
       // Calculate points based on actual inserted items, grouped by source
       let actualPointsEarned = 0;
+      const pointsBySource = {};
       for (const [source, count] of Object.entries(insertedBySource)) {
-        actualPointsEarned += calculateDataPoints(source, count);
+        const sourcePoints = calculateDataPoints(source, count);
+        pointsBySource[source] = sourcePoints;
+        actualPointsEarned += sourcePoints;
       }
 
-      // Summer Travel 2026: +10 bonus per newly inserted eligible stay (base 10 remains as crawler)
+      // Stay bonus: extra points per newly inserted eligible stay (base crawler points stay as-is)
       let summerBonusPoints = 0;
-      if (isSummerTravel2026Active() && actualInserted > 0) {
+      if (stayRules && actualInserted > 0) {
         const newlyInsertedItems = [];
         let attributedForBonus = 0;
         for (let i = 0; i < validItems.length && attributedForBonus < actualInserted; i++) {
@@ -723,8 +726,8 @@ async function uploadCrawlerData(data, userId) {
           newlyInsertedItems.push(validItems[i]);
           attributedForBonus += 1;
         }
-        const bonusItems = countSummerBonusItems(newlyInsertedItems);
-        summerBonusPoints = bonusItems * (SUMMER_TRAVEL_2026.uploadBonusPerItem || 10);
+        const bonusItems = countStayBonusItems(newlyInsertedItems, stayRules);
+        summerBonusPoints = bonusItems * (stayRules.bonusPerItem || 0);
       }
 
       // Calculate and award points
@@ -776,12 +779,31 @@ async function uploadCrawlerData(data, userId) {
             userId,
             amount: summerBonusPoints,
             source: POINT_SOURCE_SUMMER_TRAVEL_BONUS,
-            sourceId: 'summer_travel_2026',
+            sourceId: stayRules?.campaignId || 'summer_travel_2026',
           },
         });
-        logger.info('Summer Travel upload bonus awarded', {
+        logger.info('Stay bonus upload awarded', {
           userId,
           summerBonusPoints,
+          campaignId: stayRules?.campaignId || null,
+        });
+      }
+
+      let connectBoostPoints = 0;
+      try {
+        const boost = await awardConnectBoosts(tx, userId, pointsBySource);
+        connectBoostPoints = boost.extra;
+        if (connectBoostPoints > 0) {
+          logger.info('Connect campaign boost awarded', {
+            userId,
+            connectBoostPoints,
+            awards: boost.awards,
+          });
+        }
+      } catch (boostError) {
+        logger.error('Connect campaign boost failed', {
+          userId,
+          error: boostError.message,
         });
       }
 
@@ -789,8 +811,9 @@ async function uploadCrawlerData(data, userId) {
         insertedCount: actualInserted,
         validItems,
         duplicates,
-        pointsEarned: actualPointsEarned + summerBonusPoints,
+        pointsEarned: actualPointsEarned + summerBonusPoints + connectBoostPoints,
         summerBonusPoints,
+        connectBoostPoints,
         validationErrors
       };
     }, {

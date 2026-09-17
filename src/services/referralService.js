@@ -12,10 +12,9 @@ const {
   POINT_SOURCE_SUMMER_TRAVEL_INVITER,
   POINT_SOURCE_SUMMER_TRAVEL_INVITEE,
   POINT_SOURCE_SUMMER_TRAVEL_BONUS,
-  isSummerTravel2026Active,
   normalizeReferralCampaignInput,
-  assertCampaignActive,
 } = require('../constants/referralCampaigns');
+const { assertReferralCampaignUsable, resolveStayBonusRules } = require('../utils/stayBonus');
 const { getReferralRulesPayload } = require('../constants/referralCopy');
 const {
   hasCompletedFirstValidUpload,
@@ -213,8 +212,9 @@ async function processCampaignReferral(newUserId, inviterId, campaignSlug) {
     inviterSource = 'REFERRAL_CAMPAIGN_MOTHERS_DAY_INVITER';
     inviteeSource = 'REFERRAL_CAMPAIGN_MOTHERS_DAY_INVITEE';
   } else if (campaignSlug === SUMMER_TRAVEL_2026_SLUG) {
-    inviterAmount = SUMMER_TRAVEL_2026.inviterPoints;
-    inviteeAmount = SUMMER_TRAVEL_2026.inviteePoints;
+    const stayRules = await resolveStayBonusRules();
+    inviterAmount = stayRules?.inviterPoints || SUMMER_TRAVEL_2026.inviterPoints;
+    inviteeAmount = stayRules?.inviteePoints || SUMMER_TRAVEL_2026.inviteePoints;
     inviterSource = POINT_SOURCE_SUMMER_TRAVEL_INVITER;
     inviteeSource = POINT_SOURCE_SUMMER_TRAVEL_INVITEE;
   } else {
@@ -289,7 +289,8 @@ async function assertSummerTravelInviterEligible(inviterId) {
 }
 
 async function tryProcessSummerTravelReferralRewards(inviteeId, inviterId) {
-  if (!isSummerTravel2026Active()) {
+  const stayRules = await resolveStayBonusRules();
+  if (!stayRules?.isActive) {
     logger.info('Summer Travel referral settlement skipped — campaign inactive', {
       inviteeId,
       inviterId,
@@ -353,6 +354,18 @@ async function processReferralRewardsForInvitee(newUserId, inviterId, referralCo
         });
       }
     });
+
+    try {
+      const { awardReferralBoost, syncRaffleTicketsForInviter } = require('./campaignEffects');
+      await awardReferralBoost(inviterId, newUserId);
+      await syncRaffleTicketsForInviter(inviterId);
+    } catch (boostError) {
+      logger.error('Referral campaign boost failed', {
+        inviterId,
+        inviteeId: newUserId,
+        error: boostError.message,
+      });
+    }
 
     await recordTaskProgress(inviterId, 'referral-1', 1);
 
@@ -521,15 +534,18 @@ async function getSummerTravel2026Stats(userId) {
       countCampaignInvitesAsInviter(userId, SUMMER_TRAVEL_2026_SLUG),
     ]);
 
+  const stayRules = await resolveStayBonusRules();
   const canInvite = summerOrderCount > 0;
-  const pointsPerOrder = SUMMER_TRAVEL_2026.pointsPerOrderDisplay;
+  const pointsPerOrder = stayRules?.pointsPerOrder || SUMMER_TRAVEL_2026.pointsPerOrderDisplay;
+  const inviterPoints = stayRules?.inviterPoints || SUMMER_TRAVEL_2026.inviterPoints;
+  const inviteePoints = stayRules?.inviteePoints || SUMMER_TRAVEL_2026.inviteePoints;
   const orderPointsEarned = summerOrderCount * pointsPerOrder;
-  const invitePointsEarned = successfulInvites * SUMMER_TRAVEL_2026.inviterPoints;
+  const invitePointsEarned = successfulInvites * inviterPoints;
   const pendingInvites = Math.max(0, linkedInvites - successfulInvites);
 
   return {
     slug: SUMMER_TRAVEL_2026_SLUG,
-    isActive: isSummerTravel2026Active(),
+    isActive: Boolean(stayRules?.isActive),
     ownReferralCode: user?.referralCode ?? '',
     canInvite,
     summerOrderCount,
@@ -540,8 +556,9 @@ async function getSummerTravel2026Stats(userId) {
     pendingInvites,
     linkedInvites,
     invitePointsEarned,
-    inviterPoints: SUMMER_TRAVEL_2026.inviterPoints,
-    inviteePoints: SUMMER_TRAVEL_2026.inviteePoints,
+    inviterPoints,
+    inviteePoints,
+    sites: stayRules?.sites || ['airbnb', 'booking'],
   };
 }
 
@@ -553,7 +570,7 @@ async function useReferralCode(userId, code, referralCampaignRaw = null) {
     if (e.code) throw e;
     throw e;
   }
-  assertCampaignActive(campaignSlug);
+  await assertReferralCampaignUsable(campaignSlug);
 
   if (campaignSlug && !code) {
     const err = new Error('Referral code is required for campaign invites');

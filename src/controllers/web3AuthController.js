@@ -8,8 +8,8 @@ const {
   MOTHERS_DAY_2026_SLUG,
   SUMMER_TRAVEL_2026_SLUG,
   normalizeReferralCampaignInput,
-  assertCampaignActive,
 } = require('../constants/referralCampaigns');
+const { assertReferralCampaignUsable } = require('../utils/stayBonus');
 
 const logger = createLogger('web3AuthController');
 
@@ -35,7 +35,7 @@ exports.web3authLogin = async (req, res) => {
     let campaignSlug = null;
     try {
       campaignSlug = normalizeReferralCampaignInput(req.body.referralCampaign ?? req.body.campaign);
-      assertCampaignActive(campaignSlug);
+      await assertReferralCampaignUsable(campaignSlug);
     } catch (e) {
       if (e.code === 'INVALID_CAMPAIGN' || e.code === 'CAMPAIGN_INACTIVE') {
         return res.status(400).json({

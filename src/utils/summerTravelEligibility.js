@@ -1,11 +1,7 @@
-const {
-  SUMMER_TRAVEL_2026,
-  isSummerTravel2026Active,
-} = require('../constants/referralCampaigns');
 const { rewardEligibleUploadWhere } = require('./firstValidUpload');
 const prisma = require('./prisma');
-
-const TRAVEL_SOURCES = new Set(['airbnb', 'booking']);
+const { normalizeCrawlerSource } = require('../constants/crawlerSources');
+const { resolveStayBonusRules } = require('./stayBonus');
 
 const INVALID_STAY_STATUSES = new Set([
   'cancelled',
@@ -33,28 +29,21 @@ function extractStayDate(payload) {
   if (raw == null) return null;
   const s = String(raw).trim();
   if (!s) return null;
-  // ISO datetime → date portion
   if (s.includes('T')) return s.slice(0, 10);
   if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
   return null;
 }
 
-function isEligibleSummerStayDate(dateStr) {
-  if (!dateStr) return false;
-  return (
-    dateStr >= SUMMER_TRAVEL_2026.stayStartDate &&
-    dateStr <= SUMMER_TRAVEL_2026.stayEndDate
-  );
+function isEligibleStayDate(dateStr, rules) {
+  if (!dateStr || !rules) return false;
+  return dateStr >= rules.stayStartDate && dateStr <= rules.stayEndDate;
 }
 
-function isTravelSource(source) {
-  return TRAVEL_SOURCES.has(String(source || '').toLowerCase());
+function isStaySource(source, rules) {
+  const site = normalizeCrawlerSource(source);
+  return Array.isArray(rules?.sites) && rules.sites.includes(site);
 }
 
-/**
- * Soft status gate: reject clearly cancelled/failed; accept missing status.
- * Booking "paid" is not always present in crawler payloads.
- */
 function isStayStatusEligible(payload) {
   const status = payload?.status ?? payload?.bookingStatus ?? payload?.reservationStatus;
   if (status == null || status === '') return true;
@@ -62,60 +51,49 @@ function isStayStatusEligible(payload) {
   return !INVALID_STAY_STATUSES.has(normalized);
 }
 
-/**
- * Whether a crawler item qualifies for Summer Travel Task 1 bonus / referral gate.
- */
-function isSummerTravelEligibleItem(item, now = new Date()) {
-  if (!isSummerTravel2026Active(now)) return false;
-  if (!item || !isTravelSource(item.source)) return false;
+function isStayBonusEligibleItem(item, rules) {
+  if (!rules?.isActive) return false;
+  if (!item || !isStaySource(item.source, rules)) return false;
   const payload = item.payload || {};
   if (!isStayStatusEligible(payload)) return false;
-  const stayDate = extractStayDate(payload);
-  return isEligibleSummerStayDate(stayDate);
+  return isEligibleStayDate(extractStayDate(payload), rules);
 }
 
-function countSummerBonusItems(items, now = new Date()) {
-  if (!Array.isArray(items) || items.length === 0) return 0;
+function countStayBonusItems(items, rules) {
+  if (!Array.isArray(items) || items.length === 0 || !rules) return 0;
   let n = 0;
   for (const item of items) {
-    if (isSummerTravelEligibleItem(item, now)) n += 1;
+    if (isStayBonusEligibleItem(item, rules)) n += 1;
   }
   return n;
 }
 
-function rowLooksLikeSummerStay(row) {
-  if (!row || !isTravelSource(row.source)) return false;
-  const payload = row.payload || {};
-  if (!isStayStatusEligible(payload)) return false;
-  return isEligibleSummerStayDate(extractStayDate(payload));
+function rowLooksLikeStay(row, rules) {
+  return isStayBonusEligibleItem(row, rules);
 }
 
-/**
- * Count reward-eligible Booking/Airbnb rows with summer stay dates for a user.
- * Stay-date filter is applied in JS (JSON payload fields vary by crawler).
- * When duringCampaignOnly=true, only rows uploaded inside the campaign window count
- * (matches “connect & recognize during the campaign”).
- */
 async function countUserSummerStayOrders(
   userId,
   db = prisma,
-  { duringCampaignOnly = true } = {},
+  { duringCampaignOnly = true, rules } = {},
 ) {
+  const active = rules || (await resolveStayBonusRules());
+  if (!active?.sites?.length) return 0;
   const where = rewardEligibleUploadWhere({
     userId,
-    source: { in: ['airbnb', 'booking'] },
+    source: { in: active.sites },
   });
   if (duringCampaignOnly) {
     where.createdAt = {
-      gte: SUMMER_TRAVEL_2026.startUtc,
-      lte: SUMMER_TRAVEL_2026.endUtc,
+      gte: active.startUtc,
+      lte: active.endUtc,
     };
   }
   const rows = await db.crawlerData.findMany({
     where,
     select: { id: true, source: true, payload: true },
   });
-  return rows.filter(rowLooksLikeSummerStay).length;
+  return rows.filter((row) => rowLooksLikeStay(row, active)).length;
 }
 
 async function hasCompletedFirstValidSummerOrder(userId, db = prisma) {
@@ -126,14 +104,15 @@ async function hasCompletedFirstValidSummerOrder(userId, db = prisma) {
 }
 
 module.exports = {
-  TRAVEL_SOURCES,
   extractStayDate,
-  isEligibleSummerStayDate,
-  isTravelSource,
+  isEligibleStayDate,
+  isStaySource,
   isStayStatusEligible,
-  isSummerTravelEligibleItem,
-  countSummerBonusItems,
+  isStayBonusEligibleItem,
+  countStayBonusItems,
   countUserSummerStayOrders,
   hasCompletedFirstValidSummerOrder,
-  rowLooksLikeSummerStay,
+  rowLooksLikeStay,
+  isSummerTravelEligibleItem: (item, rules) => isStayBonusEligibleItem(item, rules),
+  countSummerBonusItems: countStayBonusItems,
 };

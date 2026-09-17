@@ -30,18 +30,36 @@ function asInt(value, fallback) {
   return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 
+function asMoney(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : 0;
+}
+
+/** Same USD wallet as merchant Account: completed ledger, withdrawals subtract. */
 async function orgBalance(userId) {
-  const [depositSum, withdrawSum] = await Promise.all([
-    prisma.organizationTransaction.aggregate({
-      _sum: { amount: true },
-      where: { userId, type: 'DEPOSIT', status: 'COMPLETED' },
-    }),
-    prisma.organizationTransaction.aggregate({
-      _sum: { amount: true },
-      where: { userId, type: 'WITHDRAW', status: 'COMPLETED' },
-    }),
-  ]);
-  return (depositSum._sum.amount || 0) - (withdrawSum._sum.amount || 0);
+  const rows = await prisma.organizationTransaction.findMany({
+    where: { userId, status: 'COMPLETED' },
+    select: { amount: true, type: true },
+  });
+  return rows.reduce((acc, tx) => {
+    const amount = asMoney(tx.amount);
+    return tx.type === 'WITHDRAW' ? acc - amount : acc + amount;
+  }, 0);
+}
+
+function presentMerchantRow(user, balance) {
+  const { legalEntity, ...rest } = user;
+  const companyName = String(legalEntity?.companyName || '').trim() || null;
+  return {
+    ...rest,
+    balance: asMoney(balance),
+    currency: 'USD',
+    companyName,
+    kyc: {
+      ...presentKyc(legalEntity),
+      companyName,
+    },
+  };
 }
 
 exports.overview = async (req, res) => {
@@ -194,14 +212,7 @@ exports.listMerchants = async (req, res) => {
       prisma.user.count({ where }),
     ]);
     const items = await Promise.all(
-      users.map(async (user) => {
-        const { legalEntity, ...rest } = user;
-        return {
-          ...rest,
-          balance: await orgBalance(user.id),
-          kyc: presentKyc(legalEntity),
-        };
-      }),
+      users.map(async (user) => presentMerchantRow(user, await orgBalance(user.id))),
     );
     return res.json({
       status: 'success',
@@ -252,14 +263,16 @@ exports.getMerchant = async (req, res) => {
         take: 20,
       }),
     ]);
+    const listed = presentMerchantRow(user, balance);
     return res.json({
       status: 'success',
       data: {
-        user: { ...merchant, kyc: presentKyc(legalEntity) },
+        user: { ...merchant, kyc: listed.kyc, companyName: listed.companyName },
         legalEntity: presentLegalEntity(legalEntity),
-        kyc: presentKyc(legalEntity),
-        balance,
+        kyc: listed.kyc,
+        balance: listed.balance,
         currency: 'USD',
+        companyName: listed.companyName,
         transactions,
         pendingPayments,
         orders: orders.map(presentOpsOrder),

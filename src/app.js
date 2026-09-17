@@ -32,6 +32,7 @@ const promotionRoutes = require('./routes/promotionRoutes');
 const transactionRoutes = require('./routes/transactionRoutes');
 const ddcNFTMetadataRoutes = require('./routes/ddcNFTMetadataRoutes');
 const opsAdminRoutes = require('./routes/opsAdminRoutes');
+const campaignRoutes = require('./routes/campaignRoutes');
 const commerceRoutes = require('./routes/commerceRoutes');
 const lifeContextRoutes = require('./routes/lifeContextRoutes');
 const mcpRoutes = require('./routes/mcpRoutes');
@@ -169,6 +170,7 @@ app.use('/data-pack', express.static(path.join(__dirname, '../public/data-pack')
 
 // 路由
 app.use('/api/ops', opsAdminRoutes);
+app.use('/api/campaigns', campaignRoutes);
 app.use('/api/auth', authRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/assets', assetRoutes);

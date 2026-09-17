@@ -94,6 +94,12 @@ async function postSavedRefined(req, res) {
     }
     const model = typeof req.body?.model === 'string' ? req.body.model.slice(0, 80) : '';
     await saveRefined(req.user.id, refined, model);
+    try {
+      const { awardFirstActionBonus } = require('../services/campaignEffects');
+      await awardFirstActionBonus(req.user.id, 'first_distillation');
+    } catch (bonusError) {
+      logger.error('First distillation bonus failed', bonusError);
+    }
     res.json({ status: 'success', data: await serializeStatus(req, req.user.id) });
   } catch (error) {
     logger.error('postSavedRefined failed', error);
@@ -105,6 +111,12 @@ async function postRefine(req, res) {
   try {
     const language = typeof req.body?.language === 'string' ? req.body.language : 'en';
     await refinePortrait(req.user.id, language);
+    try {
+      const { awardFirstActionBonus } = require('../services/campaignEffects');
+      await awardFirstActionBonus(req.user.id, 'first_distillation');
+    } catch (bonusError) {
+      logger.error('First distillation bonus failed', bonusError);
+    }
     res.json({ status: 'success', data: await serializeStatus(req, req.user.id) });
   } catch (error) {
     logger.error('postRefine failed', error);

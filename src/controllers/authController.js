@@ -7,8 +7,8 @@ const {
   MOTHERS_DAY_2026_SLUG,
   SUMMER_TRAVEL_2026_SLUG,
   normalizeReferralCampaignInput,
-  assertCampaignActive,
 } = require('../constants/referralCampaigns');
+const { assertReferralCampaignUsable } = require('../utils/stayBonus');
 
 /**
  * 用户注册
@@ -32,7 +32,7 @@ exports.register = async (req, res) => {
     let campaignSlug = null;
     try {
       campaignSlug = normalizeReferralCampaignInput(referralCampaign ?? campaign);
-      assertCampaignActive(campaignSlug);
+      await assertReferralCampaignUsable(campaignSlug);
     } catch (e) {
       if (e.code === 'INVALID_CAMPAIGN' || e.code === 'CAMPAIGN_INACTIVE') {
         return res.status(400).json({
