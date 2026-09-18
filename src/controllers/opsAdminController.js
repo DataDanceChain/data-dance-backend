@@ -360,3 +360,156 @@ exports.getUserPointHistory = async (req, res) => {
     return res.status(500).json({ status: 'error', message: 'Server error' });
   }
 };
+
+function parsePointsQuery(req) {
+  const q = String(req.query.q || '').trim();
+  const minRaw = req.query.min;
+  const maxRaw = req.query.max;
+  const min = minRaw === undefined || minRaw === '' ? null : Number(minRaw);
+  const max = maxRaw === undefined || maxRaw === '' ? null : Number(maxRaw);
+  const zeros = String(req.query.zeros || '1') !== '0';
+  const sort = ['totalPoints', 'createdAt', 'email'].includes(String(req.query.sort))
+    ? String(req.query.sort)
+    : 'totalPoints';
+  const order = String(req.query.order) === 'asc' ? 'asc' : 'desc';
+  const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+  const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 50, 1), 200);
+  return { q, min, max, zeros, sort, order, page, limit };
+}
+
+function pointsUserWhere({ q, min, max, zeros }) {
+  const where = {};
+  const points = {};
+  if (!zeros) points.gt = 0;
+  if (min != null && Number.isFinite(min)) points.gte = min;
+  if (max != null && Number.isFinite(max)) points.lte = max;
+  if (Object.keys(points).length) where.totalPoints = points;
+  if (q.length >= 2) {
+    where.OR = [
+      { email: { contains: q, mode: 'insensitive' } },
+      { name: { contains: q, mode: 'insensitive' } },
+      { walletAddress: { contains: q, mode: 'insensitive' } },
+      { referralCode: { contains: q, mode: 'insensitive' } },
+      { id: q },
+    ];
+  }
+  return where;
+}
+
+async function pointsSummary() {
+  const [users, ledger, withBalance, issued, deducted] = await Promise.all([
+    prisma.user.aggregate({
+      _count: { _all: true },
+      _sum: { totalPoints: true },
+    }),
+    prisma.point.aggregate({
+      _count: { _all: true },
+      _sum: { amount: true },
+    }),
+    prisma.user.count({ where: { totalPoints: { not: 0 } } }),
+    prisma.point.aggregate({ where: { amount: { gt: 0 } }, _sum: { amount: true } }),
+    prisma.point.aggregate({ where: { amount: { lt: 0 } }, _sum: { amount: true } }),
+  ]);
+  return {
+    users: users._count._all,
+    usersWithBalance: withBalance,
+    outstanding: users._sum.totalPoints ?? 0,
+    issued: issued._sum.amount ?? 0,
+    deducted: Math.abs(deducted._sum.amount ?? 0),
+    ledgerNet: ledger._sum.amount ?? 0,
+    ledgerRows: ledger._count._all,
+  };
+}
+
+/** GET /api/ops/points — ledger totals plus a filterable member list */
+exports.listPoints = async (req, res) => {
+  try {
+    const parsed = parsePointsQuery(req);
+    const where = pointsUserWhere(parsed);
+    const [summary, total, items] = await Promise.all([
+      pointsSummary(),
+      prisma.user.count({ where }),
+      prisma.user.findMany({
+        where,
+        select: {
+          id: true,
+          email: true,
+          name: true,
+          walletAddress: true,
+          referralCode: true,
+          totalPoints: true,
+          createdAt: true,
+        },
+        orderBy: { [parsed.sort]: parsed.order },
+        skip: (parsed.page - 1) * parsed.limit,
+        take: parsed.limit,
+      }),
+    ]);
+    return res.json({
+      status: 'success',
+      data: {
+        summary,
+        items,
+        pagination: {
+          page: parsed.page,
+          limit: parsed.limit,
+          total,
+          pages: Math.max(1, Math.ceil(total / parsed.limit)),
+        },
+      },
+    });
+  } catch (error) {
+    console.error('Ops points list error:', error);
+    return res.status(500).json({ status: 'error', message: 'Server error' });
+  }
+};
+
+function csvCell(value) {
+  const text = value == null ? '' : String(value);
+  if (/[",\r\n]/.test(text)) return `"${text.replace(/"/g, '""')}"`;
+  return text;
+}
+
+/** GET /api/ops/points/export — same filters, CSV of every matching member */
+exports.exportPoints = async (req, res) => {
+  try {
+    const parsed = parsePointsQuery(req);
+    const where = pointsUserWhere(parsed);
+    const rows = await prisma.user.findMany({
+      where,
+      select: {
+        id: true,
+        email: true,
+        name: true,
+        walletAddress: true,
+        referralCode: true,
+        totalPoints: true,
+        createdAt: true,
+      },
+      orderBy: { [parsed.sort]: parsed.order },
+      take: 20000,
+    });
+    const header = ['email', 'name', 'wallet', 'referral_code', 'points', 'user_id', 'created_at'];
+    const lines = [
+      header.join(','),
+      ...rows.map((row) =>
+        [
+          csvCell(row.email),
+          csvCell(row.name),
+          csvCell(row.walletAddress),
+          csvCell(row.referralCode),
+          csvCell(row.totalPoints),
+          csvCell(row.id),
+          csvCell(row.createdAt.toISOString()),
+        ].join(','),
+      ),
+    ];
+    const stamp = new Date().toISOString().slice(0, 10);
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="datadance-points-${stamp}.csv"`);
+    return res.send(`\uFEFF${lines.join('\n')}\n`);
+  } catch (error) {
+    console.error('Ops points export error:', error);
+    return res.status(500).json({ status: 'error', message: 'Server error' });
+  }
+};

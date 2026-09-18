@@ -17,6 +17,8 @@ JWT_SECRET=<existing-jwt-secret>
 | Method | Path | Auth |
 |--------|------|------|
 | POST | `/api/ops/auth/login` | Body: `{ username, password }` |
+| GET | `/api/ops/points` | Ledger totals + paginated member balances. Query: `q`, `min`, `max`, `zeros=0`, `sort`, `order`, `page`, `limit` |
+| GET | `/api/ops/points/export` | Same filters, CSV download |
 | GET | `/api/ops/users/search?q=` | Ops Bearer token |
 | GET | `/api/ops/users/:userId` | Ops Bearer token |
 | POST | `/api/ops/users/:userId/points` | Ops Bearer token, body: `{ amount, note }` |
