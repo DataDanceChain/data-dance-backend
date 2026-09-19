@@ -1,7 +1,7 @@
 const bcrypt = require('bcryptjs');
 const { generateToken } = require('../utils/jwtUtils');
 const prisma = require('../utils/prisma');
-const { generateReferralCode } = require('../utils/referralUtils');
+const { findUserByReferralCode, generateUniqueReferralCode } = require('../utils/referralUtils');
 const referralService = require('../services/referralService');
 const {
   MOTHERS_DAY_2026_SLUG,
@@ -69,15 +69,11 @@ exports.register = async (req, res) => {
     const salt = await bcrypt.genSalt(10);
     const hashedPassword = await bcrypt.hash(password, salt);
 
-    // Generate a new referral code for the registering user
-    const newUsersOwnReferralCode = generateReferralCode();
+    const newUsersOwnReferralCode = await generateUniqueReferralCode();
 
     let inviterId = null;
     if (referralCodeFromRequest) {
-      const inviter = await prisma.user.findUnique({
-        where: { referralCode: referralCodeFromRequest },
-        select: { id: true }
-      });
+      const inviter = await findUserByReferralCode(referralCodeFromRequest, { id: true });
 
       if (!inviter) {
         return res.status(400).json({

@@ -73,4 +73,41 @@ const uploadCommerceFile = multer({
   limits: { fileSize: 20 * 1024 * 1024 }
 });
 
-module.exports = { uploadNFTImage, uploadCommerceFile }; 
+const campaignCoverDir = path.join(__dirname, '../../public/assets/campaigns');
+if (!fs.existsSync(campaignCoverDir)) {
+  fs.mkdirSync(campaignCoverDir, { recursive: true });
+}
+
+const COVER_EXT = {
+  'image/jpeg': '.jpg',
+  'image/png': '.png',
+  'image/webp': '.webp',
+  'image/gif': '.gif',
+};
+
+const campaignCoverStorage = multer.diskStorage({
+  destination: function (_req, _file, cb) {
+    cb(null, campaignCoverDir);
+  },
+  filename: function (_req, file, cb) {
+    const ext = COVER_EXT[file.mimetype] || path.extname(file.originalname).toLowerCase() || '.jpg';
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+    cb(null, `cover-${uniqueSuffix}${ext}`);
+  },
+});
+
+const campaignCoverFilter = (req, file, cb) => {
+  if (COVER_EXT[file.mimetype]) {
+    cb(null, true);
+  } else {
+    cb(new Error('Only JPG, PNG, WebP, or GIF images are allowed'), false);
+  }
+};
+
+const uploadCampaignCover = multer({
+  storage: campaignCoverStorage,
+  fileFilter: campaignCoverFilter,
+  limits: { fileSize: 8 * 1024 * 1024 },
+});
+
+module.exports = { uploadNFTImage, uploadCommerceFile, uploadCampaignCover }; 

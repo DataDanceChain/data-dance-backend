@@ -26,6 +26,7 @@ const {
 } = require('../utils/summerTravelEligibility');
 
 const logger = createLogger('referralService');
+const { ensureDisplayReferralCode, findUserByReferralCode } = require('../utils/referralUtils');
 
 /** Standard (non-campaign) direct referral — immediate inviter bonus and upline distribution base */
 const DIRECT_REFERRAL_BONUS_POINTS = 150;
@@ -456,11 +457,9 @@ async function getReferralStatus(userId) {
     }
   });
 
-  // Get user's own referral code
   const user = await prisma.user.findUnique({
     where: { id: userId },
-    select: { 
-      referralCode: true,
+    select: {
       name: true
     }
   });
@@ -468,6 +467,8 @@ async function getReferralStatus(userId) {
   if (!user) {
     throw new Error('User not found');
   }
+
+  const ownReferralCode = await ensureDisplayReferralCode(userId);
 
   return {
     hasBeenInvited: !!asInvitee,
@@ -477,7 +478,7 @@ async function getReferralStatus(userId) {
       code: asInvitee.inviter.referralCode,
       inviteTime: asInvitee.createdAt
     } : null,
-    ownReferralCode: user.referralCode,
+    ownReferralCode,
     invitedUsers: asInviter.map(ref => ({
       id: ref.inviteeId,
       name: ref.invitee?.name || 'Unknown',
@@ -596,11 +597,7 @@ async function useReferralCode(userId, code, referralCampaignRaw = null) {
     throw error;
   }
 
-  // Find inviter
-  const inviter = await prisma.user.findUnique({
-    where: { referralCode: code },
-    select: { id: true, name: true, referralCode: true }
-  });
+  const inviter = await findUserByReferralCode(code, { id: true, name: true, referralCode: true });
 
   if (!inviter) {
     const error = new Error('Invalid referral code');

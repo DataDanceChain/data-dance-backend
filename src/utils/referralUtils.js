@@ -1,20 +1,104 @@
-const { init: initCuid } = require('@paralleldrive/cuid2');
+const crypto = require('crypto');
+const { Prisma } = require('@prisma/client');
 const prisma = require('./prisma');
 const { createLogger } = require('./logger');
 
 const logger = createLogger('referralUtils');
 
-// Initialize cuid generator with custom configuration
-const createId = initCuid({
-  length: 8  // Shorter length for referral codes
-});
+// 32 characters. Skip 0/O and 1/I/L so codes stay easy to read aloud.
+const ALPHABET = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
+const CODE_LENGTH = 6;
+const ALLOCATE_ATTEMPTS = 16;
 
-/**
- * Generate a unique referral code for a new user
- * @returns {string} A unique referral code
- */
 function generateReferralCode() {
-  return `DD-${createId()}`;
+  let code = '';
+  for (let i = 0; i < CODE_LENGTH; i += 1) {
+    code += ALPHABET[crypto.randomInt(ALPHABET.length)];
+  }
+  return code;
+}
+
+function isDisplayReferralCode(code) {
+  return typeof code === 'string'
+    && code.length === CODE_LENGTH
+    && [...code].every((character) => ALPHABET.includes(character));
+}
+
+function referralCodeLookupValues(raw) {
+  const compact = String(raw || '').trim().replace(/\s+/g, '');
+  if (!compact) return [];
+
+  const noHyphen = compact.replace(/-/g, '');
+  const values = new Set([
+    compact,
+    compact.toUpperCase(),
+    compact.toLowerCase(),
+    noHyphen,
+    noHyphen.toUpperCase(),
+    noHyphen.toLowerCase(),
+  ]);
+
+  if (/^DD[A-Z0-9]{8}$/i.test(noHyphen)) {
+    const body = noHyphen.slice(2);
+    values.add(`DD-${body}`);
+    values.add(`DD-${body.toLowerCase()}`);
+    values.add(`DD-${body.toUpperCase()}`);
+  }
+
+  return [...values];
+}
+
+async function findUserByReferralCode(code, select = { id: true, email: true }) {
+  const values = [...new Set(referralCodeLookupValues(code).map((value) => value.toLowerCase()))];
+  if (values.length === 0) return null;
+  const rows = await prisma.$queryRaw`
+    SELECT id, email, name, "referralCode"
+    FROM "User"
+    WHERE LOWER("referralCode") IN (${Prisma.join(values)})
+       OR LOWER(COALESCE("legacyReferralCode", '')) IN (${Prisma.join(values)})
+    LIMIT 1
+  `;
+  const row = rows[0];
+  if (!row) return null;
+  const picked = {};
+  if (select.id) picked.id = row.id;
+  if (select.email) picked.email = row.email;
+  if (select.name) picked.name = row.name;
+  if (select.referralCode) picked.referralCode = row.referralCode;
+  return picked;
+}
+
+async function generateUniqueReferralCode() {
+  for (let attempt = 0; attempt < ALLOCATE_ATTEMPTS; attempt += 1) {
+    const code = generateReferralCode();
+    const existing = await findUserByReferralCode(code, { id: true });
+    if (!existing) return code;
+  }
+  throw new Error('Could not allocate a unique referral code');
+}
+
+async function ensureDisplayReferralCode(userId) {
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { id: true, referralCode: true },
+  });
+  if (!user) return '';
+  if (isDisplayReferralCode(user.referralCode)) return user.referralCode;
+
+  const short = await generateUniqueReferralCode();
+  await prisma.$executeRaw`
+    UPDATE "User"
+    SET "referralCode" = ${short},
+        "legacyReferralCode" = COALESCE("legacyReferralCode", ${user.referralCode})
+    WHERE id = ${userId}
+      AND "referralCode" = ${user.referralCode}
+  `;
+  const latest = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { referralCode: true },
+  });
+  logger.info('Assigned display referral code', { userId, display: latest?.referralCode });
+  return latest?.referralCode || short;
 }
 
 /**
@@ -27,55 +111,43 @@ async function validateReferralCode(code, userId = null) {
   try {
     if (!code) {
       logger.warn('No referral code provided');
-      return { 
-        valid: false, 
+      return {
+        valid: false,
         error: 'No referral code provided',
-        errorCode: 'MISSING_CODE'
+        errorCode: 'MISSING_CODE',
       };
     }
 
-    // Find user with this referral code
-    const referrer = await prisma.user.findFirst({
-      where: { referralCode: code },
-      select: {
-        id: true,
-        email: true
-      }
-    });
+    const referrer = await findUserByReferralCode(code, { id: true, email: true });
 
     if (!referrer) {
       logger.warn('Invalid referral code', { code });
-      return { 
-        valid: false, 
+      return {
+        valid: false,
         error: 'Invalid referral code',
-        errorCode: 'INVALID_CODE'
+        errorCode: 'INVALID_CODE',
       };
     }
 
-    // If userId is provided, perform additional validations
     if (userId) {
-      // For new user registration, userId might be an email or actual user ID
-      // Check if it's an email (contains @) or actual user ID
       const isEmail = typeof userId === 'string' && userId.includes('@');
-      
+
       if (isEmail) {
-        // For email-based validation (new user registration)
-        // Check if a user with this email already exists and has been referred
         const existingUser = await prisma.user.findUnique({
           where: { email: userId },
-          select: { id: true }
+          select: { id: true },
         });
-        
+
         if (existingUser) {
           const existingReferral = await prisma.referral.findUnique({
             where: { inviteeId: existingUser.id },
-            include: { inviter: { select: { id: true, name: true } } }
+            include: { inviter: { select: { id: true, name: true } } },
           });
 
           if (existingReferral) {
             logger.warn('User has already been referred', {
               userEmail: userId,
-              existingInviterId: existingReferral.inviterId
+              existingInviterId: existingReferral.inviterId,
             });
             return {
               valid: false,
@@ -85,42 +157,39 @@ async function validateReferralCode(code, userId = null) {
                 inviterId: existingReferral.inviterId,
                 inviterName: existingReferral.inviter?.name,
                 code: existingReferral.code,
-                createdAt: existingReferral.createdAt
-              }
+                createdAt: existingReferral.createdAt,
+              },
             };
           }
-          
-          // Prevent self-referral for existing user
+
           if (referrer.id === existingUser.id) {
             logger.warn('Self-referral attempt', { userEmail: userId, code });
             return {
               valid: false,
               error: 'Cannot use your own referral code',
-              errorCode: 'SELF_REFERRAL_NOT_ALLOWED'
+              errorCode: 'SELF_REFERRAL_NOT_ALLOWED',
             };
           }
         }
-        
-        // Check if the referrer has the same email (self-referral prevention for new users)
+
         if (referrer.email === userId) {
           logger.warn('Self-referral attempt by email', { userEmail: userId, code });
           return {
             valid: false,
             error: 'Cannot use your own referral code',
-            errorCode: 'SELF_REFERRAL_NOT_ALLOWED'
+            errorCode: 'SELF_REFERRAL_NOT_ALLOWED',
           };
         }
       } else {
-        // For user ID-based validation (existing user)
         const existingReferral = await prisma.referral.findUnique({
           where: { inviteeId: userId },
-          include: { inviter: { select: { id: true, name: true } } }
+          include: { inviter: { select: { id: true, name: true } } },
         });
 
         if (existingReferral) {
           logger.warn('User has already been referred', {
             userId,
-            existingInviterId: existingReferral.inviterId
+            existingInviterId: existingReferral.inviterId,
           });
           return {
             valid: false,
@@ -130,62 +199,54 @@ async function validateReferralCode(code, userId = null) {
               inviterId: existingReferral.inviterId,
               inviterName: existingReferral.inviter?.name,
               code: existingReferral.code,
-              createdAt: existingReferral.createdAt
-            }
+              createdAt: existingReferral.createdAt,
+            },
           };
         }
 
-        // Prevent self-referral
         if (referrer.id === userId) {
           logger.warn('Self-referral attempt', { userId, code });
           return {
             valid: false,
             error: 'Cannot use your own referral code',
-            errorCode: 'SELF_REFERRAL_NOT_ALLOWED'
+            errorCode: 'SELF_REFERRAL_NOT_ALLOWED',
           };
         }
       }
     }
 
-    // Check if referrer has reached their limit (if any limit exists)
-    // This is a placeholder for future referral limit implementation
-    /*
-    const MAX_REFERRALS = 50;
-    if (referrer.referralCount >= MAX_REFERRALS) {
-      logger.warn('Referral limit reached', { 
-        referrerId: referrer.id,
-        currentCount: referrer.referralCount 
-      });
-      return { valid: false, error: 'Referrer has reached their referral limit' };
-    }
-    */
-
     logger.info('Valid referral code used', {
       code,
       referrerId: referrer.id,
-      userId
+      userId,
     });
 
     return {
       valid: true,
-      referrerId: referrer.id
+      referrerId: referrer.id,
     };
-
   } catch (error) {
     logger.error('Error validating referral code', {
       code,
       userId,
-      error: error.message
+      error: error.message,
     });
     return {
       valid: false,
       error: 'Error validating referral code',
-      errorCode: 'VALIDATION_ERROR'
+      errorCode: 'VALIDATION_ERROR',
     };
   }
 }
 
 module.exports = {
+  ALPHABET,
+  CODE_LENGTH,
   generateReferralCode,
-  validateReferralCode
+  generateUniqueReferralCode,
+  isDisplayReferralCode,
+  ensureDisplayReferralCode,
+  referralCodeLookupValues,
+  findUserByReferralCode,
+  validateReferralCode,
 };

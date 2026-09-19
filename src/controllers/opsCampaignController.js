@@ -340,6 +340,26 @@ exports.drawRaffle = async (req, res) => {
   }
 };
 
+exports.uploadCover = async (req, res) => {
+  try {
+    if (!req.file || !req.file.filename) {
+      return fail(res, 400, 'Choose a JPG, PNG, WebP, or GIF image');
+    }
+    const origin = String(process.env.PUBLIC_BASE_URL || 'https://api.datadance.ai').replace(/\/$/, '');
+    const pathName = `/assets/campaigns/${req.file.filename}`;
+    return res.json({
+      status: 'success',
+      data: {
+        url: `${origin}${pathName}`,
+        path: pathName,
+      },
+    });
+  } catch (error) {
+    console.error('Ops campaign cover upload error:', error);
+    return res.status(500).json({ status: 'error', message: 'Server error' });
+  }
+};
+
 exports.fulfillRaffleWin = async (req, res) => {
   try {
     const campaign = await prisma.campaign.findUnique({ where: { id: req.params.id } });

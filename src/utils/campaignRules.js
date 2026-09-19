@@ -81,6 +81,18 @@ function hostAllowed(hostname) {
   return EXTERNAL_HOSTS.some((allowed) => host === allowed || host.endsWith(`.${allowed}`));
 }
 
+function isCoverImageUrl(value) {
+  if (/^\/assets\/campaigns\/[A-Za-z0-9._-]+$/.test(value)) return true;
+  try {
+    const url = new URL(value);
+    const local = url.hostname === 'localhost' || url.hostname === '127.0.0.1';
+    if (local) return url.protocol === 'http:' || url.protocol === 'https:';
+    return url.protocol === 'https:' && hostAllowed(url.hostname);
+  } catch {
+    return false;
+  }
+}
+
 function parseDate(value) {
   if (!value) return null;
   const date = value instanceof Date ? value : new Date(value);
@@ -141,15 +153,8 @@ function parseHomeConfig(body) {
   const ctaError = validateCta(ctaKind, ctaValue);
   if (ctaError) return { error: ctaError };
   const coverImageUrl = stripText(body.coverImageUrl, 500);
-  if (coverImageUrl) {
-    try {
-      const url = new URL(coverImageUrl);
-      if (url.protocol !== 'https:' || !hostAllowed(url.hostname)) {
-        return { error: 'Cover image must be an https DataDance or X URL' };
-      }
-    } catch {
-      return { error: 'Cover image is not a valid URL' };
-    }
+  if (coverImageUrl && !isCoverImageUrl(coverImageUrl)) {
+    return { error: 'Cover image must be an uploaded file or an https DataDance / X URL' };
   }
   return {
     ctaKind,
@@ -400,8 +405,8 @@ function parseDraft(body = {}) {
       titleZh,
       blurbEn,
       blurbZh,
-      pillEn: i18n.pill.en || stripText(body.pillEn, 40) || null,
-      pillZh: i18n.pill.zh || stripText(body.pillZh, 40) || null,
+      pillEn: i18n.pill.en || null,
+      pillZh: i18n.pill.zh || null,
       template,
       startsAt,
       endsAt,
@@ -492,8 +497,8 @@ function applyCopyFields(existing, body = {}) {
       titleZh: stripText(body.titleZh, 80) || existing.titleZh,
       blurbEn: stripText(body.blurbEn, 200) || existing.blurbEn,
       blurbZh: stripText(body.blurbZh, 200) || existing.blurbZh,
-      pillEn: stripText(body.pillEn, 40) || existing.pillEn,
-      pillZh: stripText(body.pillZh, 40) || existing.pillZh,
+      pillEn: Object.prototype.hasOwnProperty.call(body, 'pillEn') ? stripText(body.pillEn, 40) : existing.pillEn,
+      pillZh: Object.prototype.hasOwnProperty.call(body, 'pillZh') ? stripText(body.pillZh, 40) : existing.pillZh,
     },
   );
   if (!firstFilled(i18n.title) || !firstFilled(i18n.blurb)) {
@@ -518,8 +523,8 @@ function applyCopyFields(existing, body = {}) {
       titleZh: i18n.title.zh || firstFilled(i18n.title),
       blurbEn: i18n.blurb.en || firstFilled(i18n.blurb),
       blurbZh: i18n.blurb.zh || firstFilled(i18n.blurb),
-      pillEn: i18n.pill.en || existing.pillEn || null,
-      pillZh: i18n.pill.zh || existing.pillZh || null,
+      pillEn: i18n.pill.en || null,
+      pillZh: i18n.pill.zh || null,
       config,
     },
   };

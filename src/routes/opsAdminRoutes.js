@@ -15,6 +15,7 @@ const {
   resolvePrivacyRequest,
 } = require('../controllers/opsPrivacyController');
 const { protectOps } = require('../middlewares/opsAuthMiddleware');
+const { uploadCampaignCover } = require('../middlewares/uploadMiddleware');
 const opsCampaigns = require('../controllers/opsCampaignController');
 
 let opsTranslate = {};
@@ -26,16 +27,28 @@ try {
 
 const router = express.Router();
 
-function mount(method, path, handler) {
-  if (typeof handler === 'function') {
-    router[method](path, handler);
+function mount(method, path, ...handlers) {
+  if (handlers.length && handlers.every((handler) => typeof handler === 'function')) {
+    router[method](path, ...handlers);
   }
+}
+
+function acceptCampaignCover(req, res, next) {
+  uploadCampaignCover.single('image')(req, res, (err) => {
+    if (!err) return next();
+    const message =
+      err.code === 'LIMIT_FILE_SIZE'
+        ? 'Cover image must be 8 MB or smaller'
+        : err.message || 'Could not upload that image';
+    return res.status(400).json({ status: 'fail', message });
+  });
 }
 
 router.post('/auth/login', login);
 router.use(protectOps);
 mount('get', '/campaigns', opsCampaigns.list);
 mount('post', '/campaigns/translate', opsCampaigns.translate || opsTranslate.translate);
+mount('post', '/campaigns/cover', acceptCampaignCover, opsCampaigns.uploadCover);
 mount('post', '/campaigns', opsCampaigns.create);
 mount('get', '/campaigns/:id', opsCampaigns.get);
 mount('patch', '/campaigns/:id', opsCampaigns.update);

@@ -68,6 +68,12 @@ function mergeMaps(...maps) {
   return out;
 }
 
+function bodyHasPrefix(body, prefix) {
+  return ['En', 'Zh', 'Ja', 'ZhTw', 'ZhTW'].some((suffix) =>
+    Object.prototype.hasOwnProperty.call(body || {}, `${prefix}${suffix}`),
+  );
+}
+
 function buildCampaignI18n(body = {}, core = {}) {
   const existing = body.i18n && typeof body.i18n === 'object' ? body.i18n : body.config?.i18n || {};
   const source = normalizeLocale(body.copySource || existing.source) || 'en';
@@ -83,12 +89,15 @@ function buildCampaignI18n(body = {}, core = {}) {
     ja: '',
     'zh-TW': '',
   });
-  const pill = mergeMaps(asMap(existing.pill), readSuffixed(body, 'pill'), {
+  const pillExplicit = {
     en: core.pillEn || '',
     zh: core.pillZh || '',
     ja: '',
     'zh-TW': '',
-  });
+  };
+  const pill = bodyHasPrefix(body, 'pill')
+    ? mergeMaps(readSuffixed(body, 'pill'), pillExplicit)
+    : mergeMaps(asMap(existing.pill), readSuffixed(body, 'pill'), pillExplicit);
   const shareText = mergeMaps(asMap(existing.shareText), readSuffixed(body, 'shareText'), readSuffixed(body.config || {}, 'shareText'));
   const perkNote = mergeMaps(asMap(existing.perkNote), readSuffixed(body, 'perkNote'), readSuffixed(body.config || {}, 'perkNote'));
   const questions = [1, 2, 3].map((index) =>

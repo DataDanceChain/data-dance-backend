@@ -26,6 +26,7 @@ model User {
   xAccessToken             String?
   xRefreshToken            String?
   referralCode             String                    @unique
+  legacyReferralCode       String?                   @unique
   createdAt                DateTime                  @default(now())
   updatedAt                DateTime                  @updatedAt
   totalPoints              Float                     @default(0)

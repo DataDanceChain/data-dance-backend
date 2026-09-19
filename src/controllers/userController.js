@@ -458,12 +458,10 @@ exports.getRegistrationTime = async (req, res) => {
  */
 exports.getReferralCode = async (req, res) => {
   try {
-    const user = await prisma.user.findUnique({
-      where: { id: req.user.id },
-      select: { referralCode: true }
-    });
+    const { ensureDisplayReferralCode } = require('../utils/referralUtils');
+    const code = await ensureDisplayReferralCode(req.user.id);
 
-    if (!user) {
+    if (!code) {
       return res.status(404).json({
         status: 'fail',
         message: 'User not found'
@@ -472,7 +470,7 @@ exports.getReferralCode = async (req, res) => {
 
     res.status(200).json({
       status: 'success',
-      data: { code: user.referralCode }
+      data: { code }
     });
   } catch (error) {
     console.error('Error getting referral code:', error);

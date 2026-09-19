@@ -3,7 +3,7 @@ const { generateToken } = require('../utils/jwtUtils');
 const { createLogger } = require('../utils/logger');
 const userService = require('../services/userService');
 const referralService = require('../services/referralService');
-const { generateReferralCode, validateReferralCode } = require('../utils/referralUtils');
+const { generateUniqueReferralCode, validateReferralCode } = require('../utils/referralUtils');
 const {
   MOTHERS_DAY_2026_SLUG,
   SUMMER_TRAVEL_2026_SLUG,
@@ -308,6 +308,7 @@ exports.web3authLogin = async (req, res) => {
         }
 
     // Create user + referral in one tx; campaign rewards run after commit (see existing-user path).
+        const ownReferralCode = await generateUniqueReferralCode();
         const result = await prisma.$transaction(async (tx) => {
           const newUser = await tx.user.create({
             data: {
@@ -317,7 +318,7 @@ exports.web3authLogin = async (req, res) => {
               walletAddress,
               authType: 'web3auth',
               userType: 'regular',
-              referralCode: generateReferralCode(),
+              referralCode: ownReferralCode,
               ...(xid && { xid }),
               ...(xUsername && { xUsername }),
               ...(xAccessToken && { xAccessToken }),
