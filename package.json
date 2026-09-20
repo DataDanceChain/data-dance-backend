@@ -5,6 +5,7 @@
   "main": "src/server.js",
   "scripts": {
     "start": "node src/app.js",
+    "test": "node --test test/ src/",
     "dev": "nodemon src/app.js",
     "build": "tsc",
     "prisma:generate": "prisma generate",
