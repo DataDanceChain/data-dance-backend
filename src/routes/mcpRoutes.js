@@ -19,11 +19,13 @@ function applyMcpHeaders(res) {
   );
 }
 
+// Header only. The former `?access_token=` fallback put bearer tokens into the
+// access log (morgan) and logs/combined.log; RFC 6750 §2.3 discourages it and
+// no MCP client uses it.
 function readBearer(req) {
   const header = req.get('authorization') || '';
   const match = header.match(/^Bearer\s+(\S+)/i);
-  if (match?.[1]) return match[1];
-  return typeof req.query.access_token === 'string' ? req.query.access_token : null;
+  return match?.[1] || null;
 }
 
 router.use((req, res, next) => {

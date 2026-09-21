@@ -146,6 +146,29 @@ npm run prisma:migrate
 npm run dev
 ```
 
+## 🛡 运行加固 (Operational hardening)
+
+- **反向代理与真实 IP**：`TRUST_PROXY_HOPS`（默认 1）设置 Express `trust proxy`，`req.ip` 取自 `X-Forwarded-For`，限流按真实客户端 IP 计。直连公网时设为 `0`，否则任何客户端都能用伪造的 `X-Forwarded-For` 绕过限流。
+- **请求 ID**：每个请求带 `X-Request-Id`（透传上游的安全字符串，否则生成 UUID），回写响应头，`Request completed` / `Request failed` 日志带 `reqId`，一次登录可按 id 串起来查。
+- **日志脱敏**（`src/utils/logger.js`）：访问日志（morgan）和 winston 日志里的 URL query 值 `access_token, token, code, ticket, id_token, idToken, client_secret, refresh_token, code_verifier, password, otp` 一律掩码（保留前 4 字符 + 长度；`password` / `otp` 及短值整体隐藏）；日志 meta 对象里同名键、`authorization` 头（保留 scheme）、`email`（只留域名）、`walletAddress`（前 6 + 后 4）递归掩码，含嵌套对象与数组。验收：跑一遍登录/授权流程后 `grep -r 'ddc_tge_\|ddc_code_\|ddc_tkt_\|client_secret=' logs/` 为零。
+- **`/mcp` 不再接受 `?access_token=`**：只认 `Authorization: Bearer`，token 不再进入访问日志。
+- **限流**（`src/middlewares/rateLimitMiddleware.js`，`rateLimiters.*`）：
+
+  | 限流器 | 挂载 | 额度 | 键 |
+  | --- | --- | --- | --- |
+  | `auth` | `POST /api/auth/login`、`/register` | 15 分钟 5 次失败 | IP（不再按提交的 email） |
+  | `web3authLogin` | `POST /api/auth/web3auth-login` | 每分钟 10 次 | IP |
+  | `opsLogin` | `POST /api/ops/auth/login` | 15 分钟 5 次失败 | IP |
+  | `oauthRegister` / `oauthAuthorize` / `oauthToken` / `oauthRevoke` | `/oauth/*`（由 OAuth 路由挂载） | 5 / 30 / 20 / 20 每分钟 | IP |
+  | `consent` | `POST /api/oauth/consent` | 每分钟 10 次 | 用户 id，未登录按 IP |
+  | `partner` | `/partner/tge/*` | 每分钟 120 次 | bearer token 的 sha256 |
+  | `ssoTicket` / `ssoExchange` | `/api/sso/*`（Phase 3） | 5 / 10 每分钟 | 用户 id / IP |
+
+  超限返回 429 并带 `Retry-After`（秒）；`/oauth/*`、`/partner/*` 下的 body 为 `{ error: 'slow_down', error_description }`，其它路径保持 `{ status: 'error', message, retryAfter }`。
+- **单实例限制**：限流计数与 OAuth PKCE 状态都在进程内存里。**起第二个副本前必须换成共享存储**（`rate-limiter-flexible` + Redis 已在依赖里），否则每个副本各算一份额度，T16 不能签收。
+- **日志留存**：`logs/*.log` 只滚动 5 × 5 MB；没有审计表时 stdout 必须接到有活动周期留存的日志平台，否则封禁/退出核对没有证据。
+- **测试**：`npm test`（`node --test`）跑 `test/unit/*.test.js` 与 `src/**/*.test.js`，不需要数据库。
+
 ## 🔧 技术栈
 
 - **Node.js 22** + Express.js

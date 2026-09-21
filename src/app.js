@@ -4,9 +4,10 @@ const morgan = require('morgan');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
 const { errorHandler } = require('./middlewares/errorMiddleware');
 const xRoutes = require('./routes/xRoutes'); // Updated import
-const { createLogger } = require('./utils/logger');
+const { createLogger, redactUrl } = require('./utils/logger');
 
 // 导入路由
 const authRoutes = require('./routes/authRoutes');
@@ -110,12 +111,28 @@ const corsOptions = {
     'Mcp-Method',
     'Mcp-Name',
   ],
-  exposedHeaders: ['Content-Range', 'X-Content-Range', 'WWW-Authenticate']
+  exposedHeaders: ['Content-Range', 'X-Content-Range', 'WWW-Authenticate', 'X-Request-Id']
 };
+
+// 反向代理：信任 TRUST_PROXY_HOPS 跳（默认 1），req.ip / req.protocol 取自 X-Forwarded-*，
+// 限流与日志按真实客户端 IP 计
+const trustProxyHops = Number(process.env.TRUST_PROXY_HOPS || 1);
+app.set('trust proxy', Number.isFinite(trustProxyHops) ? trustProxyHops : 1);
+
+// 请求 ID：透传上游 X-Request-Id（仅接受安全字符），否则生成；回写响应头，日志按 reqId 串联
+const REQUEST_ID_PATTERN = /^[A-Za-z0-9._-]{1,128}$/;
+app.use((req, res, next) => {
+  const incoming = req.get('x-request-id');
+  req.reqId = incoming && REQUEST_ID_PATTERN.test(incoming) ? incoming : crypto.randomUUID();
+  res.set('X-Request-Id', req.reqId);
+  next();
+});
 
 // 中间件 - 生产环境也需要 CORS
 app.use(cors(corsOptions));
 app.use(express.json({ limit: '20mb' }));
+// 访问日志里的 URL 脱敏：query 中的 token / code / ticket 等值不落盘
+morgan.token('url', (req) => redactUrl(req.originalUrl || req.url));
 app.use(morgan('dev'));
 
 // Add request logging
