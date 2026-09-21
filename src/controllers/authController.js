@@ -207,6 +207,14 @@ exports.login = async (req, res) => {
       });
     }
 
+    if (user.disabledAt) {
+      return res.status(403).json({
+        status: 'fail',
+        code: 'ACCOUNT_DISABLED',
+        message: '账号已停用'
+      });
+    }
+
     // 生成 token
     const token = generateToken(user.id);
 

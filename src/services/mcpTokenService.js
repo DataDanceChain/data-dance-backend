@@ -59,9 +59,10 @@ async function findUserByMcpToken(token) {
   if (!trimmed.startsWith(TOKEN_PREFIX)) return null;
   const row = await prisma.mcpToken.findUnique({
     where: { tokenHash: hashToken(trimmed) },
-    include: { user: { select: { id: true, email: true } } },
+    include: { user: { select: { id: true, email: true, disabledAt: true } } },
   });
   if (!row?.user) return null;
+  if (row.user.disabledAt) return null;
   if (row.expiresAt && row.expiresAt < new Date()) return null;
   await prisma.mcpToken.update({
     where: { id: row.id },
