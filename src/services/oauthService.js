@@ -1,12 +1,27 @@
 const crypto = require('crypto');
 const prisma = require('../utils/prisma');
 const { MCP_SCOPES, appPublicUrl, mcpEndpointUrl, publicBaseUrl } = require('../constants/lifeContext');
-const { hashToken, issueMcpToken, findUserByMcpToken } = require('./mcpTokenService');
+const { hashToken, issueMcpToken, issuePartnerToken, findUserByMcpToken } = require('./mcpTokenService');
+const {
+  PARTNER_SCOPES,
+  PARTNER_DEFAULT_SCOPE,
+  PARTNER_TOKEN_PREFIX,
+  getPartnerClient,
+  isPartnerClient,
+  verifyClientSecret,
+  parseBasicAuth,
+  partnerResourceUrl,
+  readPartnerConfig,
+} = require('../constants/partnerClient');
+const { isCEndSubject } = require('./dataLicenceConsent');
 
 const CODE_TTL_MS = 10 * 60 * 1000;
 const REQUEST_TTL_MS = 15 * 60 * 1000;
 const ACCESS_TTL_SEC = 3600;
 const REFRESH_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const ISSUED_FROM_CODE_TTL_MS = 5 * 60 * 1000;
+const PKCE_UNRESERVED = /^[A-Za-z0-9._~-]{43,128}$/;
+const TOKEN_ENDPOINT_AUTH_METHODS = ['none', 'client_secret_basic', 'client_secret_post'];
 const CIMD_HOSTS = new Set([
   'chatgpt.com',
   'www.chatgpt.com',
@@ -23,7 +38,25 @@ class OAuthError extends Error {
     this.statusCode = statusCode;
     this.error = error;
     this.description = description || error;
+    this.redirectable = false;
+    this.redirectTo = null;
   }
+}
+
+/**
+ * Marks an authorize-time error as "safe to redirect": client and redirect_uri were already
+ * validated, so the OAuth error may travel back to the client (contract T09). Pre-validation
+ * errors stay non-redirectable and render as a 400 page (T08, RFC 9700 §4.11).
+ */
+function markRedirectable(error, { redirectUri, state, iss }) {
+  error.redirectable = true;
+  error.redirectTo = appendQuery(redirectUri, {
+    error: error.error,
+    error_description: error.description,
+    state,
+    iss,
+  });
+  return error;
 }
 
 function hashSecret(value) {
@@ -52,13 +85,29 @@ function appendQuery(uri, params) {
   return url.toString();
 }
 
+function sameResource(a, b) {
+  return String(a || '').replace(/\/$/, '') === String(b || '').replace(/\/$/, '');
+}
+
 function issuerFrom(req) {
   return publicBaseUrl(req);
+}
+
+/** The issuer a stored request belongs to: resource is always `${issuer}/mcp` or `${issuer}/partner/tge`. */
+function issuerFromResource(resource) {
+  try {
+    const url = new URL(resource);
+    return `${url.protocol}//${url.host}`;
+  } catch {
+    return String(resource || '').replace(/\/(mcp|partner\/tge)\/?$/, '');
+  }
 }
 
 function metadataDocuments(req) {
   const issuer = issuerFrom(req);
   const resource = mcpEndpointUrl(req);
+  const partnerResource = partnerResourceUrl(req);
+  const partnerCfg = readPartnerConfig();
   const as = {
     issuer,
     authorization_endpoint: `${issuer}/oauth/authorize`,
@@ -66,15 +115,18 @@ function metadataDocuments(req) {
     registration_endpoint: `${issuer}/oauth/register`,
     userinfo_endpoint: `${issuer}/oauth/userinfo`,
     revocation_endpoint: `${issuer}/oauth/revoke`,
-    scopes_supported: MCP_SCOPES,
+    scopes_supported: [...MCP_SCOPES, ...PARTNER_SCOPES],
     response_types_supported: ['code'],
     grant_types_supported: ['authorization_code', 'refresh_token'],
     code_challenge_methods_supported: ['S256'],
-    token_endpoint_auth_methods_supported: ['none'],
+    token_endpoint_auth_methods_supported: TOKEN_ENDPOINT_AUTH_METHODS,
+    revocation_endpoint_auth_methods_supported: TOKEN_ENDPOINT_AUTH_METHODS,
     client_id_metadata_document_supported: true,
     authorization_response_iss_parameter_supported: true,
+    resource_indicators_supported: true,
     service_documentation: `${appPublicUrl()}/updates.html`,
   };
+  if (partnerCfg.environment) as.ddc_sso_environment = partnerCfg.environment;
   const resourceDoc = {
     resource,
     authorization_servers: [issuer],
@@ -82,11 +134,17 @@ function metadataDocuments(req) {
     scopes_supported: MCP_SCOPES,
     resource_documentation: `${appPublicUrl()}/user/life-capsule`,
   };
-  return { issuer, resource, as, resourceDoc };
+  const partnerResourceDoc = {
+    resource: partnerResource,
+    resource_name: 'DataDance partner API (TGE)',
+    authorization_servers: [issuer],
+    bearer_methods_supported: ['header'],
+    scopes_supported: [...PARTNER_SCOPES],
+  };
+  return { issuer, resource, partnerResource, as, resourceDoc, partnerResourceDoc };
 }
 
 function challengeHeader(req) {
-  const { resourceDoc } = metadataDocuments(req);
   const metadata = `${issuerFrom(req)}/.well-known/oauth-protected-resource`;
   return `Bearer realm="data-dance", resource_metadata="${metadata}", scope="life_capsule"`;
 }
@@ -98,6 +156,26 @@ function normalizeScope(value) {
     .filter(Boolean);
   const allowed = requested.filter((item) => MCP_SCOPES.includes(item));
   return (allowed.length ? allowed : ['life_capsule', 'openid', 'email']).join(' ');
+}
+
+/**
+ * Partner scopes: default `tge:identity`; `tge:status` unlocks /partner/tge/status. Anything
+ * else — in particular `openid` — is refused so no vendor library ever expects an id_token.
+ */
+function parsePartnerScope(value) {
+  const requested = String(value || '')
+    .split(/[\s+]+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+  if (!requested.length) return PARTNER_DEFAULT_SCOPE;
+  const unknown = requested.filter((item) => !PARTNER_SCOPES.includes(item));
+  if (unknown.includes('openid')) {
+    throw new OAuthError(400, 'invalid_scope', 'openid is not available for this client; read identity from /partner/tge/me.');
+  }
+  if (unknown.length) {
+    throw new OAuthError(400, 'invalid_scope', `Unknown scope: ${unknown.join(' ')}.`);
+  }
+  return PARTNER_SCOPES.filter((item) => requested.includes(item)).join(' ');
 }
 
 function isAllowedRedirect(uri) {
@@ -126,6 +204,7 @@ async function loadCimdClient(clientId) {
   const doc = await response.json();
   const redirectUris = Array.isArray(doc.redirect_uris) ? doc.redirect_uris.map(String) : [];
   return {
+    kind: 'mcp',
     clientId,
     clientName: String(doc.client_name || doc.client_id || 'ChatGPT / Claude'),
     redirectUris,
@@ -134,12 +213,22 @@ async function loadCimdClient(clientId) {
   };
 }
 
-async function resolveClient(clientId) {
+/**
+ * Static partner client first (env), then DCR rows, then CIMD documents. A disabled partner
+ * client is `unauthorized_client`, not "unknown", so the failure is diagnosable (T13/T17).
+ */
+async function resolveClient(clientId, req) {
   const id = String(clientId || '').trim();
   if (!id) throw new OAuthError(400, 'invalid_client', 'client_id is required.');
+  const partner = getPartnerClient(id, req);
+  if (partner) {
+    if (!partner.enabled) throw new OAuthError(400, 'unauthorized_client', 'This client is disabled.');
+    return partner;
+  }
   const stored = await prisma.oAuthClient.findUnique({ where: { clientId: id } });
   if (stored) {
     return {
+      kind: 'mcp',
       clientId: stored.clientId,
       clientName: stored.clientName,
       redirectUris: stored.redirectUris,
@@ -153,11 +242,14 @@ async function resolveClient(clientId) {
   throw new OAuthError(400, 'invalid_client', 'Unknown client_id.');
 }
 
+/** Exact string match against a NON-EMPTY registered list, for every client (RFC 9700 §4.1.3). */
 function assertRedirect(client, redirectUri) {
-  if (!redirectUri || !isAllowedRedirect(redirectUri)) {
+  const uri = String(redirectUri || '');
+  if (!uri || !isAllowedRedirect(uri)) {
     throw new OAuthError(400, 'invalid_request', 'redirect_uri is not allowed.');
   }
-  if (client.redirectUris.length && !client.redirectUris.includes(redirectUri)) {
+  const registered = Array.isArray(client.redirectUris) ? client.redirectUris : [];
+  if (!registered.length || !registered.includes(uri)) {
     throw new OAuthError(400, 'invalid_request', 'redirect_uri is not registered for this client.');
   }
 }
@@ -188,33 +280,75 @@ async function registerClient(body) {
   };
 }
 
+function plausibleLoginHint(value) {
+  const hint = String(value || '').trim();
+  return hint.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(hint) ? hint : '';
+}
+
+/**
+ * Validation order (contract /oauth/authorize):
+ *  1. client_id unknown/disabled, redirect_uri not an exact match → throws non-redirectable (400 page).
+ *  2. everything else → throws redirectable (302 back with error, state, iss).
+ *  3. store the request and send the browser to the Wallet consent page.
+ */
 async function startAuthorization(req, query) {
-  if (query.response_type !== 'code') {
-    throw new OAuthError(400, 'unsupported_response_type', 'Only response_type=code is supported.');
-  }
-  if (query.code_challenge_method !== 'S256' || !query.code_challenge) {
-    throw new OAuthError(400, 'invalid_request', 'PKCE S256 is required.');
-  }
-  const client = await resolveClient(query.client_id);
+  const client = await resolveClient(query.client_id, req);
   assertRedirect(client, query.redirect_uri);
-  const resource = String(query.resource || mcpEndpointUrl(req));
-  const expected = mcpEndpointUrl(req);
-  if (resource !== expected && resource.replace(/\/$/, '') !== expected.replace(/\/$/, '')) {
-    throw new OAuthError(400, 'invalid_target', 'resource must match the MCP endpoint.');
+
+  const partner = isPartnerClient(client);
+  const redirectUri = String(query.redirect_uri);
+  const state = query.state === undefined || query.state === null ? '' : String(query.state);
+  const iss = issuerFrom(req);
+  let row;
+  try {
+    if (query.response_type !== 'code') {
+      throw new OAuthError(400, 'unsupported_response_type', 'Only response_type=code is supported.');
+    }
+    if (partner) {
+      if (!state) throw new OAuthError(400, 'invalid_request', 'state is required.');
+      if (state.length > 512) throw new OAuthError(400, 'invalid_request', 'state must be at most 512 characters.');
+    }
+    if (query.code_challenge_method !== 'S256' || !query.code_challenge) {
+      throw new OAuthError(400, 'invalid_request', 'PKCE S256 is required.');
+    }
+    if (partner && !PKCE_UNRESERVED.test(String(query.code_challenge))) {
+      throw new OAuthError(400, 'invalid_request', 'code_challenge must be 43-128 unreserved characters.');
+    }
+    if (partner && query.prompt !== undefined && !['none', 'login'].includes(String(query.prompt))) {
+      throw new OAuthError(400, 'invalid_request', 'prompt must be none or login.');
+    }
+    if (partner && String(query.prompt) === 'none') {
+      // The authorization server holds no browser session of its own (the DataDance login
+      // lives in the Wallet SPA), so a silent authorization can never be satisfied here.
+      throw new OAuthError(400, 'login_required', 'No DataDance session is available for a silent authorization.');
+    }
+    const expected = partner ? client.resource : mcpEndpointUrl(req);
+    const resource = String(query.resource || expected);
+    if (!sameResource(resource, expected)) {
+      throw new OAuthError(400, 'invalid_target', partner ? 'resource must match the partner API.' : 'resource must match the MCP endpoint.');
+    }
+    const scope = partner ? parsePartnerScope(query.scope) : normalizeScope(query.scope);
+    row = await prisma.oAuthAuthorization.create({
+      data: {
+        clientId: client.clientId,
+        redirectUri,
+        state,
+        codeChallenge: String(query.code_challenge),
+        codeChallengeMethod: 'S256',
+        resource: expected,
+        scope,
+        expiresAt: new Date(Date.now() + (client.requestTtlMs || REQUEST_TTL_MS)),
+      },
+    });
+  } catch (error) {
+    if (error instanceof OAuthError) markRedirectable(error, { redirectUri, state, iss });
+    throw error;
   }
-  const row = await prisma.oAuthAuthorization.create({
-    data: {
-      clientId: client.clientId,
-      redirectUri: query.redirect_uri,
-      state: String(query.state || ''),
-      codeChallenge: String(query.code_challenge),
-      codeChallengeMethod: 'S256',
-      resource,
-      scope: normalizeScope(query.scope),
-      expiresAt: new Date(Date.now() + REQUEST_TTL_MS),
-    },
-  });
-  return `${appPublicUrl()}/oauth/consent?request=${row.id}`;
+  const consent = new URL(`${appPublicUrl()}/oauth/consent`);
+  consent.searchParams.set('request', row.id);
+  const loginHint = partner ? plausibleLoginHint(query.login_hint) : '';
+  if (loginHint) consent.searchParams.set('login_hint', loginHint);
+  return consent.toString();
 }
 
 async function getConsentRequest(id) {
@@ -222,89 +356,230 @@ async function getConsentRequest(id) {
   if (!row || row.consumedAt || row.expiresAt < new Date()) {
     throw new OAuthError(404, 'invalid_request', 'This authorization request has expired.');
   }
-  let clientName = 'ChatGPT / Claude';
-  try {
-    const client = await resolveClient(row.clientId);
-    clientName = client.clientName;
-  } catch {
-    clientName = row.clientId.startsWith('https://') ? new URL(row.clientId).hostname : clientName;
+  const partner = getPartnerClient(row.clientId);
+  if (partner && !partner.enabled) {
+    throw new OAuthError(400, 'unauthorized_client', 'This client is disabled.');
+  }
+  let clientName = partner ? partner.clientName : 'ChatGPT / Claude';
+  if (!partner) {
+    try {
+      const client = await resolveClient(row.clientId);
+      clientName = client.clientName;
+    } catch {
+      clientName = row.clientId.startsWith('https://') ? new URL(row.clientId).hostname : clientName;
+    }
   }
   return {
     id: row.id,
     clientName,
     clientId: row.clientId,
+    kind: partner ? 'partner' : 'assistant',
     scope: row.scope,
     resource: row.resource,
+    expiresAt: row.expiresAt,
   };
 }
 
-async function decideConsent(user, requestId, allow) {
+/**
+ * @param ctx { kind: 'user_jwt' | 'sso_ticket', claims?: object, clientId?: string }
+ *   `claims` are the verified DDC JWT claims (`ver` >= 2 marks a Web3Auth-verified login);
+ *   `clientId` is the client an SSO ticket session is bound to (Phase 3).
+ */
+async function decideConsent(user, requestId, allow, ctx = {}) {
   const row = await prisma.oAuthAuthorization.findUnique({ where: { id: requestId } });
   if (!row || row.consumedAt || row.expiresAt < new Date()) {
     throw new OAuthError(400, 'invalid_request', 'This authorization request has expired.');
   }
-  let issuer = '';
-  try {
-    const resourceUrl = new URL(row.resource);
-    issuer = `${resourceUrl.protocol}//${resourceUrl.host}`;
-  } catch {
-    issuer = row.resource.replace(/\/mcp\/?$/, '');
+  const issuer = issuerFromResource(row.resource);
+  const client = await resolveClient(row.clientId);
+  const partner = isPartnerClient(client);
+  const principal = ctx && ctx.kind ? ctx.kind : 'user_jwt';
+  if (principal === 'sso_ticket' && ctx.clientId && ctx.clientId !== row.clientId) {
+    throw new OAuthError(400, 'invalid_request', 'This session is bound to a different client.');
   }
-  if (!allow) {
+
+  const finish = async (params) => {
     await prisma.oAuthAuthorization.update({
       where: { id: row.id },
       data: { consumedAt: new Date(), userId: user.id },
     });
-    return appendQuery(row.redirectUri, {
-      error: 'access_denied',
-      state: row.state,
-      iss: issuer,
-    });
+    return appendQuery(row.redirectUri, { ...params, state: row.state, iss: issuer });
+  };
+
+  if (!allow) return finish({ error: 'access_denied' });
+  if (user.disabledAt) {
+    return finish({ error: 'access_denied', error_description: 'This account is disabled.' });
   }
+  if (partner) {
+    if (!isCEndSubject(user)) {
+      return finish({ error: 'access_denied', error_description: 'Organization accounts cannot sign in to this partner.' });
+    }
+    const verified = Number(ctx?.claims?.ver) >= 2;
+    if (client.requireVerifiedSession && principal === 'user_jwt' && !verified) {
+      return finish({ error: 'login_required', error_description: 'A verified DataDance login is required.' });
+    }
+  }
+
   const code = randomSecret('ddc_code_');
   await prisma.oAuthAuthorization.update({
     where: { id: row.id },
     data: {
       userId: user.id,
       codeHash: hashSecret(code),
-      expiresAt: new Date(Date.now() + CODE_TTL_MS),
+      expiresAt: new Date(Date.now() + (client.codeTtlMs || CODE_TTL_MS)),
     },
   });
-  return appendQuery(row.redirectUri, {
-    code,
-    state: row.state,
-    iss: issuer,
-  });
+  return appendQuery(row.redirectUri, { code, state: row.state, iss: issuer });
+}
+
+/**
+ * Client credentials as presented on the token / revocation endpoint (RFC 6749 §2.3.1).
+ * Basic wins; a body `client_id` next to Basic must agree; a body `client_secret` next to
+ * Basic is a second authentication method and is refused.
+ */
+function presentedClientCredentials(req, body = {}) {
+  const header = req && typeof req.get === 'function' ? req.get('authorization') : req?.headers?.authorization;
+  const basic = parseBasicAuth(header);
+  const bodyId = body.client_id !== undefined && body.client_id !== null ? String(body.client_id) : '';
+  const bodySecret = body.client_secret !== undefined && body.client_secret !== null ? String(body.client_secret) : '';
+  if (basic) {
+    if (bodySecret) throw new OAuthError(400, 'invalid_request', 'Use only one client authentication method.');
+    if (bodyId && bodyId !== basic.clientId) {
+      throw new OAuthError(400, 'invalid_request', 'client_id does not match the Basic credentials.');
+    }
+    return { clientId: basic.clientId, clientSecret: basic.clientSecret, method: 'client_secret_basic' };
+  }
+  if (bodyId) {
+    return { clientId: bodyId, clientSecret: bodySecret, method: bodySecret ? 'client_secret_post' : 'none' };
+  }
+  return null;
+}
+
+/** 401 invalid_client unless the secret verifies AND the client is enabled (contract /oauth/token 401). */
+function authenticatePartnerClient(client, presented) {
+  if (!presented || !presented.clientSecret) {
+    throw new OAuthError(401, 'invalid_client', 'Client authentication is required.');
+  }
+  if (!verifyClientSecret(client, presented.clientSecret)) {
+    throw new OAuthError(401, 'invalid_client', 'Invalid client credentials.');
+  }
+  if (!client.enabled) {
+    throw new OAuthError(401, 'invalid_client', 'This client is disabled.');
+  }
+}
+
+/**
+ * Which tokens came out of which authorization code, so a replayed code can revoke them
+ * (RFC 6749 §4.1.2, contract T10). In-process only (single instance, see plan D10): after a
+ * restart a replay is still refused with invalid_grant, only the best-effort revocation is
+ * lost. Entries expire 5 minutes after issue (the partner token itself lives 300 s).
+ */
+const issuedTokensByCode = new Map();
+
+function rememberIssuedToken(codeRowId, entry) {
+  const now = Date.now();
+  for (const [key, value] of issuedTokensByCode) {
+    if (value.expiresAt <= now) issuedTokensByCode.delete(key);
+  }
+  issuedTokensByCode.set(codeRowId, { ...entry, expiresAt: now + ISSUED_FROM_CODE_TTL_MS });
+}
+
+async function revokeTokensIssuedFromCode(codeRowId) {
+  const entry = issuedTokensByCode.get(codeRowId);
+  if (!entry) return false;
+  issuedTokensByCode.delete(codeRowId);
+  try {
+    if (entry.refreshHash) {
+      await prisma.oAuthRefreshToken.updateMany({
+        where: { tokenHash: entry.refreshHash, revokedAt: null },
+        data: { revokedAt: new Date() },
+      });
+    }
+    if (entry.tokenHash) {
+      await prisma.mcpToken.deleteMany({ where: { tokenHash: entry.tokenHash } });
+    }
+  } catch {
+    // best effort: the replay is refused regardless
+  }
+  return true;
 }
 
 async function exchangeAuthorizationCode(req, body) {
   const code = String(body.code || '');
   const verifier = String(body.code_verifier || '');
   if (!code || !verifier) throw new OAuthError(400, 'invalid_request', 'code and code_verifier are required.');
+
+  // Partner client authentication happens BEFORE the code lookup (RFC 6749 §4.1.3): the
+  // presented client_id decides whether credentials are required at all.
+  const presented = presentedClientCredentials(req, body);
+  const presentedPartner = presented?.clientId ? getPartnerClient(presented.clientId, req) : null;
+  if (presentedPartner) authenticatePartnerClient(presentedPartner, presented);
+
   const row = await prisma.oAuthAuthorization.findUnique({ where: { codeHash: hashSecret(code) } });
-  if (!row || row.consumedAt || !row.userId || row.expiresAt < new Date()) {
+  if (!row || !row.userId) {
     throw new OAuthError(400, 'invalid_grant', 'Authorization code is invalid or expired.');
   }
-  if (body.client_id && String(body.client_id) !== row.clientId) {
-    throw new OAuthError(400, 'invalid_client', 'client_id does not match this code.');
+  if (row.consumedAt) {
+    await revokeTokensIssuedFromCode(row.id);
+    throw new OAuthError(400, 'invalid_grant', 'Authorization code has already been used.');
   }
-  if (body.redirect_uri && String(body.redirect_uri) !== row.redirectUri) {
-    throw new OAuthError(400, 'invalid_grant', 'redirect_uri does not match this code.');
+  if (row.expiresAt < new Date()) {
+    throw new OAuthError(400, 'invalid_grant', 'Authorization code is invalid or expired.');
+  }
+
+  const rowPartner = getPartnerClient(row.clientId, req);
+  if (rowPartner) {
+    if (!presentedPartner || presentedPartner.clientId !== row.clientId) {
+      throw new OAuthError(401, 'invalid_client', 'Client authentication is required for this code.');
+    }
+    if (!body.redirect_uri || String(body.redirect_uri) !== row.redirectUri) {
+      throw new OAuthError(400, 'invalid_grant', 'redirect_uri must equal the one used at /oauth/authorize.');
+    }
+    if (!PKCE_UNRESERVED.test(verifier)) {
+      throw new OAuthError(400, 'invalid_grant', 'code_verifier must be 43-128 unreserved characters.');
+    }
+  } else {
+    if (presentedPartner) {
+      throw new OAuthError(400, 'invalid_grant', 'client_id does not match this code.');
+    }
+    if (body.client_id && String(body.client_id) !== row.clientId) {
+      throw new OAuthError(400, 'invalid_client', 'client_id does not match this code.');
+    }
+    if (body.redirect_uri && String(body.redirect_uri) !== row.redirectUri) {
+      throw new OAuthError(400, 'invalid_grant', 'redirect_uri does not match this code.');
+    }
   }
   if (!verifyS256(verifier, row.codeChallenge)) {
     throw new OAuthError(400, 'invalid_grant', 'PKCE verification failed.');
   }
-  if (body.resource && String(body.resource) !== row.resource) {
+  if (body.resource && !sameResource(body.resource, row.resource)) {
     throw new OAuthError(400, 'invalid_target', 'resource does not match this code.');
   }
-  await prisma.oAuthAuthorization.update({
-    where: { id: row.id },
+
+  // Atomic single-use consume: exactly one concurrent exchange can win (contract T10).
+  const consumed = await prisma.oAuthAuthorization.updateMany({
+    where: { id: row.id, consumedAt: null, expiresAt: { gt: new Date() } },
     data: { consumedAt: new Date() },
   });
-  return issueOAuthTokens(row.userId, row.clientId, row.resource, row.scope);
+  if (!consumed || consumed.count !== 1) {
+    throw new OAuthError(400, 'invalid_grant', 'Authorization code is invalid or expired.');
+  }
+  return issueOAuthTokens(row.userId, row.clientId, row.resource, row.scope, { codeRowId: row.id, client: rowPartner, req });
 }
 
-async function issueOAuthTokens(userId, clientId, resource, scope) {
+async function issueOAuthTokens(userId, clientId, resource, scope, { codeRowId, client, req } = {}) {
+  const partner = client || getPartnerClient(clientId, req);
+  if (isPartnerClient(partner)) {
+    const issued = await issuePartnerToken(userId, partner, { resource, scope });
+    if (codeRowId) rememberIssuedToken(codeRowId, { tokenHash: hashToken(issued.token) });
+    return {
+      access_token: issued.token,
+      token_type: 'Bearer',
+      expires_in: issued.expiresIn,
+      scope,
+      resource,
+    };
+  }
   let clientName = 'ChatGPT / Claude';
   try {
     clientName = (await resolveClient(clientId)).clientName;
@@ -330,6 +605,7 @@ async function issueOAuthTokens(userId, clientId, resource, scope) {
       expiresAt: new Date(Date.now() + REFRESH_TTL_MS),
     },
   });
+  if (codeRowId) rememberIssuedToken(codeRowId, { tokenHash: hashToken(issued.token), refreshHash: hashToken(refresh) });
   return {
     access_token: issued.token,
     token_type: 'Bearer',
@@ -347,6 +623,10 @@ async function exchangeRefreshToken(body) {
   if (!row || row.revokedAt || row.expiresAt < new Date()) {
     throw new OAuthError(400, 'invalid_grant', 'Refresh token is invalid or expired.');
   }
+  if (getPartnerClient(row.clientId)) {
+    // Partner clients never receive refresh tokens; a row like this cannot legitimately exist.
+    throw new OAuthError(400, 'invalid_grant', 'Refresh tokens are not available for this client.');
+  }
   if (body.client_id && String(body.client_id) !== row.clientId) {
     throw new OAuthError(400, 'invalid_client', 'client_id does not match this refresh token.');
   }
@@ -357,9 +637,26 @@ async function exchangeRefreshToken(body) {
   return issueOAuthTokens(row.userId, row.clientId, row.resource, row.scope);
 }
 
-async function revokeToken(token) {
+/**
+ * RFC 7009. Partner tokens (`ddc_tge_`) require client authentication and can only be revoked
+ * by the client they were issued to; MCP paths are unchanged (possession is the credential).
+ * Unknown tokens are a silent success.
+ */
+async function revokeToken(token, { req, body } = {}) {
   const trimmed = String(token || '').trim();
   if (!trimmed) return;
+  if (trimmed.startsWith(PARTNER_TOKEN_PREFIX)) {
+    const presented = presentedClientCredentials(req, body || {});
+    const client = presented?.clientId ? getPartnerClient(presented.clientId, req) : null;
+    if (!client || !presented.clientSecret || !verifyClientSecret(client, presented.clientSecret)) {
+      throw new OAuthError(401, 'invalid_client', 'Client authentication is required to revoke a partner token.');
+    }
+    const access = await prisma.mcpToken.findUnique({ where: { tokenHash: hashToken(trimmed) } });
+    if (access && access.source === 'partner' && access.clientId === client.clientId) {
+      await prisma.mcpToken.delete({ where: { id: access.id } });
+    }
+    return;
+  }
   const refresh = await prisma.oAuthRefreshToken.findUnique({ where: { tokenHash: hashToken(trimmed) } });
   if (refresh) {
     await prisma.oAuthRefreshToken.update({
@@ -398,4 +695,13 @@ module.exports = {
   revokeToken,
   userInfoFromBearer,
   verifyS256,
+  // exported for tests and the partner routes
+  resolveClient,
+  assertRedirect,
+  parsePartnerScope,
+  presentedClientCredentials,
+  markRedirectable,
+  issuerFromResource,
+  sameResource,
+  issuedTokensByCode,
 };

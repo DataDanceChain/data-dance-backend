@@ -1,5 +1,8 @@
 const express = require('express');
 const { protect } = require('../middlewares/authMiddleware');
+const { rateLimiters } = require('../middlewares/rateLimitMiddleware');
+const { createLogger } = require('../utils/logger');
+const { PARTNER_REALM } = require('../constants/partnerClient');
 const {
   OAuthError,
   metadataDocuments,
@@ -14,14 +17,80 @@ const {
 } = require('../services/oauthService');
 
 const router = express.Router();
+const logger = createLogger('oauthRoutes');
 
+// Limiters are defined on the hardening branch; until it is merged they are pass-through.
+const passthrough = (req, res, next) => next();
+const lim = (name) => (rateLimiters && rateLimiters[name]) || passthrough;
+
+function logUnexpected(error) {
+  logger.error('OAuth endpoint failed', { message: error && error.message, name: error && error.name });
+}
+
+/** OAuthError → its status/code; anything else → 500 server_error with NO internal detail. */
 function sendOAuthError(res, error) {
-  const status = error instanceof OAuthError ? error.statusCode : 500;
+  const known = error instanceof OAuthError;
+  if (!known) logUnexpected(error);
+  const status = known ? error.statusCode : 500;
   const body = {
-    error: error instanceof OAuthError ? error.error : 'server_error',
-    error_description: error instanceof Error ? error.message : 'Unexpected error.',
+    error: known ? error.error : 'server_error',
+    error_description: known ? error.description : 'Unexpected error.',
   };
+  if (status === 401 && body.error === 'invalid_client') {
+    res.set('WWW-Authenticate', `Basic realm="${PARTNER_REALM}"`);
+  }
+  res.set('Cache-Control', 'no-store');
   return res.status(status).json(body);
+}
+
+function escapeHtml(value) {
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+/**
+ * Authorize-time failures that happen BEFORE client + redirect_uri are validated must never
+ * leave the browser at an unregistered URI (RFC 6749 §4.1.2.1, RFC 9700 §4.11): render a page.
+ */
+function sendAuthorizeErrorPage(res, error) {
+  if (!(error instanceof OAuthError)) logUnexpected(error);
+  const status = error instanceof OAuthError ? error.statusCode : 500;
+  const code = error instanceof OAuthError ? error.error : 'server_error';
+  const description = error instanceof OAuthError ? error.description : 'Unexpected error.';
+  const html = `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>DataDance sign-in could not start</title>
+<style>
+  body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#f6f7f9;color:#1c1f26;display:flex;min-height:100vh;align-items:center;justify-content:center;padding:16px;box-sizing:border-box}
+  main{background:#fff;border-radius:12px;max-width:440px;width:100%;padding:28px 24px;box-shadow:0 2px 12px rgba(0,0,0,.06)}
+  h1{font-size:1.2rem;margin:0 0 12px}
+  p{margin:0 0 10px;line-height:1.5}
+  code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;background:#f0f1f4;padding:2px 6px;border-radius:6px;font-size:.92em}
+  .muted{color:#5c6270;font-size:.92rem}
+</style>
+</head>
+<body>
+<main>
+<h1>Sign-in could not start</h1>
+<p>The application that sent you here is not registered correctly with DataDance, so we stopped before redirecting you anywhere.</p>
+<p><code>${escapeHtml(code)}</code> — ${escapeHtml(description)}</p>
+<p class="muted">Nothing was shared. Close this tab and start again from the application; if it keeps failing, contact the application's support.</p>
+</main>
+</body>
+</html>`;
+  res.set('Cache-Control', 'no-store');
+  res.set('X-Frame-Options', 'DENY');
+  res.set('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'");
+  res.set('Referrer-Policy', 'no-referrer');
+  return res.status(status).type('html').send(html);
 }
 
 function readBearer(req) {
@@ -50,7 +119,11 @@ router.get('/.well-known/oauth-protected-resource/mcp', (req, res) => {
   res.json(metadataDocuments(req).resourceDoc);
 });
 
-router.post('/oauth/register', async (req, res) => {
+router.get('/.well-known/oauth-protected-resource/partner/tge', (req, res) => {
+  res.json(metadataDocuments(req).partnerResourceDoc);
+});
+
+router.post('/oauth/register', lim('oauthRegister'), async (req, res) => {
   try {
     return res.status(201).json(await registerClient(req.body || {}));
   } catch (error) {
@@ -58,26 +131,21 @@ router.post('/oauth/register', async (req, res) => {
   }
 });
 
-router.get('/oauth/authorize', async (req, res) => {
+router.get('/oauth/authorize', lim('oauthAuthorize'), async (req, res) => {
   try {
+    res.set('Cache-Control', 'no-store');
     return res.redirect(302, await startAuthorization(req, req.query || {}));
   } catch (error) {
-    if (error instanceof OAuthError && req.query.redirect_uri) {
-      try {
-        const url = new URL(String(req.query.redirect_uri));
-        url.searchParams.set('error', error.error);
-        url.searchParams.set('error_description', error.description);
-        if (req.query.state) url.searchParams.set('state', String(req.query.state));
-        return res.redirect(302, url.toString());
-      } catch {
-        // fall through
-      }
+    if (error instanceof OAuthError && error.redirectable && error.redirectTo) {
+      return res.redirect(302, error.redirectTo);
     }
-    return sendOAuthError(res, error);
+    return sendAuthorizeErrorPage(res, error);
   }
 });
 
-router.post('/oauth/token', async (req, res) => {
+router.post('/oauth/token', lim('oauthToken'), async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  res.set('Pragma', 'no-cache');
   try {
     const body = req.body || {};
     if (body.grant_type === 'authorization_code') {
@@ -92,9 +160,15 @@ router.post('/oauth/token', async (req, res) => {
   }
 });
 
-router.post('/oauth/revoke', async (req, res) => {
-  await revokeToken(req.body?.token || req.body?.refresh_token);
-  return res.status(200).json({ revoked: true });
+router.post('/oauth/revoke', lim('oauthRevoke'), async (req, res) => {
+  try {
+    const body = req.body || {};
+    await revokeToken(body.token || body.refresh_token, { req, body });
+    res.set('Cache-Control', 'no-store');
+    return res.status(200).json({ revoked: true });
+  } catch (error) {
+    return sendOAuthError(res, error);
+  }
 });
 
 router.get('/oauth/userinfo', async (req, res) => {
@@ -111,16 +185,20 @@ router.get('/oauth/userinfo', async (req, res) => {
 
 router.get('/api/oauth/requests/:id', async (req, res) => {
   try {
+    res.set('Cache-Control', 'no-store');
     return res.json({ status: 'success', data: await getConsentRequest(req.params.id) });
   } catch (error) {
     return sendOAuthError(res, error);
   }
 });
 
-router.post('/api/oauth/consent', protect, async (req, res) => {
+router.post('/api/oauth/consent', lim('consent'), protect, async (req, res) => {
   try {
     const allow = req.body?.allow !== false;
-    const redirectTo = await decideConsent(req.user, req.body?.requestId, allow);
+    // req.authClaims is set by the verified-login middleware (P0 branch); undefined until merged.
+    const ctx = { kind: 'user_jwt', claims: req.authClaims };
+    const redirectTo = await decideConsent(req.user, req.body?.requestId, allow, ctx);
+    res.set('Cache-Control', 'no-store');
     return res.json({ status: 'success', data: { redirectTo } });
   } catch (error) {
     return sendOAuthError(res, error);
