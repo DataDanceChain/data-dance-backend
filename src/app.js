@@ -197,6 +197,7 @@ app.use('/api/organization/transactions', transactionRoutes);
 app.use('/api/commerce', commerceRoutes);
 app.use('/api/life-context', lifeContextRoutes);
 app.use('/mcp', mcpRoutes);
+app.use('/partner/tge', require('./routes/partnerTgeRoutes'));
 app.use('/', oauthRoutes);
 // DDC NFT Metadata API - 需要后端权限控制
 app.use('/metadata/ddcnft', ddcNFTMetadataRoutes);
