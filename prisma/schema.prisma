@@ -31,6 +31,10 @@ model User {
   updatedAt                DateTime                  @updatedAt
   totalPoints              Float                     @default(0)
   organizationId           String?
+  web3authVerifier         String?
+  web3authVerifierId       String?
+  web3authLinkedAt         DateTime?
+  disabledAt               DateTime?
   createdActivities        Activity[]
   activityClaims           ActivityClaim[]
   transactions             AssetTransaction[]
@@ -75,6 +79,8 @@ model User {
   campaignApplications     CampaignApplication[]
   campaignRaffleTickets    CampaignRaffleTicket[]
   campaignRaffleWins       CampaignRaffleWin[]
+
+  @@unique([web3authVerifier, web3authVerifierId])
 }
 
 model UserProfile {

@@ -107,6 +107,14 @@ docker compose up -d
 - 迁移：`20260903090000_add_mcp_oauth`；说明见 [docs/LIFE_CONTEXT_MCP.md](docs/LIFE_CONTEXT_MCP.md)
 - Web3Auth 只负责人登录钱包，不当 ChatGPT / Claude 的授权服务器
 
+### Web3Auth ID token verification
+- `POST /api/auth/web3auth-login` verifies the Web3Auth ID token (`idToken` in the body) against the Web3Auth JWKS with `jose` and maps the user by the upstream identity pair (`User.web3authVerifier`, `User.web3authVerifierId`); e-mail / name / avatar on that path come only from the verified token. Sessions minted from a verified token carry `ver: 2`.
+- `WEB3AUTH_VERIFY_MODE`: `off` (legacy client-asserted login only; refused at boot in production) → `log` (verify when `idToken` is present, otherwise legacy path with a `legacy_login` warning; a rejected token also falls back and logs `idtoken_rejected`) → `enforce` (`idToken` required, token decides). Roll out `log` first, watch the `legacy_login` count drop as Wallet builds send the token, then switch to `enforce` (test, then prod). Old App builds without `idToken` cannot log in under `enforce`.
+- Legacy `web3auth` rows are linked lazily on first verified login (e-mail — matched case-insensitively — or proven wallet asserted by the token, row unlinked, non-organization, wallet-consistent, verifier in `WEB3AUTH_LEGACY_VERIFIERS` when set); password (`traditional`) accounts or already-linked rows with the same e-mail are never merged and answer `IDENTITY_CONFLICT`. An e-mail-shaped `verifierId` is lower-cased before it is stored as the identity key.
+- Error codes: `IDTOKEN_REQUIRED` (400), `IDTOKEN_INVALID`, `IDTOKEN_EXPIRED`, `IDTOKEN_ISSUER`, `IDTOKEN_AUDIENCE`, `IDTOKEN_SIGNATURE`, `WALLET_NOT_IN_TOKEN` (401), `IDENTITY_CONFLICT` (409), `ORG_NOT_ALLOWED`, `ACCOUNT_DISABLED` (403). `ACCOUNT_DISABLED` (`User.disabledAt`) is also refused by `protect`, `authenticate`, password login and MCP tokens.
+- Env (see `env.example`): `WEB3AUTH_VERIFY_MODE`, `WEB3AUTH_CLIENT_ID`, `WEB3AUTH_JWKS_URL`, `WEB3AUTH_ISSUERS`, `WEB3AUTH_EXTERNAL_JWKS_URL`, `WEB3AUTH_EXTERNAL_ISSUERS`, `WEB3AUTH_EXTERNAL_AUDIENCE`, `WEB3AUTH_ALGS`, `WEB3AUTH_MAX_TOKEN_AGE`, `WEB3AUTH_VERIFIER_CLAIM`, `WEB3AUTH_VERIFIER_ID_CLAIM`, `WEB3AUTH_EMAIL_CLAIM`, `WEB3AUTH_WALLETS_CLAIM`, `WEB3AUTH_WALLET_MATCH`, `WEB3AUTH_LEGACY_VERIFIERS`. `JWT_EXPIRES_IN` is mandatory in production.
+- 迁移：`20260922100000_user_upstream_identity_and_disable`；单测：`npm test`（`test/unit/web3authIdentity.test.js`，本地 JWKS，无需数据库）
+
 ## 🛠 开发环境
 
 ### Docker开发（推荐）
