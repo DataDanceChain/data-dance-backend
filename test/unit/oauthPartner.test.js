@@ -29,6 +29,7 @@ delete process.env.SSO_TGE_STATUS_FIELDS;
 const oauth = require('../../src/services/oauthService');
 const { findUserByPartnerToken, listMcpTokens, issueMcpToken, hashToken } = require('../../src/services/mcpTokenService');
 const { DATA_LICENCE_POLICY_VERSION } = require('../../src/constants/dataLicence');
+const { PARTNER_SCOPES } = require('../../src/constants/partnerClient');
 
 const {
   OAuthError,
@@ -610,7 +611,7 @@ describe('metadataDocuments', () => {
     assert.equal(partnerResourceDoc.resource, PARTNER_RESOURCE);
     assert.deepEqual(partnerResourceDoc.authorization_servers, [ISSUER]);
     assert.deepEqual(partnerResourceDoc.bearer_methods_supported, ['header']);
-    assert.deepEqual(partnerResourceDoc.scopes_supported, ['tge:identity', 'tge:status']);
+    assert.deepEqual(partnerResourceDoc.scopes_supported, [...PARTNER_SCOPES]);
     assert.equal(resourceDoc.resource, MCP_RESOURCE);
   });
 });

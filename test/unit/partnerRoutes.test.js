@@ -47,6 +47,7 @@ const partnerTgeRoutes = require('../../src/routes/partnerTgeRoutes');
 const { decideConsent, issuedTokensByCode } = require('../../src/services/oauthService');
 const { issueMcpToken } = require('../../src/services/mcpTokenService');
 const { DATA_LICENCE_POLICY_VERSION } = require('../../src/constants/dataLicence');
+const { PARTNER_SCOPES, STATUS_FIELD_CATALOG } = require('../../src/constants/partnerClient');
 
 const app = express();
 app.use(express.json());
@@ -54,7 +55,7 @@ app.use(express.urlencoded({ extended: true }));
 app.use('/partner/tge', partnerTgeRoutes);
 app.use('/', oauthRoutes);
 
-const user = { id: 'user-1', email: 'sloan@example.com', isOrganization: false, userType: 'regular', createdAt: new Date('2025-05-03T09:12:44Z'), walletAddress: '0xabc' };
+const user = { id: 'user-1', email: 'sloan@example.com', isOrganization: false, userType: 'regular', createdAt: new Date('2025-05-03T09:12:44Z'), walletAddress: '0xabc', referralCode: 'AB23CD', totalPoints: 1234.5 };
 const basic = (id = 'tge-test', secret = SECRET) => `Basic ${Buffer.from(`${encodeURIComponent(id)}:${encodeURIComponent(secret)}`).toString('base64')}`;
 
 function pkce() {
@@ -112,7 +113,7 @@ describe('discovery', () => {
     const pr = await request(app).get('/.well-known/oauth-protected-resource/partner/tge');
     assert.equal(pr.status, 200);
     assert.equal(pr.body.resource, PARTNER_RESOURCE);
-    assert.deepEqual(pr.body.scopes_supported, ['tge:identity', 'tge:status']);
+    assert.deepEqual(pr.body.scopes_supported, [...PARTNER_SCOPES]);
   });
 });
 
@@ -376,6 +377,187 @@ describe('/partner/tge', () => {
     const res = await request(app).get('/partner/tge/points');
     assert.equal(res.status, 404);
     assert.equal(res.body.error, 'invalid_request');
+  });
+});
+
+/**
+ * Per-field scopes: `tge:email`, `tge:wallet`, `tge:points`, `tge:referral`. Each one is gated
+ * twice — the token must carry the scope AND the environment must have frozen the field — and a
+ * closed gate omits the key instead of answering 403 (only the endpoint scopes 403).
+ */
+describe('/partner/tge — per-field scopes', () => {
+  const ALL_FIELDS = 'registered_at,wallet_bound,data_licence_granted,email,wallet_address,points,referral';
+  const FULL_SCOPE = 'tge:identity tge:status tge:email tge:wallet tge:points tge:referral';
+
+  /** SSO_TGE_STATUS_FIELDS is read per request, so a test can freeze/unfreeze around one call. */
+  async function withFields(fields, fn) {
+    const saved = process.env.SSO_TGE_STATUS_FIELDS;
+    process.env.SSO_TGE_STATUS_FIELDS = fields;
+    try {
+      return await fn();
+    } finally {
+      process.env.SSO_TGE_STATUS_FIELDS = saved;
+    }
+  }
+
+  const me = (token) => request(app).get('/partner/tge/me').set('Authorization', `Bearer ${token}`);
+  const status = (token) => request(app).get('/partner/tge/status').set('Authorization', `Bearer ${token}`);
+
+  // Each case runs several authorization round-trips; /oauth/authorize is 30/min per IP.
+  beforeEach(() => clearRateLimitStore());
+
+  it('every catalogued field declares its scope, source, meaning, null meaning and cache TTL', () => {
+    for (const [name, entry] of Object.entries(STATUS_FIELD_CATALOG)) {
+      assert.ok(PARTNER_SCOPES.includes(entry.scope), `${name} must be gated by a real scope`);
+      assert.ok(entry.source && entry.meaning && entry.nullMeaning, `${name} must document itself`);
+      assert.equal(typeof entry.cacheTtlSec, 'number', `${name} must state a cache TTL`);
+      assert.ok(['me', 'status'].includes(entry.endpoint));
+    }
+    assert.equal(STATUS_FIELD_CATALOG.points.cacheTtlSec, 0, 'a balance is never cacheable');
+    // The new fields are off until an operator lists them: nothing new leaks on a deploy.
+    const { readPartnerConfig } = require('../../src/constants/partnerClient');
+    const saved = process.env.SSO_TGE_STATUS_FIELDS;
+    delete process.env.SSO_TGE_STATUS_FIELDS;
+    try {
+      assert.deepEqual(readPartnerConfig().statusFields, []);
+    } finally {
+      process.env.SSO_TGE_STATUS_FIELDS = saved;
+    }
+  });
+
+  it('/me adds the real e-mail and a checksummed wallet once both gates are open', async () => {
+    await withFields(ALL_FIELDS, async () => {
+      prisma.user.rows[0].walletAddress = '0x8ba1f109551bd432803012645ac136ddd64dba72';
+      const token = await mintToken(FULL_SCOPE);
+      const res = await me(token);
+      assert.equal(res.status, 200, res.text);
+      assert.deepEqual(Object.keys(res.body).sort(), ['client_id', 'email', 'email_masked', 'expires_at', 'issued_at', 'sub', 'wallet_address']);
+      assert.equal(res.body.email, 'sloan@example.com', 'the real address, not the masked hint');
+      assert.equal(res.body.wallet_address, '0x8ba1f109551bD432803012645Ac136ddd64DBA72', 'EIP-55 checksummed');
+      assert.equal(res.headers['cache-control'], 'no-store');
+    });
+  });
+
+  it('/me reports no e-mail for an external-wallet account and for a legacy twitter|<id> value', async () => {
+    await withFields(ALL_FIELDS, async () => {
+      // The e-mail column is NOT NULL, so a wallet-only login parks the lower-cased address there.
+      prisma.user.rows[0].email = '0x8ba1f109551bd432803012645ac136ddd64dba72';
+      prisma.user.rows[0].web3authVerifier = 'external-wallet';
+      const wallet = await me(await mintToken(FULL_SCOPE));
+      assert.equal(wallet.body.email, null, 'a wallet address is not an e-mail');
+      assert.equal(wallet.body.email_masked, null);
+
+      prisma.user.rows[0].email = 'twitter|1234567890';
+      delete prisma.user.rows[0].web3authVerifier;
+      const legacy = await me(await mintToken(FULL_SCOPE));
+      assert.equal(legacy.body.email, null, 'an IdP subject is not an e-mail');
+      assert.equal(legacy.body.email_masked, null);
+
+      prisma.user.rows[0].email = 'sloan@example.com';
+      const real = await me(await mintToken(FULL_SCOPE));
+      assert.equal(real.body.email, 'sloan@example.com');
+    });
+  });
+
+  it('/me reports a null wallet_address when nothing is bound', async () => {
+    await withFields(ALL_FIELDS, async () => {
+      prisma.user.rows[0].walletAddress = null;
+      const res = await me(await mintToken(FULL_SCOPE));
+      assert.equal(res.status, 200);
+      assert.ok('wallet_address' in res.body, 'the field is served, it just has no value');
+      assert.equal(res.body.wallet_address, null);
+      const st = await status(await mintToken(FULL_SCOPE));
+      assert.equal(st.body.wallet_bound, false, 'the old boolean keeps working next to it');
+    });
+  });
+
+  it('/status adds a points balance that must never be cached', async () => {
+    await withFields(ALL_FIELDS, async () => {
+      const res = await status(await mintToken(FULL_SCOPE));
+      assert.equal(res.status, 200, res.text);
+      assert.equal(typeof res.body.points.balance, 'number');
+      assert.equal(res.body.points.balance, 1234.5, 'the denormalised User.totalPoints');
+      assert.equal(res.body.points.cache_max_age, 0);
+      assert.ok(Date.parse(res.body.points.as_of) > 0);
+      assert.equal(res.body.cache_max_age, 0, 'a body carrying a balance is not cacheable as a whole');
+      assert.equal(res.headers['cache-control'], 'no-store');
+    });
+  });
+
+  it('/status adds the referral summary, with and without an inviter', async () => {
+    await withFields(ALL_FIELDS, async () => {
+      const alone = await status(await mintToken(FULL_SCOPE));
+      assert.deepEqual(alone.body.referral, { code: 'AB23CD', inviter_sub: null, direct_invitees: 0 });
+
+      await prisma.referral.create({ data: { inviterId: 'upline-1', inviteeId: user.id, code: 'ZZ99ZZ', campaignSlug: null } });
+      await prisma.referral.create({ data: { inviterId: user.id, inviteeId: 'downline-1', code: 'AB23CD', campaignSlug: null } });
+      await prisma.referral.create({ data: { inviterId: user.id, inviteeId: 'downline-2', code: 'AB23CD', campaignSlug: null } });
+      // A campaign invite runs on its own economics and is not a referral in the Wallet either.
+      await prisma.referral.create({ data: { inviterId: user.id, inviteeId: 'downline-3', code: 'AB23CD', campaignSlug: 'summer-travel-2026' } });
+      // Someone else's downline must never be counted into this user's number.
+      await prisma.referral.create({ data: { inviterId: 'stranger', inviteeId: 'downline-4', code: 'QQ33QQ', campaignSlug: null } });
+
+      const res = await status(await mintToken(FULL_SCOPE));
+      assert.deepEqual(res.body.referral, { code: 'AB23CD', inviter_sub: 'upline-1', direct_invitees: 2 });
+    });
+  });
+
+  it('never returns a downline identifier or a network total, anywhere in the body', async () => {
+    await withFields(ALL_FIELDS, async () => {
+      await prisma.referral.create({ data: { inviterId: user.id, inviteeId: 'downline-1', code: 'AB23CD', campaignSlug: null } });
+      await prisma.referral.create({ data: { inviterId: 'downline-1', inviteeId: 'downline-1-1', code: 'AB23CD', campaignSlug: null } });
+      const token = await mintToken(FULL_SCOPE);
+      for (const res of [await status(token), await me(token)]) {
+        const body = JSON.stringify(res.body);
+        assert.equal(body.includes('downline-1'), false, 'the people this user invited did not consent to this partner');
+        assert.equal(body.includes('downline-1-1'), false, 'and neither did their invitees');
+        assert.equal(body.includes('network_size'), false, 'the multi-level total was dropped from the contract');
+        assert.equal(/invitees\s*"?\s*:\s*\[/.test(body), false, 'direct_invitees is a count, never a list');
+      }
+      assert.equal(typeof (await status(token)).body.referral.direct_invitees, 'number');
+    });
+  });
+
+  it('a token with only tge:identity gets none of the new fields, and no 403', async () => {
+    await withFields(ALL_FIELDS, async () => {
+      const token = await mintToken('tge:identity');
+      const res = await me(token);
+      assert.equal(res.status, 200, 'a missing OPTIONAL scope is not an error');
+      assert.deepEqual(Object.keys(res.body).sort(), ['client_id', 'email_masked', 'expires_at', 'issued_at', 'sub']);
+      assert.equal('email' in res.body, false);
+      assert.equal('wallet_address' in res.body, false);
+
+      const statusToken = await mintToken('tge:identity tge:status');
+      const st = await status(statusToken);
+      assert.equal(st.status, 200);
+      assert.equal('points' in st.body, false);
+      assert.equal('referral' in st.body, false);
+      assert.equal(st.body.cache_max_age, 60, 'without a balance the old cache window stands');
+      assert.equal(st.headers['cache-control'], 'private, max-age=60');
+    });
+  });
+
+  it('a field that the environment has not frozen stays absent even with its scope granted', async () => {
+    await withFields('registered_at,wallet_bound,data_licence_granted', async () => {
+      const token = await mintToken(FULL_SCOPE);
+      const identity = await me(token);
+      assert.equal('email' in identity.body, false, 'granted but not switched on for this deployment');
+      assert.equal('wallet_address' in identity.body, false);
+      const st = await status(token);
+      assert.equal('points' in st.body, false);
+      assert.equal('referral' in st.body, false);
+      assert.equal(st.body.cache_max_age, 60);
+    });
+  });
+
+  it('the consent page can render the granted scopes as a list', async () => {
+    const res = await request(app).get('/oauth/authorize').query(authorizeQuery({ scope: 'tge:referral tge:identity tge:email' }));
+    assert.equal(res.status, 302, res.text);
+    const id = new URL(res.headers.location).searchParams.get('request');
+    const info = await request(app).get(`/api/oauth/requests/${id}`);
+    assert.equal(info.status, 200);
+    assert.equal(info.body.data.scope, 'tge:identity tge:email tge:referral');
+    assert.deepEqual(info.body.data.scopeItems, ['identity', 'email', 'referral'], 'stable order, no tge: prefix for the Wallet copy');
   });
 });
 

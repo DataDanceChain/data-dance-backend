@@ -51,14 +51,15 @@ then only the new one.
   "code_challenge_methods_supported": ["S256"],
   "token_endpoint_auth_methods_supported": ["none", "client_secret_basic", "client_secret_post"],
   "authorization_response_iss_parameter_supported": true,
-  "scopes_supported": ["openid", "email", "profile", "life_capsule", "tge:identity", "tge:status"],
+  "scopes_supported": ["openid", "email", "profile", "life_capsule", "tge:identity", "tge:status",
+                       "tge:email", "tge:wallet", "tge:points", "tge:referral"],
   "ddc_sso_environment": "test"
 }
 ```
 
 `none` and the non-`tge:` scopes exist for DataDance's own AI-assistant (MCP) clients; the TGE
-client **must** authenticate (`client_secret_basic` or `client_secret_post`) and may only use
-`tge:identity` / `tge:status`. `GET {issuer}/.well-known/oauth-protected-resource/partner/tge`
+client **must** authenticate (`client_secret_basic` or `client_secret_post`) and may only use the
+`tge:` scopes. `GET {issuer}/.well-known/oauth-protected-resource/partner/tge`
 (RFC 9728) describes the partner API resource.
 
 ## 4. Authorization request (browser, top-level navigation)
@@ -89,8 +90,16 @@ Validation order and what the browser sees:
 3. Otherwise the request is stored (TTL **10 min**) and the browser is sent to the DataDance
    consent page.
 
-`scope` defaults to `tge:identity`; `tge:status` additionally unlocks `/partner/tge/status`.
-`state` is mandatory (max 512 characters). `login_hint` only pre-fills the DataDance login form.
+`scope` defaults to `tge:identity`. Two kinds of scope:
+
+- **Endpoint scopes** — `tge:identity` for `/partner/tge/me`, `tge:status` for
+  `/partner/tge/status`. A token without the one an endpoint needs gets `403 insufficient_scope`.
+- **Field scopes** — `tge:email`, `tge:wallet`, `tge:points`, `tge:referral`. Each unlocks exactly
+  one field. A token without one is **not** an error: the call succeeds and the field is simply
+  **absent from the body**. Ask only for what the campaign uses; the user sees the list.
+
+An unknown scope is `invalid_scope` (redirected per §4.2). `state` is mandatory (max 512
+characters). `login_hint` only pre-fills the DataDance login form.
 
 **`prompt=none`** — this build answers `302 … error=login_required` immediately (see §12).
 
@@ -110,7 +119,9 @@ interactively), `invalid_request`, `invalid_scope`, `unsupported_response_type`,
 
 ## 5. What the user sees
 
-The DataDance Wallet shows a consent page naming the partner and the requested scopes. If the
+The DataDance Wallet shows a consent page naming the partner and the requested scopes, one line
+per scope (`GET /api/oauth/requests/:id` returns both the raw `scope` string and a rendered
+`scopeItems: ["identity","email","wallet","points","referral"]`). If the
 user has no DataDance session they log in first (Web3Auth e-mail OTP). Organization (B-end)
 accounts cannot authorize a partner and receive `access_denied`. Nothing is shared until the
 user allows.
@@ -186,42 +197,86 @@ or `user_id` parameter is refused (T12).
 ```json
 { "sub": "6f1c1a0e-…", "client_id": "tge-test",
   "issued_at": "2026-09-21T02:15:30.000Z", "expires_at": "2026-09-21T02:20:30.000Z",
-  "email_masked": null }
+  "email_masked": "s***@example.com",
+  "email": "sloan@example.com",
+  "wallet_address": "0x8ba1f109551bD432803012645Ac136ddd64DBA72" }
 ```
 
-### `GET /partner/tge/status` — scope `tge:status` (`Cache-Control: private, max-age=60`)
+`email` needs `tge:email`, `wallet_address` needs `tge:wallet`. Without the scope the key is not
+in the body at all.
+
+### `GET /partner/tge/status` — scope `tge:status`
 
 ```json
 { "sub": "6f1c1a0e-…", "account_status": "active",
   "registered_at": "2025-05-03T09:12:44.000Z", "wallet_bound": true, "data_licence_granted": null,
-  "as_of": "2026-09-21T02:15:31.000Z", "cache_max_age": 60 }
+  "points": { "balance": 1234.5, "as_of": "2026-09-21T02:15:31.000Z", "cache_max_age": 0 },
+  "referral": { "code": "AB23CD", "inviter_sub": "9d2e…", "direct_invitees": 12 },
+  "as_of": "2026-09-21T02:15:31.000Z", "cache_max_age": 0 }
 ```
 
-Field semantics (contract §6). Unknown is always `null`, never fabricated. Fields marked
-*candidate* are returned as `null` until DataDance freezes them for the environment (a server
-configuration change, no deploy).
+`points` needs `tge:points`, `referral` needs `tge:referral`.
 
-| Field | Endpoint | Source | Meaning | Freshness | `null` means |
+**Caching.** Without `points` the response is `Cache-Control: private, max-age=60` and
+`cache_max_age: 60`. **With** `points` the whole body carries a live balance, so it drops to
+`Cache-Control: no-store` and `cache_max_age: 0` — never store a balance (T14).
+
+### Field table
+
+Unknown is always `null`, never fabricated. **Two gates** stand in front of every optional field:
+the **scope** the user granted, and DataDance's per-environment freeze list
+(`SSO_TGE_STATUS_FIELDS`). A gate that is shut means:
+
+- for the original candidates (`registered_at`, `wallet_bound`, `data_licence_granted`,
+  `email_masked`) — the key is present with value `null`;
+- for the fields added for the campaign (`email`, `wallet_address`, `points`, `referral`) — the
+  key is **absent**, so the partner can tell "this deployment does not serve it" from "DataDance
+  has no value for this user" (which is `null` *inside* a field that is served).
+
+| Field | Scope | Endpoint | Source | `null` means | Cache |
 | --- | --- | --- | --- | --- | --- |
-| `sub` | both | `User.id` (uuid) | Permanent DataDance user key; the same person across Wallet, Business and this partner | immutable | never null |
-| `client_id` | `/me` | token | Client the token was issued to | — | never null |
-| `issued_at`, `expires_at` | `/me` | token | Token lifetime for the partner's own bookkeeping | — | never null |
-| `email_masked` *(candidate)* | `/me` | `User.email` as `j***@domain.com` | Display hint only; never an identifier | live | no e-mail, or not frozen |
-| `account_status` | `/status` | `User.disabledAt` | `active` / `disabled`; `unknown` until the column is deployed | live | never null |
-| `registered_at` *(candidate)* | `/status` | `User.createdAt` | Account creation time | immutable | not frozen |
-| `wallet_bound` *(candidate)* | `/status` | `User.walletAddress != null` | A wallet address is bound. **Not** proof of control, **not** permission to sign or transfer (F05) | live | unknown / not frozen |
-| `data_licence_granted` *(candidate)* | `/status` | `DataLicenceConsent` active for the current policy version | User allowed DataDance to license their Connect records. Unrelated to partner eligibility | live | unknown / not frozen |
-| `as_of`, `cache_max_age` | `/status` | server clock | Do not cache beyond `cache_max_age` seconds (T14) | — | never null |
+| `sub` | `tge:identity` | both | `User.id` (uuid) — permanent key, the same person across Wallet, Business and this partner | never null | — |
+| `client_id`, `issued_at`, `expires_at` | `tge:identity` | `/me` | the token itself | never null | — |
+| `email_masked` | `tge:identity` | `/me` | `User.email` as `j***@domain.com`; display hint, never an identifier | no real e-mail, or not frozen | no-store |
+| `email` | `tge:email` | `/me` | `User.email` when it really is an address — the address a campaign can write to | the account has no e-mail (see below) | no-store |
+| `wallet_address` | `tge:wallet` | `/me` | `User.walletAddress`, EIP-55 checksummed when it parses. **Not** proof of control, **not** permission to sign or transfer (F05) | no wallet bound | no-store |
+| `account_status` | `tge:status` | `/status` | `User.disabledAt` → `active` / `disabled`; `unknown` until the column is deployed | never null | 60 s |
+| `registered_at` | `tge:status` | `/status` | `User.createdAt` | not frozen | 60 s |
+| `wallet_bound` | `tge:status` | `/status` | `User.walletAddress != null` | unknown / not frozen | 60 s |
+| `data_licence_granted` | `tge:status` | `/status` | `DataLicenceConsent` active for the current policy version. Unrelated to partner eligibility | unknown / not frozen | 60 s |
+| `points.balance` | `tge:points` | `/status` | `User.totalPoints` — the denormalised balance, maintained from the `Point` ledger inside the same transactions. The ledger is the source of truth; summing it per request is too expensive for a 120/min endpoint | never null while served; a new account is `0` | **0 — never cache** |
+| `points.as_of` | `tge:points` | `/status` | server clock at read time | never null | — |
+| `referral.code` | `tge:referral` | `/status` | the user's own short code (`User.referralCode`), the same one the Wallet shows | a display code could not be resolved | 60 s |
+| `referral.inviter_sub` | `tge:referral` | `/status` | `Referral.inviterId` for this user as invitee — the `sub` of whoever invited them, for an upline rebate | nobody invited this user | 60 s |
+| `referral.direct_invitees` | `tge:referral` | `/status` | **count** of level-1 invitees (standard invites; campaign invites run on separate economics and are excluded, as in the Wallet) | never null; `0` when they invited nobody | 60 s |
+| `as_of`, `cache_max_age` | — | `/status` | server clock | never null | — |
 
-This API never returns points, orders, portrait data or raw personal data. Eligibility for the
-partner's own campaign is the partner's decision, not a DataDance field.
+**Why `email` can be `null` while the account clearly logged in.** `User.email` is `NOT NULL`, so
+a login that has no e-mail parks something else in it: an **external-wallet** login stores the
+lower-cased wallet address, and a **legacy X login** stored the IdP subject `twitter|<id>`.
+Neither is an address anyone can write to, so both read as `null` here (and `email_masked` is
+`null` too). Use `wallet_address` to reach those users.
+
+### What DataDance will never return
+
+Not "not yet" — these are out of scope by design, and asking for them is a contract change, not a
+configuration change:
+
+- **Downline user lists.** `direct_invitees` is a count. The people this user invited are third
+  parties who consented to DataDance, not to the partner; their ids, e-mails and names are never
+  sent. There is no multi-level network total either.
+- **Order data** — what the user bought, where they stayed, from whom.
+- **Portrait / profile inference** — interests, segments, scores.
+- **Raw records** — anything from Connect, the crawler, uploads or the data licence pipeline.
+
+Eligibility for the partner's own campaign stays the partner's decision, not a DataDance field.
 
 Errors (RFC 6750, `WWW-Authenticate: Bearer realm="ddc-sso", error=…, resource_metadata=…`):
 
 | Status | `error` | When |
 | --- | --- | --- |
 | 401 | `invalid_token` | missing, expired, revoked, wrong-audience (e.g. an MCP token), or the client is switched off |
-| 403 | `insufficient_scope` | token lacks the scope the endpoint needs (`scope="…"` in the challenge) |
+| 403 | `insufficient_scope` | token lacks the **endpoint** scope (`tge:identity` / `tge:status`; `scope="…"` in the challenge). A missing **field** scope is never an error — the field is just absent |
 | 403 | `account_disabled` | the DataDance account is disabled |
 | 429 | `slow_down` | per-token rate limit |
 
@@ -246,7 +301,8 @@ Takes effect on the next `/partner/tge/*` call. `401 invalid_client` without cre
 ## 10. Rate limits
 
 Per IP: `/oauth/authorize` 30/min, `/oauth/token` 20/min, `/oauth/revoke` 20/min. Per token:
-`/partner/tge/*` 120/min. `429` bodies use the OAuth error shape with `error=slow_down`. (These
+`/partner/tge/*` 120/min — unchanged by `points` and `referral`. The limit is sized for a partner
+backend reading once per user session; it is not a bulk-export budget. `429` bodies use the OAuth error shape with `error=slow_down`. (These
 limits ship with the hardening change set; until it is deployed the endpoints are unlimited.)
 
 ## 11. End-to-end example
@@ -285,6 +341,15 @@ server also accepts.)
 - **Candidate fields default to `null`.** `registered_at`, `wallet_bound`,
   `data_licence_granted` and `email_masked` are enabled per environment through server
   configuration once frozen in 阶段 1. Ask which are on in the test environment.
+- **The contract file `ddc-sso-tge-v0.1.yaml` is behind this build.** v0.1 says the partner API
+  "never returns points balances" and lists only `tge:identity` / `tge:status`. The project owner
+  widened it: `tge:email`, `tge:wallet`, `tge:points` and `tge:referral` now exist and `/status`
+  can carry a balance and a referral summary. Everything v0.1 forbids that is not in the list
+  above — orders, portrait, raw records, downline lists — still holds. The YAML needs a v0.2.
+- **`referral` carries no network total.** An earlier draft of this change also returned
+  `network_size` (a 4-level downline count); the owner dropped it. Only the user's own code,
+  their inviter's `sub` and a level-1 count are served, and the query never materialises the
+  invitees.
 - **Replay revocation is per process.** The link "code → token issued from it" is kept in memory
   for 5 minutes; after a server restart a replayed code is still refused, but the earlier token
   is not revoked. The token expires within 300 s regardless.
@@ -318,7 +383,9 @@ Environment (see `env.example`): `SSO_ENVIRONMENT`, `SSO_TGE_ENABLED`, `SSO_TGE_
 - Generate a secret: `node scripts/genPartnerSecret.js` (prints once; nothing is written).
 - Rotate: move the current hash to `…_PREVIOUS`, set the new hash, set `…_ROTATION_UNTIL`,
   recreate the container; after the deadline remove the previous hash.
-- Freeze a status field: add it to `SSO_TGE_STATUS_FIELDS` and recreate.
+- Freeze a status field: add it to `SSO_TGE_STATUS_FIELDS` and recreate. `email`,
+  `wallet_address`, `points` and `referral` are **off** until listed, so deploying this change
+  set alone exposes nothing new. Boot refuses an unknown field name.
 - `SSO_REQUIRE_VERIFIED_SESSION=true` requires the consenting user's DataDance JWT to carry
   `ver >= 2` (issued by the verified Web3Auth login); older sessions get `login_required`.
 - Partner tokens are `McpToken` rows with `source = 'partner'`; they are hidden from the

@@ -178,6 +178,19 @@ function parsePartnerScope(value) {
   return PARTNER_SCOPES.filter((item) => requested.includes(item)).join(' ');
 }
 
+/**
+ * The granted scope as a list the consent page can render one line per item — "your e-mail
+ * address", "your points balance" — instead of showing the raw `tge:email tge:points` string.
+ * The `tge:` prefix is dropped because it is an implementation detail of the client, not
+ * something a user should have to read; the order follows PARTNER_SCOPES so the list is stable
+ * whatever order the partner asked in. The copy itself lives in the Wallet.
+ */
+function scopeItems(scope, partner) {
+  const granted = new Set(String(scope || '').split(/\s+/).filter(Boolean));
+  if (!partner) return [...granted];
+  return PARTNER_SCOPES.filter((item) => granted.has(item)).map((item) => item.replace(/^tge:/, ''));
+}
+
 function isAllowedRedirect(uri) {
   try {
     const url = new URL(uri);
@@ -375,6 +388,7 @@ async function getConsentRequest(id) {
     clientId: row.clientId,
     kind: partner ? 'partner' : 'assistant',
     scope: row.scope,
+    scopeItems: scopeItems(row.scope, partner),
     resource: row.resource,
     expiresAt: row.expiresAt,
   };

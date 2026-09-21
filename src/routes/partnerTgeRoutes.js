@@ -14,12 +14,19 @@ const { publicBaseUrl } = require('../constants/lifeContext');
 const {
   PARTNER_REALM,
   PARTNER_STATUS_CACHE_MAX_AGE_SEC,
+  PARTNER_POINTS_CACHE_MAX_AGE_SEC,
   getPartnerClient,
   partnerResourceUrl,
   maskEmail,
+  realEmail,
+  checksumWalletAddress,
 } = require('../constants/partnerClient');
 const { findUserByPartnerToken } = require('../services/mcpTokenService');
 const { hasActiveConsent } = require('../services/dataLicenceConsent');
+const { ensureDisplayReferralCode, getInviterId, countDirectInvitees } = require('../utils/referralUtils');
+const { createLogger } = require('../utils/logger');
+
+const logger = createLogger('partnerTge');
 
 const router = express.Router();
 
@@ -107,34 +114,101 @@ function requireScope(scope) {
   };
 }
 
+/**
+ * One limiter for the whole partner API (120/min per access token). `points` and `referral` make
+ * /status heavier than it was — two extra indexed reads — but the limit stays where it is: it is
+ * sized for a partner backend reading once per user session, not for a crawl, and raising it is
+ * how a read API quietly becomes a bulk export. Revisit only with a measured need.
+ */
 router.use(lim('partner'));
+
+/**
+ * Both gates in front of an optional field:
+ *   - the token must carry the field's scope (the partner asked for it and the user allowed it);
+ *   - the environment must have frozen the field in SSO_TGE_STATUS_FIELDS.
+ * Either gate shut → the key is simply absent, so the partner can tell "not served here" from
+ * "DataDance has no value" (which is `null` inside a field that IS served).
+ */
+function fieldGate(req) {
+  const { client, token } = req.partner;
+  const frozen = new Set(client.statusFields);
+  return (scope, field) => hasScope(token.scope, scope) && frozen.has(field);
+}
 
 router.get('/me', requirePartnerToken, requireScope('tge:identity'), (req, res) => {
   const { client, user, token } = req.partner;
-  res.set('Cache-Control', 'no-store');
-  return res.json({
+  const serves = fieldGate(req);
+  const body = {
     sub: user.id,
     client_id: token.clientId,
     issued_at: iso(token.issuedAt),
     expires_at: iso(token.expiresAt),
-    email_masked: client.statusFields.includes('email_masked') ? maskEmail(user.email) : null,
-  });
+    email_masked: client.statusFields.includes('email_masked') ? maskEmail(realEmail(user)) : null,
+  };
+  // The real address, for the campaign's own mail. null when the e-mail column holds a wallet
+  // address (external-wallet login) or a legacy `twitter|<id>` subject — see realEmail().
+  if (serves('tge:email', 'email')) body.email = realEmail(user);
+  // EIP-55 form, so the partner can compare it with what a wallet shows. null when unbound.
+  if (serves('tge:wallet', 'wallet_address')) body.wallet_address = checksumWalletAddress(user.walletAddress);
+  res.set('Cache-Control', 'no-store');
+  return res.json(body);
 });
+
+/**
+ * `{ code, inviter_sub, direct_invitees }`.
+ *
+ * NEVER a list of downline users. The people this user invited are third parties who consented
+ * to DataDance, not to this partner; handing over their ids (or e-mails, or names) would share
+ * data nobody in that list agreed to share. `direct_invitees` is a COUNT for the partner's
+ * leaderboard and `inviter_sub` is the one id the user's own upline rebate needs.
+ */
+async function referralSummary(userId) {
+  let code = null;
+  try {
+    // The same helper the Wallet uses, so the partner sees the code the user can read aloud.
+    code = (await ensureDisplayReferralCode(userId)) || null;
+  } catch (error) {
+    // A code that cannot be allocated right now must not fail the whole status read.
+    logger.warn('Could not resolve a display referral code for the partner API', { userId, error: error.message });
+  }
+  const [inviterSub, directInvitees] = await Promise.all([getInviterId(userId), countDirectInvitees(userId)]);
+  return { code, inviter_sub: inviterSub, direct_invitees: directInvitees };
+}
 
 router.get('/status', requirePartnerToken, requireScope('tge:status'), async (req, res, next) => {
   try {
-    const { client, user } = req.partner;
-    const frozen = new Set(client.statusFields);
+    const { user } = req.partner;
+    const serves = fieldGate(req);
+    const asOf = new Date().toISOString();
     const body = {
       sub: user.id,
       account_status: accountStatus(user),
-      registered_at: frozen.has('registered_at') ? iso(user.createdAt) : null,
-      wallet_bound: frozen.has('wallet_bound') ? Boolean(user.walletAddress) : null,
-      data_licence_granted: frozen.has('data_licence_granted') ? Boolean(await hasActiveConsent(user.id)) : null,
-      as_of: new Date().toISOString(),
+      registered_at: serves('tge:status', 'registered_at') ? iso(user.createdAt) : null,
+      wallet_bound: serves('tge:status', 'wallet_bound') ? Boolean(user.walletAddress) : null,
+      data_licence_granted: serves('tge:status', 'data_licence_granted') ? Boolean(await hasActiveConsent(user.id)) : null,
+      as_of: asOf,
       cache_max_age: PARTNER_STATUS_CACHE_MAX_AGE_SEC,
     };
-    res.set('Cache-Control', `private, max-age=${PARTNER_STATUS_CACHE_MAX_AGE_SEC}`);
+    if (serves('tge:points', 'points')) {
+      // The denormalised User.totalPoints, NOT SUM(Point.amount). The Point ledger is the source
+      // of truth and totalPoints is maintained from it inside the same transactions, but summing
+      // a user's whole ledger on every partner read is too expensive for a 120/min endpoint.
+      // A balance is therefore as fresh as the last ledger write, which is what `as_of` states.
+      body.points = {
+        balance: Number(user.totalPoints) || 0,
+        as_of: asOf,
+        cache_max_age: PARTNER_POINTS_CACHE_MAX_AGE_SEC,
+      };
+    }
+    if (serves('tge:referral', 'referral')) body.referral = await referralSummary(user.id);
+    // A body carrying a live balance is not cacheable at all, so the whole response drops to
+    // no-store and the top-level cache_max_age follows it down (T14: never cache past the value).
+    if (body.points) {
+      body.cache_max_age = PARTNER_POINTS_CACHE_MAX_AGE_SEC;
+      res.set('Cache-Control', 'no-store');
+    } else {
+      res.set('Cache-Control', `private, max-age=${PARTNER_STATUS_CACHE_MAX_AGE_SEC}`);
+    }
     return res.json(body);
   } catch (error) {
     return next(error);

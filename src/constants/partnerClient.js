@@ -14,52 +14,132 @@
  * Nothing in this module logs; the returned client objects never carry secret hashes.
  */
 const crypto = require('crypto');
+const { getAddress } = require('ethers');
 const { publicBaseUrl } = require('./lifeContext');
 
 const PARTNER_KIND = 'partner';
 const PARTNER_REALM = 'ddc-sso';
 const PARTNER_TOKEN_PREFIX = 'ddc_tge_';
-const PARTNER_SCOPES = Object.freeze(['tge:identity', 'tge:status']);
+/**
+ * Every scope the partner client may request at /oauth/authorize. `tge:identity` (default) and
+ * `tge:status` gate an ENDPOINT — missing one is 403 insufficient_scope. The four that follow
+ * gate a single FIELD each: a token without them simply does not carry that field, which is why
+ * the handlers omit the key instead of answering 403 (a partner that asked for less must still
+ * get the rest of the response).
+ */
+const PARTNER_SCOPES = Object.freeze([
+  'tge:identity',
+  'tge:status',
+  'tge:email',
+  'tge:wallet',
+  'tge:points',
+  'tge:referral',
+]);
 const PARTNER_DEFAULT_SCOPE = 'tge:identity';
 const PARTNER_REQUEST_TTL_MS = 10 * 60 * 1000;
 const PARTNER_CODE_TTL_MS = 60 * 1000;
 const PARTNER_ACCESS_TTL_SEC = 300;
 const PARTNER_STATUS_CACHE_MAX_AGE_SEC = 60;
+/** A points balance is never cacheable: it moves on every task, order and referral settlement. */
+const PARTNER_POINTS_CACHE_MAX_AGE_SEC = 0;
+/** Referral counts move slowly; still short, because an invite is visible to the user at once. */
+const PARTNER_REFERRAL_CACHE_MAX_AGE_SEC = 60;
 const PARTNER_ENVIRONMENTS = Object.freeze(['test', 'prod']);
 const PARTNER_TOKEN_ENDPOINT_AUTH_METHODS = Object.freeze(['client_secret_basic', 'client_secret_post']);
 const CLIENT_ID_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
 
 /**
- * Candidate /partner/tge/status and /me fields (contract §6). A field is populated only when
- * SSO_TGE_STATUS_FIELDS lists it; otherwise the key is present with value null ("unknown,
- * never fabricated"). `sub`, `account_status`, `as_of` and `cache_max_age` are always sent.
- * Default (variable unset): nothing frozen, every candidate is null — 阶段 1 freezes fields by
- * listing them in the environment, no code change.
+ * Every field /partner/tge/me and /partner/tge/status can carry, with the two gates in front of
+ * it (contract §6, extended for the campaign read API):
+ *
+ *   1. `scope`  — granted at /oauth/authorize and carried by the token. A field whose scope was
+ *                 not granted is OMITTED from the body (`presence: 'omit'`); the call still
+ *                 succeeds. Only the endpoint scopes (`tge:identity`, `tge:status`) 403.
+ *   2. SSO_TGE_STATUS_FIELDS — the per-environment freeze list. A field that is not listed is
+ *                 `null` for the original candidates (`presence: 'null'`, "unknown, never
+ *                 fabricated") and OMITTED for the fields added later, so a partner can tell
+ *                 "DataDance has nothing" from "this deployment does not serve it".
+ *
+ * `sub`, `client_id`, `issued_at`, `expires_at`, `account_status`, `as_of` and `cache_max_age`
+ * have no gate and are always sent. Default (variable unset): nothing is frozen, so the new
+ * fields are OFF until an operator lists them — no code change, no deploy.
  */
 const STATUS_FIELD_CATALOG = Object.freeze({
   registered_at: {
     endpoint: 'status',
+    scope: 'tge:status',
+    presence: 'null',
     source: 'User.createdAt',
     meaning: 'When the DataDance account was created.',
     nullMeaning: 'Not frozen for this environment.',
+    cacheTtlSec: PARTNER_STATUS_CACHE_MAX_AGE_SEC,
   },
   wallet_bound: {
     endpoint: 'status',
+    scope: 'tge:status',
+    presence: 'null',
     source: 'User.walletAddress != null',
     meaning: 'A wallet address is bound to the account. Not proof of control, not a signing permission.',
     nullMeaning: 'Unknown / not frozen.',
+    cacheTtlSec: PARTNER_STATUS_CACHE_MAX_AGE_SEC,
   },
   data_licence_granted: {
     endpoint: 'status',
+    scope: 'tge:status',
+    presence: 'null',
     source: 'DataLicenceConsent active (grantedAt set, not withdrawn, current policy version)',
     meaning: 'The user allowed DataDance to license their Connect records. Unrelated to partner eligibility.',
     nullMeaning: 'Unknown / not frozen.',
+    cacheTtlSec: PARTNER_STATUS_CACHE_MAX_AGE_SEC,
   },
   email_masked: {
     endpoint: 'me',
+    scope: 'tge:identity',
+    presence: 'null',
     source: 'User.email masked as j***@domain.com',
     meaning: 'Display hint for the partner; never an identifier.',
-    nullMeaning: 'No e-mail on the account, or not frozen.',
+    nullMeaning: 'No e-mail on the account, not a real address, or not frozen.',
+    cacheTtlSec: 0,
+  },
+  email: {
+    endpoint: 'me',
+    scope: 'tge:email',
+    presence: 'omit',
+    source: 'User.email, when it really is an e-mail address',
+    meaning: "The user's e-mail address, as the campaign will write to it.",
+    nullMeaning:
+      'The account has no e-mail: an external-wallet login stores the lower-cased wallet address in the NOT NULL e-mail column and a legacy X login stored `twitter|<id>` there. Neither is an address.',
+    cacheTtlSec: 0,
+  },
+  wallet_address: {
+    endpoint: 'me',
+    scope: 'tge:wallet',
+    presence: 'omit',
+    source: 'User.walletAddress, EIP-55 checksummed when it parses',
+    meaning:
+      'The wallet bound to the account, for an on-chain distribution. Still not proof of control and not a permission to sign or transfer (F05).',
+    nullMeaning: 'No wallet is bound to the account.',
+    cacheTtlSec: 0,
+  },
+  points: {
+    endpoint: 'status',
+    scope: 'tge:points',
+    presence: 'omit',
+    source: 'User.totalPoints (denormalised balance; the Point ledger is the source of truth)',
+    meaning: '{ balance, as_of, cache_max_age }. The DataDance points balance at `as_of`.',
+    nullMeaning: 'Never null while granted and frozen; a fresh account is `balance: 0`.',
+    cacheTtlSec: PARTNER_POINTS_CACHE_MAX_AGE_SEC,
+  },
+  referral: {
+    endpoint: 'status',
+    scope: 'tge:referral',
+    presence: 'omit',
+    source: 'User.referralCode + Referral rows for this user (inviteeId for the inviter, level-1 inviterId count)',
+    meaning:
+      '{ code, inviter_sub, direct_invitees }. One id (the inviter, so the partner can pay an upline rebate) and one count (for a leaderboard). No downline list, no multi-level total.',
+    nullMeaning:
+      '`inviter_sub` is null when nobody invited this user; `code` is null when a display code could not be resolved.',
+    cacheTtlSec: PARTNER_REFERRAL_CACHE_MAX_AGE_SEC,
   },
 });
 const DEFAULT_STATUS_FIELDS = Object.freeze([]);
@@ -201,12 +281,50 @@ function parseBasicAuth(headerValue) {
   };
 }
 
+/**
+ * `User.email` is NOT NULL, so logins that have no e-mail park something else in it:
+ *  - an external-wallet login stores the lower-cased wallet address (see EXTERNAL_WALLET_VERIFIER
+ *    in src/services/web3authIdentity.js — mirrored here rather than imported, because that
+ *    module pulls jose and its own boot configuration into a constants file);
+ *  - a legacy X login stored the IdP subject `twitter|<id>`.
+ * Neither is an address a campaign could write to, so both read as "no e-mail".
+ */
+const EXTERNAL_WALLET_VERIFIER = 'external-wallet';
+const IDP_SUBJECT_PATTERN = /^[a-z0-9-]+\|/i;
+const RAW_ADDRESS_PATTERN = /^0x[0-9a-fA-F]{40}$/;
+
+/** The real e-mail address, or null when the column holds one of the placeholders above. */
+function realEmail(user) {
+  const value = String((user && user.email) || '').trim();
+  if (!value) return null;
+  if (user && user.web3authVerifier === EXTERNAL_WALLET_VERIFIER) return null;
+  if (IDP_SUBJECT_PATTERN.test(value) || RAW_ADDRESS_PATTERN.test(value)) return null;
+  const at = value.indexOf('@');
+  if (at < 1 || at === value.length - 1) return null;
+  return value;
+}
+
 /** `j***@domain.com`; null when there is no usable e-mail. */
 function maskEmail(email) {
   const value = String(email || '').trim();
   const at = value.indexOf('@');
   if (at < 1 || at === value.length - 1) return null;
   return `${value[0]}***@${value.slice(at + 1)}`;
+}
+
+/**
+ * EIP-55 checksum form, so the partner can compare addresses byte-for-byte with what a wallet
+ * shows. A stored value that ethers cannot parse is handed back verbatim rather than dropped:
+ * it is what DataDance holds, and inventing a "valid" address would be worse than an odd one.
+ */
+function checksumWalletAddress(address) {
+  const value = String(address || '').trim();
+  if (!value) return null;
+  try {
+    return getAddress(value);
+  } catch {
+    return value;
+  }
 }
 
 function isLoopbackHost(hostname) {
@@ -307,6 +425,8 @@ module.exports = {
   PARTNER_CODE_TTL_MS,
   PARTNER_ACCESS_TTL_SEC,
   PARTNER_STATUS_CACHE_MAX_AGE_SEC,
+  PARTNER_POINTS_CACHE_MAX_AGE_SEC,
+  PARTNER_REFERRAL_CACHE_MAX_AGE_SEC,
   PARTNER_ENVIRONMENTS,
   PARTNER_TOKEN_ENDPOINT_AUTH_METHODS,
   STATUS_FIELD_CATALOG,
@@ -319,6 +439,9 @@ module.exports = {
   parseBasicAuth,
   parseBasicCredentials: parseBasicAuth,
   maskEmail,
+  realEmail,
+  checksumWalletAddress,
+  EXTERNAL_WALLET_VERIFIER,
   sha256Hex,
   assertPartnerConfig,
 };

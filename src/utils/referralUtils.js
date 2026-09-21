@@ -102,6 +102,32 @@ async function ensureDisplayReferralCode(userId) {
 }
 
 /**
+ * Who invited this user, as a DataDance user id — or null when nobody did.
+ * Same row the Wallet referral page reads (`Referral.inviteeId` is unique, so there is at most
+ * one inviter per account).
+ */
+async function getInviterId(userId) {
+  const row = await prisma.referral.findUnique({
+    where: { inviteeId: userId },
+    select: { inviterId: true },
+  });
+  return row?.inviterId || null;
+}
+
+/**
+ * How many people this user invited DIRECTLY (level 1).
+ *
+ * `campaignSlug: null` matches `getReferralStatus`/`getReferralOverview`: campaign invites
+ * (Mother's Day, Summer Travel) run on their own economics and are not listed as referrals in
+ * the Wallet, so counting them here would show the user a different number than their own app.
+ * Indexed by `@@index([inviterId, campaignSlug])`, and a COUNT never materialises the invitees —
+ * which is what keeps the downline out of reach by construction, not only by convention.
+ */
+async function countDirectInvitees(userId) {
+  return prisma.referral.count({ where: { inviterId: userId, campaignSlug: null } });
+}
+
+/**
  * Validate a referral code and return the referrer's information
  * @param {string} code - The referral code to validate
  * @param {string} userId - Optional user ID to perform additional validations
@@ -249,4 +275,6 @@ module.exports = {
   referralCodeLookupValues,
   findUserByReferralCode,
   validateReferralCode,
+  getInviterId,
+  countDirectInvitees,
 };

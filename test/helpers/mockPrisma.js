@@ -2,9 +2,11 @@
  * Hand-rolled in-memory Prisma stand-in for unit tests. Installed into require.cache in place
  * of src/utils/prisma.js BEFORE any service is required, so no test needs a database.
  *
- * Supported: findUnique / findFirst / findMany / create / update / updateMany / delete /
+ * Supported: findUnique / findFirst / findMany / count / create / update / updateMany / delete /
  * deleteMany with `where` conditions on scalar equality, null, and { gt, gte, lt, lte, not,
  * in, equals }; `include` for the relations declared below (with optional `select`).
+ * `select` is ignored on reads — the whole row comes back — so a test must never rely on it to
+ * hide a column.
  */
 const path = require('path');
 const crypto = require('crypto');
@@ -79,6 +81,7 @@ function makeModel(store, name, { relations = {} } = {}) {
     findUnique: async ({ where, include }) => withInclude(rows.find((r) => matches(r, where)) || null, include),
     findFirst: async ({ where, include } = {}) => withInclude(rows.find((r) => matches(r, where)) || null, include),
     findMany: async ({ where } = {}) => rows.filter((r) => matches(r, where)).map((r) => ({ ...r })),
+    count: async ({ where } = {}) => rows.filter((r) => matches(r, where)).length,
     create: async ({ data }) => {
       const row = { id: crypto.randomUUID(), createdAt: new Date(), ...data };
       rows.push(row);
