@@ -1,8 +1,10 @@
 const express = require('express');
+const prisma = require('../utils/prisma');
 const { protect } = require('../middlewares/authMiddleware');
 const { rateLimiters } = require('../middlewares/rateLimitMiddleware');
 const { createLogger } = require('../utils/logger');
 const { PARTNER_REALM } = require('../constants/partnerClient');
+const { verifySsoSession, looksLikeSsoSession } = require('./ssoRoutes');
 const {
   OAuthError,
   metadataDocuments,
@@ -99,6 +101,55 @@ function readBearer(req) {
   return match?.[1] || null;
 }
 
+/** The one answer the Wallet page acts on: drop the session and log in normally. */
+function ssoSessionExpired(res) {
+  res.set('Cache-Control', 'no-store');
+  return res.status(401).json({
+    status: 'fail',
+    code: 'SSO_SESSION_EXPIRED',
+    message: 'This sign-in session has expired. Please sign in again.',
+  });
+}
+
+/**
+ * The request summary stays readable without a credential (the consent page loads it before
+ * any login), but a credential that IS presented must be usable: a partner access token, an
+ * MCP token or a stale JWT gets 401, never a free read (contract security: userJwt|ssoSession,
+ * T12.5).
+ */
+function bearerMustVerify(req, res, next) {
+  return readBearer(req) ? protect(req, res, next) : next();
+}
+
+/**
+ * Phase 3: the two consent endpoints additionally accept the consent-only SSO session
+ * (`ddc_sso_…`, contract ddc-sso-tge-v0.1), which is recognised by its prefix and verified
+ * with SSO_SESSION_SECRET. Every other credential — above all the user JWT the MCP consent
+ * flow uses — falls through to `fallback` unchanged.
+ *
+ * A session that does not verify (wrong secret, expired, unknown subject) is 401
+ * `SSO_SESSION_EXPIRED`; which client it may answer for is decided further down, by
+ * `decideConsent` for a decision and by the handler for the request summary.
+ */
+function consentPrincipal(fallback) {
+  return async (req, res, next) => {
+    const token = readBearer(req);
+    if (!looksLikeSsoSession(token)) return fallback(req, res, next);
+    const claims = verifySsoSession(token);
+    if (!claims) return ssoSessionExpired(res);
+    try {
+      const user = await prisma.user.findUnique({ where: { id: claims.userId } });
+      if (!user) return ssoSessionExpired(res);
+      req.user = user;
+      // Consumed by decideConsent as ctx.clientId: the session may only answer for its client.
+      req.ssoSession = { clientId: claims.clientId, jti: claims.jti };
+      return next();
+    } catch (error) {
+      return next(error);
+    }
+  };
+}
+
 router.get('/.well-known/oauth-authorization-server', (req, res) => {
   res.json(metadataDocuments(req).as);
 });
@@ -183,20 +234,33 @@ router.get('/oauth/userinfo', async (req, res) => {
   }
 });
 
-router.get('/api/oauth/requests/:id', async (req, res) => {
+router.get('/api/oauth/requests/:id', consentPrincipal(bearerMustVerify), async (req, res) => {
   try {
+    const data = await getConsentRequest(req.params.id);
+    if (req.ssoSession && req.ssoSession.clientId !== data.clientId) {
+      logger.warn('SSO session presented for another client', { requestId: req.params.id });
+      res.set('Cache-Control', 'no-store');
+      return res.status(401).json({
+        status: 'fail',
+        code: 'UNAUTHORIZED',
+        message: 'This session is bound to a different client.',
+      });
+    }
     res.set('Cache-Control', 'no-store');
-    return res.json({ status: 'success', data: await getConsentRequest(req.params.id) });
+    return res.json({ status: 'success', data });
   } catch (error) {
     return sendOAuthError(res, error);
   }
 });
 
-router.post('/api/oauth/consent', lim('consent'), protect, async (req, res) => {
+router.post('/api/oauth/consent', lim('consent'), consentPrincipal(protect), async (req, res) => {
   try {
     const allow = req.body?.allow !== false;
-    // req.authClaims is set by the verified-login middleware (P0 branch); undefined until merged.
-    const ctx = { kind: 'user_jwt', claims: req.authClaims };
+    // req.authClaims is set by `protect` (P0 verified-login claims); an SSO session carries no
+    // claims of its own — the verified-login check happened when the ticket was minted.
+    const ctx = req.ssoSession
+      ? { kind: 'sso_ticket', clientId: req.ssoSession.clientId }
+      : { kind: 'user_jwt', claims: req.authClaims };
     const redirectTo = await decideConsent(req.user, req.body?.requestId, allow, ctx);
     res.set('Cache-Control', 'no-store');
     return res.json({ status: 'success', data: { redirectTo } });

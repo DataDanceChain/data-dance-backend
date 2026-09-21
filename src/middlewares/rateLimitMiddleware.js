@@ -22,14 +22,16 @@ function isOAuthStylePath(req) {
  * - everything else: existing `{ status: 'error', message, retryAfter }`
  * `Retry-After` (seconds) is always set.
  */
-function sendRateLimited(req, res, { message, retryAfter, errorFormat }) {
+function sendRateLimited(req, res, { message, retryAfter, errorFormat, code }) {
   const seconds = Math.max(1, Math.ceil(retryAfter));
   res.setHeader('Retry-After', String(seconds));
   const oauthStyle = errorFormat === 'oauth' || (errorFormat === 'auto' && isOAuthStylePath(req));
   if (oauthStyle) {
     return res.status(429).json({ error: 'slow_down', error_description: message });
   }
-  return res.status(429).json({ status: 'error', message, retryAfter: seconds });
+  // `code` lets an endpoint whose contract names a machine code (RATE_LIMITED for /api/sso/*)
+  // return it without introducing a second error shape.
+  return res.status(429).json({ status: 'error', ...(code ? { code } : {}), message, retryAfter: seconds });
 }
 
 /**
@@ -42,6 +44,7 @@ function sendRateLimited(req, res, { message, retryAfter, errorFormat }) {
  * @param {Function} options.keyGenerator - Function to generate unique key for each client
  * @param {string} options.name - Bucket namespace; each limiter gets its own buckets even for the same client key
  * @param {'auto'|'oauth'|'default'} options.errorFormat - 429 body shape (auto: by path)
+ * @param {string} options.code - Machine code added to the default 429 body (contract codes)
  * @param {Function} options.now - Clock (tests)
  */
 function createRateLimiter(options = {}) {
@@ -53,6 +56,7 @@ function createRateLimiter(options = {}) {
     keyGenerator = keyGenerators.userOrIp,
     name = `limiter${++limiterCounter}`,
     errorFormat = 'auto',
+    code = '',
     now = Date.now,
   } = options;
 
@@ -81,7 +85,7 @@ function createRateLimiter(options = {}) {
         limit: max,
         retryAfter: Math.ceil(retryAfter)
       });
-      return sendRateLimited(req, res, { message, retryAfter, errorFormat });
+      return sendRateLimited(req, res, { message, retryAfter, errorFormat, code });
     }
 
     // Clean up old requests outside the current window
@@ -101,7 +105,7 @@ function createRateLimiter(options = {}) {
         limit: max,
         retryAfter: Math.ceil(retryAfter)
       });
-      return sendRateLimited(req, res, { message, retryAfter, errorFormat });
+      return sendRateLimited(req, res, { message, retryAfter, errorFormat, code });
     }
 
     // Track response status if skipSuccessfulRequests is enabled
@@ -274,7 +278,8 @@ const rateLimiters = {
     windowMs: 60 * 1000,
     max: 5,
     message: 'Too many hand-off tickets requested. Please wait a minute.',
-    keyGenerator: keyGenerators.userOrIp
+    keyGenerator: keyGenerators.userOrIp,
+    code: 'RATE_LIMITED'
   }),
 
   // POST /api/sso/ticket/exchange — public, per IP (Phase 3)
@@ -283,7 +288,8 @@ const rateLimiters = {
     windowMs: 60 * 1000,
     max: 10,
     message: 'Too many ticket exchanges. Please wait a minute.',
-    keyGenerator: keyGenerators.ip
+    keyGenerator: keyGenerators.ip,
+    code: 'RATE_LIMITED'
   })
 };
 

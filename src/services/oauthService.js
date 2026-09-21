@@ -394,8 +394,10 @@ async function decideConsent(user, requestId, allow, ctx = {}) {
   const client = await resolveClient(row.clientId);
   const partner = isPartnerClient(client);
   const principal = ctx && ctx.kind ? ctx.kind : 'user_jwt';
+  // An SSO session may only answer for the client it was minted for (T11.6): 403, never a
+  // decision on someone else's request.
   if (principal === 'sso_ticket' && ctx.clientId && ctx.clientId !== row.clientId) {
-    throw new OAuthError(400, 'invalid_request', 'This session is bound to a different client.');
+    throw new OAuthError(403, 'access_denied', 'This session is bound to a different client.');
   }
 
   const finish = async (params) => {

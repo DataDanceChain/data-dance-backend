@@ -99,6 +99,7 @@ function createMockPrisma() {
       relations: { user: { model: 'user', field: 'userId', references: 'id' } },
     }),
     dataLicenceConsent: makeModel(store, 'dataLicenceConsent'),
+    ssoTicket: makeModel(store, 'ssoTicket'),
     reset() {
       Object.keys(store).forEach((key) => {
         store[key].length = 0;

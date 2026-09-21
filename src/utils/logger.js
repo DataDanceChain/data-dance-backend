@@ -13,6 +13,8 @@ const winston = require('winston');
 const SENSITIVE_QUERY_KEYS = [
   'access_token',
   'token',
+  'session_token',
+  'sessionToken',
   'code',
   'ticket',
   'id_token',

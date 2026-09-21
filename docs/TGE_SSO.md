@@ -115,6 +115,31 @@ user has no DataDance session they log in first (Web3Auth e-mail OTP). Organizat
 accounts cannot authorize a partner and receive `access_denied`. Nothing is shared until the
 user allows.
 
+### App hand-off (DataDance Wallet App → system browser)
+
+When the user starts from inside the DataDance Wallet App, the App does not send its own
+session to the browser. It mints a single-use ticket (`POST /api/sso/app-ticket`, DataDance
+first-party API), opens `https://app.datadance.ai/sso/continue#ticket=…` in the **system
+browser**, and that page exchanges the ticket for a 5-minute session that DataDance accepts
+only on its own consent endpoints.
+
+**Nothing of this is visible to the partner.** The ticket and the session never leave
+DataDance; the partner is entered exactly once, by a top-level navigation to its registered
+
+```
+{initiate_login_uri}?iss=https%3A%2F%2Fapi.datadance.ai
+```
+
+(OIDC Core §4 third-party-initiated login; `login_hint` is added only when DataDance knows an
+unmasked e-mail, which in this build it does not). The partner MUST verify that `iss` equals
+the DataDance issuer it trusts and then start `GET /oauth/authorize` itself, in the same tab,
+with its own `state` and PKCE pair — exactly as in §4. From there the flow is identical to a
+browser-initiated login, including the consent page and the callback.
+
+What the partner must configure: `SSO_TGE_INITIATE_LOGIN_URI` on the DataDance side (the hand-off
+is refused with `CLIENT_DISABLED` while it is empty), and an endpoint at that URI that ignores
+any other parameter it receives.
+
 ## 6. Token request (partner backend → DataDance, server-to-server)
 
 ```

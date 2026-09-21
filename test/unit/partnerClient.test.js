@@ -25,6 +25,7 @@ const ENV_KEYS = [
   'SSO_ENVIRONMENT', 'SSO_TGE_ENABLED', 'SSO_TGE_CLIENT_ID', 'SSO_TGE_CLIENT_NAME',
   'SSO_TGE_CLIENT_SECRET_SHA256', 'SSO_TGE_CLIENT_SECRET_SHA256_PREVIOUS', 'SSO_TGE_SECRET_ROTATION_UNTIL',
   'SSO_TGE_REDIRECT_URIS', 'SSO_TGE_INITIATE_LOGIN_URI', 'SSO_TGE_STATUS_FIELDS', 'SSO_REQUIRE_VERIFIED_SESSION',
+  'SSO_SESSION_SECRET', 'JWT_SECRET',
   'PUBLIC_BASE_URL', 'APP_PUBLIC_URL', 'NODE_ENV', 'PORT',
 ];
 const saved = {};
@@ -44,6 +45,7 @@ function baseEnv(overrides = {}) {
     SSO_TGE_CLIENT_NAME: 'DDC TGE',
     SSO_TGE_CLIENT_SECRET_SHA256: SECRET_HASH,
     SSO_TGE_REDIRECT_URIS: ' https://tge.example.com/oauth/callback , https://tge.example.com/alt ',
+    SSO_SESSION_SECRET: 'sso-session-key-for-tests',
     PUBLIC_BASE_URL: 'https://api.test.local',
     APP_PUBLIC_URL: 'https://app.test.local',
     ...overrides,
