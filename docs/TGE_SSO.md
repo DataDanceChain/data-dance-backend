@@ -248,7 +248,7 @@ the **scope** the user granted, and DataDance's per-environment freeze list
 | `points.as_of` | `tge:points` | `/status` | server clock at read time | never null | — |
 | `referral.code` | `tge:referral` | `/status` | the user's own short code (`User.referralCode`), the same one the Wallet shows | a display code could not be resolved | 60 s |
 | `referral.inviter_sub` | `tge:referral` | `/status` | `Referral.inviterId` for this user as invitee — the `sub` of whoever invited them, for an upline rebate | nobody invited this user | 60 s |
-| `referral.direct_invitees` | `tge:referral` | `/status` | **count** of level-1 invitees (standard invites; campaign invites run on separate economics and are excluded, as in the Wallet) | never null; `0` when they invited nobody | 60 s |
+| `referral.direct_invitees` | `tge:referral` | `/status` | **count** of level-1 invitees, campaign invites included (may exceed the figure the Wallet referral page shows, which lists standard referrals only) | never null; `0` when they invited nobody | 60 s |
 | `as_of`, `cache_max_age` | — | `/status` | server clock | never null | — |
 
 **Why `email` can be `null` while the account clearly logged in.** `User.email` is `NOT NULL`, so

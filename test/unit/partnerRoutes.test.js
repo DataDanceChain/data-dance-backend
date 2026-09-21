@@ -492,13 +492,15 @@ describe('/partner/tge — per-field scopes', () => {
       await prisma.referral.create({ data: { inviterId: 'upline-1', inviteeId: user.id, code: 'ZZ99ZZ', campaignSlug: null } });
       await prisma.referral.create({ data: { inviterId: user.id, inviteeId: 'downline-1', code: 'AB23CD', campaignSlug: null } });
       await prisma.referral.create({ data: { inviterId: user.id, inviteeId: 'downline-2', code: 'AB23CD', campaignSlug: null } });
-      // A campaign invite runs on its own economics and is not a referral in the Wallet either.
+      // A campaign invite counts: the partner asks how many people this user invited, and someone
+      // who joined through a campaign link was still invited by them. (The Wallet referral page
+      // lists standard referrals only, so its figure can be lower — that difference is intended.)
       await prisma.referral.create({ data: { inviterId: user.id, inviteeId: 'downline-3', code: 'AB23CD', campaignSlug: 'summer-travel-2026' } });
       // Someone else's downline must never be counted into this user's number.
       await prisma.referral.create({ data: { inviterId: 'stranger', inviteeId: 'downline-4', code: 'QQ33QQ', campaignSlug: null } });
 
       const res = await status(await mintToken(FULL_SCOPE));
-      assert.deepEqual(res.body.referral, { code: 'AB23CD', inviter_sub: 'upline-1', direct_invitees: 2 });
+      assert.deepEqual(res.body.referral, { code: 'AB23CD', inviter_sub: 'upline-1', direct_invitees: 3 });
     });
   });
 

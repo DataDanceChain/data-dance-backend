@@ -117,14 +117,19 @@ async function getInviterId(userId) {
 /**
  * How many people this user invited DIRECTLY (level 1).
  *
- * `campaignSlug: null` matches `getReferralStatus`/`getReferralOverview`: campaign invites
- * (Mother's Day, Summer Travel) run on their own economics and are not listed as referrals in
- * the Wallet, so counting them here would show the user a different number than their own app.
- * Indexed by `@@index([inviterId, campaignSlug])`, and a COUNT never materialises the invitees —
- * which is what keeps the downline out of reach by construction, not only by convention.
+ * Counts EVERY direct invite, campaign invites (Mother's Day, Summer Travel) included: the
+ * partner's question is "how many people did this user invite", and someone who joined through a
+ * campaign link was still invited by them. This can therefore exceed the number the Wallet
+ * referral page shows, which lists standard referrals only — say so wherever it is displayed.
+ * A COUNT never materialises the invitees, which is what keeps the downline out of reach by
+ * construction, not only by convention.
  */
 async function countDirectInvitees(userId) {
-  return prisma.referral.count({ where: { inviterId: userId, campaignSlug: null } });
+  // Every person this user directly brought in, campaign invites included: the partner asks
+  // "how many people did this user invite", and someone who joined through a campaign link was
+  // still invited by them. Note this can exceed the number the Wallet referral page shows, which
+  // counts standard referrals only.
+  return prisma.referral.count({ where: { inviterId: userId } });
 }
 
 /**
