@@ -104,19 +104,27 @@ function createRateLimiter(options = {}) {
       return sendRateLimited(req, res, { message, retryAfter, errorFormat });
     }
 
-    // Track response status if skipSuccessfulRequests is enabled
+    // Count on ENTRY, always. Counting in res.end let N concurrent requests all pass the check
+    // above before any of them counted, which nullified the brute-force limiters (plan §7.2 row
+    // 7): an attacker just had to send the attempts in parallel.
+    clientData.requests.push(current);
+
+    // `skipSuccessfulRequests`: give the slot back once the response turns out to be a success,
+    // so only failures accumulate — but only after it is known, never before.
     if (skipSuccessfulRequests) {
       const originalEnd = res.end;
+      let settled = false;
       res.end = function(...args) {
-        // Only count non-successful requests
-        if (res.statusCode >= 400) {
-          clientData.requests.push(current);
+        if (!settled) {
+          settled = true;
+          if (res.statusCode < 400) {
+            // `clientData.requests` is re-assigned by the window filter, so read it now.
+            const index = clientData.requests.indexOf(current);
+            if (index !== -1) clientData.requests.splice(index, 1);
+          }
         }
-        originalEnd.apply(res, args);
+        return originalEnd.apply(res, args);
       };
-    } else {
-      // Add current request timestamp
-      clientData.requests.push(current);
     }
 
     // Add rate limit headers

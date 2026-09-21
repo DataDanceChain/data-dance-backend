@@ -415,6 +415,28 @@ const IDENTITY = {
   wallets: [],
 };
 
+/**
+ * The only opt-in that lets an IdP-asserted e-mail key an existing account: the verifier is
+ * named in WEB3AUTH_LEGACY_VERIFIERS and the token itself says the address is verified.
+ */
+function allowLegacyEmailBackfill(identity = IDENTITY) {
+  process.env.WEB3AUTH_LEGACY_VERIFIERS = identity.verifier;
+  _internals.resetConfig();
+  return { ...identity, emailVerified: true };
+}
+
+async function conflictReason(promise) {
+  let caught = null;
+  try {
+    await promise;
+  } catch (err) {
+    caught = err;
+  }
+  assert.ok(caught, 'expected IDENTITY_CONFLICT, got a resolved promise');
+  assert.equal(caught.code, 'IDENTITY_CONFLICT', caught.message);
+  return caught.details && caught.details.reason;
+}
+
 describe('resolveUser', () => {
   beforeEach(() => {
     delete process.env.WEB3AUTH_LEGACY_VERIFIERS;
@@ -445,8 +467,9 @@ describe('resolveUser', () => {
   });
 
   it('backfills a legacy row whose stored e-mail differs only by case', async () => {
+    const identity = allowLegacyEmailBackfill();
     const db = mockPrisma([{ id: 'legacy', email: 'Alice@Example.com' }]);
-    const { user, action } = await resolveUser(IDENTITY, { db });
+    const { user, action } = await resolveUser(identity, { db });
     assert.equal(action, 'backfilled');
     assert.equal(user.id, 'legacy');
     assert.equal(user.email, 'Alice@Example.com');
@@ -462,8 +485,9 @@ describe('resolveUser', () => {
   });
 
   it('turns a lost backfill race (count 0) into IDENTITY_CONFLICT', async () => {
+    const identity = allowLegacyEmailBackfill();
     const db = mockPrisma([{ id: 'legacy', email: 'alice@example.com' }], { updateManyCount: 0 });
-    await expectCode(resolveUser(IDENTITY, { db }), 'IDENTITY_CONFLICT');
+    await expectCode(resolveUser(identity, { db }), 'IDENTITY_CONFLICT');
   });
 
   it('never merges into a traditional (password) account with the same e-mail', async () => {
@@ -554,5 +578,105 @@ describe('resolveUser', () => {
     const candidate = mockPrisma([{ id: 'dis', email: 'alice@example.com', disabledAt: new Date() }]);
     await expectCode(resolveUser(IDENTITY, { db: candidate }), 'ACCOUNT_DISABLED');
     assert.equal(candidate._users[0].web3authVerifier, null);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Legacy-row linking: what may key someone else's account (plan §5 F03)
+// ---------------------------------------------------------------------------
+
+describe('legacy backfill gating', () => {
+  const WALLET = '0xAbC0000000000000000000000000000000000001';
+
+  beforeEach(() => {
+    delete process.env.WEB3AUTH_LEGACY_VERIFIERS;
+    delete process.env.WEB3AUTH_EMAIL_VERIFIED_CLAIM;
+    _internals.resetConfig();
+  });
+
+  it('never backfills by e-mail while WEB3AUTH_LEGACY_VERIFIERS is empty', async () => {
+    // The Web3Auth client id ships in the SPA bundle, so "any verifier" is "any attacker".
+    const db = mockPrisma([{ id: 'victim', email: 'alice@example.com' }]);
+    assert.equal(await conflictReason(resolveUser({ ...IDENTITY, emailVerified: true }, { db })), 'verifier_not_allowed');
+    assert.equal(db._users[0].web3authVerifier, null);
+  });
+
+  it('never backfills on an e-mail the IdP did not mark verified', async () => {
+    process.env.WEB3AUTH_LEGACY_VERIFIERS = IDENTITY.verifier;
+    _internals.resetConfig();
+    const db = mockPrisma([{ id: 'victim', email: 'alice@example.com' }]);
+    assert.equal(await conflictReason(resolveUser({ ...IDENTITY, emailVerified: false }, { db })), 'email_not_verified');
+    assert.equal(await conflictReason(resolveUser(IDENTITY, { db })), 'email_not_verified', 'absent claim = unverified');
+    assert.equal(db._users[0].web3authVerifier, null);
+  });
+
+  it('does not treat a NULL wallet as wallet-consistent', async () => {
+    const { walletConsistent } = _internals;
+    assert.equal(walletConsistent({ walletAddress: null }, WALLET), false, 'a row with no wallet proves nothing');
+    assert.equal(walletConsistent({ walletAddress: WALLET }, WALLET.toLowerCase()), true);
+    assert.equal(walletConsistent({ walletAddress: WALLET }, null), false);
+
+    // Most legacy rows have no wallet: that used to make the e-mail route "consistent" for free.
+    const db = mockPrisma([{ id: 'victim', email: 'alice@example.com', walletAddress: null }]);
+    assert.equal(
+      await conflictReason(resolveUser({ ...IDENTITY, emailVerified: true }, { db, walletAddress: WALLET })),
+      'verifier_not_allowed'
+    );
+    assert.equal(db._users[0].web3authVerifier, null);
+  });
+
+  it('backfills when the verifier is allow-listed and the e-mail is verified', async () => {
+    const identity = allowLegacyEmailBackfill();
+    const db = mockPrisma([{ id: 'legacy', email: 'alice@example.com' }]);
+    const { user, action } = await resolveUser(identity, { db });
+    assert.equal(action, 'backfilled');
+    assert.equal(user.id, 'legacy');
+    assert.equal(user.web3authVerifier, identity.verifier);
+  });
+
+  it('keeps the cryptographic route: a wallet the token proves needs no allow-list', async () => {
+    const db = mockPrisma([{ id: 'legacy', email: 'alice@example.com', walletAddress: WALLET }]);
+    const { action } = await resolveUser({ ...IDENTITY, emailVerified: false }, { db, walletAddress: WALLET.toLowerCase() });
+    assert.equal(action, 'backfilled', 'ownership of the row’s wallet is proof, unlike an e-mail claim');
+  });
+
+  it('refuses a linked or non-web3auth row before it looks at the verifier at all', async () => {
+    const identity = allowLegacyEmailBackfill();
+    const password = mockPrisma([{ id: 'pw', email: 'alice@example.com', authType: 'traditional' }]);
+    assert.equal(await conflictReason(resolveUser(identity, { db: password })), 'candidate_not_web3auth');
+    const linked = mockPrisma([
+      { id: 'other', email: 'alice@example.com', web3authVerifier: 'v2', web3authVerifierId: 'someone-else' },
+    ]);
+    assert.equal(await conflictReason(resolveUser(identity, { db: linked })), 'candidate_already_linked');
+  });
+});
+
+describe('email_verified claim', () => {
+  beforeEach(() => {
+    delete process.env.WEB3AUTH_EMAIL_VERIFIED_CLAIM;
+    _internals.resetConfig();
+  });
+
+  it('is true only for a real boolean true on the configured claim', () => {
+    const base = { verifier: 'torus', verifierId: 'alice@example.com', email: 'alice@example.com' };
+    assert.equal(extractIdentity({ ...base, email_verified: true }).emailVerified, true);
+    assert.equal(extractIdentity({ ...base, email_verified: 'true' }).emailVerified, false, 'a string is not the IdP saying yes');
+    assert.equal(extractIdentity({ ...base, email_verified: 1 }).emailVerified, false);
+    assert.equal(extractIdentity(base).emailVerified, false, 'absent = unverified');
+    // No e-mail at all (X-style verifierId) is never a verified e-mail.
+    assert.equal(extractIdentity({ verifier: 'torus', verifierId: 'twitter|123', email_verified: true }).emailVerified, false);
+  });
+
+  it('reads the dot path in WEB3AUTH_EMAIL_VERIFIED_CLAIM', () => {
+    process.env.WEB3AUTH_EMAIL_VERIFIED_CLAIM = 'idp.emailVerified';
+    _internals.resetConfig();
+    try {
+      const payload = { verifier: 'torus', verifierId: 'alice@example.com', email: 'alice@example.com' };
+      assert.equal(extractIdentity({ ...payload, email_verified: true }).emailVerified, false, 'default claim is ignored now');
+      assert.equal(extractIdentity({ ...payload, idp: { emailVerified: true } }).emailVerified, true);
+    } finally {
+      delete process.env.WEB3AUTH_EMAIL_VERIFIED_CLAIM;
+      _internals.resetConfig();
+    }
   });
 });

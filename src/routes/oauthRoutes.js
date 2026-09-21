@@ -192,9 +192,24 @@ router.get('/api/oauth/requests/:id', async (req, res) => {
   }
 });
 
+/**
+ * Parse the consent decision. `express.urlencoded` is mounted before these routes, so a
+ * form-encoded `allow=false` arrives as the STRING "false" — truthy. Only a real boolean `true`
+ * or the string "true" is consent; anything else present is a denial; absent is malformed.
+ * Returns true | false | null (absent).
+ */
+function parseAllow(value) {
+  if (value === true || value === 'true') return true;
+  if (value === undefined || value === null) return null;
+  return false;
+}
+
 router.post('/api/oauth/consent', lim('consent'), protect, async (req, res) => {
   try {
-    const allow = req.body?.allow !== false;
+    const allow = parseAllow(req.body?.allow);
+    if (allow === null) {
+      throw new OAuthError(400, 'invalid_request', 'allow must be true or false.');
+    }
     // req.authClaims is set by the verified-login middleware (P0 branch); undefined until merged.
     const ctx = { kind: 'user_jwt', claims: req.authClaims };
     const redirectTo = await decideConsent(req.user, req.body?.requestId, allow, ctx);

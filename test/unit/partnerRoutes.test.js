@@ -8,6 +8,16 @@ const { installMockPrisma } = require('../helpers/mockPrisma');
 
 const prisma = installMockPrisma();
 
+// authMiddleware builds its own PrismaClient when it loads; point it at the same in-memory store
+// so `protect` — and therefore POST /api/oauth/consent — can be exercised through the router.
+require.cache[require.resolve('@prisma/client')].exports = {
+  PrismaClient: class PrismaClient {
+    constructor() {
+      return prisma;
+    }
+  },
+};
+
 const SECRET = 'tge-secret-dev';
 const SECRET_HASH = crypto.createHash('sha256').update(SECRET).digest('hex');
 const REDIRECT = 'https://tge.example.com/oauth/callback';
@@ -25,10 +35,14 @@ Object.assign(process.env, {
   SSO_TGE_STATUS_FIELDS: 'registered_at,wallet_bound,data_licence_granted',
   PUBLIC_BASE_URL: ISSUER,
   APP_PUBLIC_URL: 'https://app.test.local',
+  JWT_SECRET: 'test-jwt-secret-partner-routes',
+  JWT_EXPIRES_IN: '1h',
 });
 delete process.env.SSO_REQUIRE_VERIFIED_SESSION;
 
 const oauthRoutes = require('../../src/routes/oauthRoutes');
+const { generateToken } = require('../../src/utils/jwtUtils');
+const { clearRateLimitStore } = require('../../src/middlewares/rateLimitMiddleware');
 const partnerTgeRoutes = require('../../src/routes/partnerTgeRoutes');
 const { decideConsent, issuedTokensByCode } = require('../../src/services/oauthService');
 const { issueMcpToken } = require('../../src/services/mcpTokenService');
@@ -362,5 +376,70 @@ describe('/partner/tge', () => {
     const res = await request(app).get('/partner/tge/points');
     assert.equal(res.status, 404);
     assert.equal(res.body.error, 'invalid_request');
+  });
+});
+
+describe('POST /api/oauth/consent', () => {
+  const bearer = () => `Bearer ${generateToken(user.id)}`;
+
+  /** A fresh pending authorization; returns its request id. */
+  async function pendingRequest() {
+    const res = await request(app).get('/oauth/authorize').query(authorizeQuery());
+    assert.equal(res.status, 302, res.text);
+    return new URL(res.headers.location).searchParams.get('request');
+  }
+
+  async function decide(body, { form = false } = {}) {
+    const req = request(app).post('/api/oauth/consent').set('Authorization', bearer());
+    const res = await (form ? req.type('form') : req).send(body);
+    return res;
+  }
+
+  function outcome(res) {
+    assert.equal(res.status, 200, res.text);
+    const to = new URL(res.body.data.redirectTo);
+    return { code: to.searchParams.get('code'), error: to.searchParams.get('error') };
+  }
+
+  beforeEach(() => clearRateLimitStore());
+
+  it('treats a form-encoded allow=false as a denial (it arrives as the STRING "false")', async () => {
+    // express.urlencoded is mounted before these routes, so `allow !== false` was always true.
+    const res = await decide({ requestId: await pendingRequest(), allow: 'false' }, { form: true });
+    const { code, error } = outcome(res);
+    assert.equal(error, 'access_denied');
+    assert.equal(code, null, 'a denial must never produce an authorization code');
+  });
+
+  it('refuses a request with no allow field at all (400 invalid_request)', async () => {
+    const requestId = await pendingRequest();
+    const res = await decide({ requestId });
+    assert.equal(res.status, 400);
+    assert.equal(res.body.error, 'invalid_request');
+    const row = prisma.oAuthAuthorization.rows.find((r) => r.id === requestId);
+    assert.equal(row.consumedAt, undefined, 'the pending request is left alone');
+    assert.equal(row.codeHash, undefined);
+  });
+
+  it('accepts only a real boolean true or the string "true"', async () => {
+    const json = outcome(await decide({ requestId: await pendingRequest(), allow: true }));
+    assert.ok(json.code, 'boolean true consents');
+    const form = outcome(await decide({ requestId: await pendingRequest(), allow: 'true' }, { form: true }));
+    assert.ok(form.code, 'the string "true" is how a form says yes');
+  });
+
+  it('denies on anything else that is present', async () => {
+    for (const allow of ['0', '1', 'yes', 'TRUE', '', 'null']) {
+      const { code, error } = outcome(await decide({ requestId: await pendingRequest(), allow }, { form: true }));
+      assert.equal(error, 'access_denied', `allow=${JSON.stringify(allow)} must deny`);
+      assert.equal(code, null);
+    }
+    const bool = outcome(await decide({ requestId: await pendingRequest(), allow: false }));
+    assert.equal(bool.error, 'access_denied');
+  });
+
+  it('still requires a signed-in user', async () => {
+    const res = await request(app).post('/api/oauth/consent').send({ requestId: await pendingRequest(), allow: true });
+    assert.equal(res.status, 401);
   });
 });

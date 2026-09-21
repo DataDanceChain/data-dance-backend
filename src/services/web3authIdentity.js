@@ -30,9 +30,11 @@ const DEFAULTS = {
   WEB3AUTH_VERIFIER_CLAIM: 'aggregateVerifier,verifier,groupedAuthConnectionId,authConnectionId',
   WEB3AUTH_VERIFIER_ID_CLAIM: 'verifierId,userId',
   WEB3AUTH_EMAIL_CLAIM: 'email',
+  WEB3AUTH_EMAIL_VERIFIED_CLAIM: 'email_verified',
   WEB3AUTH_WALLETS_CLAIM: 'wallets',
   WEB3AUTH_WALLET_MATCH: 'public_key',
-  WEB3AUTH_LEGACY_VERIFIERS: '',
+  WEB3AUTH_LEGACY_VERIFIERS: '', // empty = NEVER link a legacy row by e-mail (opt-in by verifier name)
+  WEB3AUTH_ALLOW_LEGACY_FALLBACK: 'false',
   WEB3AUTH_EXTERNAL_ISSUERS: 'https://authjs.web3auth.io',
   WEB3AUTH_EXTERNAL_JWKS_URL: 'https://authjs.web3auth.io/jwks',
   WEB3AUTH_EXTERNAL_AUDIENCE: '', // empty → WEB3AUTH_CLIENT_ID
@@ -85,6 +87,14 @@ function envOr(env, key) {
   return v === undefined || v === null || String(v).trim() === '' ? DEFAULTS[key] : String(v).trim();
 }
 
+/** Strict boolean env: only "true"/"false" (any case). A typo must not read as "on". */
+function envBool(env, key) {
+  const raw = envOr(env, key).toLowerCase();
+  if (raw === 'true') return true;
+  if (raw === 'false') return false;
+  throw new Error(`${key} must be "true" or "false" (got "${raw}")`);
+}
+
 function loadConfig(env = process.env) {
   const mode = envOr(env, 'WEB3AUTH_VERIFY_MODE').toLowerCase();
   const walletMatch = envOr(env, 'WEB3AUTH_WALLET_MATCH').toLowerCase();
@@ -99,9 +109,13 @@ function loadConfig(env = process.env) {
     verifierClaims: csv(envOr(env, 'WEB3AUTH_VERIFIER_CLAIM')),
     verifierIdClaims: csv(envOr(env, 'WEB3AUTH_VERIFIER_ID_CLAIM')),
     emailClaims: csv(envOr(env, 'WEB3AUTH_EMAIL_CLAIM')),
+    emailVerifiedClaim: envOr(env, 'WEB3AUTH_EMAIL_VERIFIED_CLAIM'),
     walletsClaim: envOr(env, 'WEB3AUTH_WALLETS_CLAIM'),
     walletMatch,
+    // Verifiers allowed to lazily link a legacy row by IdP-asserted e-mail. EMPTY = NONE.
     legacyVerifiers: csv(envOr(env, 'WEB3AUTH_LEGACY_VERIFIERS')),
+    // `log` mode only: allow a request with NO idToken at all to use the legacy path.
+    allowLegacyFallback: envBool(env, 'WEB3AUTH_ALLOW_LEGACY_FALLBACK'),
     kinds: {
       social: {
         jwksUrl: envOr(env, 'WEB3AUTH_JWKS_URL'),
@@ -174,6 +188,15 @@ function getJwks(url) {
 
 function getVerifyMode() {
   return getConfig().mode;
+}
+
+/**
+ * `log` mode only, and only for a request that supplied NO idToken: may it use the legacy
+ * client-asserted path? Default false — the body alone never mints a session (SSO plan §5 F03).
+ * A supplied-but-rejected token is never covered by this flag; it fails closed in every mode.
+ */
+function getAllowLegacyFallback() {
+  return getConfig().allowLegacyFallback;
 }
 
 // ---------------------------------------------------------------------------
@@ -291,8 +314,17 @@ function normalizeWallets(raw) {
 }
 
 /**
+ * Did the IdP assert that it VERIFIED this e-mail? Only a real boolean `true` counts: a
+ * string, 1, or a missing claim means "not verified", because an unverified e-mail is a
+ * value the token holder types in, not a fact the provider checked.
+ */
+function emailVerifiedFrom(payload, cfg) {
+  return readPath(payload, cfg.emailVerifiedClaim) === true;
+}
+
+/**
  * Read the upstream identity out of a verified payload.
- * Returns `{ kind, verifier, verifierId, email, name, profileImage, wallets, claims: { verifier, verifierId } }`.
+ * Returns `{ kind, verifier, verifierId, email, emailVerified, name, profileImage, wallets }`.
  * Throws IDTOKEN_INVALID when no identity can be established.
  */
 function extractIdentity(payload, { kind } = {}) {
@@ -326,6 +358,7 @@ function extractIdentity(payload, { kind } = {}) {
 
   const emailRaw = firstString(payload, cfg.emailClaims);
   const email = emailRaw && emailRaw.includes('@') ? emailRaw : null;
+  const emailVerified = Boolean(email) && emailVerifiedFrom(payload, cfg);
   const name = firstString(payload, NAME_CLAIMS);
   const profileImage = firstString(payload, AVATAR_CLAIMS);
 
@@ -335,6 +368,7 @@ function extractIdentity(payload, { kind } = {}) {
     verifierId,
     verifierIdRaw,
     email,
+    emailVerified,
     name,
     profileImage,
     wallets,
@@ -410,6 +444,15 @@ function guardAccount(user) {
 }
 
 /**
+ * Does the token PROVE the candidate row's wallet? A row with a NULL wallet proves nothing and
+ * is NOT "consistent": most legacy rows have no wallet, and treating that as consistency was
+ * what let an IdP-asserted e-mail alone claim someone else's account.
+ */
+function walletConsistent(candidate, walletAddress) {
+  return Boolean(walletAddress) && sameAddress(candidate && candidate.walletAddress, walletAddress);
+}
+
+/**
  * The e-mail column is NOT NULL; the legacy frontend stored `verifierId` there when the
  * provider released no e-mail (X: `twitter|<id>`). Mirror that so legacy rows are found.
  */
@@ -426,8 +469,12 @@ function defaultName(identity, accountEmail) {
 /**
  * Map a verified identity to a DDC user (plan §2.1):
  *   1. hit by (web3authVerifier, web3authVerifierId) → login
- *   2. lazy backfill of a legacy `web3auth` row found by IdP-asserted e-mail (or proven wallet)
- *      via updateMany(... web3authVerifier: null) requiring count === 1
+ *   2. lazy backfill of a legacy `web3auth` row, via updateMany(... web3authVerifier: null)
+ *      requiring count === 1, on exactly two routes:
+ *        - the token PROVES the wallet the row already holds (cryptographic), or
+ *        - the row is found by the key the token carries in the e-mail column AND the verifier
+ *          is named in WEB3AUTH_LEGACY_VERIFIERS AND, when that key is an IdP-asserted e-mail,
+ *          the token asserts `email_verified === true` (F03: an e-mail claim alone is not proof)
  *   3. otherwise IDENTITY_CONFLICT (never merged)
  *   4. no candidate → create
  *
@@ -461,7 +508,9 @@ async function resolveUser(identity, options = {}) {
       where: { email: { equals: accountEmail, mode: 'insensitive' } },
     });
   }
-  let candidateBy = candidate ? 'email' : null;
+  // `email` = the IdP asserted this address; `verifier_id` = the legacy column holds the
+  // token-proven verifierId (X rows kept `twitter|<id>` there, the column being NOT NULL).
+  let candidateBy = candidate ? (identity.email ? 'email' : 'verifier_id') : null;
   if (!candidate && walletAddress) {
     candidate = await db.user.findFirst({
       where: { walletAddress: { equals: walletAddress, mode: 'insensitive' } },
@@ -471,17 +520,27 @@ async function resolveUser(identity, options = {}) {
 
   if (candidate) {
     guardAccount(candidate);
-    const verifierAllowed =
-      cfg.legacyVerifiers.length === 0 || cfg.legacyVerifiers.includes(identity.verifier);
+    // Explicit opt-in, by verifier name: an EMPTY list links nothing by e-mail (it used to mean
+    // "any verifier", and the Web3Auth client id ships in the SPA bundle, so "any verifier with a
+    // token whose e-mail claim the holder controls" was enough to claim a victim's row).
+    const verifierAllowed = cfg.legacyVerifiers.includes(identity.verifier);
     const unlinked = candidate.web3authVerifier == null && candidate.web3authVerifierId == null;
-    const walletConsistent =
-      !walletAddress || !candidate.walletAddress || sameAddress(candidate.walletAddress, walletAddress);
+    const walletProven = walletConsistent(candidate, walletAddress);
+    const walletMismatch =
+      Boolean(walletAddress) &&
+      Boolean(candidate.walletAddress) &&
+      !sameAddress(candidate.walletAddress, walletAddress);
 
     let reason = null;
-    if (!verifierAllowed) reason = 'verifier_not_allowed';
-    else if (candidate.authType !== 'web3auth') reason = 'candidate_not_web3auth';
+    if (candidate.authType !== 'web3auth') reason = 'candidate_not_web3auth';
     else if (!unlinked) reason = 'candidate_already_linked';
-    else if (!walletConsistent) reason = 'wallet_mismatch';
+    else if (walletMismatch) reason = 'wallet_mismatch';
+    else if (!walletProven) {
+      // Not the cryptographic route: the e-mail-column route needs the opt-in, and a real
+      // e-mail needs the IdP's own `email_verified` before it may key a legacy account.
+      if (!verifierAllowed) reason = 'verifier_not_allowed';
+      else if (candidateBy === 'email' && identity.emailVerified !== true) reason = 'email_not_verified';
+    }
 
     if (reason) {
       logger.warn('identity_conflict', {
@@ -566,6 +625,7 @@ module.exports = {
   assertWalletBound,
   resolveUser,
   getVerifyMode,
+  getAllowLegacyFallback,
   Web3AuthIdentityError,
   EXTERNAL_WALLET_VERIFIER,
   _internals: {
@@ -583,5 +643,7 @@ module.exports = {
     addressFromCompressedKey,
     accountEmailFor,
     guardAccount,
+    walletConsistent,
+    emailVerifiedFrom,
   },
 };

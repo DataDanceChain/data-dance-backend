@@ -13,15 +13,19 @@ function matchValue(actual, cond) {
   if (cond === null) return actual === null || actual === undefined;
   if (cond instanceof Date) return actual instanceof Date && actual.getTime() === cond.getTime();
   if (typeof cond === 'object' && !Array.isArray(cond)) {
+    // Prisma's `mode: 'insensitive'` applies to the string comparisons in the same condition.
+    const fold = (v) =>
+      cond.mode === 'insensitive' && typeof v === 'string' ? v.toLowerCase() : v;
     return Object.entries(cond).every(([op, value]) => {
       switch (op) {
+        case 'mode': return true;
         case 'gt': return actual > value;
         case 'gte': return actual >= value;
         case 'lt': return actual < value;
         case 'lte': return actual <= value;
         case 'not': return !matchValue(actual, value);
-        case 'in': return value.includes(actual);
-        case 'equals': return actual === value;
+        case 'in': return value.map(fold).includes(fold(actual));
+        case 'equals': return fold(actual) === fold(value);
         default: throw new Error(`mockPrisma: unsupported operator "${op}"`);
       }
     });
@@ -29,8 +33,27 @@ function matchValue(actual, cond) {
   return actual === cond;
 }
 
+const OPERATORS = new Set(['gt', 'gte', 'lt', 'lte', 'not', 'in', 'equals', 'mode']);
+
+/** `{ gt: 1 }` is a condition; `{ web3authVerifier: 'x', web3authVerifierId: 'y' }` is a compound key. */
+function isConditionObject(cond) {
+  return (
+    cond &&
+    typeof cond === 'object' &&
+    !Array.isArray(cond) &&
+    !(cond instanceof Date) &&
+    Object.keys(cond).every((key) => OPERATORS.has(key))
+  );
+}
+
 function matches(row, where = {}) {
-  return Object.entries(where).every(([key, cond]) => matchValue(row[key], cond));
+  return Object.entries(where).every(([key, cond]) => {
+    // Prisma passes a compound unique key as `a_b: { a, b }`; match its parts against the row.
+    if (cond && typeof cond === 'object' && !Array.isArray(cond) && !(cond instanceof Date) && !isConditionObject(cond)) {
+      return matches(row, cond);
+    }
+    return matchValue(row[key], cond);
+  });
 }
 
 function makeModel(store, name, { relations = {} } = {}) {
@@ -99,6 +122,12 @@ function createMockPrisma() {
       relations: { user: { model: 'user', field: 'userId', references: 'id' } },
     }),
     dataLicenceConsent: makeModel(store, 'dataLicenceConsent'),
+    referral: makeModel(store, 'referral'),
+    /** Interactive transactions run inline: the mock is single-threaded and never rolls back. */
+    async $transaction(arg) {
+      if (typeof arg === 'function') return arg(prisma);
+      return Promise.all(arg);
+    },
     reset() {
       Object.keys(store).forEach((key) => {
         store[key].length = 0;

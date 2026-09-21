@@ -224,6 +224,65 @@ describe('failure-only counting (opsLogin / auth)', () => {
   });
 });
 
+describe('failure-only counting under concurrency', () => {
+  /** Hold the response open so every request is in flight at the same time. */
+  function slowApp({ max, status }) {
+    const app = buildApp();
+    const limiter = createRateLimiter({
+      name: `t-conc-${max}-${status}`, max, windowMs: 60_000,
+      skipSuccessfulRequests: true, keyGenerator: keyGenerators.ip,
+    });
+    let reached = 0;
+    app.post('/login', limiter, async (req, res) => {
+      reached += 1;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      res.status(status).json({ ok: status < 400 });
+    });
+    return { app, reached: () => reached };
+  }
+
+  it('lets at most `max` requests in at once, even before any of them has answered', async () => {
+    // The old limiter counted in res.end, so N parallel attempts all passed the check first —
+    // the ops-login brute-force control (§7.2 row 7) was nullified by concurrency alone.
+    const { app, reached } = slowApp({ max: 2, status: 401 });
+    const results = await Promise.all(
+      Array.from({ length: 6 }, () => request(app).post('/login').set('X-Forwarded-For', '203.0.113.70'))
+    );
+    const statuses = results.map((r) => r.status);
+    assert.equal(statuses.filter((s) => s === 401).length, 2, `attempts admitted: ${statuses.join(',')}`);
+    assert.equal(statuses.filter((s) => s === 429).length, 4);
+    assert.equal(reached(), 2, 'the handler must never see more than max concurrent attempts');
+  });
+
+  it('gives the slot back once a concurrent request turns out to be a success', async () => {
+    const { app } = slowApp({ max: 2, status: 200 });
+    const first = await Promise.all(
+      Array.from({ length: 2 }, () => request(app).post('/login').set('X-Forwarded-For', '203.0.113.71'))
+    );
+    assert.deepEqual(first.map((r) => r.status), [200, 200]);
+    // Both finished successfully, so the bucket is empty again: successes stay free.
+    for (let i = 0; i < 4; i += 1) {
+      const res = await request(app).post('/login').set('X-Forwarded-For', '203.0.113.71');
+      assert.equal(res.status, 200, `success ${i} was charged to the bucket`);
+    }
+  });
+
+  it('counts an aborted-then-failed response once, not twice', async () => {
+    const app = buildApp();
+    const limiter = createRateLimiter({
+      name: 't-double-end', max: 2, windowMs: 60_000,
+      skipSuccessfulRequests: true, keyGenerator: keyGenerators.ip,
+    });
+    app.post('/login', limiter, (req, res) => {
+      res.status(401).json({ status: 'fail' });
+      res.end(); // a second end() must not change the count
+    });
+    assert.equal((await request(app).post('/login').set('X-Forwarded-For', '203.0.113.72')).status, 401);
+    assert.equal((await request(app).post('/login').set('X-Forwarded-For', '203.0.113.72')).status, 401);
+    assert.equal((await request(app).post('/login').set('X-Forwarded-For', '203.0.113.72')).status, 429);
+  });
+});
+
 describe('pre-configured limiters', () => {
   it('opsLogin allows 5 failures then blocks per IP', async () => {
     const app = buildApp();

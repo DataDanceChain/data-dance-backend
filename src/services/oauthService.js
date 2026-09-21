@@ -630,6 +630,12 @@ async function exchangeRefreshToken(body) {
   if (body.client_id && String(body.client_id) !== row.clientId) {
     throw new OAuthError(400, 'invalid_client', 'client_id does not match this refresh token.');
   }
+  // A refresh token must not outlive the account: disabling a user has to end every session it
+  // can still mint, not only the ones already issued.
+  const user = await prisma.user.findUnique({ where: { id: row.userId } });
+  if (!user || user.disabledAt) {
+    throw new OAuthError(400, 'invalid_grant', 'Refresh token is invalid or expired.');
+  }
   await prisma.oAuthRefreshToken.update({
     where: { id: row.id },
     data: { revokedAt: new Date() },

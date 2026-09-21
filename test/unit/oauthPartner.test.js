@@ -553,10 +553,47 @@ describe('revokeToken', () => {
 });
 
 describe('exchangeRefreshToken', () => {
+  async function seedRefresh(raw, overrides = {}) {
+    await prisma.oAuthRefreshToken.create({
+      data: {
+        tokenHash: hashToken(raw), userId: user.id, clientId: 'ddc_oauth_mcp1', mcpTokenId: 'm',
+        resource: MCP_RESOURCE, scope: 'life_capsule', expiresAt: new Date(Date.now() + 60_000), revokedAt: null,
+        ...overrides,
+      },
+    });
+  }
+
   it('refuses refresh rows that claim the partner client id', async () => {
     const raw = 'ddc_rt_x';
     await prisma.oAuthRefreshToken.create({ data: { tokenHash: hashToken(raw), userId: user.id, clientId: 'tge-test', mcpTokenId: 'm', resource: PARTNER_RESOURCE, scope: 'tge:identity', expiresAt: new Date(Date.now() + 60_000) } });
     await rejects(exchangeRefreshToken({ refresh_token: raw }), { status: 400, error: 'invalid_grant' });
+  });
+
+  it('rotates a live refresh token for a healthy account', async () => {
+    const raw = 'ddc_rt_live';
+    await seedRefresh(raw);
+    const issued = await exchangeRefreshToken({ refresh_token: raw });
+    assert.match(issued.access_token, /^ddc_mcp_/);
+    assert.match(issued.refresh_token, /^ddc_rt_/);
+    assert.notEqual(issued.refresh_token, raw, 'the presented token is rotated');
+    await rejects(exchangeRefreshToken({ refresh_token: raw }), { status: 400, error: 'invalid_grant' });
+  });
+
+  it('refuses a refresh token whose account has been disabled', async () => {
+    // Disabling an account has to end the sessions it can still mint, not only the live ones.
+    const raw = 'ddc_rt_disabled';
+    await seedRefresh(raw);
+    prisma.user.rows.find((r) => r.id === user.id).disabledAt = new Date();
+    await rejects(exchangeRefreshToken({ refresh_token: raw }), { status: 400, error: 'invalid_grant' });
+    assert.equal(prisma.mcpToken.rows.length, 0, 'no access token was issued');
+    assert.equal(prisma.oAuthRefreshToken.rows[0].revokedAt, null, 'the row is refused, not consumed');
+  });
+
+  it('refuses a refresh token whose user row is gone', async () => {
+    const raw = 'ddc_rt_orphan';
+    await seedRefresh(raw, { userId: 'deleted-user' });
+    await rejects(exchangeRefreshToken({ refresh_token: raw }), { status: 400, error: 'invalid_grant' });
+    assert.equal(prisma.mcpToken.rows.length, 0);
   });
 });
 

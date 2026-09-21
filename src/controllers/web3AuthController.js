@@ -15,6 +15,7 @@ const {
   assertWalletBound,
   resolveUser,
   getVerifyMode,
+  getAllowLegacyFallback,
   Web3AuthIdentityError,
 } = require('../services/web3authIdentity');
 
@@ -294,8 +295,10 @@ async function verifiedLogin(req, res, { mode, referralCode, campaignSlug }) {
 }
 
 /**
- * Legacy path (no ID token): today's client-asserted lookup. Kept for the `log` rollout
- * window and `off` (dev only). Sessions minted here carry no `ver` claim.
+ * Legacy path (no ID token): today's client-asserted lookup — the body alone names the account.
+ * Reachable only from `off` (dev only, refused at boot in production) and from `log` with
+ * WEB3AUTH_ALLOW_LEGACY_FALLBACK=true and NO idToken supplied. Sessions minted here carry no
+ * `ver` claim. A token that was supplied and rejected never arrives here.
  */
 async function legacyLogin(req, res, { mode, referralCode, campaignSlug }) {
   const { userInfo, walletAddress, xid, xUsername, xAccessToken, xRefreshToken } = req.body;
@@ -461,9 +464,12 @@ async function legacyLogin(req, res, { mode, referralCode, campaignSlug }) {
  *
  * WEB3AUTH_VERIFY_MODE:
  *   enforce — `idToken` required; identity only from the verified token.
- *   log     — verified path when `idToken` is present; otherwise (or when the token is rejected
- *             for anything but ACCOUNT_DISABLED) the legacy path runs and a warning is logged.
- *   off     — legacy path only (refused at boot in production).
+ *   log     — verified path when `idToken` is present. A supplied token that is REJECTED fails
+ *             closed exactly as under `enforce`: the detector exists to replace the legacy path,
+ *             so it never hands a refused request to it. A request with NO `idToken` is refused
+ *             too (`IDTOKEN_REQUIRED`) unless WEB3AUTH_ALLOW_LEGACY_FALLBACK=true, the explicit
+ *             rollout flag that is the only way a body-asserted identity still mints a session.
+ *   off     — legacy path only (dev; refused at boot in production).
  * For new registrations, validates referral code and records referral relation.
  */
 exports.web3authLogin = async (req, res) => {
@@ -485,49 +491,55 @@ exports.web3authLogin = async (req, res) => {
 
     const ctx = { mode, referralCode, campaignSlug };
 
-    if (mode === 'enforce' && !idToken) {
-      return res.status(400).json({
-        status: 'fail',
-        code: 'IDTOKEN_REQUIRED',
-        message: 'A Web3Auth ID token is required to log in',
-      });
-    }
-
-    let legacyReason = 'no_id_token';
-    if (mode !== 'off' && idToken) {
-      try {
-        return await verifiedLogin(req, res, ctx);
-      } catch (error) {
-        if (!(error instanceof Web3AuthIdentityError)) throw error;
-        const failClosed = mode === 'enforce' || error.code === 'ACCOUNT_DISABLED';
-        logger.warn('idtoken_rejected', {
-          code: error.code,
-          reason: error.details && error.details.reason,
-          mode,
-          outcome: failClosed ? 'refused' : 'legacy_fallback',
-        });
-        if (failClosed) {
+    if (mode !== 'off') {
+      if (idToken) {
+        // A token was supplied: it decides, in every mode. Rejected is REFUSED — never
+        // downgraded to the client-asserted path the verification exists to replace.
+        try {
+          return await verifiedLogin(req, res, ctx);
+        } catch (error) {
+          if (!(error instanceof Web3AuthIdentityError)) throw error;
+          logger.warn('idtoken_rejected', {
+            code: error.code,
+            reason: error.details && error.details.reason,
+            mode,
+            outcome: 'refused',
+          });
           return res.status(error.httpStatus).json({
             status: 'fail',
             code: error.code,
             message: error.message,
           });
         }
-        legacyReason = 'idtoken_rejected';
+      }
+
+      // No token at all. `enforce` never accepts that; `log` only while the rollout flag is on.
+      if (mode === 'enforce' || !getAllowLegacyFallback()) {
+        logger.warn('idtoken_rejected', {
+          code: 'IDTOKEN_REQUIRED',
+          reason: 'no_id_token',
+          mode,
+          outcome: 'refused',
+        });
+        return res.status(400).json({
+          status: 'fail',
+          code: 'IDTOKEN_REQUIRED',
+          message: 'A Web3Auth ID token is required to log in',
+        });
       }
     }
 
-    if (mode !== 'off') {
-      logger.warn('legacy_login', {
-        mode,
-        reason: legacyReason,
-        hasEmail: Boolean(req.body.userInfo?.email),
-        hasWallet: Boolean(req.body.walletAddress),
-        hasXid: Boolean(req.body.xid),
-        hasReferralCode: Boolean(referralCode),
-        campaignSlug,
-      });
-    }
+    // Body-asserted identity. Logged on every request so the rollout can be measured and the
+    // flag turned off once the count is zero.
+    logger.warn('legacy_login', {
+      mode,
+      reason: mode === 'off' ? 'verify_mode_off' : 'legacy_fallback_allowed',
+      hasEmail: Boolean(req.body.userInfo?.email),
+      hasWallet: Boolean(req.body.walletAddress),
+      hasXid: Boolean(req.body.xid),
+      hasReferralCode: Boolean(referralCode),
+      campaignSlug,
+    });
     return await legacyLogin(req, res, ctx);
   } catch (error) {
     if (error instanceof HttpReply) {
@@ -559,9 +571,11 @@ exports.web3authLogin = async (req, res) => {
  * @access Private
  */
 exports.updateWallet = async (req, res) => {
+  // Declared outside the try: the catch logs it, and a `const` inside the try is out of scope
+  // there — the error handler itself used to throw a ReferenceError.
+  const userId = req.user && req.user.id;
   try {
     const { walletAddress } = req.body;
-    const userId = req.user.id;
 
     logger.info('Update wallet address attempt', { userId, walletAddress });
 
