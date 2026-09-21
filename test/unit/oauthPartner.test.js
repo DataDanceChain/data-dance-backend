@@ -330,7 +330,7 @@ describe('decideConsent', () => {
 
   it('refuses an SSO ticket session bound to another client, and a disabled client mid-flow', async () => {
     const id = await fresh();
-    await rejects(decideConsent(user, id, true, { kind: 'sso_ticket', clientId: 'other' }), { error: 'invalid_request' });
+    await rejects(decideConsent(user, id, true, { kind: 'sso_ticket', clientId: 'other' }), { status: 403, error: 'access_denied' });
     process.env.SSO_TGE_ENABLED = 'false';
     await rejects(decideConsent(user, id, true, { kind: 'user_jwt' }), { error: 'unauthorized_client' });
   });

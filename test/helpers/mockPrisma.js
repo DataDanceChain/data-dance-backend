@@ -123,6 +123,7 @@ function createMockPrisma() {
     }),
     dataLicenceConsent: makeModel(store, 'dataLicenceConsent'),
     referral: makeModel(store, 'referral'),
+    ssoTicket: makeModel(store, 'ssoTicket'),
     /** Interactive transactions run inline: the mock is single-threaded and never rolls back. */
     async $transaction(arg) {
       if (typeof arg === 'function') return arg(prisma);

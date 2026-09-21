@@ -268,6 +268,15 @@ function assertPartnerConfig(env = process.env) {
     for (const field of cfg.statusFields) {
       if (!STATUS_FIELD_CATALOG[field]) problems.push(`SSO_TGE_STATUS_FIELDS: unknown field "${field}"`);
     }
+    // Phase 3: the consent-only SSO session is safe only because it is signed with a key the
+    // normal session middleware does not know. Same key = the session would open every
+    // authenticated endpoint. Never log either value.
+    const sessionSecret = String(env.SSO_SESSION_SECRET || '').trim();
+    if (!sessionSecret) {
+      problems.push('SSO_SESSION_SECRET is required when SSO_TGE_ENABLED=true (dedicated key for the App hand-off session)');
+    } else if (sessionSecret === String(env.JWT_SECRET || '').trim()) {
+      problems.push('SSO_SESSION_SECRET must differ from JWT_SECRET');
+    }
     if (production) {
       if (!String(env.PUBLIC_BASE_URL || '').trim()) problems.push('PUBLIC_BASE_URL is required in production');
       if (!String(env.APP_PUBLIC_URL || '').trim()) problems.push('APP_PUBLIC_URL is required in production');

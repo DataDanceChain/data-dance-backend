@@ -38,6 +38,7 @@ const commerceRoutes = require('./routes/commerceRoutes');
 const lifeContextRoutes = require('./routes/lifeContextRoutes');
 const mcpRoutes = require('./routes/mcpRoutes');
 const oauthRoutes = require('./routes/oauthRoutes');
+const ssoRoutes = require('./routes/ssoRoutes');
 
 const app = express();
 
@@ -217,6 +218,7 @@ app.use('/api/promotions', promotionRoutes);
 app.use('/api/organization/transactions', transactionRoutes);
 app.use('/api/commerce', commerceRoutes);
 app.use('/api/life-context', lifeContextRoutes);
+app.use('/api/sso', ssoRoutes);
 app.use('/mcp', mcpRoutes);
 app.use('/partner/tge', require('./routes/partnerTgeRoutes'));
 app.use('/', oauthRoutes);
