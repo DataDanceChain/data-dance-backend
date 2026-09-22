@@ -4,8 +4,9 @@ const morgan = require('morgan');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
-const crypto = require('crypto');
 const { errorHandler } = require('./middlewares/errorMiddleware');
+const { requestIdMiddleware } = require('./middlewares/requestIdMiddleware');
+const { corsOrigins } = require('./constants/corsOrigins');
 const xRoutes = require('./routes/xRoutes'); // Updated import
 const { createLogger, redactUrl } = require('./utils/logger');
 
@@ -78,28 +79,9 @@ const upload = multer({
 // 将 multer 实例添加到 app 对象中，以便路由可以使用
 app.set('upload', upload);
 
-// CORS 配置
-const localFrontendOrigins = [
-  'http://localhost:8100',
-  'http://localhost:3000',
-  'http://localhost:3001',
-  'http://127.0.0.1:3000',
-  'http://127.0.0.1:3001',
-];
-const configuredOrigins = (process.env.FRONTEND_URL || '')
-  .split(',')
-  .map((value) => value.trim())
-  .filter(Boolean);
-const publicOrigins = [
-  'https://app.datadance.ai',
-  'https://business.datadance.ai',
-  'https://admin.datadance.ai',
-  'http://localhost:5174',
-];
+// CORS 配置（生产/开发两份来源清单见 src/constants/corsOrigins.js；localhost:5174 只在开发清单里）
 const corsOptions = {
-  origin: configuredOrigins.length || process.env.NODE_ENV === 'production'
-    ? [...new Set([...configuredOrigins, ...publicOrigins])]
-    : localFrontendOrigins,
+  origin: corsOrigins(),
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
   allowedHeaders: [
@@ -124,14 +106,9 @@ const corsOptions = {
 const trustProxyHops = Number(process.env.TRUST_PROXY_HOPS ?? 1);
 app.set('trust proxy', Number.isFinite(trustProxyHops) ? trustProxyHops : 2);
 
-// 请求 ID：透传上游 X-Request-Id（仅接受安全字符），否则生成；回写响应头，日志按 reqId 串联
-const REQUEST_ID_PATTERN = /^[A-Za-z0-9._-]{1,128}$/;
-app.use((req, res, next) => {
-  const incoming = req.get('x-request-id');
-  req.reqId = incoming && REQUEST_ID_PATTERN.test(incoming) ? incoming : crypto.randomUUID();
-  res.set('X-Request-Id', req.reqId);
-  next();
-});
+// 请求 ID：reqId 永远由我们生成（审计锚点不能由被审计方挑选）；上游送来的 X-Request-Id 只作为
+// upstreamRequestId 并排记录，用于跨系统对账，绝不当主键。见 src/middlewares/requestIdMiddleware.js
+app.use(requestIdMiddleware);
 
 // 中间件 - 生产环境也需要 CORS
 app.use(cors(corsOptions));

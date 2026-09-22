@@ -117,6 +117,15 @@ function pkce() {
   return { verifier, challenge: crypto.createHash('sha256').update(verifier).digest('base64url') };
 }
 
+/**
+ * The `__Host-ddc_authz` cookie of the browser that started the most recent authorization.
+ * Every consent decision below is made from that browser, because that is what the binding
+ * added in this change set requires (item 1) and what the real hand-off does: the ticket is
+ * redeemed in the SYSTEM browser, the partner starts /oauth/authorize in that same browser,
+ * and the consent page posts back from it.
+ */
+let authzCookie = '';
+
 /** Browser step: start an authorize transaction and return the consent request id. */
 async function authorizeRequestId() {
   const res = await request(app).get('/oauth/authorize').query({
@@ -128,7 +137,16 @@ async function authorizeRequestId() {
     code_challenge_method: 'S256',
   });
   assert.equal(res.status, 302, res.text);
+  authzCookie = ((res.headers['set-cookie'] || [])[0] || '').split(';')[0];
   return new URL(res.headers.location).searchParams.get('request');
+}
+
+/** POST /api/oauth/consent from the browser that started the authorization. */
+function consentCall(token) {
+  const call = request(app).post('/api/oauth/consent');
+  if (token) call.set('Authorization', `Bearer ${token}`);
+  if (authzCookie) call.set('Cookie', authzCookie);
+  return call;
 }
 
 /** App → system browser: mint a ticket and redeem it. Returns the exchange response. */
@@ -356,10 +374,7 @@ describe('consent with an SSO session', () => {
     assert.equal(summary.body.data.kind, 'partner');
     assert.equal(summary.body.data.clientId, 'tge-test');
 
-    const consent = await request(app)
-      .post('/api/oauth/consent')
-      .set('Authorization', `Bearer ${session}`)
-      .send({ requestId, allow: true });
+    const consent = await consentCall(session).send({ requestId, allow: true });
     assert.equal(consent.status, 200, consent.text);
     const redirectTo = new URL(consent.body.data.redirectTo);
     assert.equal(`${redirectTo.origin}${redirectTo.pathname}`, REDIRECT);
@@ -380,10 +395,7 @@ describe('consent with an SSO session', () => {
     assert.equal(summary.status, 401);
     assert.equal(summary.body.code, 'UNAUTHORIZED');
 
-    const consent = await request(app)
-      .post('/api/oauth/consent')
-      .set('Authorization', `Bearer ${token}`)
-      .send({ requestId, allow: true });
+    const consent = await consentCall(token).send({ requestId, allow: true });
     assert.equal(consent.status, 403, consent.text);
     assert.equal(consent.body.data, undefined);
     const row = prisma.store.oAuthAuthorization.find((r) => r.id === requestId);
@@ -401,10 +413,7 @@ describe('consent with an SSO session', () => {
     const summary = await request(app)
       .get(`/api/oauth/requests/${requestId}`)
       .set('Authorization', `Bearer ${token}`);
-    const consent = await request(app)
-      .post('/api/oauth/consent')
-      .set('Authorization', `Bearer ${token}`)
-      .send({ requestId, allow: true });
+    const consent = await consentCall(token).send({ requestId, allow: true });
 
     for (const res of [summary, consent]) {
       assert.equal(res.status, 401, res.text);
@@ -418,10 +427,7 @@ describe('consent with an SSO session', () => {
     const orphan = signSsoSession({ userId: 'deleted-user', clientId: 'tge-test', jti: 'ticket-z' }).token;
 
     for (const token of [forged, orphan]) {
-      const res = await request(app)
-        .post('/api/oauth/consent')
-        .set('Authorization', `Bearer ${token}`)
-        .send({ requestId, allow: true });
+      const res = await consentCall(token).send({ requestId, allow: true });
       assert.equal(res.status, 401, res.text);
       assert.equal(res.body.code, 'SSO_SESSION_EXPIRED');
     }
@@ -444,28 +450,63 @@ describe('consent with an SSO session', () => {
 
   it('leaves the user-JWT consent path untouched (MCP and web consent still work)', async () => {
     const requestId = await authorizeRequestId();
-    const consent = await request(app)
-      .post('/api/oauth/consent')
-      .set('Authorization', `Bearer ${userJwt()}`)
-      .send({ requestId, allow: true });
+    const consent = await consentCall(userJwt()).send({ requestId, allow: true });
     assert.equal(consent.status, 200, consent.text);
     assert.match(new URL(consent.body.data.redirectTo).searchParams.get('code'), /^ddc_code_/);
 
-    const anonymous = await request(app).post('/api/oauth/consent').send({ requestId, allow: true });
+    const anonymous = await consentCall(null).send({ requestId, allow: true });
     assert.equal(anonymous.status, 401);
   });
 
   it('still lets a denial travel back as access_denied with no code', async () => {
     const session = (await handoff()).body.data.session_token;
     const requestId = await authorizeRequestId();
-    const consent = await request(app)
-      .post('/api/oauth/consent')
-      .set('Authorization', `Bearer ${session}`)
-      .send({ requestId, allow: false });
+    const consent = await consentCall(session).send({ requestId, allow: false });
     assert.equal(consent.status, 200, consent.text);
     const redirectTo = new URL(consent.body.data.redirectTo);
     assert.equal(redirectTo.searchParams.get('error'), 'access_denied');
     assert.equal(redirectTo.searchParams.get('code'), null);
+  });
+});
+
+/**
+ * Item 1 in the hand-off shape. The App mints the ticket inside its WebView, but everything the
+ * binding cares about happens in the SYSTEM browser: the ticket is exchanged there, the partner
+ * is entered there, `/oauth/authorize` is started there (so that is where the cookie lands), and
+ * the consent page posts back from there. The WebView never holds the cookie and never needs to.
+ */
+describe('App hand-off ⇄ initiator binding (item 1)', () => {
+  it('runs end to end when the ticket, the authorize step and the consent all share one browser', async () => {
+    // 1. App (WebView): mint. 2. System browser: redeem — no cookie involved yet.
+    const redeemed = await handoff();
+    const session = redeemed.body.data.session_token;
+    assert.equal((redeemed.headers['set-cookie'] || []).length, 0, 'the exchange sets no cookie of its own');
+
+    // 3. System browser follows initiate_login_uri → the partner starts /oauth/authorize HERE.
+    const requestId = await authorizeRequestId();
+    assert.ok(authzCookie.startsWith('__Host-ddc_authz='), 'the cookie is set on the API origin, in this browser');
+
+    // 4. The consent page (same browser) reads the request and approves it.
+    const summary = await request(app).get(`/api/oauth/requests/${requestId}`).set('Authorization', `Bearer ${session}`);
+    assert.equal(summary.status, 200, summary.text);
+    const consent = await consentCall(session).send({ requestId, allow: true });
+    assert.equal(consent.status, 200, consent.text);
+    assert.match(new URL(consent.body.data.redirectTo).searchParams.get('code'), /^ddc_code_/);
+  });
+
+  it('a valid session is not enough on its own: the approval must come from the same browser', async () => {
+    const session = (await handoff()).body.data.session_token;
+    const requestId = await authorizeRequestId();
+    // Same user, same client, live session — but the request was started somewhere else.
+    const res = await request(app)
+      .post('/api/oauth/consent')
+      .set('Authorization', `Bearer ${session}`)
+      .send({ requestId, allow: true });
+    assert.equal(res.status, 409, res.text);
+    assert.equal(res.body.code, 'AUTHZ_INITIATOR_MISMATCH');
+    const row = prisma.store.oAuthAuthorization.find((r) => r.id === requestId);
+    assert.equal(row.codeHash, undefined);
+    assert.equal(row.initiatorMismatchCount, 1);
   });
 });
 

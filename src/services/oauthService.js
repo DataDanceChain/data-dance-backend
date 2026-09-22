@@ -15,6 +15,10 @@ const {
 } = require('../constants/partnerClient');
 const { isCEndSubject } = require('./dataLicenceConsent');
 
+const { createLogger } = require('../utils/logger');
+
+const logger = createLogger('oauthService');
+
 const CODE_TTL_MS = 10 * 60 * 1000;
 const REQUEST_TTL_MS = 15 * 60 * 1000;
 const ACCESS_TTL_SEC = 3600;
@@ -41,6 +45,90 @@ class OAuthError extends Error {
     this.redirectable = false;
     this.redirectTo = null;
   }
+}
+
+/**
+ * The consent decision arrived from a browser that did not start this authorization (no
+ * `__Host-ddc_authz` cookie, or a different one). NOT an OAuth protocol error: the browser is
+ * never redirected anywhere — the Wallet renders "this sign-in was started on another device or
+ * browser" and the user restarts from the client. No code is ever minted (item 1).
+ */
+class ConsentInitiatorError extends Error {
+  constructor(reason, { clientName, clientId } = {}) {
+    super('This sign-in was started in another browser.');
+    this.name = 'ConsentInitiatorError';
+    this.code = 'AUTHZ_INITIATOR_MISMATCH';
+    this.statusCode = 409;
+    this.reason = reason; // 'missing' | 'mismatch'
+    this.clientName = clientName || null;
+    this.clientId = clientId || null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Authorization-request ↔ browser binding (item 1)
+// ---------------------------------------------------------------------------
+
+/**
+ * `__Host-` prefix: the cookie is then accepted by the browser only when it is Secure, has
+ * Path=/ and carries NO Domain, i.e. it cannot be planted by a sibling host or a sub-domain —
+ * which is exactly the property this binding needs. HttpOnly keeps it out of script, SameSite=Lax
+ * keeps it off cross-site requests while still travelling on the Wallet's same-site XHR to the
+ * API (app.datadance.ai → api.datadance.ai is cross-ORIGIN but same SITE).
+ */
+const AUTHZ_COOKIE_NAME = '__Host-ddc_authz';
+const AUTHZ_NONCE_BYTES = 32;
+const AUTHZ_COOKIE_TTL_MS = 30 * 60 * 1000;
+const AUTHZ_NONCE_PATTERN = /^[A-Za-z0-9_-]{16,128}$/;
+
+function newInitiatorNonce() {
+  return crypto.randomBytes(AUTHZ_NONCE_BYTES).toString('base64url');
+}
+
+function hashInitiator(nonce) {
+  return crypto.createHash('sha256').update(String(nonce)).digest('hex');
+}
+
+function sameHash(a, b) {
+  const left = Buffer.from(String(a || ''), 'utf8');
+  const right = Buffer.from(String(b || ''), 'utf8');
+  return left.length > 0 && left.length === right.length && crypto.timingSafeEqual(left, right);
+}
+
+/** The initiator nonce this request carries, or null. No cookie parser is mounted app-wide. */
+function readInitiatorNonce(req) {
+  const header = (req && typeof req.get === 'function' ? req.get('cookie') : req?.headers?.cookie) || '';
+  for (const part of String(header).split(';')) {
+    const idx = part.indexOf('=');
+    if (idx < 0) continue;
+    if (part.slice(0, idx).trim() !== AUTHZ_COOKIE_NAME) continue;
+    const value = part.slice(idx + 1).trim();
+    return AUTHZ_NONCE_PATTERN.test(value) ? value : null;
+  }
+  return null;
+}
+
+/**
+ * One nonce per BROWSER, not per authorization: an existing, well-formed cookie is reused (and
+ * its lifetime refreshed) so two sign-ins started in two tabs can both be completed. The value
+ * is opaque, carries nothing about the user, and is only ever compared against stored hashes.
+ */
+function bindInitiator(req, res) {
+  const existing = readInitiatorNonce(req);
+  const nonce = existing || newInitiatorNonce();
+  if (res && typeof res.cookie === 'function') {
+    res.cookie(AUTHZ_COOKIE_NAME, nonce, {
+      httpOnly: true,
+      secure: true,
+      sameSite: 'lax',
+      path: '/',
+      maxAge: AUTHZ_COOKIE_TTL_MS,
+    });
+    return nonce;
+  }
+  // No response object (service-level callers, e.g. tests): the row stays unbound rather than
+  // being bound to a nonce no browser will ever present.
+  return null;
 }
 
 /**
@@ -201,7 +289,20 @@ function isAllowedRedirect(uri) {
   }
 }
 
+/**
+ * Kill switch for dynamic client acquisition (item 11). Default ON, so today's MCP behaviour is
+ * unchanged; set OAUTH_PUBLIC_REGISTRATION_ENABLED=false for the campaign window and both
+ * `POST /oauth/register` and the CIMD metadata fetch answer 403 — no new client can appear
+ * while money is on the line. The static partner client and stored clients are unaffected.
+ */
+function publicRegistrationEnabled(env = process.env) {
+  return String(env.OAUTH_PUBLIC_REGISTRATION_ENABLED ?? 'true').trim().toLowerCase() !== 'false';
+}
+
 async function loadCimdClient(clientId) {
+  if (!publicRegistrationEnabled()) {
+    throw new OAuthError(403, 'unauthorized_client', 'Client metadata documents are not accepted right now.');
+  }
   const url = new URL(clientId);
   if (url.protocol !== 'https:' && url.hostname !== 'localhost' && url.hostname !== '127.0.0.1') {
     throw new OAuthError(400, 'invalid_client', 'CIMD client_id must be HTTPS.');
@@ -268,6 +369,9 @@ function assertRedirect(client, redirectUri) {
 }
 
 async function registerClient(body) {
+  if (!publicRegistrationEnabled()) {
+    throw new OAuthError(403, 'access_denied', 'Dynamic client registration is closed.');
+  }
   const redirectUris = Array.isArray(body.redirect_uris) ? body.redirect_uris.map(String) : [];
   if (!redirectUris.length || redirectUris.some((uri) => !isAllowedRedirect(uri))) {
     throw new OAuthError(400, 'invalid_redirect_uri', 'A valid redirect_uris array is required.');
@@ -303,8 +407,11 @@ function plausibleLoginHint(value) {
  *  1. client_id unknown/disabled, redirect_uri not an exact match → throws non-redirectable (400 page).
  *  2. everything else → throws redirectable (302 back with error, state, iss).
  *  3. store the request and send the browser to the Wallet consent page.
+ *
+ * `res` (when present) also receives the `__Host-ddc_authz` initiator cookie, whose sha256 is
+ * stored on the row: the consent decision must come back from this browser (item 1).
  */
-async function startAuthorization(req, query) {
+async function startAuthorization(req, query, res) {
   const client = await resolveClient(query.client_id, req);
   assertRedirect(client, query.redirect_uri);
 
@@ -341,6 +448,9 @@ async function startAuthorization(req, query) {
       throw new OAuthError(400, 'invalid_target', partner ? 'resource must match the partner API.' : 'resource must match the MCP endpoint.');
     }
     const scope = partner ? parsePartnerScope(query.scope) : normalizeScope(query.scope);
+    // Bind BEFORE the row is written, so a row never exists without the hash of the cookie that
+    // was actually set on this response.
+    const initiatorNonce = bindInitiator(req, res);
     row = await prisma.oAuthAuthorization.create({
       data: {
         clientId: client.clientId,
@@ -351,6 +461,9 @@ async function startAuthorization(req, query) {
         resource: expected,
         scope,
         expiresAt: new Date(Date.now() + (client.requestTtlMs || REQUEST_TTL_MS)),
+        initiatorHash: initiatorNonce ? hashInitiator(initiatorNonce) : null,
+        initiatorBoundAt: initiatorNonce ? new Date() : null,
+        initiatorMismatchCount: 0,
       },
     });
   } catch (error) {
@@ -395,13 +508,16 @@ async function getConsentRequest(id) {
 }
 
 /**
- * @param ctx { kind: 'user_jwt' | 'sso_ticket', claims?: object, clientId?: string }
+ * @param ctx { kind: 'user_jwt' | 'sso_ticket', claims?: object, clientId?: string,
+ *              initiatorNonce?: string }
  *   `claims` are the verified DDC JWT claims (`ver` >= 2 marks a Web3Auth-verified login);
- *   `clientId` is the client an SSO ticket session is bound to (Phase 3).
+ *   `clientId` is the client an SSO ticket session is bound to (Phase 3);
+ *   `initiatorNonce` is the `__Host-ddc_authz` cookie of the deciding browser (item 1).
  */
 async function decideConsent(user, requestId, allow, ctx = {}) {
   const row = await prisma.oAuthAuthorization.findUnique({ where: { id: requestId } });
-  if (!row || row.consumedAt || row.expiresAt < new Date()) {
+  // `codeHash` set = this request was already decided and is now a live code, not a consent slot.
+  if (!row || row.consumedAt || row.codeHash || row.expiresAt < new Date()) {
     throw new OAuthError(400, 'invalid_request', 'This authorization request has expired.');
   }
   const issuer = issuerFromResource(row.resource);
@@ -414,15 +530,49 @@ async function decideConsent(user, requestId, allow, ctx = {}) {
     throw new OAuthError(403, 'access_denied', 'This session is bound to a different client.');
   }
 
+  // Every terminal answer consumes the request atomically: one authorization request is ONE
+  // decision, whatever that decision was (item 4 — the approve path used to leave the row
+  // decidable, so a second approval minted a second code).
   const finish = async (params) => {
-    await prisma.oAuthAuthorization.update({
-      where: { id: row.id },
+    const consumed = await prisma.oAuthAuthorization.updateMany({
+      where: { id: row.id, consumedAt: null, codeHash: null },
       data: { consumedAt: new Date(), userId: user.id },
     });
+    if (!consumed || consumed.count !== 1) {
+      throw new OAuthError(400, 'invalid_request', 'This authorization request has expired.');
+    }
     return appendQuery(row.redirectUri, { ...params, state: row.state, iss: issuer });
   };
 
+  // A denial is accepted from any browser: it only ever destroys the request, and refusing it
+  // would leave a fixated request alive for the attacker.
   if (!allow) return finish({ error: 'access_denied' });
+
+  // The approval must come back from the browser that STARTED this authorization, or the code
+  // would be minted into an authorization someone else set up (RFC 9700 §4.14 request fixation).
+  if (row.initiatorHash) {
+    const presented = ctx && ctx.initiatorNonce ? hashInitiator(ctx.initiatorNonce) : '';
+    if (!sameHash(presented, row.initiatorHash)) {
+      const reason = presented ? 'mismatch' : 'missing';
+      try {
+        await prisma.oAuthAuthorization.updateMany({
+          where: { id: row.id },
+          data: { initiatorMismatchCount: Number(row.initiatorMismatchCount || 0) + 1 },
+        });
+      } catch {
+        // telemetry only; the refusal below stands either way
+      }
+      logger.warn('oauth.authz_initiator_mismatch', {
+        requestId: row.id,
+        clientId: row.clientId,
+        userId: user.id,
+        reason,
+        mismatchCount: Number(row.initiatorMismatchCount || 0) + 1,
+      });
+      throw new ConsentInitiatorError(reason, { clientName: client.clientName, clientId: row.clientId });
+    }
+  }
+
   if (user.disabledAt) {
     return finish({ error: 'access_denied', error_description: 'This account is disabled.' });
   }
@@ -437,14 +587,20 @@ async function decideConsent(user, requestId, allow, ctx = {}) {
   }
 
   const code = randomSecret('ddc_code_');
-  await prisma.oAuthAuthorization.update({
-    where: { id: row.id },
+  // Atomic single-decision consume, exactly as the code-exchange path consumes the code: the
+  // where clause requires a request that has neither been finished nor already carries a code,
+  // so a second "allow" on the same request affects 0 rows and mints nothing (item 4).
+  const decided = await prisma.oAuthAuthorization.updateMany({
+    where: { id: row.id, consumedAt: null, codeHash: null, expiresAt: { gt: new Date() } },
     data: {
       userId: user.id,
       codeHash: hashSecret(code),
       expiresAt: new Date(Date.now() + (client.codeTtlMs || CODE_TTL_MS)),
     },
   });
+  if (!decided || decided.count !== 1) {
+    throw new OAuthError(400, 'invalid_request', 'This authorization request has expired.');
+  }
   return appendQuery(row.redirectUri, { code, state: row.state, iss: issuer });
 }
 
@@ -570,6 +726,15 @@ async function exchangeAuthorizationCode(req, body) {
   }
   if (body.resource && !sameResource(body.resource, row.resource)) {
     throw new OAuthError(400, 'invalid_target', 'resource does not match this code.');
+  }
+
+  // The account is re-read HERE, not only at consent and on refresh: between the consent click
+  // and this exchange there is a whole code lifetime (60 s for the partner) in which support can
+  // disable the account, and a token minted after that decision would outlive it (item 7).
+  const account = await prisma.user.findUnique({ where: { id: row.userId } });
+  if (!account || account.disabledAt) {
+    logger.warn('oauth.code_exchange_refused', { reason: account ? 'account_disabled' : 'account_missing', clientId: row.clientId, userId: row.userId });
+    throw new OAuthError(400, 'invalid_grant', 'Authorization code is invalid or expired.');
   }
 
   // Atomic single-use consume: exactly one concurrent exchange can win (contract T10).
@@ -706,6 +871,10 @@ async function userInfoFromBearer(token) {
 
 module.exports = {
   OAuthError,
+  ConsentInitiatorError,
+  AUTHZ_COOKIE_NAME,
+  readInitiatorNonce,
+  publicRegistrationEnabled,
   metadataDocuments,
   challengeHeader,
   registerClient,

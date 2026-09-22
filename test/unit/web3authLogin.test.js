@@ -31,6 +31,9 @@ Object.assign(process.env, {
   WEB3AUTH_CLIENT_ID: CLIENT_ID,
   WEB3AUTH_LEGACY_VERIFIERS: '',
   WEB3AUTH_ALLOW_LEGACY_FALLBACK: 'false',
+  // The connections this deployment accepts as an identity source (item 2). Mandatory under
+  // `enforce`; `configure()` below keeps it in step with the mode each test sets.
+  WEB3AUTH_ALLOWED_VERIFIERS: ALLOWED_VERIFIER,
 });
 
 const { installMockPrisma } = require('../helpers/mockPrisma');
@@ -151,10 +154,11 @@ const victimRow = () => ({
   referralCode: 'VICTIM1',
 });
 
-function configure({ mode = 'log', fallback = false, legacyVerifiers = '' } = {}) {
+function configure({ mode = 'log', fallback = false, legacyVerifiers = '', allowedVerifiers = ALLOWED_VERIFIER } = {}) {
   process.env.WEB3AUTH_VERIFY_MODE = mode;
   process.env.WEB3AUTH_ALLOW_LEGACY_FALLBACK = fallback ? 'true' : 'false';
   process.env.WEB3AUTH_LEGACY_VERIFIERS = legacyVerifiers;
+  process.env.WEB3AUTH_ALLOWED_VERIFIERS = allowedVerifiers;
   identityService._internals.resetConfig();
 }
 
@@ -410,5 +414,72 @@ describe('WEB3AUTH_ALLOW_LEGACY_FALLBACK', () => {
       () => identityService._internals.loadConfig({ WEB3AUTH_CLIENT_ID: 'c', WEB3AUTH_ALLOW_LEGACY_FALLBACK: 'yes' }),
       /must be "true" or "false"/
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The connection allow-list, over HTTP (item 2)
+// ---------------------------------------------------------------------------
+
+/**
+ * "Whoever can add a connection in the DataDance Web3Auth project can become any user."
+ * The token below is genuine: right issuer, right audience, right signature, fresh. The only
+ * thing wrong with it is that DataDance never chose the connection it names — which, before
+ * WEB3AUTH_ALLOWED_VERIFIERS, was not something the server had any opinion about.
+ */
+describe('WEB3AUTH_ALLOWED_VERIFIERS over HTTP (item 2)', () => {
+  const rogue = (overrides = {}) =>
+    claims({ aggregateVerifier: 'connection-added-by-whoever-holds-the-console', ...overrides });
+
+  it('enforce: 401 IDTOKEN_VERIFIER_NOT_ALLOWED, no session, no row touched', async () => {
+    configure({ mode: 'enforce' });
+    const res = await post({ idToken: await mint(rogue({ email: VICTIM_EMAIL, verifierId: VICTIM_EMAIL })) });
+    assert.equal(res.status, 401);
+    assert.equal(res.body.code, 'IDTOKEN_VERIFIER_NOT_ALLOWED');
+    assertNoSession(res);
+    assert.equal(logged('idtoken_rejected')[0].meta.outcome, 'refused');
+  });
+
+  it('enforce: the listed connection still logs its holder in', async () => {
+    configure({ mode: 'enforce' });
+    prisma.user.rows.push({
+      ...victimRow(),
+      id: 'linked-1',
+      email: 'attacker@example.com',
+      referralCode: 'LINKED1',
+      web3authVerifier: ALLOWED_VERIFIER,
+      web3authVerifierId: 'attacker@example.com',
+    });
+    const res = await post({ idToken: await mint(claims()) });
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+    assert.equal(res.body.data.user.id, 'linked-1');
+  });
+
+  it('log: accepted, but said loudly on every single token', async () => {
+    configure({ mode: 'log' });
+    prisma.user.rows.push({
+      ...victimRow(),
+      id: 'rogue-linked',
+      email: 'nobody@example.com',
+      referralCode: 'ROGUE01',
+      web3authVerifier: 'connection-added-by-whoever-holds-the-console',
+      web3authVerifierId: 'nobody@example.com',
+    });
+    const res = await post({ idToken: await mint(rogue({ verifierId: 'nobody@example.com' })) });
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+    const [warning] = logged('idtoken_verifier_not_allowed');
+    assert.ok(warning, 'the rollout must not be able to end quietly with the list still wrong');
+    assert.equal(warning.level, 'warn');
+    assert.equal(warning.meta.outcome, 'accepted_log_mode');
+    assert.equal(warning.meta.verifier, 'connection-added-by-whoever-holds-the-console');
+  });
+
+  it('log: the unlisted connection still cannot walk into an existing account', async () => {
+    // Even where extractIdentity only warns, resolveUser refuses the backfill (item 2, 2nd half).
+    configure({ mode: 'log', legacyVerifiers: 'connection-added-by-whoever-holds-the-console' });
+    const res = await post({ idToken: await mint(rogue({ email: VICTIM_EMAIL, verifierId: VICTIM_EMAIL, email_verified: true })) });
+    assert.equal(res.status, 409);
+    assert.equal(res.body.code, 'IDENTITY_CONFLICT');
+    assertNoSession(res);
   });
 });

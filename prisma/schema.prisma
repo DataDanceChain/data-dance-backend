@@ -890,6 +890,14 @@ model OAuthAuthorization {
   expiresAt           DateTime
   consumedAt          DateTime?
   createdAt           DateTime  @default(now())
+  /// sha256 of the initiator nonce carried by the `__Host-ddc_authz` cookie of the browser that
+  /// started this authorization. The consent decision must present the same nonce, so a consent
+  /// link forwarded to another browser cannot mint a code for the initiator (authorization
+  /// request fixation). NULL = started by a path that could not set a cookie: unbound.
+  initiatorHash       String?
+  initiatorBoundAt    DateTime?
+  /// How many consent approvals arrived with a missing/wrong initiator cookie. Telemetry only.
+  initiatorMismatchCount Int    @default(0)
   user                User?     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([clientId])

@@ -17,15 +17,27 @@ function isLifePrivacyLevel(value) {
   return LIFE_PRIVACY_LEVELS.includes(value);
 }
 
+/**
+ * The OAuth issuer and the audience of every token this server mints.
+ *
+ * PUBLIC_BASE_URL is REQUIRED. There used to be a fallback to `x-forwarded-host` / `Host`, which
+ * let the issuer — the value a partner checks with `iss` (RFC 9207) and the value token audiences
+ * are compared against — be chosen by whoever sent the request: one forged header and a token
+ * bears someone else's issuer, or the discovery document points the client at another host. An
+ * identifier that names US cannot come from THEM. `req` is accepted and ignored so call sites
+ * read the same as before.
+ */
+// eslint-disable-next-line no-unused-vars
 function publicBaseUrl(req) {
   const configured = (process.env.PUBLIC_BASE_URL || '').trim().replace(/\/$/, '');
-  if (configured) return configured;
-  const forwardedHost = (req.get('x-forwarded-host') || '').split(',')[0].trim();
-  const host = forwardedHost || req.get('host') || 'localhost:10000';
-  const forwardedProto = (req.get('x-forwarded-proto') || '').split(',')[0].trim();
-  const proto =
-    forwardedProto || (host.includes('localhost') || host.startsWith('127.') ? 'http' : 'https');
-  return `${proto}://${host}`;
+  if (!configured) {
+    throw new Error(
+      'PUBLIC_BASE_URL is required: it is the OAuth issuer and the audience of every token this ' +
+        'server mints, and it must never be derived from a request header. Set it to this API\'s ' +
+        'public origin, e.g. https://api.datadance.ai (or http://localhost:3000 for local work).'
+    );
+  }
+  return configured;
 }
 
 function mcpEndpointUrl(req) {

@@ -11,6 +11,17 @@ const EXTERNAL_ISS = 'https://authjs.web3auth.io';
 process.env.NODE_ENV = 'test';
 process.env.WEB3AUTH_VERIFY_MODE = 'enforce';
 process.env.WEB3AUTH_CLIENT_ID = CLIENT_ID;
+// Every connection this file signs tokens for. Under `enforce` the list is mandatory (boot
+// refuses an empty one): the identity key may only come from a login method we chose.
+const ALLOWED_VERIFIERS = [
+  'web3auth-google-sapphire-devnet',
+  'web3auth-google-sapphire-mainnet',
+  'torus',
+  'agg',
+  'plain',
+  'external-wallet',
+];
+process.env.WEB3AUTH_ALLOWED_VERIFIERS = ALLOWED_VERIFIERS.join(',');
 
 const identityService = require('../../src/services/web3authIdentity');
 const { verifyIdToken, extractIdentity, assertWalletBound, resolveUser, _internals } = identityService;
@@ -301,6 +312,98 @@ describe('assertWalletBound', () => {
 // ---------------------------------------------------------------------------
 // Boot config
 // ---------------------------------------------------------------------------
+
+/**
+ * Item 2 — the accepted-connection allow-list. Without it the identity key is whatever the token
+ * names in the first of four candidate claims, so anyone who can add a connection in the
+ * DataDance Web3Auth project (a console credential, a hijacked dashboard session) picks a
+ * `verifierId` and becomes that user. The signature check never sees it: the signature is real.
+ */
+describe('WEB3AUTH_ALLOWED_VERIFIERS (item 2)', () => {
+  /** Run `fn` with a different allow-list (and optionally mode), then put both back. */
+  const withAllowed = (value, fn, mode = 'enforce') => {
+    process.env.WEB3AUTH_ALLOWED_VERIFIERS = value;
+    process.env.WEB3AUTH_VERIFY_MODE = mode;
+    _internals.resetConfig();
+    try {
+      return fn();
+    } finally {
+      process.env.WEB3AUTH_ALLOWED_VERIFIERS = ALLOWED_VERIFIERS.join(',');
+      process.env.WEB3AUTH_VERIFY_MODE = 'enforce';
+      _internals.resetConfig();
+    }
+  };
+
+  it('is required under enforce: an empty list refuses to boot, like WEB3AUTH_CLIENT_ID', () => {
+    assert.throws(
+      () => _internals.assertBootConfig({ WEB3AUTH_VERIFY_MODE: 'enforce', WEB3AUTH_CLIENT_ID: 'c' }),
+      /WEB3AUTH_ALLOWED_VERIFIERS is required/
+    );
+    assert.throws(
+      () => _internals.assertBootConfig({ WEB3AUTH_VERIFY_MODE: 'enforce', WEB3AUTH_CLIENT_ID: 'c', WEB3AUTH_ALLOWED_VERIFIERS: '  ,  ' }),
+      /WEB3AUTH_ALLOWED_VERIFIERS is required/
+    );
+    assert.doesNotThrow(() => _internals.assertBootConfig({ WEB3AUTH_VERIFY_MODE: 'enforce', WEB3AUTH_CLIENT_ID: 'c', WEB3AUTH_ALLOWED_VERIFIERS: 'a,b' }));
+    // log and off keep working without it (that is the rollout window).
+    assert.doesNotThrow(() => _internals.assertBootConfig({ WEB3AUTH_VERIFY_MODE: 'log', WEB3AUTH_CLIENT_ID: 'c' }));
+  });
+
+  it('enforce: a genuine, correctly signed token from an unlisted connection is refused', async () => {
+    const w = social();
+    const token = await mint(socialClaims(w, { aggregateVerifier: 'attacker-added-connection' }));
+    const { kind, payload } = await verifyIdToken(token);
+    // The signature, issuer, audience and age are all fine — this is exactly the attack.
+    assert.throws(
+      () => extractIdentity(payload, { kind }),
+      (err) => {
+        assert.equal(err.code, 'IDTOKEN_VERIFIER_NOT_ALLOWED');
+        assert.equal(err.httpStatus, 401);
+        return true;
+      }
+    );
+  });
+
+  it('log: the same token is accepted, because that is what the rollout window is for', async () => {
+    process.env.WEB3AUTH_VERIFY_MODE = 'log';
+    _internals.resetConfig();
+    try {
+      const identity = extractIdentity({ verifier: 'attacker-added-connection', verifierId: 'victim@example.com' });
+      assert.equal(identity.verifier, 'attacker-added-connection');
+    } finally {
+      process.env.WEB3AUTH_VERIFY_MODE = 'enforce';
+      _internals.resetConfig();
+    }
+  });
+
+  it('an empty list outside enforce allows every connection (unchanged behaviour)', () => {
+    withAllowed('', () => {
+      assert.equal(extractIdentity({ verifier: 'anything', verifierId: 'x' }).verifier, 'anything');
+    }, 'log');
+  });
+
+  it('the external-wallet branch is not exempt: it has to be listed like any other connection', async () => {
+    const w = social();
+    const token = await mint({ wallets: [{ address: w.address.toLowerCase(), type: 'ethereum' }] }, { key: keys.external, iss: EXTERNAL_ISS });
+    const { kind, payload } = await verifyIdToken(token);
+    assert.equal(extractIdentity(payload, { kind }).verifier, identityService.EXTERNAL_WALLET_VERIFIER);
+    withAllowed('web3auth-google-sapphire-devnet', () => {
+      assert.throws(() => extractIdentity(payload, { kind }), (err) => err.code === 'IDTOKEN_VERIFIER_NOT_ALLOWED');
+    });
+  });
+
+  it('matches the exact name: no prefix, suffix or case games', () => {
+    withAllowed('torus', () => {
+      assert.equal(extractIdentity({ verifier: 'torus', verifierId: 'x' }).verifier, 'torus');
+      for (const near of ['torus-evil', 'evil-torus', 'TORUS', 'torus.']) {
+        assert.throws(
+          () => extractIdentity({ verifier: near, verifierId: 'x' }),
+          (err) => err.code === 'IDTOKEN_VERIFIER_NOT_ALLOWED',
+          near
+        );
+      }
+    });
+  });
+});
 
 describe('assertBootConfig', () => {
   it('refuses off in production', () => {
@@ -634,10 +737,53 @@ describe('legacy backfill gating', () => {
     assert.equal(user.web3authVerifier, identity.verifier);
   });
 
-  it('keeps the cryptographic route: a wallet the token proves needs no allow-list', async () => {
+  it('keeps the cryptographic route: a wallet the token proves needs no LEGACY allow-list', async () => {
     const db = mockPrisma([{ id: 'legacy', email: 'alice@example.com', walletAddress: WALLET }]);
     const { action } = await resolveUser({ ...IDENTITY, emailVerified: false }, { db, walletAddress: WALLET.toLowerCase() });
     assert.equal(action, 'backfilled', 'ownership of the row’s wallet is proof, unlike an e-mail claim');
+  });
+
+  /**
+   * Item 2, second half. The wallet-proven route set no `reason`, so it fell through every gate
+   * below it — including the connection allow-list. In `log` mode extractIdentity only warns, so
+   * a connection nobody at DataDance chose could still walk into an existing account through it;
+   * and the "proof" on that route is a key Web3Auth derives for that very connection.
+   */
+  it('the connection allow-list also guards the wallet-proven backfill', async () => {
+    process.env.WEB3AUTH_ALLOWED_VERIFIERS = 'web3auth-google-sapphire-devnet';
+    _internals.resetConfig();
+    try {
+      const db = mockPrisma([{ id: 'legacy', email: 'alice@example.com', walletAddress: WALLET }]);
+      const identity = { ...IDENTITY, verifier: 'attacker-added-connection', emailVerified: true };
+      assert.equal(
+        await conflictReason(resolveUser(identity, { db, walletAddress: WALLET.toLowerCase() })),
+        'verifier_not_in_allowlist'
+      );
+      assert.equal(db._users[0].web3authVerifier, null, 'the row was not linked');
+
+      // The listed connection still takes the same route.
+      const ok = mockPrisma([{ id: 'legacy', email: 'alice@example.com', walletAddress: WALLET }]);
+      assert.equal((await resolveUser(IDENTITY, { db: ok, walletAddress: WALLET.toLowerCase() })).action, 'backfilled');
+    } finally {
+      process.env.WEB3AUTH_ALLOWED_VERIFIERS = ALLOWED_VERIFIERS.join(',');
+      _internals.resetConfig();
+    }
+  });
+
+  it('…and the e-mail route, before the WEB3AUTH_LEGACY_VERIFIERS opt-in is even consulted', async () => {
+    process.env.WEB3AUTH_ALLOWED_VERIFIERS = 'web3auth-google-sapphire-devnet';
+    process.env.WEB3AUTH_LEGACY_VERIFIERS = 'attacker-added-connection';
+    _internals.resetConfig();
+    try {
+      const db = mockPrisma([{ id: 'victim', email: 'alice@example.com' }]);
+      const identity = { ...IDENTITY, verifier: 'attacker-added-connection', emailVerified: true };
+      assert.equal(await conflictReason(resolveUser(identity, { db })), 'verifier_not_in_allowlist');
+      assert.equal(db._users[0].web3authVerifier, null);
+    } finally {
+      process.env.WEB3AUTH_ALLOWED_VERIFIERS = ALLOWED_VERIFIERS.join(',');
+      delete process.env.WEB3AUTH_LEGACY_VERIFIERS;
+      _internals.resetConfig();
+    }
   });
 
   it('refuses a linked or non-web3auth row before it looks at the verifier at all', async () => {

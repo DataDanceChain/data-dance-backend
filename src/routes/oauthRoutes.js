@@ -7,6 +7,8 @@ const { PARTNER_REALM } = require('../constants/partnerClient');
 const { verifySsoSession, looksLikeSsoSession } = require('./ssoRoutes');
 const {
   OAuthError,
+  ConsentInitiatorError,
+  readInitiatorNonce,
   metadataDocuments,
   registerClient,
   startAuthorization,
@@ -29,8 +31,28 @@ function logUnexpected(error) {
   logger.error('OAuth endpoint failed', { message: error && error.message, name: error && error.name });
 }
 
+/**
+ * The one answer that is neither success nor an OAuth error: the consent came from a browser
+ * that did not start this authorization (item 1). The Wallet renders it as "this sign-in was
+ * started on another device or browser — start again from {client}"; nothing is redirected and
+ * no code exists (an OAuth error here would have to travel to `redirect_uri`, i.e. to the
+ * attacker who set the request up).
+ */
+function sendInitiatorMismatch(res, error) {
+  res.set('Cache-Control', 'no-store');
+  return res.status(409).json({
+    status: 'fail',
+    code: error.code,
+    message: error.clientName
+      ? `This sign-in was started on another device or browser. Start again from ${error.clientName}.`
+      : 'This sign-in was started on another device or browser. Start again from the application.',
+    data: { reason: error.reason, clientId: error.clientId, clientName: error.clientName },
+  });
+}
+
 /** OAuthError → its status/code; anything else → 500 server_error with NO internal detail. */
 function sendOAuthError(res, error) {
+  if (error instanceof ConsentInitiatorError) return sendInitiatorMismatch(res, error);
   const known = error instanceof OAuthError;
   if (!known) logUnexpected(error);
   const status = known ? error.statusCode : 500;
@@ -185,7 +207,8 @@ router.post('/oauth/register', lim('oauthRegister'), async (req, res) => {
 router.get('/oauth/authorize', lim('oauthAuthorize'), async (req, res) => {
   try {
     res.set('Cache-Control', 'no-store');
-    return res.redirect(302, await startAuthorization(req, req.query || {}));
+    // `res` carries the `__Host-ddc_authz` cookie this authorization is bound to (item 1).
+    return res.redirect(302, await startAuthorization(req, req.query || {}, res));
   } catch (error) {
     if (error instanceof OAuthError && error.redirectable && error.redirectTo) {
       return res.redirect(302, error.redirectTo);
@@ -273,9 +296,10 @@ router.post('/api/oauth/consent', lim('consent'), consentPrincipal(protect), asy
     }
     // req.authClaims is set by `protect` (P0 verified-login claims); an SSO session carries no
     // claims of its own — the verified-login check happened when the ticket was minted.
+    const initiatorNonce = readInitiatorNonce(req);
     const ctx = req.ssoSession
-      ? { kind: 'sso_ticket', clientId: req.ssoSession.clientId }
-      : { kind: 'user_jwt', claims: req.authClaims };
+      ? { kind: 'sso_ticket', clientId: req.ssoSession.clientId, initiatorNonce }
+      : { kind: 'user_jwt', claims: req.authClaims, initiatorNonce };
     const redirectTo = await decideConsent(req.user, req.body?.requestId, allow, ctx);
     res.set('Cache-Control', 'no-store');
     return res.json({ status: 'success', data: { redirectTo } });

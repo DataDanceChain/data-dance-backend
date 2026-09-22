@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const crypto = require('crypto');
 
 const partnerClient = require('../../src/constants/partnerClient');
+const { publicBaseUrl } = require('../../src/constants/lifeContext');
 
 const {
   readPartnerConfig,
@@ -12,6 +13,7 @@ const {
   maskEmail,
   partnerResourceUrl,
   assertPartnerConfig,
+  assertFinancialGradeConfig,
   sha256Hex,
   PARTNER_SCOPES,
 } = partnerClient;
@@ -26,7 +28,9 @@ const ENV_KEYS = [
   'SSO_TGE_CLIENT_SECRET_SHA256', 'SSO_TGE_CLIENT_SECRET_SHA256_PREVIOUS', 'SSO_TGE_SECRET_ROTATION_UNTIL',
   'SSO_TGE_REDIRECT_URIS', 'SSO_TGE_INITIATE_LOGIN_URI', 'SSO_TGE_STATUS_FIELDS', 'SSO_REQUIRE_VERIFIED_SESSION',
   'SSO_SESSION_SECRET', 'JWT_SECRET',
-  'PUBLIC_BASE_URL', 'APP_PUBLIC_URL', 'NODE_ENV', 'PORT',
+  'PUBLIC_BASE_URL', 'APP_PUBLIC_URL', 'NODE_ENV', 'PORT', 'FRONTEND_URL',
+  'WEB3AUTH_VERIFY_MODE', 'WEB3AUTH_ALLOW_LEGACY_FALLBACK', 'WEB3AUTH_CLIENT_ID', 'WEB3AUTH_ALLOWED_VERIFIERS',
+  'OAUTH_PUBLIC_REGISTRATION_ENABLED',
 ];
 const saved = {};
 
@@ -116,15 +120,58 @@ describe('readPartnerConfig / getPartnerClient', () => {
   });
 });
 
-describe('partnerResourceUrl', () => {
-  it('uses PUBLIC_BASE_URL (trailing slash stripped) or the request host', () => {
+/**
+ * Item 9 — the issuer (and therefore every token audience) is configuration, never a header.
+ * The request host used to win whenever PUBLIC_BASE_URL was unset, which let whoever sent the
+ * request decide what this server calls itself.
+ */
+describe('partnerResourceUrl / publicBaseUrl', () => {
+  const forgedHost = {
+    get: (name) => ({ host: 'evil.example', 'x-forwarded-host': 'evil.example' }[name.toLowerCase()] || ''),
+  };
+
+  it('uses PUBLIC_BASE_URL, trailing slash stripped', () => {
     setEnv({ PUBLIC_BASE_URL: 'https://api.test.local/' });
     assert.equal(partnerResourceUrl(), 'https://api.test.local/partner/tge');
+  });
+
+  it('ignores Host and X-Forwarded-Host entirely', () => {
+    setEnv({ PUBLIC_BASE_URL: 'https://api.test.local' });
+    assert.equal(partnerResourceUrl(forgedHost), 'https://api.test.local/partner/tge');
+    assert.equal(publicBaseUrl(forgedHost), 'https://api.test.local');
+  });
+
+  it('refuses to invent one when PUBLIC_BASE_URL is unset — no host fallback, no localhost guess', () => {
     setEnv({});
-    const req = { get: (name) => ({ host: 'localhost:4000' }[name.toLowerCase()] || '') };
-    assert.equal(partnerResourceUrl(req), 'http://localhost:4000/partner/tge');
+    assert.throws(() => partnerResourceUrl(forgedHost), /PUBLIC_BASE_URL is required/);
+    assert.throws(() => partnerResourceUrl(), /PUBLIC_BASE_URL is required/);
+    assert.throws(() => publicBaseUrl(forgedHost), /PUBLIC_BASE_URL is required/);
     setEnv({ PORT: '9090' });
-    assert.equal(partnerResourceUrl(), 'http://localhost:9090/partner/tge');
+    assert.throws(() => partnerResourceUrl(), /PUBLIC_BASE_URL is required/);
+  });
+});
+
+/** Item 10 — the production origin list is deployed front-ends only. */
+describe('CORS origins', () => {
+  const { corsOrigins, LOCAL_FRONTEND_ORIGINS, PUBLIC_ORIGINS } = require('../../src/constants/corsOrigins');
+
+  it('production carries no loopback origin at all', () => {
+    const origins = corsOrigins({ NODE_ENV: 'production' });
+    assert.deepEqual(origins, [...PUBLIC_ORIGINS]);
+    assert.equal(origins.includes('http://localhost:5174'), false, 'a developer port may not read authenticated responses in production');
+    assert.equal(origins.some((o) => /localhost|127\.0\.0\.1/.test(o)), false);
+    assert.equal(PUBLIC_ORIGINS.some((o) => o.startsWith('http://')), false, 'and nothing on the list is plaintext');
+  });
+
+  it('FRONTEND_URL adds to the deployed list without re-opening loopback', () => {
+    const origins = corsOrigins({ FRONTEND_URL: 'https://app.staging.datadance.ai, https://app.datadance.ai' });
+    assert.deepEqual(origins, ['https://app.staging.datadance.ai', ...PUBLIC_ORIGINS], 'deduplicated, deployed origins only');
+  });
+
+  it('development still gets the local list, 5174 included', () => {
+    const origins = corsOrigins({});
+    assert.deepEqual(origins, [...LOCAL_FRONTEND_ORIGINS]);
+    assert.ok(origins.includes('http://localhost:5174'));
   });
 });
 
@@ -281,5 +328,89 @@ describe('assertPartnerConfig (boot)', () => {
     });
     setEnv(baseEnv({ NODE_ENV: 'production', PUBLIC_BASE_URL: undefined }));
     assert.throws(() => assertPartnerConfig(), /PUBLIC_BASE_URL is required in production/);
+  });
+});
+
+/**
+ * Item 8 — the money-path boot assertions. `SSO_TGE_ENABLED=true` is the moment DataDance
+ * identities appear in front of the partner page, so the deployment shape around the protocol
+ * has to be the hardened one before the process is allowed to serve anything.
+ */
+describe('assertFinancialGradeConfig (boot, item 8)', () => {
+  const hardened = (overrides = {}) => ({
+    SSO_ENVIRONMENT: 'prod',
+    SSO_TGE_ENABLED: 'true',
+    SSO_TGE_CLIENT_ID: 'tge-prod',
+    SSO_TGE_CLIENT_SECRET_SHA256: SECRET_HASH,
+    SSO_TGE_REDIRECT_URIS: 'https://tge.example.com/oauth/callback',
+    NODE_ENV: 'production',
+    WEB3AUTH_VERIFY_MODE: 'enforce',
+    WEB3AUTH_ALLOW_LEGACY_FALLBACK: 'false',
+    WEB3AUTH_CLIENT_ID: 'web3auth-client',
+    WEB3AUTH_ALLOWED_VERIFIERS: 'web3auth-google-sapphire-devnet,external-wallet',
+    SSO_SESSION_SECRET: 'a-dedicated-sso-session-key',
+    JWT_SECRET: 'the-user-session-key',
+    PUBLIC_BASE_URL: 'https://api.datadance.ai',
+    APP_PUBLIC_URL: 'https://app.datadance.ai',
+    ...overrides,
+  });
+
+  it('says nothing while the partner client is off — this is not a global policy', () => {
+    assert.deepEqual(assertFinancialGradeConfig({ SSO_TGE_ENABLED: 'false' }), { enforced: false });
+    assert.deepEqual(assertFinancialGradeConfig({ NODE_ENV: 'development' }), { enforced: false });
+  });
+
+  it('passes a fully hardened environment and returns a summary with no secret in it', () => {
+    const summary = assertFinancialGradeConfig(hardened());
+    assert.equal(summary.enforced, true);
+    assert.equal(summary.verifyMode, 'enforce');
+    assert.equal(summary.allowedVerifierCount, 2);
+    assert.equal(summary.publicBaseUrl, 'https://api.datadance.ai');
+    const serialized = JSON.stringify(summary);
+    assert.equal(serialized.includes('a-dedicated-sso-session-key'), false);
+    assert.equal(serialized.includes('the-user-session-key'), false);
+    assert.equal(serialized.includes(SECRET_HASH), false);
+  });
+
+  it('refuses each unsafe shape on its own', () => {
+    const cases = [
+      [{ NODE_ENV: 'development' }, /NODE_ENV must be "production"/],
+      [{ WEB3AUTH_VERIFY_MODE: 'log' }, /WEB3AUTH_VERIFY_MODE must be "enforce"/],
+      [{ WEB3AUTH_VERIFY_MODE: 'off' }, /WEB3AUTH_VERIFY_MODE must be "enforce"/],
+      [{ WEB3AUTH_ALLOW_LEGACY_FALLBACK: 'true' }, /WEB3AUTH_ALLOW_LEGACY_FALLBACK must be false/],
+      [{ WEB3AUTH_CLIENT_ID: '' }, /WEB3AUTH_CLIENT_ID is required/],
+      [{ WEB3AUTH_ALLOWED_VERIFIERS: '' }, /WEB3AUTH_ALLOWED_VERIFIERS must list/],
+      [{ SSO_SESSION_SECRET: '' }, /SSO_SESSION_SECRET is required/],
+      [{ SSO_SESSION_SECRET: 'same', JWT_SECRET: 'same' }, /SSO_SESSION_SECRET must differ from JWT_SECRET/],
+      [{ PUBLIC_BASE_URL: '' }, /PUBLIC_BASE_URL is required/],
+      [{ PUBLIC_BASE_URL: 'http://api.datadance.ai' }, /PUBLIC_BASE_URL must be https/],
+      [{ APP_PUBLIC_URL: '' }, /APP_PUBLIC_URL is required/],
+      [{ APP_PUBLIC_URL: 'http://app.datadance.ai' }, /APP_PUBLIC_URL must be https/],
+      [{ APP_PUBLIC_URL: 'app.datadance.ai' }, /APP_PUBLIC_URL must be an absolute URL/],
+    ];
+    for (const [overrides, pattern] of cases) {
+      assert.throws(() => assertFinancialGradeConfig(hardened(overrides)), pattern, JSON.stringify(overrides));
+    }
+  });
+
+  it('lists every problem at once, so one restart shows the whole gap', () => {
+    assert.throws(
+      () => assertFinancialGradeConfig(hardened({ NODE_ENV: 'test', WEB3AUTH_VERIFY_MODE: 'log', WEB3AUTH_ALLOWED_VERIFIERS: '' })),
+      (error) => {
+        assert.match(error.message, /refusing to start/);
+        assert.match(error.message, /NODE_ENV must be "production"/);
+        assert.match(error.message, /WEB3AUTH_VERIFY_MODE must be "enforce"/);
+        assert.match(error.message, /WEB3AUTH_ALLOWED_VERIFIERS must list/);
+        return true;
+      }
+    );
+  });
+
+  it('reports whether public client registration is still open (item 11)', () => {
+    assert.equal(assertFinancialGradeConfig(hardened()).publicRegistration, true);
+    assert.equal(
+      assertFinancialGradeConfig(hardened({ OAUTH_PUBLIC_REGISTRATION_ENABLED: 'false' })).publicRegistration,
+      false
+    );
   });
 });

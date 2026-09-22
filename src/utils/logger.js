@@ -247,6 +247,8 @@ function createLogger(module) {
       const duration = Date.now() - start;
       logger.info('Request completed', {
         reqId: req.reqId,
+        // Claimed by the caller, never our key. Present only when one was sent.
+        ...(req.upstreamRequestId ? { upstreamRequestId: req.upstreamRequestId } : {}),
         method: req.method,
         url: redactUrl(req.originalUrl || req.url),
         status: res.statusCode,
@@ -262,6 +264,7 @@ function createLogger(module) {
   logger.errorLogger = (err, req, res, next) => {
     logger.error('Request failed', {
       reqId: req.reqId,
+      ...(req.upstreamRequestId ? { upstreamRequestId: req.upstreamRequestId } : {}),
       error: err.message,
       stack: err.stack,
       method: req.method,

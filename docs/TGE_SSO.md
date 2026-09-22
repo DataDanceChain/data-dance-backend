@@ -126,6 +126,31 @@ user has no DataDance session they log in first (Web3Auth e-mail OTP). Organizat
 accounts cannot authorize a partner and receive `access_denied`. Nothing is shared until the
 user allows.
 
+### The authorization is bound to the browser that started it
+
+`GET /oauth/authorize` sets a `__Host-ddc_authz` cookie (HttpOnly, Secure, SameSite=Lax, Path=/,
+no Domain) carrying a high-entropy initiator nonce, and stores its SHA-256 on the authorization
+request. **Approving requires that cookie back.** Without it — or with a different one — DataDance
+refuses to issue a code and the Wallet renders "this sign-in was started on another device or
+browser; start again from {client}". The browser is **not** redirected to `redirect_uri`, because
+an error there would travel to whoever set the request up.
+
+Why: without the binding, an attacker could start an authorization on their own machine, send the
+resulting consent link to a victim, and have the victim's approval mint a code that arrives at the
+**attacker's** registered callback, bound to the attacker's `state` and `code_verifier`. PKCE does
+not help — the attacker holds the verifier. Contract-visible consequence: `POST /api/oauth/consent`
+can now answer **`409` with `code: "AUTHZ_INITIATOR_MISMATCH"`** (a Wallet-internal endpoint; the
+partner never calls it, and a partner-visible flow only ever sees "the user did not come back").
+
+Two practical notes: a denial is still accepted from any browser (it only ever destroys the
+request), and the nonce is per browser rather than per authorization, so two sign-ins open in two
+tabs both complete.
+
+The App hand-off is unaffected, because everything that matters happens in the **system browser**:
+the ticket is redeemed there, the partner's `initiate_login_uri` is opened there, and the partner
+starts `/oauth/authorize` from there — so the cookie is set in the same browser that will post the
+consent. The WebView never holds it.
+
 ### App hand-off (DataDance Wallet App → system browser)
 
 When the user starts from inside the DataDance Wallet App, the App does not send its own
@@ -205,6 +230,11 @@ or `user_id` parameter is refused (T12).
 `email` needs `tge:email`, `wallet_address` needs `tge:wallet`. Without the scope the key is not
 in the body at all.
 
+**The partner API is strictly read-only.** Every handler runs inside a scope in which any
+non-`SELECT` database operation throws, so a read can never change DataDance state — not even
+indirectly, several helper calls down. One consequence is visible in the table below:
+`referral.code` used to be *allocated and persisted* on demand by `GET /status`, and no longer is.
+
 ### `GET /partner/tge/status` — scope `tge:status`
 
 ```json
@@ -237,7 +267,7 @@ the **scope** the user granted, and DataDance's per-environment freeze list
 | --- | --- | --- | --- | --- | --- |
 | `sub` | `tge:identity` | both | `User.id` (uuid) — permanent key, the same person across Wallet, Business and this partner | never null | — |
 | `client_id`, `issued_at`, `expires_at` | `tge:identity` | `/me` | the token itself | never null | — |
-| `email_masked` | `tge:identity` | `/me` | `User.email` as `j***@domain.com`; display hint, never an identifier | no real e-mail, or not frozen | no-store |
+| `email_masked` | `tge:identity` | `/me` | `User.email` as `j***@domain.com`; display hint, never an identifier | no real e-mail, **or the token lacks `tge:identity`**, or not frozen | no-store |
 | `email` | `tge:email` | `/me` | `User.email` when it really is an address — the address a campaign can write to | the account has no e-mail (see below) | no-store |
 | `wallet_address` | `tge:wallet` | `/me` | `User.walletAddress`, EIP-55 checksummed when it parses. **Not** proof of control, **not** permission to sign or transfer (F05) | no wallet bound | no-store |
 | `account_status` | `tge:status` | `/status` | `User.disabledAt` → `active` / `disabled`; `unknown` until the column is deployed | never null | 60 s |
@@ -246,7 +276,7 @@ the **scope** the user granted, and DataDance's per-environment freeze list
 | `data_licence_granted` | `tge:status` | `/status` | `DataLicenceConsent` active for the current policy version. Unrelated to partner eligibility | unknown / not frozen | 60 s |
 | `points.balance` | `tge:points` | `/status` | `User.totalPoints` — the denormalised balance, maintained from the `Point` ledger inside the same transactions. The ledger is the source of truth; summing it per request is too expensive for a 120/min endpoint | never null while served; a new account is `0` | **0 — never cache** |
 | `points.as_of` | `tge:points` | `/status` | server clock at read time | never null | — |
-| `referral.code` | `tge:referral` | `/status` | the user's own short code (`User.referralCode`), the same one the Wallet shows | a display code could not be resolved | 60 s |
+| `referral.code` | `tge:referral` | `/status` | the user's own short code (`User.referralCode`) **when the account already holds one in display form**, the same one the Wallet shows. A partner read never allocates one | the account has no display code yet (an older account whose code is still in the legacy form); it appears as soon as the Wallet allocates it | 60 s |
 | `referral.inviter_sub` | `tge:referral` | `/status` | `Referral.inviterId` for this user as invitee — the `sub` of whoever invited them, for an upline rebate | nobody invited this user | 60 s |
 | `referral.direct_invitees` | `tge:referral` | `/status` | **count** of level-1 invitees, campaign invites included (may exceed the figure the Wallet referral page shows, which lists standard referrals only) | never null; `0` when they invited nobody | 60 s |
 | `as_of`, `cache_max_age` | — | `/status` | server clock | never null | — |
@@ -330,6 +360,16 @@ curl -sS -H "Authorization: Bearer $ACCESS_TOKEN" "$ISS/partner/tge/status"
 is what `genPartnerSecret.js` produces. Libraries such as openid-client encode first, which the
 server also accepts.)
 
+## 11b. Request correlation (`X-Request-Id`)
+
+Every response carries `X-Request-Id`. **It is always DataDance's own identifier**, a fresh UUID
+per request; an inbound `X-Request-Id` is no longer echoed back and is never used as the key of
+the DataDance record. If the partner sends one, it is kept beside ours in our logs as
+`upstreamRequestId`, so a support conversation can be joined up from either side. Quote both when
+reporting an incident. (Rationale: an audit record on a money path cannot be keyed on an
+identifier its subject picks — two requests could otherwise share one id, or collide with
+somebody else's.)
+
 ## 12. Deviations and limitations of this build
 
 - **`prompt=none` never succeeds.** The authorization server keeps no browser session of its
@@ -356,7 +396,18 @@ server also accepts.)
 - `state` minimum length (22 characters in the contract) is not enforced server-side; entropy is
   the partner's responsibility. Maximum length 512 is enforced.
 - `token_endpoint_auth_methods_supported` also lists `none` because DataDance's own AI-assistant
-  clients are public PKCE clients. The TGE client is never accepted without a secret.
+  clients are public PKCE clients. The TGE client is never accepted without a secret. During the
+  campaign window DataDance additionally closes dynamic registration
+  (`OAUTH_PUBLIC_REGISTRATION_ENABLED=false`): `POST /oauth/register` and client-metadata
+  documents are then `403`, so no new client can appear while the flow is live. The static TGE
+  client is unaffected either way.
+- **The code is re-checked against the account at the exchange.** An account disabled between the
+  consent click and `POST /oauth/token` (up to 60 s) now yields `invalid_grant`, not a token. A
+  partner backend needs no change: `invalid_grant` was already a possible answer there.
+- **Contract additions in this build** (the YAML needs them in the next revision): `POST
+  /api/oauth/consent` can answer `409 AUTHZ_INITIATOR_MISMATCH` (§5, Wallet-internal), and
+  `email_masked` is gated on its declared `tge:identity` scope as well as on the freeze list —
+  which changes nothing for a real caller, since `/me` already requires that scope.
 
 ## 13. Vendor acceptance checklist (maps to T01–T18)
 
@@ -374,12 +425,20 @@ server also accepts.)
 Environment (see `env.example`): `SSO_ENVIRONMENT`, `SSO_TGE_ENABLED`, `SSO_TGE_CLIENT_ID`,
 `SSO_TGE_CLIENT_NAME`, `SSO_TGE_CLIENT_SECRET_SHA256`, `SSO_TGE_CLIENT_SECRET_SHA256_PREVIOUS`,
 `SSO_TGE_SECRET_ROTATION_UNTIL`, `SSO_TGE_REDIRECT_URIS`, `SSO_TGE_INITIATE_LOGIN_URI`,
-`SSO_TGE_STATUS_FIELDS`, `SSO_REQUIRE_VERIFIED_SESSION`, plus `PUBLIC_BASE_URL` and
-`APP_PUBLIC_URL`.
+`SSO_TGE_STATUS_FIELDS`, `SSO_REQUIRE_VERIFIED_SESSION`, plus `PUBLIC_BASE_URL` (now required
+unconditionally — the issuer is never derived from a request header), `APP_PUBLIC_URL`,
+`WEB3AUTH_ALLOWED_VERIFIERS` and `OAUTH_PUBLIC_REGISTRATION_ENABLED`.
 
 - `src/server.js` calls `assertPartnerConfig()` at boot and refuses to start with every problem
   listed (missing hash, http redirect URI outside localhost, fragment, unknown status field,
   missing public URLs in production, malformed client id).
+- It then calls `assertFinancialGradeConfig()`: with `SSO_TGE_ENABLED=true` the container also
+  refuses to start unless `NODE_ENV=production`, `WEB3AUTH_VERIFY_MODE=enforce`,
+  `WEB3AUTH_ALLOW_LEGACY_FALLBACK=false`, `WEB3AUTH_CLIENT_ID` and `WEB3AUTH_ALLOWED_VERIFIERS`
+  are non-empty, `SSO_SESSION_SECRET` is set and differs from `JWT_SECRET`, and `PUBLIC_BASE_URL`
+  / `APP_PUBLIC_URL` are set and https. There is no flag to switch that off — turn
+  `SSO_TGE_ENABLED` off instead. The boot log prints a summary with no secret values. See the
+  README section "金融级加固：合作方 SSO".
 - Generate a secret: `node scripts/genPartnerSecret.js` (prints once; nothing is written).
 - Rotate: move the current hash to `…_PREVIOUS`, set the new hash, set `…_ROTATION_UNTIL`,
   recreate the container; after the deadline remove the previous hash.

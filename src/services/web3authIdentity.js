@@ -27,6 +27,10 @@ const DEFAULTS = {
   WEB3AUTH_CLIENT_ID: '',
   WEB3AUTH_ALGS: 'ES256',
   WEB3AUTH_MAX_TOKEN_AGE: '1d',
+  // The login connections DataDance actually uses (csv of verifier / auth-connection names, as
+  // they appear in the token). EMPTY is only allowed outside `enforce`: under `enforce` the boot
+  // refuses to start, because an empty list would mean "whatever connection the token names".
+  WEB3AUTH_ALLOWED_VERIFIERS: '',
   WEB3AUTH_VERIFIER_CLAIM: 'aggregateVerifier,verifier,groupedAuthConnectionId,authConnectionId',
   WEB3AUTH_VERIFIER_ID_CLAIM: 'verifierId,userId',
   WEB3AUTH_EMAIL_CLAIM: 'email',
@@ -51,6 +55,7 @@ const HTTP_STATUS = {
   IDTOKEN_ISSUER: 401,
   IDTOKEN_AUDIENCE: 401,
   IDTOKEN_SIGNATURE: 401,
+  IDTOKEN_VERIFIER_NOT_ALLOWED: 401,
   WALLET_NOT_IN_TOKEN: 401,
   IDENTITY_CONFLICT: 409,
   ORG_NOT_ALLOWED: 403,
@@ -106,6 +111,8 @@ function loadConfig(env = process.env) {
     clientId,
     algs: csv(envOr(env, 'WEB3AUTH_ALGS')),
     maxTokenAge: envOr(env, 'WEB3AUTH_MAX_TOKEN_AGE'),
+    // Connections this deployment accepts as an identity source. Required under `enforce`.
+    allowedVerifiers: csv(envOr(env, 'WEB3AUTH_ALLOWED_VERIFIERS')),
     verifierClaims: csv(envOr(env, 'WEB3AUTH_VERIFIER_CLAIM')),
     verifierIdClaims: csv(envOr(env, 'WEB3AUTH_VERIFIER_ID_CLAIM')),
     emailClaims: csv(envOr(env, 'WEB3AUTH_EMAIL_CLAIM')),
@@ -155,6 +162,14 @@ function assertBootConfig(env = process.env) {
     throw new Error(
       'WEB3AUTH_CLIENT_ID is required when WEB3AUTH_VERIFY_MODE is "log" or "enforce" (it is the expected ID token audience). ' +
         'Set it to the Web3Auth project client id the Wallet uses, or set WEB3AUTH_VERIFY_MODE=off outside production.'
+    );
+  }
+  if (cfg.mode === 'enforce' && !cfg.allowedVerifiers.length) {
+    throw new Error(
+      'WEB3AUTH_ALLOWED_VERIFIERS is required when WEB3AUTH_VERIFY_MODE=enforce (csv of the login connections DataDance uses, ' +
+        'e.g. "web3auth-google-sapphire-devnet,external-wallet"). Without it, ANY connection added in the Web3Auth project — ' +
+        'by anyone holding a console credential — is accepted as an identity source and can impersonate any user. ' +
+        'Add "external-wallet" if sign-in-with-wallet is offered.'
     );
   }
   for (const kind of Object.keys(cfg.kinds)) {
@@ -323,9 +338,41 @@ function emailVerifiedFrom(payload, cfg) {
 }
 
 /**
+ * Is this verifier one of the login connections DataDance actually uses?
+ * An EMPTY list means "not configured", which is only reachable outside `enforce` (the boot
+ * assertion refuses an empty list under `enforce`); it then allows everything, as before.
+ */
+function isVerifierAllowed(cfg, verifier) {
+  return !cfg.allowedVerifiers.length || cfg.allowedVerifiers.includes(String(verifier || ''));
+}
+
+/**
+ * The identity key may only come from a connection we chose (item 2). Without this, whoever can
+ * add a connection in the DataDance Web3Auth project — a console credential, a hijacked
+ * dashboard session — mints tokens this server accepts, and `verifierId` is theirs to choose:
+ * that is "become any user", and no amount of signature checking sees it, because the signature
+ * is genuine.
+ *
+ * `enforce` → IDTOKEN_VERIFIER_NOT_ALLOWED (401). `log` → accept, but say so loudly on every
+ * single token, so the rollout cannot end quietly with the list still wrong.
+ */
+function assertVerifierAllowed(cfg, identity) {
+  if (isVerifierAllowed(cfg, identity.verifier)) return;
+  const meta = { verifier: identity.verifier, kind: identity.kind, mode: cfg.mode, allowedCount: cfg.allowedVerifiers.length };
+  if (cfg.mode === 'enforce') {
+    logger.warn('idtoken_verifier_not_allowed', { ...meta, outcome: 'refused' });
+    throw fail('IDTOKEN_VERIFIER_NOT_ALLOWED', 'This login method is not accepted by DataDance', {
+      verifier: identity.verifier,
+    });
+  }
+  logger.warn('idtoken_verifier_not_allowed', { ...meta, outcome: 'accepted_log_mode' });
+}
+
+/**
  * Read the upstream identity out of a verified payload.
  * Returns `{ kind, verifier, verifierId, email, emailVerified, name, profileImage, wallets }`.
- * Throws IDTOKEN_INVALID when no identity can be established.
+ * Throws IDTOKEN_INVALID when no identity can be established, or
+ * IDTOKEN_VERIFIER_NOT_ALLOWED when the connection is not on WEB3AUTH_ALLOWED_VERIFIERS.
  */
 function extractIdentity(payload, { kind } = {}) {
   const cfg = getConfig();
@@ -361,6 +408,10 @@ function extractIdentity(payload, { kind } = {}) {
   const emailVerified = Boolean(email) && emailVerifiedFrom(payload, cfg);
   const name = firstString(payload, NAME_CLAIMS);
   const profileImage = firstString(payload, AVATAR_CLAIMS);
+
+  // Every caller reaches the identity through here, so this is the one place the allow-list has
+  // to hold — including the external-wallet branch above, which must be listed explicitly.
+  assertVerifierAllowed(cfg, { verifier, kind: resolvedKind });
 
   return {
     kind: resolvedKind,
@@ -535,6 +586,11 @@ async function resolveUser(identity, options = {}) {
     if (candidate.authType !== 'web3auth') reason = 'candidate_not_web3auth';
     else if (!unlinked) reason = 'candidate_already_linked';
     else if (walletMismatch) reason = 'wallet_mismatch';
+    // The connection allow-list guards EVERY route into an existing account, the cryptographic
+    // one included (item 2). The "proof" on that route is a key Web3Auth derives for the
+    // connection, so a connection we never chose proves nothing about the person — and in `log`
+    // mode extractIdentity only warns, which used to leave this route wide open.
+    else if (!isVerifierAllowed(cfg, identity.verifier)) reason = 'verifier_not_in_allowlist';
     else if (!walletProven) {
       // Not the cryptographic route: the e-mail-column route needs the opt-in, and a real
       // e-mail needs the IdP's own `email_verified` before it may key a legacy account.
@@ -631,6 +687,8 @@ module.exports = {
   _internals: {
     DEFAULTS,
     HTTP_STATUS,
+    isVerifierAllowed,
+    assertVerifierAllowed,
     loadConfig,
     assertBootConfig,
     getConfig,

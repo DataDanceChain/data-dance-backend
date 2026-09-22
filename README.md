@@ -112,8 +112,9 @@ docker compose up -d
 - `WEB3AUTH_VERIFY_MODE`: `off` (legacy client-asserted login only; refused at boot in production) → `log` → `enforce` (`idToken` required, token decides). In `log`, a **supplied token that is rejected fails closed exactly as under `enforce`** (`idtoken_rejected`, `outcome: refused`) — it is never downgraded to the legacy path; a request with **no** `idToken` is refused with `IDTOKEN_REQUIRED` unless `WEB3AUTH_ALLOW_LEGACY_FALLBACK=true`.
 - `WEB3AUTH_ALLOW_LEGACY_FALLBACK` (default `false`) is the only switch that still lets a body-asserted identity (`userInfo.email` / `walletAddress` / `xid`) mint a session, and only in `log` with no `idToken`. Rollout: `log` + fallback on → watch the `legacy_login` warning count drop to zero as Wallet builds send the token → fallback off → `enforce` (test, then prod). Old App builds without `idToken` cannot log in once it is off.
 - Legacy `web3auth` rows are linked lazily on first verified login by exactly two routes: (a) the token **proves the wallet the row already holds** (cryptographic; a row with a NULL wallet proves nothing and no longer counts as “wallet-consistent”), or (b) the row is found by the e-mail the token carries **and** the verifier is named in `WEB3AUTH_LEGACY_VERIFIERS` (empty = never) **and** the token asserts `email_verified === true` (`WEB3AUTH_EMAIL_VERIFIED_CLAIM`). The row must also be unlinked, `web3auth`, non-organization and free of a wallet mismatch. Anything else — password (`traditional`) accounts, already-linked rows, an unverified or non-allow-listed e-mail — answers `IDENTITY_CONFLICT` and is never merged. Rationale: the Web3Auth client id ships in the SPA bundle, so an IdP-asserted e-mail alone is not proof of ownership (plan §5 F03). An e-mail-shaped `verifierId` is lower-cased before it is stored as the identity key.
-- Error codes: `IDTOKEN_REQUIRED` (400), `IDTOKEN_INVALID`, `IDTOKEN_EXPIRED`, `IDTOKEN_ISSUER`, `IDTOKEN_AUDIENCE`, `IDTOKEN_SIGNATURE`, `WALLET_NOT_IN_TOKEN` (401), `IDENTITY_CONFLICT` (409), `ORG_NOT_ALLOWED`, `ACCOUNT_DISABLED` (403). `ACCOUNT_DISABLED` (`User.disabledAt`) is also refused by `protect`, `authenticate`, password login and MCP tokens.
-- Env (see `env.example`): `WEB3AUTH_VERIFY_MODE`, `WEB3AUTH_CLIENT_ID`, `WEB3AUTH_JWKS_URL`, `WEB3AUTH_ISSUERS`, `WEB3AUTH_EXTERNAL_JWKS_URL`, `WEB3AUTH_EXTERNAL_ISSUERS`, `WEB3AUTH_EXTERNAL_AUDIENCE`, `WEB3AUTH_ALGS`, `WEB3AUTH_MAX_TOKEN_AGE`, `WEB3AUTH_VERIFIER_CLAIM`, `WEB3AUTH_VERIFIER_ID_CLAIM`, `WEB3AUTH_EMAIL_CLAIM`, `WEB3AUTH_WALLETS_CLAIM`, `WEB3AUTH_WALLET_MATCH`, `WEB3AUTH_LEGACY_VERIFIERS`, `WEB3AUTH_EMAIL_VERIFIED_CLAIM`, `WEB3AUTH_ALLOW_LEGACY_FALLBACK`. `JWT_EXPIRES_IN` is mandatory in production.
+- **Accepted login connections — `WEB3AUTH_ALLOWED_VERIFIERS` (csv).** The identity key is read from whichever of `aggregateVerifier` / `verifier` / `groupedAuthConnectionId` / `authConnectionId` the token carries first, and that value used to be accepted whatever it said. It is a Web3Auth *connection name*, so anyone who can add a connection in the DataDance Web3Auth project — a console credential, a hijacked dashboard session — could mint a correctly signed token for our audience, choose any `verifierId`, and be that user; no signature check sees it, because the signature is genuine. The list is now the gate: **required under `enforce` (boot refuses an empty list, same shape as the `WEB3AUTH_CLIENT_ID` assertion)**, a token from an unlisted connection is `401 IDTOKEN_VERIFIER_NOT_ALLOWED`, and under `log` it is accepted but logged as `idtoken_verifier_not_allowed` on every request so the rollout cannot end quietly with the list wrong. Include `external-wallet` if sign-in-with-wallet is offered — the synthetic external-wallet identity is not exempt. The list also guards **every** lazy link into an existing account, the wallet-proven route included (that route set no reason and therefore skipped both this list and the `email_verified` requirement).
+- Error codes: `IDTOKEN_REQUIRED` (400), `IDTOKEN_INVALID`, `IDTOKEN_EXPIRED`, `IDTOKEN_ISSUER`, `IDTOKEN_AUDIENCE`, `IDTOKEN_SIGNATURE`, `IDTOKEN_VERIFIER_NOT_ALLOWED`, `WALLET_NOT_IN_TOKEN` (401), `IDENTITY_CONFLICT` (409), `ORG_NOT_ALLOWED`, `ACCOUNT_DISABLED` (403). `ACCOUNT_DISABLED` (`User.disabledAt`) is also refused by `protect`, `authenticate`, password login and MCP tokens.
+- Env (see `env.example`): `WEB3AUTH_VERIFY_MODE`, `WEB3AUTH_CLIENT_ID`, `WEB3AUTH_ALLOWED_VERIFIERS`, `WEB3AUTH_JWKS_URL`, `WEB3AUTH_ISSUERS`, `WEB3AUTH_EXTERNAL_JWKS_URL`, `WEB3AUTH_EXTERNAL_ISSUERS`, `WEB3AUTH_EXTERNAL_AUDIENCE`, `WEB3AUTH_ALGS`, `WEB3AUTH_MAX_TOKEN_AGE`, `WEB3AUTH_VERIFIER_CLAIM`, `WEB3AUTH_VERIFIER_ID_CLAIM`, `WEB3AUTH_EMAIL_CLAIM`, `WEB3AUTH_WALLETS_CLAIM`, `WEB3AUTH_WALLET_MATCH`, `WEB3AUTH_LEGACY_VERIFIERS`, `WEB3AUTH_EMAIL_VERIFIED_CLAIM`, `WEB3AUTH_ALLOW_LEGACY_FALLBACK`. `JWT_EXPIRES_IN` is mandatory in production.
 - 迁移：`20260922100000_user_upstream_identity_and_disable`；单测：`npm test`（`test/unit/web3authIdentity.test.js` 和 `test/unit/web3authLogin.test.js`，本地 JWKS + supertest，无需数据库）
 
 ## 🛠 开发环境
@@ -155,11 +156,75 @@ npm run prisma:migrate
 npm run dev
 ```
 
+## 🛡 金融级加固：合作方 SSO（Partner SSO boot assertions）
+
+TGE 页面这条链路上可能有很大金额，所以协议之外的"部署形态"也必须被程序本身卡死。以下三件事是
+这次加固里最需要运维知道的：
+
+### 1. 启动断言：`SSO_TGE_ENABLED=true` 时不满足就拒绝启动
+
+`src/server.js` 在 `assertPartnerConfig()` 之后再调用 `assertFinancialGradeConfig()`，一次把所有问题
+列全后抛错（摘要里不含任何密钥值）。必须同时满足：
+
+| 条件 | 为什么 |
+| --- | --- |
+| `NODE_ENV=production` | 否则开发态 CORS、堆栈、`off` 验签模式都还够得着 |
+| `WEB3AUTH_VERIFY_MODE=enforce` | `log` 模式下不在白名单里的登录方式只是"记一笔"，仍然放行 |
+| `WEB3AUTH_ALLOW_LEGACY_FALLBACK=false` | 这是历史上的"请求体自报身份"接管路径 |
+| `WEB3AUTH_CLIENT_ID` 非空 | ID token 的预期受众 |
+| `WEB3AUTH_ALLOWED_VERIFIERS` 非空 | 见下一节，这是"谁能成为任何人"的那把锁 |
+| `SSO_SESSION_SECRET` 已设且 ≠ `JWT_SECRET` | 这个差异就是"同意页会话打不开别的接口"的全部依据 |
+| `PUBLIC_BASE_URL` / `APP_PUBLIC_URL` 已设且是 https | 签发方标识与同意页来源 |
+
+没有开关可以关掉这组断言：要放松就把 `SSO_TGE_ENABLED` 关掉。启动日志会打印一行摘要
+（`Partner SSO money-path assertions OK: …`），含模式、白名单条数、issuer、同意页来源、动态注册开关状态，不含密钥。
+
+### 2. 登录方式白名单 `WEB3AUTH_ALLOWED_VERIFIERS`
+
+身份键取自 ID token 里的连接名（`aggregateVerifier` / `verifier` / `groupedAuthConnectionId` /
+`authConnectionId` 取第一个存在的）。以前这个值是什么都收：**谁能在 DDC 的 Web3Auth 项目里加一个连接
+（一份控制台凭据、一次被盗的后台会话），谁就能签出对我们受众有效的 token、挑一个 `verifierId`，
+成为那个用户**——签名是真的，所以验签永远看不出来。现在：
+
+- `enforce`：不在白名单里的连接 → `401 IDTOKEN_VERIFIER_NOT_ALLOWED`；**白名单为空则拒绝启动**
+  （与 `WEB3AUTH_CLIENT_ID` 同一形状的断言）。
+- `log`：放行，但每一个 token 都打 `idtoken_verifier_not_allowed` 告警，灰度不会悄悄结束。
+- 用外部钱包登录的话，`external-wallet` 也要显式写进白名单，它不是例外。
+- 白名单同时守住**所有**懒绑定老账号的路径，包括"钱包被 token 证明"那条（那条以前不设 reason，
+  于是既绕过了老账号白名单也绕过了 `email_verified` 要求）。
+
+### 3. 授权请求绑定发起它的浏览器（没有开关）
+
+`GET /oauth/authorize` 会种一个 `__Host-ddc_authz` Cookie（HttpOnly、Secure、SameSite=Lax、Path=/、
+无 Domain），并把它的 sha256 存进授权请求行；`POST /api/oauth/consent` 的**批准**必须带回同一个值，
+否则不签发授权码，返回 `409 AUTHZ_INITIATOR_MISMATCH`，同意页据此提示"这次登录是在另一台设备或另一个
+浏览器里开始的，请从 {客户端} 重新开始"。**拒绝**不受影响（任何浏览器都能把请求作废）。
+
+- 钱包同意页的请求必须带上 Cookie：`fetch(url, { credentials: 'include' })`。
+  `app.datadance.ai → api.datadance.ai` 是同站（跨源），SameSite=Lax 不会拦，但不带 credentials 就收不到。
+- App 交接（`/api/sso/*`）不受影响：票据在系统浏览器里兑换，合作方也在同一个系统浏览器里发起
+  `/oauth/authorize`，Cookie 就落在那里，同意页从同一浏览器提交。WebView 从头到尾不需要这个 Cookie。
+- 一个浏览器一个 nonce（不是一次授权一个），所以两个标签页同时登录都能完成。
+- 行上另有 `initiatorBoundAt` / `initiatorMismatchCount`，加上 `oauth.authz_initiator_mismatch` 告警日志。
+- 迁移：`20260922120000_authz_initiator_binding`（三个可空列，向前向后都安全）。
+
+### 4. 合作方接口真正只读
+
+`/partner/tge/*` 的处理函数运行在一个只读作用域里（`src/utils/prismaReadOnly.js`，AsyncLocalStorage +
+包装写方法）：**请求进行中任何 Prisma 写操作直接抛错**，哪怕它发生在很深的 helper 里。`GET /status`
+不再懒分配推荐码（那是一次 `$executeRaw` UPDATE），已有的展示码照常返回，没有就是 `null`。
+唯一保留的写是认证阶段刷新 `McpToken.lastUsedAt`，它发生在只读作用域打开之前。
+
+### 5. 活动期间关掉公共客户端注册
+
+`OAUTH_PUBLIC_REGISTRATION_ENABLED=false` → `POST /oauth/register` 与 CIMD 客户端元数据抓取一律 403，
+活动窗口内不会冒出新的客户端。默认 `true`，保持今天的 ChatGPT / Claude 行为。
+
 ## 🛡 运行加固 (Operational hardening)
 
 - **反向代理与真实 IP**：`TRUST_PROXY_HOPS`（默认 **1**）设置 Express `trust proxy`，`req.ip` 取自 `X-Forwarded-For`，限流按真实客户端 IP 计。默认值是 1 而不是链路跳数：生产 nginx 只设 `Host`/`Upgrade`/`Connection`，**不追加** `X-Forwarded-For`，所以容器看到的只有 Cloudflare 写入的那一条，也就是真实客户端。设成 2 会让 Express 跳过那一条、退回到**客户端自己发的**值，于是任何人都能用伪造的 `X-Forwarded-For` 绕过所有按 IP 的限流。上线前必须用一次真实请求核对（启动摘要会打印该值）；源站若直连公网则设 `0`。
   - **上线前必须用一次真实请求核对这个值**（比如临时打一条 `req.ip` 日志，确认等于终端用户地址）：少算一跳时 `req.ip` 是 Cloudflare 边缘地址，同一个 PoP 后面的所有用户共用一个限流桶；多算一跳则 `X-Forwarded-For` 可伪造。
-- **请求 ID**：每个请求带 `X-Request-Id`（透传上游的安全字符串，否则生成 UUID），回写响应头，`Request completed` / `Request failed` 日志带 `reqId`，一次登录可按 id 串起来查。
+- **请求 ID**：`reqId` **永远由我们生成**（UUID），回写 `X-Request-Id` 响应头。上游送来的 `X-Request-Id` 只作为 `upstreamRequestId` 并排记录，用于和合作方系统对账。以前是"上游值合法就直接当 reqId"，等于审计记录的主键由被审计方挑选：合作方可以让两个请求共用一个 id，也可以撞上别人的 id，而日志会站在他们那边。
 - **日志脱敏**（`src/utils/logger.js`）：访问日志（morgan）和 winston 日志里的 URL query 值 `access_token, token, code, ticket, id_token, idToken, client_secret, refresh_token, code_verifier, password, otp` 一律掩码（保留前 4 字符 + 长度；`password` / `otp` 及短值整体隐藏）；日志 meta 对象里同名键、`authorization` 头（保留 scheme）、`email`（只留域名）、`walletAddress`（前 6 + 后 4）递归掩码，含嵌套对象与数组。验收：跑一遍登录/授权流程后 `grep -r 'ddc_tge_\|ddc_code_\|ddc_tkt_\|client_secret=' logs/` 为零。
 - **`/mcp` 不再接受 `?access_token=`**：只认 `Authorization: Bearer`，token 不再进入访问日志。
 - **限流**（`src/middlewares/rateLimitMiddleware.js`，`rateLimiters.*`）：

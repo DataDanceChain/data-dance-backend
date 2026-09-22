@@ -43,7 +43,10 @@ delete process.env.SSO_REQUIRE_VERIFIED_SESSION;
 const oauthRoutes = require('../../src/routes/oauthRoutes');
 const { generateToken } = require('../../src/utils/jwtUtils');
 const { clearRateLimitStore } = require('../../src/middlewares/rateLimitMiddleware');
+const { requestIdMiddleware } = require('../../src/middlewares/requestIdMiddleware');
+const { runReadOnly } = require('../../src/utils/prismaReadOnly');
 const partnerTgeRoutes = require('../../src/routes/partnerTgeRoutes');
+const { meBody } = partnerTgeRoutes;
 const { decideConsent, issuedTokensByCode } = require('../../src/services/oauthService');
 const { issueMcpToken } = require('../../src/services/mcpTokenService');
 const { DATA_LICENCE_POLICY_VERSION } = require('../../src/constants/dataLicence');
@@ -76,13 +79,20 @@ function authorizeQuery(overrides = {}) {
   };
 }
 
+/** The initiator nonce the 302 planted in the browser that started the authorization (item 1). */
+function initiatorNonceFrom(res) {
+  const cookie = ((res.headers['set-cookie'] || [])[0] || '').split(';')[0];
+  return cookie.slice(cookie.indexOf('=') + 1);
+}
+
 /** Browser + Wallet steps done directly against the service; returns { code, verifier }. */
 async function mintCode(scope) {
   const { verifier, challenge } = pkce();
   const res = await request(app).get('/oauth/authorize').query(authorizeQuery({ code_challenge: challenge, scope }));
   assert.equal(res.status, 302, res.text);
   const requestId = new URL(res.headers.location).searchParams.get('request');
-  const redirectTo = await decideConsent(user, requestId, true, { kind: 'user_jwt' });
+  // The decision comes from the same browser, as it does in the Wallet.
+  const redirectTo = await decideConsent(user, requestId, true, { kind: 'user_jwt', initiatorNonce: initiatorNonceFrom(res) });
   return { code: new URL(redirectTo).searchParams.get('code'), verifier };
 }
 
@@ -566,15 +576,22 @@ describe('/partner/tge — per-field scopes', () => {
 describe('POST /api/oauth/consent', () => {
   const bearer = () => `Bearer ${generateToken(user.id)}`;
 
-  /** A fresh pending authorization; returns its request id. */
+  // The cookie of the browser that started the most recent authorization. Every decision below
+  // is made from that browser unless a test says otherwise (item 1).
+  let lastCookie = '';
+
+  /** A fresh pending authorization; returns its request id AND the browser cookie it set. */
   async function pendingRequest() {
     const res = await request(app).get('/oauth/authorize').query(authorizeQuery());
     assert.equal(res.status, 302, res.text);
+    const setCookie = (res.headers['set-cookie'] || [])[0] || '';
+    lastCookie = setCookie.split(';')[0];
     return new URL(res.headers.location).searchParams.get('request');
   }
 
-  async function decide(body, { form = false } = {}) {
+  async function decide(body, { form = false, cookie = lastCookie } = {}) {
     const req = request(app).post('/api/oauth/consent').set('Authorization', bearer());
+    if (cookie) req.set('Cookie', cookie);
     const res = await (form ? req.type('form') : req).send(body);
     return res;
   }
@@ -625,5 +642,241 @@ describe('POST /api/oauth/consent', () => {
   it('still requires a signed-in user', async () => {
     const res = await request(app).post('/api/oauth/consent').send({ requestId: await pendingRequest(), allow: true });
     assert.equal(res.status, 401);
+  });
+});
+
+/**
+ * Item 1 over HTTP: the cookie must survive the round trip the Wallet actually makes —
+ * `GET /oauth/authorize` (302, Set-Cookie) then `POST /api/oauth/consent` from the same browser.
+ */
+describe('authorization-request ↔ browser binding over HTTP (item 1)', () => {
+  const bearer = () => `Bearer ${generateToken(user.id)}`;
+
+  async function authorize() {
+    const res = await request(app).get('/oauth/authorize').query(authorizeQuery());
+    assert.equal(res.status, 302, res.text);
+    const setCookie = (res.headers['set-cookie'] || [])[0] || '';
+    return {
+      requestId: new URL(res.headers.location).searchParams.get('request'),
+      setCookie,
+      cookie: setCookie.split(';')[0],
+    };
+  }
+
+  const consent = (requestId, cookie) => {
+    const call = request(app).post('/api/oauth/consent').set('Authorization', bearer());
+    if (cookie) call.set('Cookie', cookie);
+    return call.send({ requestId, allow: true });
+  };
+
+  beforeEach(() => clearRateLimitStore());
+
+  it('/oauth/authorize sets __Host-ddc_authz with HttpOnly, Secure, SameSite=Lax, Path=/ and no Domain', async () => {
+    const { setCookie } = await authorize();
+    assert.match(setCookie, /^__Host-ddc_authz=/);
+    assert.match(setCookie, /HttpOnly/i);
+    assert.match(setCookie, /Secure/i);
+    assert.match(setCookie, /SameSite=Lax/i);
+    assert.match(setCookie, /Path=\//i);
+    assert.equal(/Domain=/i.test(setCookie), false);
+  });
+
+  it('same browser → 200 with a code; the forwarded link → 409, and nothing is redirected anywhere', async () => {
+    const started = await authorize();
+    const forwarded = await consent(started.requestId, '');
+    assert.equal(forwarded.status, 409);
+    assert.equal(forwarded.body.code, 'AUTHZ_INITIATOR_MISMATCH');
+    assert.equal(forwarded.body.status, 'fail');
+    assert.match(forwarded.body.message, /another device or browser/);
+    assert.match(forwarded.body.message, /DDC TGE/, 'the page can say where to start again');
+    assert.equal(forwarded.body.data.reason, 'missing');
+    assert.equal('redirectTo' in (forwarded.body.data || {}), false, 'the victim is never sent to the attacker’s callback');
+    assert.equal(forwarded.headers['cache-control'], 'no-store');
+
+    const ok = await consent(started.requestId, started.cookie);
+    assert.equal(ok.status, 200, ok.text);
+    assert.ok(new URL(ok.body.data.redirectTo).searchParams.get('code'));
+  });
+
+  it('a decision from a browser holding ANOTHER authorization’s cookie is refused as a mismatch', async () => {
+    const victimBrowser = await authorize();   // the victim has their own sign-in open
+    const attacker = await authorize();        // and is sent the attacker’s request id
+    const res = await consent(attacker.requestId, victimBrowser.cookie);
+    assert.equal(res.status, 409);
+    assert.equal(res.body.data.reason, 'mismatch');
+    const row = prisma.oAuthAuthorization.rows.find((r) => r.id === attacker.requestId);
+    assert.equal(row.codeHash, undefined);
+    assert.equal(row.initiatorMismatchCount, 1);
+  });
+});
+
+/**
+ * Item 3 — the audit record must not be anchored on an identifier the caller chooses.
+ * The middleware is mounted on its own app: it runs in front of everything in src/app.js.
+ */
+describe('request id (item 3)', () => {
+  const idApp = express();
+  idApp.use(requestIdMiddleware);
+  idApp.get('/echo', (req, res) => res.json({ reqId: req.reqId, upstream: req.upstreamRequestId }));
+
+  it('always generates our own id, whatever the caller sent', async () => {
+    const a = await request(idApp).get('/echo').set('X-Request-Id', 'partner-chosen-id');
+    assert.equal(a.body.reqId === 'partner-chosen-id', false, 'the caller must not be able to name our record');
+    assert.match(a.body.reqId, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+    assert.equal(a.headers['x-request-id'], a.body.reqId);
+  });
+
+  it('keeps the inbound value beside it, as a claim, never as the key', async () => {
+    const res = await request(idApp).get('/echo').set('X-Request-Id', 'partner-chosen-id');
+    assert.equal(res.body.upstream, 'partner-chosen-id');
+    assert.notEqual(res.body.reqId, res.body.upstream);
+  });
+
+  it('two requests that claim one id still get two different records', async () => {
+    const first = await request(idApp).get('/echo').set('X-Request-Id', 'same-id-twice');
+    const second = await request(idApp).get('/echo').set('X-Request-Id', 'same-id-twice');
+    assert.notEqual(first.body.reqId, second.body.reqId, 'a partner cannot collapse two requests into one line');
+    assert.equal(first.body.upstream, second.body.upstream);
+  });
+
+  it('drops an inbound value that is not log-safe, and reports none when nothing was sent', async () => {
+    const bad = await request(idApp).get('/echo').set('X-Request-Id', 'has spaces and "quotes"');
+    assert.equal(bad.body.upstream, null);
+    assert.ok(bad.body.reqId);
+    const none = await request(idApp).get('/echo');
+    assert.equal(none.body.upstream, null);
+  });
+});
+
+/**
+ * Item 5 — the partner API is read-only, and the process enforces it.
+ */
+describe('/partner/tge is read-only (item 5)', () => {
+  beforeEach(() => clearRateLimitStore());
+
+  async function statusWith(fields, scope = 'tge:identity tge:status tge:referral') {
+    const saved = process.env.SSO_TGE_STATUS_FIELDS;
+    process.env.SSO_TGE_STATUS_FIELDS = fields;
+    try {
+      const token = await mintToken(scope);
+      return await request(app).get('/partner/tge/status').set('Authorization', `Bearer ${token}`);
+    } finally {
+      process.env.SSO_TGE_STATUS_FIELDS = saved;
+    }
+  }
+
+  it('GET /status never allocates a referral code: a legacy code reads as null and the row is untouched', async () => {
+    // A code that is not in display form used to make the partner read ALLOCATE one and write it.
+    prisma.user.rows[0].referralCode = 'legacy-referral-code-0001';
+    const res = await statusWith('registered_at,referral');
+    assert.equal(res.status, 200, res.text);
+    assert.equal(res.body.referral.code, null, 'unknown, never fabricated — and never written');
+    assert.equal(prisma.user.rows[0].referralCode, 'legacy-referral-code-0001', 'a GET must not change a row');
+    assert.equal(typeof res.body.referral.direct_invitees, 'number');
+  });
+
+  it('a display code the user already has is still served', async () => {
+    prisma.user.rows[0].referralCode = 'AB23CD';
+    const res = await statusWith('registered_at,referral');
+    assert.equal(res.body.referral.code, 'AB23CD');
+  });
+
+  it('the guard fires: a write attempted while a partner request is in flight throws', async () => {
+    // Stand in for "someone adds a write to a helper on this path one day".
+    const originalCount = prisma.referral.count;
+    prisma.referral.count = async (args) => {
+      await prisma.user.update({ where: { id: user.id }, data: { totalPoints: 999999 } });
+      return originalCount(args);
+    };
+    try {
+      const res = await statusWith('registered_at,referral');
+      assert.equal(res.status, 500, 'the write is refused, not quietly performed');
+      assert.equal(res.body.error, 'server_error');
+      assert.equal(prisma.user.rows[0].totalPoints, 1234.5, 'the row is unchanged');
+    } finally {
+      prisma.referral.count = originalCount;
+    }
+  });
+
+  it('the same write succeeds outside a partner request (the guard is scoped, not global)', async () => {
+    await prisma.user.update({ where: { id: user.id }, data: { totalPoints: 7 } });
+    assert.equal(prisma.user.rows[0].totalPoints, 7);
+  });
+
+  it('a read inside the scope is still a read', async () => {
+    const value = await runReadOnly('unit', async () => (await prisma.user.findUnique({ where: { id: user.id } })).id);
+    assert.equal(value, user.id);
+    await assert.rejects(
+      () => runReadOnly('unit', () => prisma.user.update({ where: { id: user.id }, data: { totalPoints: 1 } })),
+      (error) => error.code === 'READ_ONLY_VIOLATION'
+    );
+  });
+});
+
+/**
+ * Item 6 — `email_masked` is declared under `tge:identity` in the field catalog but was gated on
+ * the freeze list alone. Today the endpoint scope happens to be the same scope, so the body is
+ * unchanged for every real caller; the gate is asserted directly on the body builder, which is
+ * where the declaration and the behaviour can drift apart again.
+ */
+describe('email_masked honours its declared scope (item 6)', () => {
+  const { getPartnerClient, STATUS_FIELD_CATALOG: catalog } = require('../../src/constants/partnerClient');
+
+  function bodyWithScope(scope) {
+    const saved = process.env.SSO_TGE_STATUS_FIELDS;
+    process.env.SSO_TGE_STATUS_FIELDS = 'registered_at,email_masked';
+    try {
+      const client = getPartnerClient('tge-test');
+      return meBody({ partner: { client, user, token: { clientId: 'tge-test', scope, issuedAt: new Date(), expiresAt: new Date() } } });
+    } finally {
+      process.env.SSO_TGE_STATUS_FIELDS = saved;
+    }
+  }
+
+  it('is declared under tge:identity', () => {
+    assert.equal(catalog.email_masked.scope, 'tge:identity');
+    assert.equal(catalog.email_masked.presence, 'null');
+  });
+
+  it('a token without that scope gets null, not the masked address', () => {
+    assert.equal(bodyWithScope('tge:status').email_masked, null);
+    assert.equal(bodyWithScope('').email_masked, null);
+  });
+
+  it('a token with it, in an environment that freezes the field, gets the hint', () => {
+    assert.equal(bodyWithScope('tge:identity').email_masked, 's***@example.com');
+  });
+
+  it('the freeze list is still the second gate', () => {
+    const saved = process.env.SSO_TGE_STATUS_FIELDS;
+    process.env.SSO_TGE_STATUS_FIELDS = 'registered_at';
+    try {
+      const client = getPartnerClient('tge-test');
+      const body = meBody({ partner: { client, user, token: { clientId: 'tge-test', scope: 'tge:identity', issuedAt: new Date(), expiresAt: new Date() } } });
+      assert.equal(body.email_masked, null);
+    } finally {
+      process.env.SSO_TGE_STATUS_FIELDS = saved;
+    }
+  });
+});
+
+/** Item 11 over HTTP. */
+describe('POST /oauth/register kill switch (item 11)', () => {
+  beforeEach(() => clearRateLimitStore());
+
+  it('registers by default and answers 403 once registration is closed', async () => {
+    const open = await request(app).post('/oauth/register').send({ redirect_uris: ['https://claude.ai/api/mcp/auth_callback'], client_name: 'Claude' });
+    assert.equal(open.status, 201, open.text);
+    process.env.OAUTH_PUBLIC_REGISTRATION_ENABLED = 'false';
+    try {
+      const closed = await request(app).post('/oauth/register').send({ redirect_uris: ['https://claude.ai/api/mcp/auth_callback'] });
+      assert.equal(closed.status, 403);
+      assert.equal(closed.headers['cache-control'], 'no-store');
+      // The partner flow is untouched by the switch.
+      const authorize = await request(app).get('/oauth/authorize').query(authorizeQuery());
+      assert.equal(authorize.status, 302);
+    } finally {
+      delete process.env.OAUTH_PUBLIC_REGISTRATION_ENABLED;
+    }
   });
 });

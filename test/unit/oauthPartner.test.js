@@ -33,6 +33,10 @@ const { PARTNER_SCOPES } = require('../../src/constants/partnerClient');
 
 const {
   OAuthError,
+  ConsentInitiatorError,
+  AUTHZ_COOKIE_NAME,
+  readInitiatorNonce,
+  registerClient,
   resolveClient,
   assertRedirect,
   parsePartnerScope,
@@ -48,6 +52,17 @@ const {
 } = oauth;
 
 const req = { get: () => '' };
+
+/** Minimal stand-in for the express response: records what res.cookie() was asked to set. */
+function fakeRes() {
+  const cookies = [];
+  return { cookies, cookie: (name, value, options) => cookies.push({ name, value, options }) };
+}
+
+/** A request carrying (only) the `__Host-ddc_authz` cookie — i.e. one specific browser. */
+function reqWithCookie(nonce) {
+  return { get: (name) => (String(name).toLowerCase() === 'cookie' ? `${AUTHZ_COOKIE_NAME}=${nonce}` : '') };
+}
 const basicHeader = (id, secret) => `Basic ${Buffer.from(`${encodeURIComponent(id)}:${encodeURIComponent(secret)}`).toString('base64')}`;
 const reqWithBasic = (id = 'tge-test', secret = SECRET) => ({ get: (name) => (name.toLowerCase() === 'authorization' ? basicHeader(id, secret) : '') });
 
@@ -348,6 +363,213 @@ describe('decideConsent', () => {
     assert.equal(to.searchParams.get('iss'), ISSUER);
     const ttl = prisma.oAuthAuthorization.rows[0].expiresAt.getTime() - before;
     assert.ok(ttl >= 10 * 60 * 1000 - 50 && ttl <= 10 * 60 * 1000 + 2000, `code ttl ${ttl}`);
+  });
+});
+
+/**
+ * Item 1 — authorization-request fixation. The attacker starts the authorization on their own
+ * machine and sends the consent link to the victim; before the binding, the victim's approval
+ * minted a code that travelled to the ATTACKER's registered redirect, bound to the attacker's
+ * state and code_verifier, so PKCE never entered into it.
+ */
+describe('decideConsent — initiator binding (item 1)', () => {
+  /** Start an authorization "in a browser": returns { requestId, nonce, row }. */
+  async function startInBrowser(query = partnerQuery()) {
+    const res = fakeRes();
+    const url = await startAuthorization(req, query, res);
+    const requestId = new URL(url).searchParams.get('request');
+    return {
+      requestId,
+      nonce: res.cookies[0].value,
+      cookie: res.cookies[0],
+      row: prisma.oAuthAuthorization.rows.find((r) => r.id === requestId),
+    };
+  }
+
+  it('sets a __Host- cookie with the attributes the prefix requires and stores only its sha256', async () => {
+    const { cookie, row, nonce } = await startInBrowser();
+    assert.equal(cookie.name, '__Host-ddc_authz');
+    assert.equal(cookie.options.httpOnly, true);
+    assert.equal(cookie.options.secure, true, '__Host- cookies are refused without Secure');
+    assert.equal(cookie.options.sameSite, 'lax');
+    assert.equal(cookie.options.path, '/');
+    assert.equal('domain' in cookie.options, false, '__Host- forbids Domain; that is what stops a sibling host planting it');
+    assert.ok(nonce.length >= 40, `nonce too short: ${nonce.length}`);
+    assert.equal(row.initiatorHash, crypto.createHash('sha256').update(nonce).digest('hex'));
+    assert.notEqual(row.initiatorHash, nonce, 'the nonce itself is never stored');
+    assert.ok(row.initiatorBoundAt instanceof Date);
+    assert.equal(row.initiatorMismatchCount, 0);
+  });
+
+  it('the browser that started it can approve', async () => {
+    const { requestId, nonce } = await startInBrowser();
+    const to = new URL(await decideConsent(user, requestId, true, { kind: 'user_jwt', initiatorNonce: nonce }));
+    assert.match(to.searchParams.get('code'), /^ddc_code_/);
+  });
+
+  it('ANOTHER browser cannot: no code is minted and the request stays undecided', async () => {
+    const { requestId, row } = await startInBrowser();
+    // The victim clicks the attacker's consent link. Their browser has no cookie for it…
+    let caught = null;
+    try {
+      await decideConsent(user, requestId, true, { kind: 'user_jwt' });
+    } catch (error) {
+      caught = error;
+    }
+    assert.ok(caught instanceof ConsentInitiatorError, `expected ConsentInitiatorError, got ${caught}`);
+    assert.equal(caught.code, 'AUTHZ_INITIATOR_MISMATCH');
+    assert.equal(caught.reason, 'missing');
+    assert.equal(caught.statusCode, 409);
+    assert.equal(caught.clientName, 'DDC TGE', 'the page renders "start again from {client}"');
+    assert.equal(row.codeHash, undefined, 'no code exists');
+    assert.equal(row.consumedAt, undefined);
+    assert.equal(row.userId, undefined, 'the victim is not even recorded as the subject');
+    assert.equal(row.initiatorMismatchCount, 1, 'the event is visible in the row, not only in the log');
+
+    // …or has its own, from a sign-in it started itself.
+    const other = await startInBrowser();
+    const second = await decideConsent(user, requestId, true, { kind: 'user_jwt', initiatorNonce: other.nonce })
+      .then(() => null, (error) => error);
+    assert.ok(second instanceof ConsentInitiatorError);
+    assert.equal(second.reason, 'mismatch');
+    assert.equal(row.initiatorMismatchCount, 2);
+    assert.equal(row.codeHash, undefined);
+  });
+
+  it('an SSO-ticket session is bound the same way (the App hand-off runs in the system browser)', async () => {
+    const { requestId, nonce } = await startInBrowser();
+    await assert.rejects(
+      decideConsent(user, requestId, true, { kind: 'sso_ticket', clientId: 'tge-test' }),
+      (error) => error instanceof ConsentInitiatorError && error.reason === 'missing'
+    );
+    const to = new URL(await decideConsent(user, requestId, true, { kind: 'sso_ticket', clientId: 'tge-test', initiatorNonce: nonce }));
+    assert.ok(to.searchParams.get('code'), 'same browser, same cookie: the hand-off completes');
+  });
+
+  it('a DENIAL is still accepted from any browser — it only ever destroys the request', async () => {
+    const { requestId, row } = await startInBrowser();
+    const to = new URL(await decideConsent(user, requestId, false, { kind: 'user_jwt' }));
+    assert.equal(to.searchParams.get('error'), 'access_denied');
+    assert.ok(row.consumedAt, 'a fixated request must not survive the victim saying no');
+  });
+
+  it('one nonce per browser, not per authorization: two tabs both complete', async () => {
+    const first = await startInBrowser();
+    // The second /oauth/authorize arrives with the cookie the first one set.
+    const res = fakeRes();
+    const url = await startAuthorization(reqWithCookie(first.nonce), partnerQuery(), res);
+    assert.equal(res.cookies[0].value, first.nonce, 'the existing nonce is reused (and refreshed)');
+    const secondId = new URL(url).searchParams.get('request');
+    assert.ok(await decideConsent(user, first.requestId, true, { kind: 'user_jwt', initiatorNonce: first.nonce }));
+    assert.ok(await decideConsent(user, secondId, true, { kind: 'user_jwt', initiatorNonce: first.nonce }));
+  });
+
+  it('readInitiatorNonce reads only a well-formed cookie of that exact name', () => {
+    assert.equal(readInitiatorNonce(reqWithCookie('abcdefghijklmnopqrstuvwx')), 'abcdefghijklmnopqrstuvwx');
+    assert.equal(readInitiatorNonce({ get: () => 'other=1; __Host-ddc_authz=abcdefghijklmnopqrstuvwx; x=2' }), 'abcdefghijklmnopqrstuvwx');
+    assert.equal(readInitiatorNonce({ get: () => 'ddc_authz=abcdefghijklmnopqrstuvwx' }), null, 'the __Host- prefix is part of the name');
+    assert.equal(readInitiatorNonce({ get: () => '__Host-ddc_authz=short' }), null);
+    assert.equal(readInitiatorNonce({ get: () => '__Host-ddc_authz=has spaces and ; junk' }), null);
+    assert.equal(readInitiatorNonce({ get: () => '' }), null);
+    assert.equal(readInitiatorNonce({}), null);
+  });
+
+  it('a request created without a response object stays unbound (no browser can hold that cookie)', async () => {
+    const url = await startAuthorization(req, partnerQuery());
+    const id = new URL(url).searchParams.get('request');
+    assert.equal(prisma.oAuthAuthorization.rows.find((r) => r.id === id).initiatorHash, null);
+    assert.ok(await decideConsent(user, id, true, { kind: 'user_jwt' }));
+  });
+});
+
+/**
+ * Item 4 — the approve path used to write `codeHash` without consuming the request, so one
+ * authorization request was a re-decidable consent slot: approve, approve again, two codes.
+ */
+describe('decideConsent — one request, one decision (item 4)', () => {
+  it('a second approval on the same request mints nothing', async () => {
+    const url = await startAuthorization(req, partnerQuery());
+    const id = new URL(url).searchParams.get('request');
+    const first = new URL(await decideConsent(user, id, true, { kind: 'user_jwt' }));
+    const firstCode = first.searchParams.get('code');
+    assert.ok(firstCode);
+
+    await rejects(decideConsent(user, id, true, { kind: 'user_jwt' }), { status: 400, error: 'invalid_request' });
+    const row = prisma.oAuthAuthorization.rows.find((r) => r.id === id);
+    assert.equal(row.codeHash, crypto.createHash('sha256').update(firstCode).digest('hex'), 'the first code still stands');
+
+    // Neither can it be turned into a denial afterwards, or the other way round.
+    await rejects(decideConsent(user, id, false, { kind: 'user_jwt' }), { status: 400, error: 'invalid_request' });
+    // And the one code it did mint is still exchangeable exactly once.
+    const { verifier, challenge } = pkce();
+    const fresh = await startAuthorization(req, partnerQuery({ code_challenge: challenge }));
+    const freshId = new URL(fresh).searchParams.get('request');
+    const code = new URL(await decideConsent(user, freshId, true, { kind: 'user_jwt' })).searchParams.get('code');
+    const token = await exchangeAuthorizationCode(reqWithBasic(), {
+      grant_type: 'authorization_code', code, code_verifier: verifier, redirect_uri: REDIRECT,
+    });
+    assert.match(token.access_token, /^ddc_tge_/);
+  });
+
+  it('the decision consume only matches a request that has neither been finished nor decided', async () => {
+    const url = await startAuthorization(req, partnerQuery());
+    const id = new URL(url).searchParams.get('request');
+    const where = { id, consumedAt: null, codeHash: null, expiresAt: { gt: new Date() } };
+    const first = await prisma.oAuthAuthorization.updateMany({ where, data: { codeHash: 'x' } });
+    const second = await prisma.oAuthAuthorization.updateMany({ where, data: { codeHash: 'y' } });
+    assert.equal(first.count, 1);
+    assert.equal(second.count, 0);
+  });
+});
+
+/** Item 7 — the account is re-read at the exchange, not only at consent and on refresh. */
+describe('exchangeAuthorizationCode — the account is re-checked (item 7)', () => {
+  it('a code minted before the account was disabled no longer yields a token', async () => {
+    const { code, verifier, row } = await mintPartnerCode();
+    prisma.user.rows.find((r) => r.id === user.id).disabledAt = new Date();
+    await rejects(exchangeAuthorizationCode(reqWithBasic(), {
+      grant_type: 'authorization_code', code, code_verifier: verifier, redirect_uri: REDIRECT,
+    }), { status: 400, error: 'invalid_grant' });
+    assert.equal(prisma.mcpToken.rows.length, 0, 'no token was issued inside the 60-second window');
+    assert.equal(row.consumedAt, undefined, 'refused before the consume, so nothing is silently burnt');
+  });
+
+  it('a code whose user row has since been deleted is invalid_grant too', async () => {
+    const { code, verifier } = await mintPartnerCode();
+    prisma.user.rows.length = 0;
+    await rejects(exchangeAuthorizationCode(reqWithBasic(), {
+      grant_type: 'authorization_code', code, code_verifier: verifier, redirect_uri: REDIRECT,
+    }), { status: 400, error: 'invalid_grant' });
+    assert.equal(prisma.mcpToken.rows.length, 0);
+  });
+});
+
+/** Item 11 — dynamic client acquisition can be closed for the campaign window. */
+describe('OAUTH_PUBLIC_REGISTRATION_ENABLED (item 11)', () => {
+  const restore = () => { delete process.env.OAUTH_PUBLIC_REGISTRATION_ENABLED; };
+
+  it('defaults to open, so today\'s MCP behaviour is unchanged', async () => {
+    restore();
+    const registered = await registerClient({ redirect_uris: ['https://claude.ai/api/mcp/auth_callback'], client_name: 'Claude' });
+    assert.match(registered.client_id, /^ddc_oauth_/);
+    process.env.OAUTH_PUBLIC_REGISTRATION_ENABLED = 'true';
+    assert.ok((await registerClient({ redirect_uris: ['https://claude.ai/api/mcp/auth_callback'] })).client_id);
+  });
+
+  it('closed: /oauth/register and the CIMD metadata fetch are 403, the partner client is untouched', async () => {
+    process.env.OAUTH_PUBLIC_REGISTRATION_ENABLED = 'false';
+    try {
+      await rejects(registerClient({ redirect_uris: ['https://claude.ai/api/mcp/auth_callback'] }), { status: 403 });
+      assert.equal(prisma.oAuthClient.rows.length, 0, 'no client row appears while registration is closed');
+      // A CIMD client_id is a URL: resolving it would FETCH the attacker-named document.
+      await rejects(resolveClient('https://chatgpt.com/backend-api/client-metadata'), { status: 403, error: 'unauthorized_client' });
+      // The static partner client and already-stored clients keep working.
+      assert.equal((await resolveClient('tge-test')).kind, 'partner');
+      await seedMcpClient();
+      assert.equal((await resolveClient('ddc_oauth_mcp1')).kind, 'mcp');
+    } finally {
+      restore();
+    }
   });
 });
 

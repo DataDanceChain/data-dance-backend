@@ -23,12 +23,29 @@ const {
 } = require('../constants/partnerClient');
 const { findUserByPartnerToken } = require('../services/mcpTokenService');
 const { hasActiveConsent } = require('../services/dataLicenceConsent');
-const { ensureDisplayReferralCode, getInviterId, countDirectInvitees } = require('../utils/referralUtils');
+const { isDisplayReferralCode, getInviterId, countDirectInvitees } = require('../utils/referralUtils');
 const { createLogger } = require('../utils/logger');
+const prisma = require('../utils/prisma');
+const { installReadOnlyGuard, runReadOnly } = require('../utils/prismaReadOnly');
 
 const logger = createLogger('partnerTge');
 
 const router = express.Router();
+
+// "Read-only" is enforced by the process, not promised by the handlers: inside a partner
+// request every Prisma write throws (src/utils/prismaReadOnly.js). The guard is installed on
+// the shared client, so it also catches a write made inside a helper several calls down.
+installReadOnlyGuard(prisma);
+
+/**
+ * Opens the read-only scope. Mounted AFTER `requirePartnerToken` on purpose: authenticating the
+ * token refreshes `McpToken.lastUsedAt`, which is DataDance's own bookkeeping about the
+ * credential — not partner-visible state — and is the one write this surface still makes.
+ * Everything from here on serves data and must not write.
+ */
+function readOnlyRequest(req, res, next) {
+  return runReadOnly(`partner ${req.method} ${req.baseUrl || ''}${req.path}`, next);
+}
 
 const passthrough = (req, res, next) => next();
 const lim = (name) => (rateLimiters && rateLimiters[name]) || passthrough;
@@ -135,23 +152,35 @@ function fieldGate(req) {
   return (scope, field) => hasScope(token.scope, scope) && frozen.has(field);
 }
 
-router.get('/me', requirePartnerToken, requireScope('tge:identity'), (req, res) => {
-  const { client, user, token } = req.partner;
+/**
+ * The `/me` body. Extracted so the field gates can be exercised with a token the endpoint
+ * itself would never let through — which is how the `email_masked` gap was found.
+ */
+function meBody(req) {
+  const { user, token } = req.partner;
   const serves = fieldGate(req);
   const body = {
     sub: user.id,
     client_id: token.clientId,
     issued_at: iso(token.issuedAt),
     expires_at: iso(token.expiresAt),
-    email_masked: client.statusFields.includes('email_masked') ? maskEmail(realEmail(user)) : null,
+    // BOTH gates, like every other field: the catalog declares `email_masked` under
+    // `tge:identity`, and it used to be gated on the freeze list alone — so a token without the
+    // scope still received it. Today that scope is also the endpoint scope, so nothing changes
+    // for a caller; the point is that the field can never again outlive its own declaration.
+    email_masked: serves('tge:identity', 'email_masked') ? maskEmail(realEmail(user)) : null,
   };
   // The real address, for the campaign's own mail. null when the e-mail column holds a wallet
   // address (external-wallet login) or a legacy `twitter|<id>` subject — see realEmail().
   if (serves('tge:email', 'email')) body.email = realEmail(user);
   // EIP-55 form, so the partner can compare it with what a wallet shows. null when unbound.
   if (serves('tge:wallet', 'wallet_address')) body.wallet_address = checksumWalletAddress(user.walletAddress);
+  return body;
+}
+
+router.get('/me', requirePartnerToken, readOnlyRequest, requireScope('tge:identity'), (req, res) => {
   res.set('Cache-Control', 'no-store');
-  return res.json(body);
+  return res.json(meBody(req));
 });
 
 /**
@@ -162,20 +191,19 @@ router.get('/me', requirePartnerToken, requireScope('tge:identity'), (req, res) 
  * data nobody in that list agreed to share. `direct_invitees` is a COUNT for the partner's
  * leaderboard and `inviter_sub` is the one id the user's own upline rebate needs.
  */
-async function referralSummary(userId) {
-  let code = null;
-  try {
-    // The same helper the Wallet uses, so the partner sees the code the user can read aloud.
-    code = (await ensureDisplayReferralCode(userId)) || null;
-  } catch (error) {
-    // A code that cannot be allocated right now must not fail the whole status read.
-    logger.warn('Could not resolve a display referral code for the partner API', { userId, error: error.message });
-  }
-  const [inviterSub, directInvitees] = await Promise.all([getInviterId(userId), countDirectInvitees(userId)]);
+async function referralSummary(user) {
+  // READ ONLY. This used to call ensureDisplayReferralCode(), which allocates a short code and
+  // writes it to the User row — a partner GET mutating DataDance state, with no request of its
+  // own in the audit trail and a `$executeRaw` UPDATE behind it. The partner now sees the code
+  // only if the user already has one in display form; a legacy code reads as `null`, exactly as
+  // the contract's "a display code could not be resolved". Allocation belongs to the Wallet,
+  // where the user is present and the write has a reason.
+  const code = isDisplayReferralCode(user.referralCode) ? user.referralCode : null;
+  const [inviterSub, directInvitees] = await Promise.all([getInviterId(user.id), countDirectInvitees(user.id)]);
   return { code, inviter_sub: inviterSub, direct_invitees: directInvitees };
 }
 
-router.get('/status', requirePartnerToken, requireScope('tge:status'), async (req, res, next) => {
+router.get('/status', requirePartnerToken, readOnlyRequest, requireScope('tge:status'), async (req, res, next) => {
   try {
     const { user } = req.partner;
     const serves = fieldGate(req);
@@ -200,7 +228,7 @@ router.get('/status', requirePartnerToken, requireScope('tge:status'), async (re
         cache_max_age: PARTNER_POINTS_CACHE_MAX_AGE_SEC,
       };
     }
-    if (serves('tge:referral', 'referral')) body.referral = await referralSummary(user.id);
+    if (serves('tge:referral', 'referral')) body.referral = await referralSummary(user);
     // A body carrying a live balance is not cacheable at all, so the whole response drops to
     // no-store and the top-level cache_max_age follows it down (T14: never cache past the value).
     if (body.points) {
@@ -220,8 +248,16 @@ router.use((req, res) => sendError(req, res, 404, 'invalid_request', 'Unknown pa
 
 // Errors thrown inside this router never fall through to the HTML/stack-trace handler.
 // eslint-disable-next-line no-unused-vars
-router.use((error, req, res, next) => sendError(req, res, 500, 'server_error', 'Unexpected error.'));
+router.use((error, req, res, next) => {
+  if (error && error.code === 'READ_ONLY_VIOLATION') {
+    // Loud on purpose: a write on this surface is a defect, not a user-visible condition.
+    logger.error('partner.read_only_violation', { operation: error.operation, path: req.originalUrl });
+  }
+  return sendError(req, res, 500, 'server_error', 'Unexpected error.');
+});
 
 module.exports = router;
 module.exports.requirePartnerToken = requirePartnerToken;
 module.exports.accountStatus = accountStatus;
+module.exports.meBody = meBody;
+module.exports.referralSummary = referralSummary;

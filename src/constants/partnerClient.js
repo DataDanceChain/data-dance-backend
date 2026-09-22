@@ -193,15 +193,13 @@ function readPartnerConfig(env = process.env) {
   };
 }
 
-/** Audience of partner access tokens: `${PUBLIC_BASE_URL}/partner/tge` (same convention as `/mcp`). */
+/**
+ * Audience of partner access tokens: `${PUBLIC_BASE_URL}/partner/tge` (same convention as
+ * `/mcp`). Always the configured origin — never the request host and never a localhost guess,
+ * or the audience a token is bound to would be chosen by whoever asked for it.
+ */
 function partnerResourceUrl(req) {
-  let base = '';
-  if (req && typeof req.get === 'function') {
-    base = publicBaseUrl(req);
-  } else {
-    base = (process.env.PUBLIC_BASE_URL || '').trim().replace(/\/$/, '') || `http://localhost:${process.env.PORT || 3000}`;
-  }
-  return `${base}/partner/tge`;
+  return `${publicBaseUrl(req)}/partner/tge`;
 }
 
 /**
@@ -415,6 +413,92 @@ function assertPartnerConfig(env = process.env) {
   };
 }
 
+function httpsUrlProblem(name, value) {
+  const raw = String(value || '').trim();
+  if (!raw) return `${name} is required`;
+  let parsed;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    return `${name} must be an absolute URL (got "${raw}")`;
+  }
+  if (parsed.protocol !== 'https:') return `${name} must be https (got "${parsed.protocol}//…")`;
+  return '';
+}
+
+/**
+ * The money-path assertions (item 8). `SSO_TGE_ENABLED=true` is the switch that puts DataDance
+ * identities in front of a partner page that may move real money; from that moment the
+ * deployment shape matters as much as the protocol, and every condition below is one that has
+ * silently held the opposite value in a real environment at least once:
+ *
+ *   - NODE_ENV=production            — otherwise stack traces, dev CORS and `off` verify modes
+ *                                      are all still reachable.
+ *   - WEB3AUTH_VERIFY_MODE=enforce   — in `log` a rejected connection is still accepted.
+ *   - WEB3AUTH_ALLOW_LEGACY_FALLBACK=false — the body-asserted login is the historical takeover.
+ *   - WEB3AUTH_CLIENT_ID             — the expected token audience.
+ *   - WEB3AUTH_ALLOWED_VERIFIERS     — the connections we chose (item 2).
+ *   - SSO_SESSION_SECRET ≠ JWT_SECRET — that difference is what keeps the consent-only session
+ *                                      out of every other authenticated endpoint.
+ *   - PUBLIC_BASE_URL / APP_PUBLIC_URL, both https — the issuer and the consent origin.
+ *
+ * Throws with every problem listed at once; returns a summary with no secret values.
+ * Called from src/server.js next to assertPartnerConfig().
+ */
+function assertFinancialGradeConfig(env = process.env) {
+  const cfg = readPartnerConfig(env);
+  if (!cfg.enabled) return { enforced: false };
+
+  const problems = [];
+  const verifyMode = String(env.WEB3AUTH_VERIFY_MODE || '').trim().toLowerCase();
+  const legacyFallback = String(env.WEB3AUTH_ALLOW_LEGACY_FALLBACK ?? 'false').trim().toLowerCase();
+  const allowedVerifiers = csv(env.WEB3AUTH_ALLOWED_VERIFIERS);
+  const sessionSecret = String(env.SSO_SESSION_SECRET || '').trim();
+  const jwtSecret = String(env.JWT_SECRET || '').trim();
+
+  if (env.NODE_ENV !== 'production') {
+    problems.push(`NODE_ENV must be "production" when SSO_TGE_ENABLED=true (got "${env.NODE_ENV || '(unset)'}")`);
+  }
+  if (verifyMode !== 'enforce') {
+    problems.push(`WEB3AUTH_VERIFY_MODE must be "enforce" when SSO_TGE_ENABLED=true (got "${verifyMode || '(unset)'}")`);
+  }
+  if (legacyFallback !== 'false') {
+    problems.push('WEB3AUTH_ALLOW_LEGACY_FALLBACK must be false when SSO_TGE_ENABLED=true');
+  }
+  if (!String(env.WEB3AUTH_CLIENT_ID || '').trim()) {
+    problems.push('WEB3AUTH_CLIENT_ID is required when SSO_TGE_ENABLED=true');
+  }
+  if (!allowedVerifiers.length) {
+    problems.push('WEB3AUTH_ALLOWED_VERIFIERS must list the accepted Web3Auth connections when SSO_TGE_ENABLED=true');
+  }
+  if (!sessionSecret) {
+    problems.push('SSO_SESSION_SECRET is required when SSO_TGE_ENABLED=true');
+  } else if (sessionSecret === jwtSecret) {
+    problems.push('SSO_SESSION_SECRET must differ from JWT_SECRET');
+  }
+  for (const [name, value] of [['PUBLIC_BASE_URL', env.PUBLIC_BASE_URL], ['APP_PUBLIC_URL', env.APP_PUBLIC_URL]]) {
+    const problem = httpsUrlProblem(name, value);
+    if (problem) problems.push(problem);
+  }
+
+  if (problems.length) {
+    throw new Error(
+      `SSO_TGE_ENABLED=true puts DataDance identities in front of the partner page; refusing to start:\n - ${problems.join('\n - ')}`
+    );
+  }
+  return {
+    enforced: true,
+    nodeEnv: env.NODE_ENV,
+    verifyMode,
+    legacyFallback: false,
+    allowedVerifierCount: allowedVerifiers.length,
+    publicBaseUrl: String(env.PUBLIC_BASE_URL).trim(),
+    appPublicUrl: String(env.APP_PUBLIC_URL).trim(),
+    sessionSecretSeparate: true,
+    publicRegistration: String(env.OAUTH_PUBLIC_REGISTRATION_ENABLED ?? 'true').trim().toLowerCase() !== 'false',
+  };
+}
+
 module.exports = {
   PARTNER_KIND,
   PARTNER_REALM,
@@ -444,4 +528,5 @@ module.exports = {
   EXTERNAL_WALLET_VERIFIER,
   sha256Hex,
   assertPartnerConfig,
+  assertFinancialGradeConfig,
 };
