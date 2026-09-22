@@ -157,7 +157,7 @@ npm run dev
 
 ## 🛡 运行加固 (Operational hardening)
 
-- **反向代理与真实 IP**：`TRUST_PROXY_HOPS`（默认 **2**，对应生产链路 Cloudflare → nginx → 容器）设置 Express `trust proxy`，`req.ip` 取自 `X-Forwarded-For`，限流按真实客户端 IP 计。直连公网时设为 `0`，否则任何客户端都能用伪造的 `X-Forwarded-For` 绕过限流。
+- **反向代理与真实 IP**：`TRUST_PROXY_HOPS`（默认 **1**）设置 Express `trust proxy`，`req.ip` 取自 `X-Forwarded-For`，限流按真实客户端 IP 计。默认值是 1 而不是链路跳数：生产 nginx 只设 `Host`/`Upgrade`/`Connection`，**不追加** `X-Forwarded-For`，所以容器看到的只有 Cloudflare 写入的那一条，也就是真实客户端。设成 2 会让 Express 跳过那一条、退回到**客户端自己发的**值，于是任何人都能用伪造的 `X-Forwarded-For` 绕过所有按 IP 的限流。上线前必须用一次真实请求核对（启动摘要会打印该值）；源站若直连公网则设 `0`。
   - **上线前必须用一次真实请求核对这个值**（比如临时打一条 `req.ip` 日志，确认等于终端用户地址）：少算一跳时 `req.ip` 是 Cloudflare 边缘地址，同一个 PoP 后面的所有用户共用一个限流桶；多算一跳则 `X-Forwarded-For` 可伪造。
 - **请求 ID**：每个请求带 `X-Request-Id`（透传上游的安全字符串，否则生成 UUID），回写响应头，`Request completed` / `Request failed` 日志带 `reqId`，一次登录可按 id 串起来查。
 - **日志脱敏**（`src/utils/logger.js`）：访问日志（morgan）和 winston 日志里的 URL query 值 `access_token, token, code, ticket, id_token, idToken, client_secret, refresh_token, code_verifier, password, otp` 一律掩码（保留前 4 字符 + 长度；`password` / `otp` 及短值整体隐藏）；日志 meta 对象里同名键、`authorization` 头（保留 scheme）、`email`（只留域名）、`walletAddress`（前 6 + 后 4）递归掩码，含嵌套对象与数组。验收：跑一遍登录/授权流程后 `grep -r 'ddc_tge_\|ddc_code_\|ddc_tkt_\|client_secret=' logs/` 为零。

@@ -115,13 +115,13 @@ const corsOptions = {
   exposedHeaders: ['Content-Range', 'X-Content-Range', 'WWW-Authenticate', 'X-Request-Id']
 };
 
-// 反向代理：信任 TRUST_PROXY_HOPS 跳（默认 2 = 生产链路 Cloudflare → nginx → 容器），
-// req.ip / req.protocol 取自 X-Forwarded-*，限流与日志按真实客户端 IP 计。
-// 上线前必须用一次真实请求核对这个值：req.ip 必须等于终端用户地址。
-// 少算一跳 → req.ip 是 Cloudflare 边缘地址，同一 PoP 后面的所有用户共用一个限流桶（一个人
-// 就能把整片地区限流掉）；多算一跳 → X-Forwarded-For 可被客户端伪造，限流形同虚设。
-// 直连公网时设 0。
-const trustProxyHops = Number(process.env.TRUST_PROXY_HOPS || 2);
+// Reverse proxy hops to trust. DEFAULT 1, and the default matters: production's nginx sets only
+// Host/Upgrade/Connection and does NOT append to X-Forwarded-For, so the container sees exactly one
+// entry — the one Cloudflare wrote, which is the real client. Trusting 2 hops would make Express
+// skip that entry and fall back to whatever the CLIENT sent, i.e. every IP-keyed rate limit becomes
+// forgeable by sending your own X-Forwarded-For. Verify against one real request before a launch
+// (the value is echoed in the boot summary); set 0 only if the origin is ever exposed directly.
+const trustProxyHops = Number(process.env.TRUST_PROXY_HOPS ?? 1);
 app.set('trust proxy', Number.isFinite(trustProxyHops) ? trustProxyHops : 2);
 
 // 请求 ID：透传上游 X-Request-Id（仅接受安全字符），否则生成；回写响应头，日志按 reqId 串联
