@@ -515,6 +515,10 @@ async function getConsentRequest(id) {
  *   `initiatorNonce` is the `__Host-ddc_authz` cookie of the deciding browser (item 1).
  */
 async function decideConsent(user, requestId, allow, ctx = {}) {
+  // A missing/malformed id is the caller's error (400), never a Prisma validation error (500).
+  if (typeof requestId !== 'string' || !requestId.trim() || requestId.length > 128) {
+    throw new OAuthError(400, 'invalid_request', 'requestId is required.');
+  }
   const row = await prisma.oAuthAuthorization.findUnique({ where: { id: requestId } });
   // `codeHash` set = this request was already decided and is now a live code, not a consent slot.
   if (!row || row.consumedAt || row.codeHash || row.expiresAt < new Date()) {
