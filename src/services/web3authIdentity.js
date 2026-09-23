@@ -8,6 +8,11 @@
  *
  * Claim names, issuers, audiences and JWKS URLs are env parameters because the exact
  * shape of a live token for DDC's project is still an open research item.
+ *
+ * Signing keys are pinned (hardening G4): the JWKS is fetched over the network, so a valid
+ * signature only proves the token was signed by *some key that URL served*. The key that
+ * actually verified the token is identified by its RFC 7638 thumbprint and checked against
+ * WEB3AUTH_JWKS_PINNED_THUMBPRINTS (WEB3AUTH_JWKS_PIN_MODE = off | log | enforce).
  */
 const jose = require('jose');
 const { computeAddress, getAddress, isAddress } = require('ethers');
@@ -16,6 +21,10 @@ const { createLogger } = require('../utils/logger');
 const logger = createLogger('web3authIdentity');
 
 const VERIFY_MODES = ['off', 'log', 'enforce'];
+const PIN_MODES = ['off', 'log', 'enforce'];
+// RFC 7638 JWK thumbprint with SHA-256, base64url without padding: always 43 characters.
+// Mirrored in constants/partnerClient.js assertFinancialGradeConfig (not imported, see there).
+const THUMBPRINT_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 const WALLET_MATCH_MODES = ['address', 'public_key', 'none'];
 const EXTERNAL_WALLET_VERIFIER = 'external-wallet';
 const CLOCK_TOLERANCE_SEC = 60;
@@ -42,6 +51,12 @@ const DEFAULTS = {
   WEB3AUTH_EXTERNAL_ISSUERS: 'https://authjs.web3auth.io',
   WEB3AUTH_EXTERNAL_JWKS_URL: 'https://authjs.web3auth.io/jwks',
   WEB3AUTH_EXTERNAL_AUDIENCE: '', // empty → WEB3AUTH_CLIENT_ID
+  // G4: the signing keys this deployment approves, as RFC 7638 SHA-256 thumbprints (csv,
+  // base64url). ONE list covers both JWKS sets (social and external-wallet). Read the current
+  // values with scripts/web3authJwksThumbprints.js. EMPTY is refused at boot under pin `enforce`.
+  WEB3AUTH_JWKS_PINNED_THUMBPRINTS: '',
+  // off = no check · log = accept, warn `jwks_key_not_pinned` · enforce = 401 IDTOKEN_KEY_NOT_PINNED
+  WEB3AUTH_JWKS_PIN_MODE: 'log',
 };
 
 // Fixed (not env) claim fallbacks for display data. Never identity.
@@ -56,6 +71,7 @@ const HTTP_STATUS = {
   IDTOKEN_AUDIENCE: 401,
   IDTOKEN_SIGNATURE: 401,
   IDTOKEN_VERIFIER_NOT_ALLOWED: 401,
+  IDTOKEN_KEY_NOT_PINNED: 401,
   WALLET_NOT_IN_TOKEN: 401,
   IDENTITY_CONFLICT: 409,
   ORG_NOT_ALLOWED: 403,
@@ -123,6 +139,9 @@ function loadConfig(env = process.env) {
     legacyVerifiers: csv(envOr(env, 'WEB3AUTH_LEGACY_VERIFIERS')),
     // `log` mode only: allow a request with NO idToken at all to use the legacy path.
     allowLegacyFallback: envBool(env, 'WEB3AUTH_ALLOW_LEGACY_FALLBACK'),
+    // G4: which signing keys may verify a token at all, by RFC 7638 thumbprint (both JWKS sets).
+    pinMode: envOr(env, 'WEB3AUTH_JWKS_PIN_MODE').toLowerCase(),
+    pinnedThumbprints: csv(envOr(env, 'WEB3AUTH_JWKS_PINNED_THUMBPRINTS')),
     kinds: {
       social: {
         jwksUrl: envOr(env, 'WEB3AUTH_JWKS_URL'),
@@ -138,6 +157,11 @@ function loadConfig(env = process.env) {
   };
 }
 
+/** 1-based positions (`#2`) of pin-list entries that are not a SHA-256 JWK thumbprint. */
+function malformedThumbprints(list) {
+  return list.map((value, index) => (THUMBPRINT_PATTERN.test(value) ? null : `#${index + 1}`)).filter(Boolean);
+}
+
 /**
  * Boot-time checks. Throws with a clear message; called at module load and by tests.
  */
@@ -151,6 +175,26 @@ function assertBootConfig(env = process.env) {
   if (!WALLET_MATCH_MODES.includes(cfg.walletMatch)) {
     throw new Error(
       `WEB3AUTH_WALLET_MATCH must be one of ${WALLET_MATCH_MODES.join('|')} (got "${cfg.walletMatch}")`
+    );
+  }
+  if (!PIN_MODES.includes(cfg.pinMode)) {
+    throw new Error(`WEB3AUTH_JWKS_PIN_MODE must be one of ${PIN_MODES.join('|')} (got "${cfg.pinMode}")`);
+  }
+  // Positions, not values: a malformed entry may be something other than a thumbprint.
+  const malformedPins = malformedThumbprints(cfg.pinnedThumbprints);
+  if (malformedPins.length) {
+    const one = malformedPins.length === 1;
+    throw new Error(
+      `WEB3AUTH_JWKS_PINNED_THUMBPRINTS ${one ? 'entry' : 'entries'} ${malformedPins.join(', ')} ` +
+        `${one ? 'is not an RFC 7638 SHA-256 JWK thumbprint' : 'are not RFC 7638 SHA-256 JWK thumbprints'} ` +
+        '(43 base64url characters, no padding). Copy the values printed by scripts/web3authJwksThumbprints.js.'
+    );
+  }
+  if (cfg.pinMode === 'enforce' && !cfg.pinnedThumbprints.length) {
+    throw new Error(
+      'WEB3AUTH_JWKS_PINNED_THUMBPRINTS is required when WEB3AUTH_JWKS_PIN_MODE=enforce (csv of the RFC 7638 thumbprints ' +
+        'of the approved Web3Auth signing keys, printed by scripts/web3authJwksThumbprints.js). An empty list would ' +
+        'refuse every login.'
     );
   }
   if (cfg.nodeEnv === 'production' && cfg.mode === 'off') {
@@ -256,9 +300,67 @@ function mapJoseError(err) {
 }
 
 /**
+ * RFC 7638 SHA-256 thumbprint (base64url) of the key that verified a token, or null when it
+ * cannot be computed (a null thumbprint is never pinned).
+ *
+ * `key` is the CryptoKey jose's key resolver handed to the signature check — `jwtVerify(...).key`,
+ * jose's documented `ResolvedKey` — so this is the key material the signature was actually
+ * verified with, not whatever a JWKS entry's `kid` says. jose imports JWKS members as extractable
+ * public keys, and the thumbprint covers only the required public members (EC: crv, kty, x, y),
+ * so it equals the thumbprint of the JWKS entry that key came from, which is what
+ * scripts/web3authJwksThumbprints.js prints.
+ */
+async function keyThumbprint(key) {
+  if (!key) return null;
+  try {
+    return await jose.calculateJwkThumbprint(key, 'sha256');
+  } catch (err) {
+    return null;
+  }
+}
+
+/**
+ * G4 — signing-key pinning. The JWKS is fetched over the network when a token is verified, so
+ * whoever can influence that one response (DNS, a TLS-intercepting proxy, a compromise or a
+ * malicious rotation at the provider) can serve a key of their own — under a new kid, or under
+ * the kid of the real key — and mint any identity: the signature check passes, because the
+ * signature IS genuine for the key that was served. A kid is only a label; the thumbprint is the
+ * key. Runs only after the token has fully verified (signature, iss, aud, exp).
+ *
+ * `enforce` → IDTOKEN_KEY_NOT_PINNED (401), logged at error level.
+ * `log`     → accepted, `jwks_key_not_pinned` warning on every such token.
+ * `off`     → no check.
+ * Logged: kid, thumbprint, JWKS URL (all public). Never the token.
+ */
+async function assertKeyPinned(cfg, { key, protectedHeader, jwksUrl, kind }) {
+  if (cfg.pinMode === 'off') return;
+  const thumbprint = await keyThumbprint(key);
+  if (thumbprint && cfg.pinnedThumbprints.includes(thumbprint)) return;
+  const kid = protectedHeader && typeof protectedHeader.kid === 'string' ? protectedHeader.kid : null;
+  const meta = {
+    kid,
+    thumbprint,
+    jwksUrl,
+    kind,
+    alg: (protectedHeader && protectedHeader.alg) || null,
+    mode: cfg.pinMode,
+    pinnedCount: cfg.pinnedThumbprints.length,
+  };
+  if (cfg.pinMode === 'enforce') {
+    logger.error('jwks_key_not_pinned', { ...meta, outcome: 'refused' });
+    throw fail('IDTOKEN_KEY_NOT_PINNED', 'ID token was signed with a key DataDance has not approved', {
+      kid,
+      thumbprint,
+    });
+  }
+  logger.warn('jwks_key_not_pinned', { ...meta, outcome: 'accepted_log_mode' });
+}
+
+/**
  * Verify a Web3Auth ID token. Resolves `{ kind: 'social'|'external', payload, protectedHeader }`.
  * Throws Web3AuthIdentityError with one of IDTOKEN_REQUIRED|IDTOKEN_INVALID|IDTOKEN_EXPIRED|
- * IDTOKEN_ISSUER|IDTOKEN_AUDIENCE|IDTOKEN_SIGNATURE. Non-JOSE errors (JWKS unreachable) propagate.
+ * IDTOKEN_ISSUER|IDTOKEN_AUDIENCE|IDTOKEN_SIGNATURE|IDTOKEN_KEY_NOT_PINNED. Non-JOSE errors
+ * (JWKS unreachable) propagate.
  */
 async function verifyIdToken(idToken) {
   const cfg = getConfig();
@@ -279,18 +381,22 @@ async function verifyIdToken(idToken) {
   const k = cfg.kinds[kind];
   if (!k.audience.length) throw fail('IDTOKEN_AUDIENCE', 'No audience configured for this token kind');
 
+  let verified;
   try {
-    const { payload, protectedHeader } = await jose.jwtVerify(token, getJwks(k.jwksUrl), {
+    verified = await jose.jwtVerify(token, getJwks(k.jwksUrl), {
       issuer: k.issuers,
       audience: k.audience,
       algorithms: cfg.algs,
       clockTolerance: CLOCK_TOLERANCE_SEC,
       maxTokenAge: cfg.maxTokenAge,
     });
-    return { kind, payload, protectedHeader };
   } catch (err) {
     throw mapJoseError(err);
   }
+  // A key resolver was passed, so jose returns the key it resolved (and verified with) as `key`.
+  const { payload, protectedHeader, key } = verified;
+  await assertKeyPinned(cfg, { key, protectedHeader, jwksUrl: k.jwksUrl, kind });
+  return { kind, payload, protectedHeader };
 }
 
 // ---------------------------------------------------------------------------
@@ -687,6 +793,11 @@ module.exports = {
   _internals: {
     DEFAULTS,
     HTTP_STATUS,
+    PIN_MODES,
+    THUMBPRINT_PATTERN,
+    malformedThumbprints,
+    keyThumbprint,
+    assertKeyPinned,
     isVerifierAllowed,
     assertVerifierAllowed,
     loadConfig,
