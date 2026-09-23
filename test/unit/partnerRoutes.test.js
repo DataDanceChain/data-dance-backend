@@ -421,7 +421,7 @@ describe('/partner/tge — per-field scopes', () => {
       assert.ok(PARTNER_SCOPES.includes(entry.scope), `${name} must be gated by a real scope`);
       assert.ok(entry.source && entry.meaning && entry.nullMeaning, `${name} must document itself`);
       assert.equal(typeof entry.cacheTtlSec, 'number', `${name} must state a cache TTL`);
-      assert.ok(['me', 'status'].includes(entry.endpoint));
+      assert.ok(['me', 'status', 'referral-network'].includes(entry.endpoint));
     }
     assert.equal(STATUS_FIELD_CATALOG.points.cacheTtlSec, 0, 'a balance is never cacheable');
     // The new fields are off until an operator lists them: nothing new leaks on a deploy.

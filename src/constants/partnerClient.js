@@ -21,11 +21,11 @@ const PARTNER_KIND = 'partner';
 const PARTNER_REALM = 'ddc-sso';
 const PARTNER_TOKEN_PREFIX = 'ddc_tge_';
 /**
- * Every scope the partner client may request at /oauth/authorize. `tge:identity` (default) and
- * `tge:status` gate an ENDPOINT — missing one is 403 insufficient_scope. The four that follow
- * gate a single FIELD each: a token without them simply does not carry that field, which is why
- * the handlers omit the key instead of answering 403 (a partner that asked for less must still
- * get the rest of the response).
+ * Every scope the partner client may request at /oauth/authorize. `tge:identity` (default),
+ * `tge:status` and `tge:referral_network` gate an ENDPOINT — missing one is 403 insufficient_scope.
+ * The four field scopes (email, wallet, points, referral) gate a single FIELD each: a token without
+ * them simply does not carry that field, which is why the handlers omit the key instead of
+ * answering 403 (a partner that asked for less must still get the rest of the response).
  */
 const PARTNER_SCOPES = Object.freeze([
   'tge:identity',
@@ -34,6 +34,9 @@ const PARTNER_SCOPES = Object.freeze([
   'tge:wallet',
   'tge:points',
   'tge:referral',
+  // Sloan, 2026-09-23: the partner may read the user's COMPLETE referral network (every upline,
+  // every downline, any depth) — GET /partner/tge/referral-network. Also frozen per environment.
+  'tge:referral_network',
 ]);
 const PARTNER_DEFAULT_SCOPE = 'tge:identity';
 const PARTNER_REQUEST_TTL_MS = 10 * 60 * 1000;
@@ -136,9 +139,23 @@ const STATUS_FIELD_CATALOG = Object.freeze({
     presence: 'omit',
     source: 'User.referralCode + Referral rows for this user (inviteeId for the inviter, level-1 inviterId count)',
     meaning:
-      '{ code, inviter_sub, direct_invitees }. One id (the inviter, so the partner can pay an upline rebate) and one count (for a leaderboard). No downline list, no multi-level total.',
+      '{ code, inviter_sub, direct_invitees }. One id (the inviter, so the partner can pay an upline rebate) and one count (for a leaderboard). The complete network, every upline and downline at any depth, is GET /partner/tge/referral-network (scope tge:referral_network).',
     nullMeaning:
       '`inviter_sub` is null when nobody invited this user; `code` is null when a display code could not be resolved.',
+    cacheTtlSec: PARTNER_REFERRAL_CACHE_MAX_AGE_SEC,
+  },
+  // Not a field of /me or /status but a whole ENDPOINT, gated the same two ways: the token must
+  // carry the scope (403 insufficient_scope otherwise) and the environment must list it here
+  // (404 {"error":"not_available"} otherwise, so "not served here" stays distinct from "not granted").
+  referral_network: {
+    endpoint: 'referral-network',
+    scope: 'tge:referral_network',
+    presence: 'endpoint',
+    source: 'Referral rows (inviterId → inviteeId, append-only), walked up and down with a cycle-guarded recursive CTE over the snapshot createdAt <= as_of',
+    meaning:
+      "The user's complete referral network: upline nearest first, and every downline node at any depth as { sub, inviter_sub, depth, invited_at } — never another user's e-mail, name, wallet, points, status, orders, portrait or raw records.",
+    nullMeaning:
+      'Never null. Not served in this environment → 404 not_available; a user with no network → empty upline and a downline total of 0.',
     cacheTtlSec: PARTNER_REFERRAL_CACHE_MAX_AGE_SEC,
   },
 });

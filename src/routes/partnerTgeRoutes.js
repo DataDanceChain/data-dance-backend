@@ -27,6 +27,7 @@ const { isDisplayReferralCode, getInviterId, countDirectInvitees } = require('..
 const { createLogger } = require('../utils/logger');
 const prisma = require('../utils/prisma');
 const { installReadOnlyGuard, runReadOnly } = require('../utils/prismaReadOnly');
+const { buildReferralNetwork, NetworkRequestError } = require('../services/referralNetwork');
 
 const logger = createLogger('partnerTge');
 
@@ -208,12 +209,11 @@ router.get('/me', requirePartnerToken, readOnlyRequest, requireScope('tge:identi
 });
 
 /**
- * `{ code, inviter_sub, direct_invitees }`.
- *
- * NEVER a list of downline users. The people this user invited are third parties who consented
- * to DataDance, not to this partner; handing over their ids (or e-mails, or names) would share
- * data nobody in that list agreed to share. `direct_invitees` is a COUNT for the partner's
- * leaderboard and `inviter_sub` is the one id the user's own upline rebate needs.
+ * `{ code, inviter_sub, direct_invitees }` — unchanged. `direct_invitees` is a COUNT for the
+ * partner's leaderboard and `inviter_sub` is the one id the user's own upline rebate needs.
+ * The complete network — every upline and every downline at any depth, as ids and dates only —
+ * is GET /partner/tge/referral-network under its own scope (`tge:referral_network`, Sloan's
+ * decision of 2026-09-23). Other users' e-mail, name, wallet, points and status never leave here.
  */
 async function referralSummary(user) {
   // READ ONLY. This used to call ensureDisplayReferralCode(), which allocates a short code and
@@ -269,6 +269,41 @@ router.get('/status', requirePartnerToken, readOnlyRequest, requireScope('tge:st
 });
 
 // Anything else under /partner/tge is unknown; answer in the same RFC 6750 vocabulary.
+/**
+ * GET /partner/tge/referral-network — the user's complete referral network (see
+ * src/services/referralNetwork.js for the snapshot, pagination and cycle rules).
+ * Gates, in order: a valid partner token (401) → this environment serves it (404 not_available,
+ * distinct from "not granted") → the token carries `tge:referral_network` (403 insufficient_scope)
+ * → the account is active (403 account_disabled). Read-only scope, per-token rate limit, and one
+ * G6 access record with the node count returned.
+ */
+function networkServed(req, res, next) {
+  if (!req.partner.client.statusFields.includes('referral_network')) {
+    res.set('Cache-Control', 'no-store');
+    return res.status(404).json({ error: 'not_available', error_description: 'The referral network is not served in this environment.' });
+  }
+  return next();
+}
+
+router.get('/referral-network', requirePartnerToken, readOnlyRequest, networkServed, requireScope('tge:referral_network'), async (req, res, next) => {
+  try {
+    const { cursor, limit, as_of: asOf } = req.query || {};
+    const body = await buildReferralNetwork(req.partner.user.id, { cursor, limit, as_of: asOf });
+    res.set('Cache-Control', 'private, max-age=60');
+    recordAccess(req, 'referral-network', body, {
+      nodeCount: body.downline.nodes.length,
+      uplineCount: body.upline.length,
+      total: body.downline.total,
+      asOf: body.as_of,
+      anomalies: body.anomalies || [],
+    });
+    return res.json(body);
+  } catch (error) {
+    if (error instanceof NetworkRequestError) return sendError(req, res, 400, 'invalid_request', error.description);
+    return next(error);
+  }
+});
+
 router.use((req, res) => sendError(req, res, 404, 'invalid_request', 'Unknown partner endpoint.'));
 
 // Errors thrown inside this router never fall through to the HTML/stack-trace handler.

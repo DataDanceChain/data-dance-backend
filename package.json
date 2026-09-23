@@ -8,6 +8,7 @@
     "dev": "nodemon src/app.js",
     "build": "tsc",
     "test": "node --test src/*/*.test.js test/*/*.test.js",
+    "test:db": "node --test test/db/*.dbtest.js",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
     "prisma:studio": "prisma studio",
