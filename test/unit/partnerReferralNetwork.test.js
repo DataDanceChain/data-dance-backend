@@ -59,12 +59,17 @@ const EXTRA_KEY_PROBE = { set: false };
 
 // Stub graph: user-net-1 invited d1, d2; d1 invited dd1. u1 invited user-net-1.
 net.source.loadUpline = async () => [{ sub: 'u1', invited_at: new Date('2025-01-02T00:00:00Z'), depth: 1, cycle: false, path: ['user-net-1', 'u1'] }];
-net.source.loadDownline = async () => {
-  const rows = [
-    { sub: 'd1', inviter_sub: 'user-net-1', invited_at: new Date('2025-02-01T00:00:00Z'), depth: 1, cycle: false, path: [] },
-    { sub: 'd2', inviter_sub: 'user-net-1', invited_at: new Date('2025-02-02T00:00:00Z'), depth: 1, cycle: false, path: [] },
-    { sub: 'dd1', inviter_sub: 'd1', invited_at: new Date('2025-03-01T00:00:00Z'), depth: 2, cycle: false, path: [] },
-  ];
+const DOWN = () => [
+  { sub: 'd1', inviter_sub: 'user-net-1', invited_at: '2025-02-01T00:00:00.000Z', depth: 1 },
+  { sub: 'd2', inviter_sub: 'user-net-1', invited_at: '2025-02-02T00:00:00.000Z', depth: 1 },
+  { sub: 'dd1', inviter_sub: 'd1', invited_at: '2025-03-01T00:00:00.000Z', depth: 2 },
+];
+net.source.loadDownlineAggregate = async () => [{ depth: 1, count: 2, cycle_paths: [] }, { depth: 2, count: 1, cycle_paths: [] }];
+const keyCmp = (a, b) => (a.depth - b.depth) || (a.invited_at < b.invited_at ? -1 : a.invited_at > b.invited_at ? 1 : 0) || (a.sub < b.sub ? -1 : a.sub > b.sub ? 1 : 0);
+net.source.loadDownlinePage = async (userId, asOf, { after, limit }) => {
+  const rows = DOWN()
+    .filter((r) => !after || keyCmp(r, { depth: after.depth, invited_at: after.invitedAt, sub: after.sub }) > 0)
+    .slice(0, limit);
   // What a careless SQL change would do: select more columns. The node must still carry four.
   if (EXTRA_KEY_PROBE.set) for (const r of rows) Object.assign(r, { email: 'leak@example.com', name: 'Leak', totalPoints: 99 });
   return rows;
@@ -91,6 +96,7 @@ const network = (token, query = '') => request(server).get(`/partner/tge/referra
 
 describe('GET /partner/tge/referral-network', () => {
   beforeEach(() => {
+    net.clearAggregateCache();
     clearRateLimitStore();
     prisma.reset();
     issuedTokensByCode.clear();

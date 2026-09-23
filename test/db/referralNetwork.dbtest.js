@@ -98,6 +98,26 @@ describe('referral network SQL on Postgres', () => {
     assert.equal(u.downline.total, 0);
   });
 
+  it('keyset paging in SQL: every page size returns the whole downline once, in (depth, invited_at, sub) order', async () => {
+    for (let limit = 1; limit <= 8; limit++) {
+      net.clearAggregateCache();
+      const pages = [];
+      let body = await build('a', { limit: String(limit) });
+      pages.push(body);
+      while (body.downline.next_cursor) {
+        body = await build('a', { limit: String(limit), cursor: body.downline.next_cursor });
+        pages.push(body);
+      }
+      const flat = pages.flatMap((p) => p.downline.nodes);
+      assert.equal(flat.length, 7, `limit=${limit}`);
+      assert.equal(new Set(flat.map((n) => n.sub)).size, 7, `limit=${limit}`);
+      for (let i = 1; i < flat.length; i++) {
+        const [x, y] = [flat[i - 1], flat[i]];
+        assert.ok(x.depth < y.depth || (x.depth === y.depth && (x.invited_at < y.invited_at || (x.invited_at === y.invited_at && x.sub < y.sub))), `limit=${limit} order at ${i}`);
+      }
+    }
+  });
+
   it('snapshot: ?as_of cuts by createdAt, and a row inserted between pages is neither returned nor counted', async () => {
     const early = strip(await build('a', { as_of: at(2.5).toISOString() }));
     assert.deepEqual(early.downline.nodes.map((x) => x.sub), ['b', 'c']);

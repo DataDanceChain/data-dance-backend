@@ -42,8 +42,35 @@ function walk(userId, asOf, dir) {
   return out;
 }
 
+// Keyset order of the SQL (`sub COLLATE "C"` = code-unit order, like JS string comparison).
+const keyCmp = (a, b) => (a.depth - b.depth) || (a.invited_at < b.invited_at ? -1 : a.invited_at > b.invited_at ? 1 : 0) || (a.sub < b.sub ? -1 : a.sub > b.sub ? 1 : 0);
+const counters = { wholeWalks: 0, pages: 0 };
+
 net.source.loadUpline = async (userId, asOf) => walk(userId, asOf, 'up').sort((a, b) => a.depth - b.depth);
-net.source.loadDownline = async (userId, asOf) => walk(userId, asOf, 'down');
+// the WHOLE downline (levels / total) — what a later page must not recompute
+net.source.loadDownline = async (userId, asOf) => { counters.wholeWalks += 1; return walk(userId, asOf, 'down'); };
+net.source.loadDownlineAggregate = async (userId, asOf) => {
+  counters.wholeWalks += 1;
+  const rows = walk(userId, asOf, 'down');
+  const byDepth = new Map();
+  for (const r of rows) {
+    const e = byDepth.get(r.depth) || { depth: r.depth, count: 0, cycle_paths: [] };
+    if (r.cycle) e.cycle_paths.push(r.path.join(','));
+    else if (r.sub !== userId) e.count += 1;
+    byDepth.set(r.depth, e);
+  }
+  return [...byDepth.values()].sort((a, b) => a.depth - b.depth);
+};
+// one keyset page, bounded by maxDepth
+net.source.loadDownlinePage = async (userId, asOf, { after, limit, maxDepth }) => {
+  counters.pages += 1;
+  return walk(userId, asOf, 'down')
+    .filter((r) => !r.cycle && r.sub !== userId && r.depth <= maxDepth)
+    .map((r) => ({ ...r, invited_at: new Date(r.invited_at).toISOString() }))
+    .sort(keyCmp)
+    .filter((r) => !after || keyCmp(r, { depth: after.depth, invited_at: after.invitedAt, sub: after.sub }) > 0)
+    .slice(0, limit);
+};
 
 const NOW = new Date('2026-09-30T00:00:00.000Z');
 const build = (user, query = {}) => net.buildReferralNetwork(user, query, { now: NOW });
@@ -112,6 +139,15 @@ describe('referral network assembly', () => {
     assert.equal(pages.at(-1).downline.next_cursor, null);
   });
 
+  it('every page size from 1 to total+1 returns the whole downline exactly once (level boundaries included)', async () => {
+    for (let limit = 1; limit <= 13; limit++) {
+      net.clearAggregateCache();
+      const subs = (await allPages('a', limit)).flatMap((p) => p.downline.nodes.map((n) => n.sub));
+      assert.equal(subs.length, 12, `limit=${limit}`);
+      assert.equal(new Set(subs).size, 12, `limit=${limit}`);
+    }
+  });
+
   it('snapshot: an invitee added between page 1 and page 2 is neither returned nor counted', async () => {
     const first = await build('a', { limit: '3' });
     edges.push({ inviterId: 'a', inviteeId: 'late', createdAt: new Date(Date.parse(first.as_of) + 1) });
@@ -159,6 +195,41 @@ describe('referral network assembly', () => {
     assert.deepEqual(body.upline, []);
     assert.deepEqual(body.downline, { total: 0, levels: [], nodes: [], next_cursor: null });
     assert.equal('anomalies' in body, false);
+  });
+});
+
+describe('levels / total are computed once per snapshot (pinned as_of, append-only data)', () => {
+  beforeEach(() => {
+    edges = [];
+    edge('a', 'b', 1); edge('b', 'c', 2); edge('c', 'd', 3);
+    for (let i = 1; i <= 9; i++) edge('b', `x${i}`, 3 + i);
+    net.clearAggregateCache?.();
+  });
+
+  it('a later page is served without recomputing the whole downline', async () => {
+    counters.wholeWalks = 0;
+    const p1 = await build('a', { limit: '4' });
+    assert.equal(counters.wholeWalks, 1, 'page 1 computes levels / total once');
+    let body = p1;
+    let pages = 1;
+    while (body.downline.next_cursor) {
+      body = await build('a', { limit: '4', cursor: body.downline.next_cursor });
+      pages += 1;
+      assert.equal(body.downline.total, p1.downline.total);
+      assert.deepEqual(body.downline.levels, p1.downline.levels);
+    }
+    assert.equal(pages, 3);
+    assert.equal(counters.wholeWalks, 1, 'later pages reuse the snapshot aggregate');
+  });
+
+  it('a cache miss on a later page (e.g. after a restart) recomputes and answers the same', async () => {
+    const p1 = await build('a', { limit: '4' });
+    const warm = await build('a', { limit: '4', cursor: p1.downline.next_cursor });
+    net.clearAggregateCache?.();
+    counters.wholeWalks = 0;
+    const cold = await build('a', { limit: '4', cursor: p1.downline.next_cursor });
+    assert.equal(counters.wholeWalks, 1);
+    assert.deepEqual(cold, warm);
   });
 });
 

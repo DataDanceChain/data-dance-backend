@@ -21,9 +21,13 @@
  * signs up mid-pagination is skipped or double-counted. If Referral rows ever become mutable or
  * deletable, snapshots stop being exact — see the contract.
  *
- * Cost: O(downline) per page (the whole snapshot is walked for `levels` / `total` and the keyset
- * position). Fine at today's scale; at ~10^5 descendants for one user, or chains thousands deep
- * (the path array is O(depth) per row), move to a materialised closure table.
+ * Cost. `levels` / `total` need the whole downline walk (measured on Postgres 17 by the
+ * coordinator: ~200 ms for a 21k-person, 15-level team; 5 ms for 100 people; a 10,000-deep upline
+ * 9 ms). Because as_of is pinned and the data is append-only, that walk runs ONCE per (user, as_of):
+ * later pages reuse it from a small in-process cache and run only the keyset page query, whose walk
+ * stops at the deepest level the page can reach. Do NOT replace this with a closure table
+ * (ancestor x descendant pairs): depth is user-controlled (sock-puppet chains, use-code), and a
+ * 10k chain alone expanded to 51M pairs.
  */
 const prisma = require('../utils/prisma');
 const { createLogger } = require('../utils/logger');
@@ -69,8 +73,44 @@ async function loadUpline(userId, asOf) {
     SELECT sub, invited_at, depth, cycle, path FROM up ORDER BY depth`;
 }
 
-/** Whole downline snapshot. Rows: { sub, inviter_sub, invited_at, depth, cycle, path }. */
-async function loadDownline(userId, asOf) {
+// The downline walk, shared by the two queries below. Carries the path; a row whose node is already
+// on its path is the ring closing (`cycle`) and is not expanded. `maxDepth` bounds the walk.
+// (Prisma.sql fragments would be tidier; the duplication keeps each query a single tagged template.)
+
+/**
+ * Levels of the WHOLE downline snapshot, plus the paths of any ring rows (ids joined by ',').
+ * Rows: { depth, count, cycle_paths }. Computed once per (user, as_of) — see aggregateCache.
+ */
+async function loadDownlineAggregate(userId, asOf) {
+  return prisma.$queryRaw`
+    WITH RECURSIVE down AS (
+      SELECT r."inviteeId" AS sub, 1 AS depth,
+             ARRAY[${userId}::text, r."inviteeId"] AS path,
+             (r."inviteeId" = ${userId}::text) AS cycle
+      FROM "Referral" r
+      WHERE r."inviterId" = ${userId}::text AND r."createdAt" <= (${asOf.toISOString()}::timestamptz AT TIME ZONE 'UTC')
+      UNION ALL
+      SELECT r."inviteeId", down.depth + 1,
+             down.path || r."inviteeId",
+             (r."inviteeId" = ANY(down.path))
+      FROM down JOIN "Referral" r ON r."inviterId" = down.sub
+      WHERE NOT down.cycle AND r."createdAt" <= (${asOf.toISOString()}::timestamptz AT TIME ZONE 'UTC')
+    )
+    SELECT depth,
+           (count(*) FILTER (WHERE NOT cycle AND sub <> ${userId}::text))::int AS count,
+           coalesce(array_agg(array_to_string(path, ',')) FILTER (WHERE cycle), ARRAY[]::text[]) AS cycle_paths
+    FROM down GROUP BY depth ORDER BY depth`;
+}
+
+/**
+ * One keyset page of downline nodes after `after` ({ depth, invitedAt, sub } or null), in
+ * (depth, invited_at, sub COLLATE "C") order. The walk stops at `maxDepth`, which the caller derives
+ * from the cached levels, so an early page never walks the deep part of a large team.
+ */
+async function loadDownlinePage(userId, asOf, { after, limit, maxDepth }) {
+  const d = after ? after.depth : 0;
+  const t = after ? after.invitedAt : '1970-01-01T00:00:00.000Z';
+  const s = after ? after.sub : '';
   return prisma.$queryRaw`
     WITH RECURSIVE down AS (
       SELECT r."inviteeId" AS sub, r."inviterId" AS inviter_sub, r."createdAt" AS invited_at, 1 AS depth,
@@ -83,17 +123,23 @@ async function loadDownline(userId, asOf) {
              down.path || r."inviteeId",
              (r."inviteeId" = ANY(down.path))
       FROM down JOIN "Referral" r ON r."inviterId" = down.sub
-      WHERE NOT down.cycle AND r."createdAt" <= (${asOf.toISOString()}::timestamptz AT TIME ZONE 'UTC')
+      WHERE NOT down.cycle AND down.depth < ${maxDepth}::int
+        AND r."createdAt" <= (${asOf.toISOString()}::timestamptz AT TIME ZONE 'UTC')
     )
-    SELECT sub, inviter_sub, invited_at, depth, cycle, path FROM down`;
+    SELECT sub, inviter_sub, invited_at, depth FROM down
+    WHERE NOT cycle AND sub <> ${userId}::text
+      AND (depth, invited_at, sub COLLATE "C") > (${d}::int, (${t}::timestamptz AT TIME ZONE 'UTC'), ${s}::text COLLATE "C")
+    ORDER BY depth, invited_at, sub COLLATE "C"
+    LIMIT ${limit}::int`;
 }
 
 /** The SQL is replaceable only for tests that exercise the assembly without Postgres. */
-const source = { loadUpline, loadDownline };
+const source = { loadUpline, loadDownlineAggregate, loadDownlinePage };
 
-function encodeCursor({ userId, asOf, row }) {
+/** `n` = nodes emitted through this page: with the pinned snapshot it maps a position to a depth. */
+function encodeCursor({ userId, asOf, row, emitted }) {
   return Buffer.from(JSON.stringify({
-    v: CURSOR_VERSION, u: userId, a: asOf.toISOString(), d: row.depth, t: row.invited_at, s: row.sub,
+    v: CURSOR_VERSION, u: userId, a: asOf.toISOString(), d: row.depth, t: row.invited_at, s: row.sub, n: emitted,
   })).toString('base64url');
 }
 
@@ -106,11 +152,12 @@ function decodeCursor(raw, userId) {
   }
   const asOf = new Date(c && c.a);
   if (!c || c.v !== CURSOR_VERSION || typeof c.s !== 'string' || !Number.isInteger(c.d) || typeof c.t !== 'string'
+      || !Number.isInteger(c.n) || c.n < 0
       || Number.isNaN(asOf.getTime()) || Number.isNaN(new Date(c.t).getTime())) {
     throw new NetworkRequestError('cursor is invalid.');
   }
   if (c.u !== userId) throw new NetworkRequestError('cursor belongs to another user.');
-  return { asOf, depth: c.d, invitedAt: c.t, sub: c.s };
+  return { asOf, depth: c.d, invitedAt: c.t, sub: c.s, emitted: c.n };
 }
 
 function parseLimit(raw) {
@@ -130,29 +177,81 @@ function parseAsOf(raw, now) {
   return d;
 }
 
-/** Keyset order: (depth, invited_at, sub). */
-function compareKey(a, b) {
-  if (a.depth !== b.depth) return a.depth - b.depth;
-  if (a.invited_at !== b.invited_at) return a.invited_at < b.invited_at ? -1 : 1;
-  if (a.sub === b.sub) return 0;
-  return a.sub < b.sub ? -1 : 1;
-}
-
 /** Warn-level record of a ring (ids only). `cycleLog.write` is replaceable for tests. */
 const cycleLog = { write: (entry) => logger.warn('partner.referral_cycle', entry) };
 
-function reportCycles(userId, direction, rows) {
-  for (const row of rows.filter((r) => r.cycle)) {
-    const path = Array.isArray(row.path) ? row.path.map(String) : [];
-    const repeated = String(row.sub);
-    cycleLog.write({
-      userId,
-      direction,
-      repeatedId: repeated,
-      closedBy: direction === 'downline' ? String(row.inviter_sub) : path[path.length - 2] || null,
-      cycleIds: path.slice(path.indexOf(repeated)),
-    });
+function reportCycle(userId, direction, path, closedBy) {
+  const repeated = path[path.length - 1];
+  cycleLog.write({
+    userId,
+    direction,
+    repeatedId: repeated,
+    closedBy: closedBy || null,
+    cycleIds: path.slice(path.indexOf(repeated)),
+  });
+}
+
+/**
+ * levels / total / downline-ring flag per (user, as_of). The snapshot is pinned and Referral rows
+ * are append-only, so a value never changes once computed: the first page computes it, later pages
+ * (which carry as_of in the cursor) reuse it and only run the keyset page query. Small, in-process,
+ * TTL'd; a miss (restart, eviction) just recomputes — correctness never depends on it.
+ */
+const AGGREGATE_TTL_MS = 10 * 60 * 1000;
+const AGGREGATE_MAX_ENTRIES = 500;
+const aggregateCache = new Map();
+
+function cacheGet(key) {
+  const hit = aggregateCache.get(key);
+  if (!hit) return null;
+  if (hit.expiresAt <= Date.now()) {
+    aggregateCache.delete(key);
+    return null;
   }
+  aggregateCache.delete(key); // refresh LRU position
+  aggregateCache.set(key, hit);
+  return hit.value;
+}
+
+function cacheSet(key, value) {
+  aggregateCache.set(key, { value, expiresAt: Date.now() + AGGREGATE_TTL_MS });
+  while (aggregateCache.size > AGGREGATE_MAX_ENTRIES) aggregateCache.delete(aggregateCache.keys().next().value);
+}
+
+function clearAggregateCache() {
+  aggregateCache.clear();
+}
+
+async function downlineAggregate(userId, asOf) {
+  const key = `${userId}|${asOf.toISOString()}`;
+  const cached = cacheGet(key);
+  if (cached) return cached;
+  const rows = await source.loadDownlineAggregate(userId, asOf);
+  const levels = rows
+    .map((r) => ({ depth: Number(r.depth), count: Number(r.count) }))
+    .filter((l) => l.count > 0)
+    .sort((a, b) => a.depth - b.depth);
+  const cyclePaths = rows.flatMap((r) => (Array.isArray(r.cycle_paths) ? r.cycle_paths : [])).map((p) => String(p).split(','));
+  for (const path of cyclePaths) reportCycle(userId, 'downline', path, path[path.length - 2]);
+  const value = { levels, total: levels.reduce((n, l) => n + l.count, 0), cycle: cyclePaths.length > 0 };
+  cacheSet(key, value);
+  return value;
+}
+
+/**
+ * Deepest level the page can reach. Nodes are ordered depth first, so with the snapshot's levels the
+ * last position this page needs (already emitted + rows wanted) falls in a known level. A tampered
+ * `emitted` only changes how much of the caller's OWN network is walked, never what is visible.
+ */
+function pageMaxDepth(levels, emitted, rowsWanted) {
+  if (!levels.length) return 0;
+  const lastPosition = emitted + rowsWanted;
+  let cumulative = 0;
+  for (const l of levels) {
+    cumulative += l.count;
+    if (cumulative >= lastPosition) return l.depth;
+  }
+  return levels[levels.length - 1].depth;
 }
 
 /**
@@ -172,37 +271,31 @@ async function buildReferralNetwork(userId, query = {}, { now = new Date() } = {
     asOf = parseAsOf(query.as_of, now);
   }
 
-  const [upRows, downRows] = await Promise.all([source.loadUpline(userId, asOf), source.loadDownline(userId, asOf)]);
-  const anomalies = new Set();
-  if (upRows.some((r) => r.cycle) || downRows.some((r) => r.cycle)) anomalies.add('cycle');
-  reportCycles(userId, 'upline', upRows);
-  reportCycles(userId, 'downline', downRows);
+  const [upRows, agg] = await Promise.all([source.loadUpline(userId, asOf), downlineAggregate(userId, asOf)]);
+  const upCycle = upRows.find((r) => r.cycle);
+  // Log an upline ring only when the snapshot is first computed, not on every page.
+  if (upCycle && !after) {
+    const path = Array.isArray(upCycle.path) ? upCycle.path.map(String) : [];
+    reportCycle(userId, 'upline', path, path[path.length - 2]);
+  }
 
   const upline = upRows
     .filter((r) => !r.cycle && String(r.sub) !== userId)
     .map((r) => ({ sub: String(r.sub), depth: Number(r.depth), invited_at: iso(r.invited_at) }));
 
-  // Defensive: one row per user (inviteeId is unique, so only corrupt data could repeat one).
-  const seen = new Set([userId]);
-  const nodes = [];
-  for (const r of [...downRows].sort((x, y) => Number(x.depth) - Number(y.depth))) {
-    const sub = String(r.sub);
-    if (r.cycle || seen.has(sub)) continue;
-    seen.add(sub);
-    nodes.push({ sub, inviter_sub: String(r.inviter_sub), depth: Number(r.depth), invited_at: iso(r.invited_at) });
-  }
-  nodes.sort(compareKey);
-
-  const counts = new Map();
-  for (const n of nodes) counts.set(n.depth, (counts.get(n.depth) || 0) + 1);
-  const levels = [...counts.entries()].sort((a, b) => a[0] - b[0]).map(([depth, count]) => ({ depth, count }));
-
-  const start = after
-    ? nodes.findIndex((n) => compareKey(n, { depth: after.depth, invited_at: after.invitedAt, sub: after.sub }) > 0)
-    : 0;
-  const from = start === -1 ? nodes.length : start;
-  const page = nodes.slice(from, from + limit);
-  const more = from + limit < nodes.length;
+  // limit + 1 rows tell whether another page exists.
+  const emittedBefore = after ? after.emitted : 0;
+  const rows = agg.total
+    ? await source.loadDownlinePage(userId, asOf, { after, limit: limit + 1, maxDepth: pageMaxDepth(agg.levels, emittedBefore, limit + 1) })
+    : [];
+  // Built field by field: a node is exactly these four facts, whatever the query selects.
+  const nodes = rows.slice(0, limit).map((r) => ({
+    sub: String(r.sub),
+    inviter_sub: String(r.inviter_sub),
+    depth: Number(r.depth),
+    invited_at: iso(r.invited_at),
+  }));
+  const more = rows.length > limit;
 
   const body = {
     sub: userId,
@@ -210,13 +303,13 @@ async function buildReferralNetwork(userId, query = {}, { now = new Date() } = {
     cache_max_age: 60,
     upline,
     downline: {
-      total: nodes.length,
-      levels,
-      nodes: page,
-      next_cursor: more ? encodeCursor({ userId, asOf, row: page[page.length - 1] }) : null,
+      total: agg.total,
+      levels: agg.levels,
+      nodes,
+      next_cursor: more ? encodeCursor({ userId, asOf, row: nodes[nodes.length - 1], emitted: emittedBefore + nodes.length }) : null,
     },
   };
-  if (anomalies.size) body.anomalies = [...anomalies];
+  if (upCycle || agg.cycle) body.anomalies = ['cycle'];
   return body;
 }
 
@@ -225,6 +318,7 @@ module.exports = {
   NetworkRequestError,
   source,
   cycleLog,
+  clearAggregateCache,
   NODE_FIELDS,
   UPLINE_FIELDS,
   DEFAULT_LIMIT,
