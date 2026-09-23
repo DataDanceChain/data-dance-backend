@@ -6,7 +6,8 @@
  * ring above the user), never list the requesting user, raise the `cycle` anomaly, honour the
  * `createdAt <= as_of` snapshot (including a row inserted between two pages), and agree with the
  * direct-invitee count. Fixture rows use a per-run id prefix and are deleted afterwards.
- * Raw SQL only, so the test does not depend on the generated client's model set.
+ * Raw SQL only, so the test does not depend on the generated client's model set. Reads run inside the
+ * G14 read-only scope with the guard installed on the real client, exactly as the route runs them.
  */
 const { describe, it, before, after } = require('node:test');
 const assert = require('node:assert/strict');
@@ -19,7 +20,13 @@ process.env.DATABASE_URL = url;
 process.env.LOG_LEVEL = 'error';
 
 const prisma = require('../../src/utils/prisma');
+const { installReadOnlyGuard, runReadOnly } = require('../../src/utils/prismaReadOnly');
 const net = require('../../src/services/referralNetwork');
+
+// Exactly as the partner routes run it: the G14 guard on the REAL client, every read inside the
+// read-only scope. (Without this the suite passed while the endpoint answered 500 on the real stack:
+// the guard refused the raw CTEs.)
+installReadOnlyGuard(prisma);
 const { countDirectInvitees } = require('../../src/utils/referralUtils');
 
 const RUN = `nt${crypto.randomBytes(3).toString('hex')}`;
@@ -63,7 +70,7 @@ describe('referral network SQL on Postgres', () => {
   });
 
   const NOW = at(1000);
-  const build = (who, q = {}) => net.buildReferralNetwork(id(who), q, { now: NOW });
+  const build = (who, q = {}) => runReadOnly('partner GET /partner/tge/referral-network (dbtest)', () => net.buildReferralNetwork(id(who), q, { now: NOW }));
 
   it('chain + branch: upline nearest first, levels/total, level 1 = countDirectInvitees', async () => {
     const e = strip(await build('e'));

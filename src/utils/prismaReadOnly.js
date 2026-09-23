@@ -53,6 +53,19 @@ function runWritable(fn) {
   return storage.run(undefined, fn);
 }
 
+/**
+ * Inside a read-only scope, allow `$queryRaw` for the duration of `fn` — and nothing else: model
+ * writes and `$executeRaw` stay refused. Raw SQL is refused by default because a statement can hide
+ * a write (`WITH x AS (DELETE …) SELECT …`); this is the explicit, named exception for vetted,
+ * fixed, parameterised SELECTs. Its only caller is src/services/referralNetwork.js (recursive CTEs
+ * the Prisma query API cannot express). Outside a read-only scope it just runs `fn`.
+ */
+function runVettedRawRead(label, fn) {
+  const scope = readOnlyScope();
+  if (!scope) return fn();
+  return storage.run({ ...scope, vettedRawRead: String(label || 'unlabelled') }, fn);
+}
+
 function guarded(operation, original) {
   // Rejected promise, not a synchronous throw: every Prisma operation is awaited, and keeping
   // the same shape means the violation surfaces exactly where the write would have.
@@ -110,7 +123,8 @@ function installReadOnlyGuard(client) {
       client.$use(async (params, next) => {
         const scope = readOnlyScope();
         const action = String(params?.action || '');
-        if (scope && !action.startsWith('find') && action !== 'count' && action !== 'aggregate' && action !== 'groupBy') {
+        const vettedRaw = action === 'queryRaw' && Boolean(scope && scope.vettedRawRead);
+        if (scope && !vettedRaw && !action.startsWith('find') && action !== 'count' && action !== 'aggregate' && action !== 'groupBy') {
           throw new ReadOnlyViolationError(`${params?.model || 'unknown'}.${action}`, scope.label);
         }
         return next(params);
@@ -127,6 +141,7 @@ module.exports = {
   installReadOnlyGuard,
   runReadOnly,
   runWritable,
+  runVettedRawRead,
   readOnlyScope,
   ReadOnlyViolationError,
   MODEL_WRITE_METHODS,

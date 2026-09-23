@@ -30,6 +30,7 @@
  * 10k chain alone expanded to 51M pairs.
  */
 const prisma = require('../utils/prisma');
+const { runVettedRawRead } = require('../utils/prismaReadOnly');
 const { createLogger } = require('../utils/logger');
 
 const logger = createLogger('referralNetwork');
@@ -134,7 +135,14 @@ async function loadDownlinePage(userId, asOf, { after, limit, maxDepth }) {
 }
 
 /** The SQL is replaceable only for tests that exercise the assembly without Postgres. */
-const source = { loadUpline, loadDownlineAggregate, loadDownlinePage };
+// The partner routes run inside the G14 read-only scope, which refuses raw SQL by default; these three
+// fixed, parameterised SELECT CTEs are the vetted exception (runVettedRawRead allows queryRaw only).
+const vetted = (name, fn) => (...args) => runVettedRawRead(`referralNetwork.${name}`, () => fn(...args));
+const source = {
+  loadUpline: vetted('upline', loadUpline),
+  loadDownlineAggregate: vetted('downlineAggregate', loadDownlineAggregate),
+  loadDownlinePage: vetted('downlinePage', loadDownlinePage),
+};
 
 /** `n` = nodes emitted through this page: with the pinned snapshot it maps a position to a depth. */
 function encodeCursor({ userId, asOf, row, emitted }) {
