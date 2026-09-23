@@ -25,6 +25,7 @@ const ACCESS_TTL_SEC = 3600;
 const REFRESH_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const ISSUED_FROM_CODE_TTL_MS = 5 * 60 * 1000;
 const PKCE_UNRESERVED = /^[A-Za-z0-9._~-]{43,128}$/;
+const PARTNER_STATE_MIN_LENGTH = 22;
 const TOKEN_ENDPOINT_AUTH_METHODS = ['none', 'client_secret_basic', 'client_secret_post'];
 const CIMD_HOSTS = new Set([
   'chatgpt.com',
@@ -426,6 +427,11 @@ async function startAuthorization(req, query, res) {
     }
     if (partner) {
       if (!state) throw new OAuthError(400, 'invalid_request', 'state is required.');
+      // Contract v0.2.1: minLength 22 (>= 128 bits as base64url), maxLength 512. Partner only —
+      // MCP public clients are not under this contract and keep accepting any state.
+      if (state.length < PARTNER_STATE_MIN_LENGTH) {
+        throw new OAuthError(400, 'invalid_request', `state must carry at least 128 bits of entropy (${PARTNER_STATE_MIN_LENGTH}+ characters).`);
+      }
       if (state.length > 512) throw new OAuthError(400, 'invalid_request', 'state must be at most 512 characters.');
     }
     if (query.code_challenge_method !== 'S256' || !query.code_challenge) {
