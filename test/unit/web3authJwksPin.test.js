@@ -287,7 +287,7 @@ describe('WEB3AUTH_JWKS_PIN_MODE=enforce', () => {
     assert.equal(pinLogs().length, 0);
   });
 
-  it('keeps failing closed with a non-identity error (→ 5xx) when the JWKS is unreachable', async () => {
+  it('keeps failing closed (503 IDTOKEN_UPSTREAM_UNAVAILABLE) when the JWKS is unreachable, in every pin mode', async () => {
     const closed = http.createServer();
     await new Promise((resolve) => closed.listen(0, '127.0.0.1', resolve));
     const deadUrl = `http://127.0.0.1:${closed.address().port}/jwks`;
@@ -299,7 +299,8 @@ describe('WEB3AUTH_JWKS_PIN_MODE=enforce', () => {
         process.env.WEB3AUTH_JWKS_URL = deadUrl;
         configure({ pinMode, pins: [keys.social] });
         await assert.rejects(verifyIdToken(await mint(socialClaims())), (err) => {
-          assert.equal(err instanceof Web3AuthIdentityError, false, `${pinMode}: ${err.code}`);
+          assert.equal(err.code, 'IDTOKEN_UPSTREAM_UNAVAILABLE', `${pinMode}: ${err.code}`);
+          assert.equal(err.httpStatus, 503);
           return true;
         });
       }

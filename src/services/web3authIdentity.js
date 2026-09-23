@@ -72,6 +72,9 @@ const HTTP_STATUS = {
   IDTOKEN_SIGNATURE: 401,
   IDTOKEN_VERIFIER_NOT_ALLOWED: 401,
   IDTOKEN_KEY_NOT_PINNED: 401,
+  // Web3Auth's key service could not be used (timeout, non-200, junk, connection failure). Says
+  // nothing about the token; nobody logs in until the key set is readable again (fail closed).
+  IDTOKEN_UPSTREAM_UNAVAILABLE: 503,
   WALLET_NOT_IN_TOKEN: 401,
   IDENTITY_CONFLICT: 409,
   ORG_NOT_ALLOWED: 403,
@@ -238,11 +241,89 @@ function resetConfig() {
   jwksCache.clear();
 }
 
+// jose's own default, stated explicitly; tests shorten it through _internals.
+const DEFAULT_JWKS_TIMEOUT_MS = 5000;
+let jwksTimeoutMs = DEFAULT_JWKS_TIMEOUT_MS;
+
+/**
+ * "The key set could not be obtained" — thrown by fetchJwksStrict below, never by jose.
+ * `reason` is one of `network` | `http_status` | `invalid_json` (a timeout is jose's JWKSTimeout,
+ * a JSON body that is not a key set is jose's JWKSInvalid; mapJoseError adds `timeout` and
+ * `invalid_jwks`).
+ */
+class JwksUnavailableError extends Error {
+  constructor(reason, message, extra = {}) {
+    super(message);
+    this.name = 'JwksUnavailableError';
+    this.reason = reason;
+    Object.assign(this, extra);
+  }
+}
+
+/**
+ * The fetch jose uses for the JWKS (`jose.customFetch`, a documented createRemoteJWKSet option).
+ *
+ * jose reports a non-200 answer and an unparseable body as a plain JOSEError — the base class,
+ * distinguishable from a token problem only by its message — and a connection failure as whatever
+ * fetch threw. So those three are decided HERE, where the HTTP response is in hand, and surface as
+ * a JwksUnavailableError that jose passes through untouched. A timeout is left to jose (it turns
+ * the abort into JWKSTimeout), so the request, redirect policy, headers and timeout signal are
+ * exactly the ones jose built.
+ */
+async function fetchJwksStrict(url, options) {
+  const isTimeout = (err) => Boolean(err) && err.name === 'TimeoutError';
+  let response;
+  try {
+    response = await fetch(url, options);
+  } catch (err) {
+    if (isTimeout(err)) throw err;
+    throw new JwksUnavailableError('network', 'JWKS request failed before a response arrived', {
+      cause: err,
+    });
+  }
+  if (response.status !== 200) {
+    try {
+      await response.body?.cancel();
+    } catch {
+      /* the body is irrelevant */
+    }
+    throw new JwksUnavailableError('http_status', `JWKS answered HTTP ${response.status}`, {
+      upstreamStatus: response.status,
+    });
+  }
+  let body;
+  try {
+    body = await response.text();
+  } catch (err) {
+    if (isTimeout(err)) throw err;
+    throw new JwksUnavailableError('network', 'JWKS response body could not be read', { cause: err });
+  }
+  try {
+    JSON.parse(body);
+  } catch {
+    throw new JwksUnavailableError('invalid_json', 'JWKS response is not JSON');
+  }
+  // jose parses it again and checks it is a key set (JWKSInvalid otherwise).
+  return new Response(body, { status: 200, headers: { 'content-type': 'application/json' } });
+}
+
 function getJwks(url) {
   if (!jwksCache.has(url)) {
-    jwksCache.set(url, jose.createRemoteJWKSet(new URL(url)));
+    jwksCache.set(
+      url,
+      jose.createRemoteJWKSet(new URL(url), {
+        timeoutDuration: jwksTimeoutMs,
+        [jose.customFetch]: fetchJwksStrict,
+      })
+    );
   }
   return jwksCache.get(url);
+}
+
+/** Tests only: a shorter JWKS timeout (drops the cached key sets). No argument restores 5 s. */
+function setJwksTimeoutMs(ms = DEFAULT_JWKS_TIMEOUT_MS) {
+  jwksTimeoutMs = ms;
+  jwksCache.clear();
 }
 
 function getVerifyMode() {
@@ -270,8 +351,32 @@ function pickKind(cfg, iss) {
   return null;
 }
 
+/**
+ * The identity provider's key service is unusable. Every case where the key set could not be
+ * OBTAINED lands here — never on an IDTOKEN_* code that blames the token.
+ */
+function upstreamUnavailable(reason, extra = {}) {
+  return fail(
+    'IDTOKEN_UPSTREAM_UNAVAILABLE',
+    'The identity provider (Web3Auth) is temporarily unavailable. Please try again shortly.',
+    { reason, ...extra }
+  );
+}
+
 function mapJoseError(err) {
   const code = err && err.code;
+  // Key set not obtainable — checked first: JWKSTimeout and JWKSInvalid are JOSEErrors too.
+  if (err instanceof JwksUnavailableError) {
+    return upstreamUnavailable(err.reason, err.upstreamStatus ? { upstreamStatus: err.upstreamStatus } : {});
+  }
+  if (err instanceof jose.errors.JWKSTimeout || code === 'ERR_JWKS_TIMEOUT') {
+    return upstreamUnavailable('timeout');
+  }
+  // Only jose's key-set code throws JWKSInvalid: the endpoint answered JSON that is not a usable
+  // public key set. That is the provider's fault, not the token's.
+  if (err instanceof jose.errors.JWKSInvalid || code === 'ERR_JWKS_INVALID') {
+    return upstreamUnavailable('invalid_jwks');
+  }
   if (err instanceof jose.errors.JWTExpired || code === 'ERR_JWT_EXPIRED') {
     return fail('IDTOKEN_EXPIRED', 'ID token has expired');
   }
@@ -292,10 +397,10 @@ function mapJoseError(err) {
     return fail('IDTOKEN_SIGNATURE', 'ID token signature could not be verified');
   }
   if (err instanceof jose.errors.JOSEError) {
-    // JWSInvalid, JWTInvalid, JOSENotSupported, JWKSInvalid, ...
+    // JWSInvalid, JWTInvalid, JOSENotSupported, ...
     return fail('IDTOKEN_INVALID', 'ID token is malformed or not supported');
   }
-  // Network / JWKS fetch failures propagate: the caller fails closed with a 5xx.
+  // Anything else is a bug, not a verdict on the token: it propagates and the caller answers 500.
   return err;
 }
 
@@ -359,8 +464,10 @@ async function assertKeyPinned(cfg, { key, protectedHeader, jwksUrl, kind }) {
 /**
  * Verify a Web3Auth ID token. Resolves `{ kind: 'social'|'external', payload, protectedHeader }`.
  * Throws Web3AuthIdentityError with one of IDTOKEN_REQUIRED|IDTOKEN_INVALID|IDTOKEN_EXPIRED|
- * IDTOKEN_ISSUER|IDTOKEN_AUDIENCE|IDTOKEN_SIGNATURE|IDTOKEN_KEY_NOT_PINNED. Non-JOSE errors
- * (JWKS unreachable) propagate.
+ * IDTOKEN_ISSUER|IDTOKEN_AUDIENCE|IDTOKEN_SIGNATURE|IDTOKEN_KEY_NOT_PINNED (401) or, when the
+ * Web3Auth key set cannot be obtained at all, IDTOKEN_UPSTREAM_UNAVAILABLE (503, logged at error
+ * level as `idtoken_upstream_unavailable` {jwksUrl, reason}). Still fail closed: nothing verifies
+ * without the key set.
  */
 async function verifyIdToken(idToken) {
   const cfg = getConfig();
@@ -391,7 +498,17 @@ async function verifyIdToken(idToken) {
       maxTokenAge: cfg.maxTokenAge,
     });
   } catch (err) {
-    throw mapJoseError(err);
+    const mapped = mapJoseError(err);
+    if (mapped && mapped.code === 'IDTOKEN_UPSTREAM_UNAVAILABLE') {
+      // The signal the T17 outage procedure looks for. Public data only — never the token.
+      logger.error('idtoken_upstream_unavailable', {
+        jwksUrl: k.jwksUrl,
+        reason: mapped.details.reason,
+        ...(mapped.details.upstreamStatus ? { upstreamStatus: mapped.details.upstreamStatus } : {}),
+        kind,
+      });
+    }
+    throw mapped;
   }
   // A key resolver was passed, so jose returns the key it resolved (and verified with) as `key`.
   const { payload, protectedHeader, key } = verified;
@@ -795,6 +912,9 @@ module.exports = {
     HTTP_STATUS,
     PIN_MODES,
     THUMBPRINT_PATTERN,
+    JwksUnavailableError,
+    fetchJwksStrict,
+    setJwksTimeoutMs,
     malformedThumbprints,
     keyThumbprint,
     assertKeyPinned,
