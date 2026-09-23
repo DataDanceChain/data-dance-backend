@@ -52,7 +52,7 @@ then only the new one.
   "token_endpoint_auth_methods_supported": ["none", "client_secret_basic", "client_secret_post"],
   "authorization_response_iss_parameter_supported": true,
   "scopes_supported": ["openid", "email", "profile", "life_capsule", "tge:identity", "tge:status",
-                       "tge:email", "tge:wallet", "tge:points", "tge:referral"],
+                       "tge:email", "tge:wallet", "tge:points", "tge:referral", "tge:referral_network"],
   "ddc_sso_environment": "test"
 }
 ```
@@ -93,7 +93,8 @@ Validation order and what the browser sees:
 `scope` defaults to `tge:identity`. Two kinds of scope:
 
 - **Endpoint scopes** — `tge:identity` for `/partner/tge/me`, `tge:status` for
-  `/partner/tge/status`. A token without the one an endpoint needs gets `403 insufficient_scope`.
+  `/partner/tge/status`, `tge:referral_network` for `/partner/tge/referral-network` (§7b). A token
+  without the one an endpoint needs gets `403 insufficient_scope`.
 - **Field scopes** — `tge:email`, `tge:wallet`, `tge:points`, `tge:referral`. Each unlocks exactly
   one field. A token without one is **not** an error: the call succeeds and the field is simply
   **absent from the body**. Ask only for what the campaign uses; the user sees the list.
@@ -122,7 +123,7 @@ interactively), `invalid_request`, `invalid_scope`, `unsupported_response_type`,
 
 The DataDance Wallet shows a consent page naming the partner and the requested scopes, one line
 per scope (`GET /api/oauth/requests/:id` returns both the raw `scope` string and a rendered
-`scopeItems: ["identity","email","wallet","points","referral"]`). If the
+`scopeItems: ["identity","email","wallet","points","referral","referral_network"]`). If the
 user has no DataDance session they log in first (Web3Auth e-mail OTP). Organization (B-end)
 accounts cannot authorize a partner and receive `access_denied`. Nothing is shared until the
 user allows.
@@ -293,21 +294,71 @@ Neither is an address anyone can write to, so both read as `null` here (and `ema
 Not "not yet" — these are out of scope by design, and asking for them is a contract change, not a
 configuration change:
 
-- **Downline user lists.** `direct_invitees` is a count. The people this user invited are third
-  parties who consented to DataDance, not to the partner; their ids, e-mails and names are never
-  sent. There is no multi-level network total either.
+- **Anything about OTHER users beyond the network facts of §7b.** The referral network gives the
+  ids of the user's uplines and downlines, their depth, who invited whom and when — nothing else.
+  Other users' e-mail, name, wallet, points, status, orders, portrait or raw records are never sent.
+  (Until 2026-09-23 this said "no downline user lists, no multi-level total"; Sloan's decision of
+  that date reversed it for the campaign — see §7b.)
 - **Order data** — what the user bought, where they stayed, from whom.
 - **Portrait / profile inference** — interests, segments, scores.
 - **Raw records** — anything from Connect, the crawler, uploads or the data licence pipeline.
 
 Eligibility for the partner's own campaign stays the partner's decision, not a DataDance field.
 
+### 7b. Referral network — `GET /partner/tge/referral-network`
+
+Scope `tge:referral_network` (consent line `referral_network`), **and** the environment must list
+`referral_network` in `SSO_TGE_STATUS_FIELDS` — off unless listed. Same token check, rate limit
+(120/min per token) and read-only guarantee as `/me` and `/status`; every read is recorded.
+
+```http
+GET /partner/tge/referral-network?limit=500 HTTP/1.1
+Authorization: Bearer ddc_tge_…
+```
+
+```json
+{ "sub": "c3…", "as_of": "2026-09-23T10:00:00.000Z", "cache_max_age": 60,
+  "upline": [ { "sub": "b2…", "depth": 1, "invited_at": "2026-05-02T08:00:00.000Z" },
+              { "sub": "a1…", "depth": 2, "invited_at": "2026-04-01T08:00:00.000Z" } ],
+  "downline": { "total": 3,
+                "levels": [ { "depth": 1, "count": 2 }, { "depth": 2, "count": 1 } ],
+                "nodes": [ { "sub": "d4…", "inviter_sub": "c3…", "depth": 1, "invited_at": "2026-06-01T08:00:00.000Z" },
+                           { "sub": "d5…", "inviter_sub": "c3…", "depth": 1, "invited_at": "2026-06-02T08:00:00.000Z" },
+                           { "sub": "e6…", "inviter_sub": "d4…", "depth": 2, "invited_at": "2026-07-01T08:00:00.000Z" } ],
+                "next_cursor": null } }
+```
+
+- `upline` — nearest first (`depth: 1` = the inviter) and complete. `invited_at` is when the edge
+  below that node was created (for depth 1: when this user was invited).
+- `downline.nodes` — every descendant at any depth, **exactly** `sub`, `inviter_sub`, `depth`,
+  `invited_at`. Paginated: `?limit=` (default 500, max 2000) and `?cursor=` from `next_cursor`;
+  order is `(depth, invited_at, sub)`. `levels` and `total` always describe the **whole** downline.
+  `levels[0].count` equals `referral.direct_invitees` (campaign invites count).
+- **Snapshot.** The first page pins `as_of` (server time, or your `?as_of=` — not in the future,
+  else `400`); the cursor carries it, and every page — and `levels` / `total` on every page — is
+  computed over the network as it stood at `as_of`. Someone who joins while you page is neither
+  skipped nor double-counted; they appear in your next first page. `?as_of=` lets a settlement ask
+  for the network as it stood at a campaign cutoff. This rests on referral links only ever being
+  created, never edited or deleted, which is true today; if that ever changes, snapshots stop being
+  exact and this section will say so.
+- **Rings.** The data can contain cycles (a user may bind another user's code after both joined).
+  Each walk stops at the first repeated node, the user never appears in their own network, and the
+  body carries `"anomalies": ["cycle"]` — **exclude such a user from payouts** and tell DataDance.
+- **Errors:** `404 {"error":"not_available"}` — this environment does not serve the network (it
+  is not "not granted"); `403 insufficient_scope` — the token lacks `tge:referral_network`;
+  `400 invalid_request` — bad `limit`, `as_of` or `cursor`, or a cursor from another user.
+- **Cache:** `Cache-Control: private, max-age=60`.
+- **Cost:** each page walks the whole snapshot (O(downline)). Fine at today's scale; if one user's
+  downline reaches ~10^5 people, or chains thousands deep, DataDance will move this to a
+  precomputed closure — the response does not change.
+
 Errors (RFC 6750, `WWW-Authenticate: Bearer realm="ddc-sso", error=…, resource_metadata=…`):
 
 | Status | `error` | When |
 | --- | --- | --- |
 | 401 | `invalid_token` | missing, expired, revoked, wrong-audience (e.g. an MCP token), or the client is switched off |
-| 403 | `insufficient_scope` | token lacks the **endpoint** scope (`tge:identity` / `tge:status`; `scope="…"` in the challenge). A missing **field** scope is never an error — the field is just absent |
+| 403 | `insufficient_scope` | token lacks the **endpoint** scope (`tge:identity` / `tge:status` / `tge:referral_network`; `scope="…"` in the challenge). A missing **field** scope is never an error — the field is just absent |
+| 404 | `not_available` | `/referral-network` only: this environment does not serve the network |
 | 403 | `account_disabled` | the DataDance account is disabled |
 | 429 | `slow_down` | per-token rate limit |
 
@@ -394,11 +445,10 @@ somebody else's.)
   "never returns points balances" and lists only `tge:identity` / `tge:status`. The project owner
   widened it: `tge:email`, `tge:wallet`, `tge:points` and `tge:referral` now exist and `/status`
   can carry a balance and a referral summary. Everything v0.1 forbids that is not in the list
-  above — orders, portrait, raw records, downline lists — still holds. The YAML needs a v0.2.
-- **`referral` carries no network total.** An earlier draft of this change also returned
-  `network_size` (a 4-level downline count); the owner dropped it. Only the user's own code,
-  their inviter's `sub` and a level-1 count are served, and the query never materialises the
-  invitees.
+  above — orders, portrait, raw records — still holds; the downline-list prohibition was lifted on
+  2026-09-23 (§7b). The contract is now v0.3.0.
+- **`referral` itself is unchanged** — the user's own code, their inviter's `sub` and a level-1
+  count. The complete network is the separate endpoint of §7b, under its own scope.
 - **Replay revocation is per process.** The link "code → token issued from it" is kept in memory
   for 5 minutes; after a server restart a replayed code is still refused, but the earlier token
   is not revoked. The token expires within 300 s regardless.
@@ -418,7 +468,7 @@ somebody else's.)
   `email_masked` is gated on its declared `tge:identity` scope as well as on the freeze list —
   which changes nothing for a real caller, since `/me` already requires that scope.
 
-## 13. Vendor acceptance checklist (maps to T01–T18)
+## 13. Vendor acceptance checklist (maps to T01–T19)
 
 - [ ] T01/T02 — full login round-trip in test env; `/me` returns the same `sub` on repeat logins.
 - [ ] T08 — a `redirect_uri` with a trailing slash or extra query renders the 400 page (no redirect).
@@ -428,6 +478,8 @@ somebody else's.)
 - [ ] T13/T17 — after DataDance flips the kill switch, tokens are `401` and the partner session ends.
 - [ ] T14 — `/status` is not cached beyond `cache_max_age`.
 - [ ] T15 — the client secret exists only in the partner backend; never in a browser or a URL.
+- [ ] T19 — with `tge:referral_network`: page the whole downline and check the union equals `total`
+      with no duplicates; a response with `anomalies: ["cycle"]` is excluded from payouts.
 
 ## 14. DataDance operations
 
@@ -452,7 +504,7 @@ unconditionally — the issuer is never derived from a request header), `APP_PUB
 - Rotate: move the current hash to `…_PREVIOUS`, set the new hash, set `…_ROTATION_UNTIL`,
   recreate the container; after the deadline remove the previous hash.
 - Freeze a status field: add it to `SSO_TGE_STATUS_FIELDS` and recreate. `email`,
-  `wallet_address`, `points` and `referral` are **off** until listed, so deploying this change
+  `wallet_address`, `points`, `referral` and `referral_network` are **off** until listed, so deploying this change
   set alone exposes nothing new. Boot refuses an unknown field name.
 - `SSO_REQUIRE_VERIFIED_SESSION=true` requires the consenting user's DataDance JWT to carry
   `ver >= 2` (issued by the verified Web3Auth login); older sessions get `login_required`.
