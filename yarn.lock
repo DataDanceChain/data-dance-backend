@@ -1752,7 +1752,7 @@ path-to-regexp@0.1.12:
   resolved "https://registry.npmjs.org/path-to-regexp/-/path-to-regexp-0.1.12.tgz"
   integrity sha512-RA1GjUVMnvYFxuqovrEqZoxxW5NUZqbwKtYz/Tt7nXerk0LbLblQmrsgdeOxV5SFHf0UDggjS/bSeOZwt1pmEQ==
 
-pdfkit@^0.17.1:
+pdfkit@^0.17.2:
   version "0.17.2"
   resolved "https://registry.yarnpkg.com/pdfkit/-/pdfkit-0.17.2.tgz#f77d7129ca49bc5015246b890d1aca6cb6b71f00"
   integrity sha512-UnwF5fXy08f0dnp4jchFYAROKMNTaPqb/xgR8GtCzIcqoTnbOqtp3bwKvO4688oHI6vzEEs8Q6vqqEnC5IUELw==
