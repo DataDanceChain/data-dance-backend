@@ -433,3 +433,136 @@ describe('boot: WEB3AUTH_JWKS_PIN_MODE / WEB3AUTH_JWKS_PINNED_THUMBPRINTS', () =
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// scripts/web3authJwksThumbprints.js — where the operator reads the pins from
+// ---------------------------------------------------------------------------
+
+describe('scripts/web3authJwksThumbprints.js', () => {
+  const path = require('node:path');
+  const { execFile } = require('node:child_process');
+  const script = require('../../scripts/web3authJwksThumbprints');
+  const SCRIPT_PATH = path.join(__dirname, '../../scripts/web3authJwksThumbprints.js');
+
+  // RFC 7638 §3.1 example key and its published SHA-256 thumbprint.
+  const RFC7638_JWK = {
+    kty: 'RSA',
+    n:
+      '0vx7agoebGcQSuuPiLJXZptN9nndrQmbXEps2aiAFbWhM78LhWx4cbbfAAtVT86zwu1RK7aPFFxuhDR1L6tSoc_BJECP' +
+      'ebWKRXjBZCiFV4n3oknjhMstn64tZ_2W-5JsGY4Hc5n9yBXArwl93lqt7_RN5w6Cf0h4QyQ5v-65YGjQR0_FDW2QvzqY' +
+      '368QQMicAtaSqzs8KJZgnYb9c7d0zgdAZHzu6qMQvRL5hajrn1n91CbOpbISD08qNLyrdkt-bFTWhAI4vMQFh6WeZu0f' +
+      'M4lFd2NcRwr3XPksINHaQ-G_xBniIqbw0Ls1jF44-csFCur-kEgU8awapJzKnqDKgw',
+    e: 'AQAB',
+    alg: 'RS256',
+    kid: '2011-04-29',
+  };
+  const RFC7638_THUMBPRINT = 'NzbLsXh8uDCcd-6MNwXF4W_7noWXFZAfHkxZsRGC9Xs';
+
+  let fixtureServer;
+  let fixtureUrl;
+  const fixtures = {};
+
+  before(async () => {
+    fixtures['/social'] = { keys: [RFC7638_JWK, keys.social.jwk] };
+    fixtures['/ext'] = { keys: [keys.external.jwk] };
+    fixtureServer = http.createServer((req, res) => {
+      if (req.url === '/redirect') {
+        res.writeHead(302, { location: '/social' });
+        return res.end();
+      }
+      const body = fixtures[req.url];
+      if (!body) {
+        res.writeHead(404);
+        return res.end();
+      }
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify(body));
+    });
+    await new Promise((resolve) => fixtureServer.listen(0, '127.0.0.1', resolve));
+    fixtureUrl = `http://127.0.0.1:${fixtureServer.address().port}`;
+  });
+
+  after(async () => {
+    await new Promise((resolve) => fixtureServer.close(resolve));
+  });
+
+  function runScriptProcess(env) {
+    return new Promise((resolve) => {
+      execFile(process.execPath, [SCRIPT_PATH], { env: { PATH: process.env.PATH, ...env }, timeout: 20000 }, (error, stdout, stderr) =>
+        resolve({ code: error ? error.code : 0, stdout, stderr })
+      );
+    });
+  }
+
+  async function runInProcess(env) {
+    const out = [];
+    const err = [];
+    const code = await script.run({ env, out: (l) => out.push(l), err: (l) => err.push(l) });
+    return { code, out, err };
+  }
+
+  it('falls back to the same JWKS URLs as the server', () => {
+    assert.deepEqual(script.DEFAULT_JWKS_URLS, {
+      WEB3AUTH_JWKS_URL: _internals.DEFAULTS.WEB3AUTH_JWKS_URL,
+      WEB3AUTH_EXTERNAL_JWKS_URL: _internals.DEFAULTS.WEB3AUTH_EXTERNAL_JWKS_URL,
+    });
+    assert.deepEqual(
+      script.jwksUrls({ WEB3AUTH_JWKS_URL: ' ', WEB3AUTH_EXTERNAL_JWKS_URL: 'https://x.example/jwks' }).map((u) => u.url),
+      [_internals.DEFAULTS.WEB3AUTH_JWKS_URL, 'https://x.example/jwks']
+    );
+  });
+
+  it('prints kid, alg, RFC 7638 thumbprint and source URL for every key of both sets (fixture JWKS)', async () => {
+    const { code, stdout, stderr } = await runScriptProcess({
+      WEB3AUTH_JWKS_URL: `${fixtureUrl}/social`,
+      WEB3AUTH_EXTERNAL_JWKS_URL: `${fixtureUrl}/ext`,
+    });
+    assert.equal(code, 0, stderr);
+    const lines = stdout.trim().split('\n');
+    assert.deepEqual(lines.slice(0, 3), [
+      `kid=2011-04-29 alg=RS256 thumbprint=${RFC7638_THUMBPRINT} jwks=${fixtureUrl}/social`,
+      `kid=social-kid-1 alg=ES256 thumbprint=${keys.social.thumbprint} jwks=${fixtureUrl}/social`,
+      `kid=external-kid-1 alg=ES256 thumbprint=${keys.external.thumbprint} jwks=${fixtureUrl}/ext`,
+    ]);
+    assert.equal(
+      lines[lines.length - 1],
+      `# WEB3AUTH_JWKS_PINNED_THUMBPRINTS=${RFC7638_THUMBPRINT},${keys.social.thumbprint},${keys.external.thumbprint}`
+    );
+  });
+
+  it('prints exactly the thumbprint the server checks: its output, pinned, passes enforce', async () => {
+    configure({ pinMode: 'enforce', pins: [keys.external] });
+    const { code, out } = await runInProcess({
+      WEB3AUTH_JWKS_URL: `${baseUrl}/jwks`,
+      WEB3AUTH_EXTERNAL_JWKS_URL: `${baseUrl}/ext-jwks`,
+    });
+    assert.equal(code, 0);
+    const pins = out.filter((l) => l.startsWith('kid=')).map((l) => /thumbprint=(\S+)/.exec(l)[1]);
+    assert.equal(pins.length, 2);
+
+    process.env.WEB3AUTH_JWKS_PINNED_THUMBPRINTS = pins.join(',');
+    _internals.resetConfig();
+    await verifyIdToken(await mint(socialClaims()));
+    await verifyIdToken(await mintExternal());
+    assert.equal(pinLogs().length, 0);
+  });
+
+  it('reports an unreadable JWKS on stderr with exit 1 and still prints the other set', async () => {
+    const { code, out, err } = await runInProcess({
+      WEB3AUTH_JWKS_URL: `${fixtureUrl}/missing`,
+      WEB3AUTH_EXTERNAL_JWKS_URL: `${fixtureUrl}/ext`,
+    });
+    assert.equal(code, 1);
+    assert.match(err[0], /WEB3AUTH_JWKS_URL: could not read .*\/missing: HTTP 404/);
+    assert.equal(out.filter((l) => l.startsWith('kid=')).length, 1);
+  });
+
+  it('does not follow redirects (neither does the server)', async () => {
+    const { code, err } = await runInProcess({
+      WEB3AUTH_JWKS_URL: `${fixtureUrl}/redirect`,
+      WEB3AUTH_EXTERNAL_JWKS_URL: `${fixtureUrl}/ext`,
+    });
+    assert.equal(code, 1);
+    assert.match(err[0], /HTTP 302/);
+  });
+});
