@@ -98,8 +98,9 @@ Validation order and what the browser sees:
   one field. A token without one is **not** an error: the call succeeds and the field is simply
   **absent from the body**. Ask only for what the campaign uses; the user sees the list.
 
-An unknown scope is `invalid_scope` (redirected per §4.2). `state` is mandatory (max 512
-characters). `login_hint` only pre-fills the DataDance login form.
+An unknown scope is `invalid_scope` (redirected per §4.2). `state` is mandatory, 22–512
+characters (at least 128 bits as base64url; a shorter one is `invalid_request`, redirected per
+§4.2). `login_hint` only pre-fills the DataDance login form.
 
 **`prompt=none`** — this build answers `302 … error=login_required` immediately (see §12).
 
@@ -323,17 +324,24 @@ Takes effect on the next `/partner/tge/*` call. `401 invalid_client` without cre
   the local session on `401` or `403` (F06).
 - **Kill switch:** DataDance sets `SSO_TGE_ENABLED=false` and recreates the container. From the
   next request `/oauth/authorize` renders a 400 page, `/oauth/token` and `/oauth/revoke` answer
-  `401 invalid_client`, and every existing token is `401 invalid_token`. Tokens are ≤ 5 minutes
-  old anyway (T13, T17).
+  `401 invalid_client`, and every existing token is `401 invalid_token`. That boot also revokes
+  every partner access token issued before the switch, so switching back on later does not revive
+  them — only new logins work (T17). The switch takes effect at the restart, not before.
+  Tokens are ≤ 5 minutes old anyway (T13, T17).
 - **Account stop:** once `User.disabledAt` is deployed, a disabled user cannot complete consent
   (`access_denied`) and existing tokens get `403 account_disabled`.
 
 ## 10. Rate limits
 
-Per IP: `/oauth/authorize` 30/min, `/oauth/token` 20/min, `/oauth/revoke` 20/min. Per token:
+Per IP: `/oauth/authorize` 30/min, `/oauth/revoke` 20/min, and `/oauth/token` 20/min **for
+requests without valid client authentication** (no credentials, a wrong secret — the brute-force
+surface). A token request whose client credentials verify is **not** limited per IP — your backend
+exchanges every user's code from one address — but by a per-client ceiling sized for a campaign
+peak (3000/min by default; it exists to stop a runaway loop, not to meter you). Per token:
 `/partner/tge/*` 120/min — unchanged by `points` and `referral`. The limit is sized for a partner
-backend reading once per user session; it is not a bulk-export budget. `429` bodies use the OAuth error shape with `error=slow_down`. (These
-limits ship with the hardening change set; until it is deployed the endpoints are unlimited.)
+backend reading once per user session; it is not a bulk-export budget. `429` bodies use the OAuth
+error shape with `error=slow_down` and carry `Retry-After`. Inside DataDance, consent decisions are
+limited to 10 per user per minute.
 
 ## 11. End-to-end example
 
