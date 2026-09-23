@@ -337,6 +337,9 @@ describe('assertPartnerConfig (boot)', () => {
  * has to be the hardened one before the process is allowed to serve anything.
  */
 describe('assertFinancialGradeConfig (boot, item 8)', () => {
+  // G4: two RFC 7638 SHA-256 thumbprints (43 base64url characters each).
+  const PIN_A = 'NzbLsXh8uDCcd-6MNwXF4W_7noWXFZAfHkxZsRGC9Xs';
+  const PIN_B = 'G6-iP7C_4NdppFwiEuckNCU_etFIVBBxxt4UH9cB9G0';
   const hardened = (overrides = {}) => ({
     SSO_ENVIRONMENT: 'prod',
     SSO_TGE_ENABLED: 'true',
@@ -348,6 +351,8 @@ describe('assertFinancialGradeConfig (boot, item 8)', () => {
     WEB3AUTH_ALLOW_LEGACY_FALLBACK: 'false',
     WEB3AUTH_CLIENT_ID: 'web3auth-client',
     WEB3AUTH_ALLOWED_VERIFIERS: 'web3auth-google-sapphire-devnet,external-wallet',
+    WEB3AUTH_JWKS_PIN_MODE: 'enforce',
+    WEB3AUTH_JWKS_PINNED_THUMBPRINTS: `${PIN_A},${PIN_B}`,
     SSO_SESSION_SECRET: 'a-dedicated-sso-session-key',
     JWT_SECRET: 'the-user-session-key',
     PUBLIC_BASE_URL: 'https://api.datadance.ai',
@@ -365,11 +370,16 @@ describe('assertFinancialGradeConfig (boot, item 8)', () => {
     assert.equal(summary.enforced, true);
     assert.equal(summary.verifyMode, 'enforce');
     assert.equal(summary.allowedVerifierCount, 2);
+    assert.equal(summary.jwksPinMode, 'enforce');
+    assert.equal(summary.jwksPinCount, 2);
     assert.equal(summary.publicBaseUrl, 'https://api.datadance.ai');
     const serialized = JSON.stringify(summary);
     assert.equal(serialized.includes('a-dedicated-sso-session-key'), false);
     assert.equal(serialized.includes('the-user-session-key'), false);
     assert.equal(serialized.includes(SECRET_HASH), false);
+    // G4: the pins are reported as a count, never as values.
+    assert.equal(serialized.includes(PIN_A), false);
+    assert.equal(serialized.includes(PIN_B), false);
   });
 
   it('refuses each unsafe shape on its own', () => {
@@ -380,6 +390,14 @@ describe('assertFinancialGradeConfig (boot, item 8)', () => {
       [{ WEB3AUTH_ALLOW_LEGACY_FALLBACK: 'true' }, /WEB3AUTH_ALLOW_LEGACY_FALLBACK must be false/],
       [{ WEB3AUTH_CLIENT_ID: '' }, /WEB3AUTH_CLIENT_ID is required/],
       [{ WEB3AUTH_ALLOWED_VERIFIERS: '' }, /WEB3AUTH_ALLOWED_VERIFIERS must list/],
+      // G4 — pinned Web3Auth signing keys
+      [{ WEB3AUTH_JWKS_PIN_MODE: 'log' }, /WEB3AUTH_JWKS_PIN_MODE must be "enforce" when SSO_TGE_ENABLED=true \(got "log"\)/],
+      [{ WEB3AUTH_JWKS_PIN_MODE: 'off' }, /WEB3AUTH_JWKS_PIN_MODE must be "enforce"/],
+      [{ WEB3AUTH_JWKS_PIN_MODE: '' }, /WEB3AUTH_JWKS_PIN_MODE must be "enforce" .*\(got "\(unset = log\)"\)/],
+      [{ WEB3AUTH_JWKS_PINNED_THUMBPRINTS: '' }, /WEB3AUTH_JWKS_PINNED_THUMBPRINTS must list the approved/],
+      [{ WEB3AUTH_JWKS_PINNED_THUMBPRINTS: ' , ' }, /WEB3AUTH_JWKS_PINNED_THUMBPRINTS must list the approved/],
+      [{ WEB3AUTH_JWKS_PINNED_THUMBPRINTS: `${PIN_A},${PIN_B}=` }, /WEB3AUTH_JWKS_PINNED_THUMBPRINTS entry #2 must be RFC 7638/],
+      [{ WEB3AUTH_JWKS_PINNED_THUMBPRINTS: `social-kid-1,${PIN_A}` }, /WEB3AUTH_JWKS_PINNED_THUMBPRINTS entry #1 must be RFC 7638/],
       [{ SSO_SESSION_SECRET: '' }, /SSO_SESSION_SECRET is required/],
       [{ SSO_SESSION_SECRET: 'same', JWT_SECRET: 'same' }, /SSO_SESSION_SECRET must differ from JWT_SECRET/],
       [{ PUBLIC_BASE_URL: '' }, /PUBLIC_BASE_URL is required/],
@@ -391,6 +409,34 @@ describe('assertFinancialGradeConfig (boot, item 8)', () => {
     for (const [overrides, pattern] of cases) {
       assert.throws(() => assertFinancialGradeConfig(hardened(overrides)), pattern, JSON.stringify(overrides));
     }
+  });
+
+  it('never echoes a rejected pin value', () => {
+    assert.throws(
+      () => assertFinancialGradeConfig(hardened({ WEB3AUTH_JWKS_PINNED_THUMBPRINTS: 'some-pasted-value,another+one' })),
+      (error) => {
+        assert.match(error.message, /entries #1, #2 must be RFC 7638/);
+        assert.equal(error.message.includes('some-pasted-value'), false);
+        assert.equal(error.message.includes('another+one'), false);
+        return true;
+      }
+    );
+  });
+
+  it('lists the G4 problems together with the others, in one error', () => {
+    assert.throws(
+      () =>
+        assertFinancialGradeConfig(
+          hardened({ WEB3AUTH_VERIFY_MODE: 'log', WEB3AUTH_JWKS_PIN_MODE: 'log', WEB3AUTH_JWKS_PINNED_THUMBPRINTS: '' })
+        ),
+      (error) => {
+        assert.match(error.message, /refusing to start/);
+        assert.match(error.message, /WEB3AUTH_VERIFY_MODE must be "enforce"/);
+        assert.match(error.message, /WEB3AUTH_JWKS_PIN_MODE must be "enforce"/);
+        assert.match(error.message, /WEB3AUTH_JWKS_PINNED_THUMBPRINTS must list the approved/);
+        return true;
+      }
+    );
   });
 
   it('lists every problem at once, so one restart shows the whole gap', () => {

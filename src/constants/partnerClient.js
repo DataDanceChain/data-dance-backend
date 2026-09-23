@@ -455,6 +455,10 @@ function httpsUrlProblem(name, value) {
  *   - WEB3AUTH_ALLOW_LEGACY_FALLBACK=false — the body-asserted login is the historical takeover.
  *   - WEB3AUTH_CLIENT_ID             — the expected token audience.
  *   - WEB3AUTH_ALLOWED_VERIFIERS     — the connections we chose (item 2).
+ *   - WEB3AUTH_JWKS_PIN_MODE=enforce + WEB3AUTH_JWKS_PINNED_THUMBPRINTS (non-empty, every entry
+ *                                      a 43-char base64url RFC 7638 SHA-256 thumbprint) — the
+ *                                      signing keys we approved (G4); otherwise whoever can
+ *                                      influence the JWKS response can serve a key of their own.
  *   - SSO_SESSION_SECRET ≠ JWT_SECRET — that difference is what keeps the consent-only session
  *                                      out of every other authenticated endpoint.
  *   - PUBLIC_BASE_URL / APP_PUBLIC_URL, both https — the issuer and the consent origin.
@@ -470,6 +474,13 @@ function assertFinancialGradeConfig(env = process.env) {
   const verifyMode = String(env.WEB3AUTH_VERIFY_MODE || '').trim().toLowerCase();
   const legacyFallback = String(env.WEB3AUTH_ALLOW_LEGACY_FALLBACK ?? 'false').trim().toLowerCase();
   const allowedVerifiers = csv(env.WEB3AUTH_ALLOWED_VERIFIERS);
+  // G4. Unset reads as the identity service's default, `log`. The pattern mirrors
+  // web3authIdentity THUMBPRINT_PATTERN (not imported: that module pulls jose and asserts its own
+  // boot configuration on load).
+  const pinModeRaw = String(env.WEB3AUTH_JWKS_PIN_MODE || '').trim().toLowerCase();
+  const pinMode = pinModeRaw || 'log';
+  const pinnedThumbprints = csv(env.WEB3AUTH_JWKS_PINNED_THUMBPRINTS);
+  const thumbprintPattern = /^[A-Za-z0-9_-]{43}$/;
   const sessionSecret = String(env.SSO_SESSION_SECRET || '').trim();
   const jwtSecret = String(env.JWT_SECRET || '').trim();
 
@@ -487,6 +498,28 @@ function assertFinancialGradeConfig(env = process.env) {
   }
   if (!allowedVerifiers.length) {
     problems.push('WEB3AUTH_ALLOWED_VERIFIERS must list the accepted Web3Auth connections when SSO_TGE_ENABLED=true');
+  }
+  if (pinMode !== 'enforce') {
+    problems.push(
+      `WEB3AUTH_JWKS_PIN_MODE must be "enforce" when SSO_TGE_ENABLED=true (got "${pinModeRaw || '(unset = log)'}")`
+    );
+  }
+  if (!pinnedThumbprints.length) {
+    problems.push(
+      'WEB3AUTH_JWKS_PINNED_THUMBPRINTS must list the approved Web3Auth signing-key thumbprints when SSO_TGE_ENABLED=true ' +
+        '(read them with scripts/web3authJwksThumbprints.js)'
+    );
+  } else {
+    // Positions, never values.
+    const malformed = pinnedThumbprints
+      .map((value, index) => (thumbprintPattern.test(value) ? null : `#${index + 1}`))
+      .filter(Boolean);
+    if (malformed.length) {
+      problems.push(
+        `WEB3AUTH_JWKS_PINNED_THUMBPRINTS ${malformed.length === 1 ? 'entry' : 'entries'} ${malformed.join(', ')} ` +
+          'must be RFC 7638 SHA-256 JWK thumbprints (43 base64url characters)'
+      );
+    }
   }
   if (!sessionSecret) {
     problems.push('SSO_SESSION_SECRET is required when SSO_TGE_ENABLED=true');
@@ -509,6 +542,8 @@ function assertFinancialGradeConfig(env = process.env) {
     verifyMode,
     legacyFallback: false,
     allowedVerifierCount: allowedVerifiers.length,
+    jwksPinMode: pinMode,
+    jwksPinCount: new Set(pinnedThumbprints).size,
     publicBaseUrl: String(env.PUBLIC_BASE_URL).trim(),
     appPublicUrl: String(env.APP_PUBLIC_URL).trim(),
     sessionSecretSeparate: true,

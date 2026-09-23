@@ -23,13 +23,15 @@ applyPartnerKillSwitch(partnerSso).then((result) => {
 
 // Money path: SSO_TGE_ENABLED=true also requires the deployment shape around it to be the
 // hardened one (production, enforced ID-token verification with an explicit connection
-// allow-list, separate session key, https issuer and consent origin). Same rule as above —
-// refuse to start rather than serve it half-hardened. No secret values in the summary.
+// allow-list and pinned Web3Auth signing keys, separate session key, https issuer and consent
+// origin). Same rule as above — refuse to start rather than serve it half-hardened. No secret
+// values in the summary, and the pins only as a count.
 const moneyPath = assertFinancialGradeConfig();
 if (moneyPath.enforced) {
   console.log(
     `Partner SSO money-path assertions OK: nodeEnv=${moneyPath.nodeEnv} web3authVerify=${moneyPath.verifyMode} ` +
       `legacyFallback=${moneyPath.legacyFallback} allowedVerifiers=${moneyPath.allowedVerifierCount} ` +
+      `jwksPinMode=${moneyPath.jwksPinMode} jwksPins=${moneyPath.jwksPinCount} ` +
       `sessionSecretSeparate=${moneyPath.sessionSecretSeparate} issuer=${moneyPath.publicBaseUrl} ` +
       `consentOrigin=${moneyPath.appPublicUrl} publicClientRegistration=${moneyPath.publicRegistration ? 'open' : 'closed'}`,
   );
