@@ -519,6 +519,33 @@ unconditionally — the issuer is never derived from a request header), `APP_PUB
   `ver >= 2` (issued by the verified Web3Auth login); older sessions get `login_required`.
 - Partner tokens are `McpToken` rows with `source = 'partner'`; they are hidden from the
   user-facing token list and cannot be used on `/mcp` or `/oauth/userinfo`.
+- **Web3Auth key service outage.** When the Web3Auth JWKS (`WEB3AUTH_JWKS_URL` or
+  `WEB3AUTH_EXTERNAL_JWKS_URL`) cannot be obtained, `POST /api/auth/web3auth-login` answers
+  `503 IDTOKEN_UPSTREAM_UNAVAILABLE` ("the identity provider is temporarily unavailable"), in the
+  same JSON shape as the `401 IDTOKEN_*` codes, and never a token error. Nobody logs in until the key
+  set is readable again: this is still fail closed, and no request reaches the user table. Each attempt
+  writes an error-level `idtoken_upstream_unavailable` line with `jwksUrl` and `reason`, never the
+  token. It is the signal to alert on:
+
+  | `reason` | Meaning |
+  | --- | --- |
+  | `timeout` | no complete answer within 5 s (jose `JWKSTimeout`; also a body that stalls) |
+  | `http_status` | any answer other than 200, redirects included (not followed); `upstreamStatus` carries the code |
+  | `invalid_json` | a 200 whose body is not JSON (an HTML error page, an empty body) |
+  | `invalid_jwks` | JSON that is not a usable public key set (jose `JWKSInvalid`) |
+  | `network` | no response at all (DNS failure, connection refused or reset) |
+
+  ```sh
+  docker logs <api> 2>&1 | grep '"message":"idtoken_upstream_unavailable"' \
+    | sed -E 's/.*"jwksUrl":"([^"]*)".*"reason":"([^"]*)".*/\2  \1/' | sort | uniq -c
+  ```
+
+  A token problem on a readable key set keeps its own 401 code: `IDTOKEN_SIGNATURE` (a bad
+  signature, or no matching key in the fetched set), `IDTOKEN_ISSUER`, `IDTOKEN_AUDIENCE`,
+  `IDTOKEN_EXPIRED` and `IDTOKEN_KEY_NOT_PINNED`. A failed fetch is not cached: the first login
+  after Web3Auth recovers fetches again and succeeds, and no restart is needed. A key set that WAS
+  fetched successfully is reused for up to 10 minutes (jose's cache), so a Web3Auth outage shorter
+  than that does not stop logins; the 503s begin once that copy expires.
 
 ### Web3Auth signing-key pins (G4) — rotation runbook
 
@@ -538,7 +565,8 @@ against `WEB3AUTH_JWKS_PINNED_THUMBPRINTS`, one csv for both JWKS sets (`WEB3AUT
 | `enforce` (required with `SSO_TGE_ENABLED=true`) | `401 IDTOKEN_KEY_NOT_PINNED`, same line at error level |
 
 Boot refuses a malformed entry (in any mode, reported by position) and `enforce` with an empty
-list. The token is never logged. An unreachable JWKS still fails closed with a 5xx.
+list. The token is never logged. A JWKS that cannot be obtained still fails closed, as
+`503 IDTOKEN_UPSTREAM_UNAVAILABLE` (next section); the pin check never runs without a key.
 
 **Reading the pins.** The JWKS endpoints are public: pins can be read at any time, no login needed.
 
