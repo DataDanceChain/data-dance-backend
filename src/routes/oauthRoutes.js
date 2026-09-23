@@ -288,7 +288,10 @@ function parseAllow(value) {
   return false;
 }
 
-router.post('/api/oauth/consent', lim('consent'), consentPrincipal(protect), async (req, res) => {
+// The limiter runs AFTER the principal is known, so its `userOrIp` key is the user: one person's
+// decisions never throttle everyone else behind the same NAT (event Wi-Fi, carrier CGNAT). Before
+// the mount-order fix this was only true by accident (an earlier router's `protect` set req.user).
+router.post('/api/oauth/consent', consentPrincipal(protect), lim('consent'), async (req, res) => {
   try {
     const allow = parseAllow(req.body?.allow);
     if (allow === null) {

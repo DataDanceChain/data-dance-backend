@@ -168,6 +168,15 @@ app.use('/data-pack', express.static(path.join(__dirname, '../public/data-pack')
 }));
 
 // 路由
+// The OAuth / SSO surface is mounted FIRST, on purpose. Several routers below are mounted at the
+// bare `/api` prefix, and one of them (crawlerRoutes) applies `router.use(protect)` to everything
+// that reaches it — mounted after it, the public ticket exchange, the credential-less consent
+// summary and every SSO-session request were answered 401 by that `protect` before their own
+// handlers ran. Both routers only claim their own paths (/api/sso/*, /.well-known/*, /oauth/*,
+// /api/oauth/*) and neither has a path-less `router.use`, so mounting them first changes nothing
+// else. test/unit/appMountOrder.test.js loads this file to keep it that way.
+app.use('/api/sso', ssoRoutes);
+app.use('/', oauthRoutes);
 app.use('/api/ops', opsAdminRoutes);
 app.use('/api/campaigns', campaignRoutes);
 app.use('/api/auth', authRoutes);
@@ -195,10 +204,8 @@ app.use('/api/promotions', promotionRoutes);
 app.use('/api/organization/transactions', transactionRoutes);
 app.use('/api/commerce', commerceRoutes);
 app.use('/api/life-context', lifeContextRoutes);
-app.use('/api/sso', ssoRoutes);
 app.use('/mcp', mcpRoutes);
 app.use('/partner/tge', require('./routes/partnerTgeRoutes'));
-app.use('/', oauthRoutes);
 // DDC NFT Metadata API - 需要后端权限控制
 app.use('/metadata/ddcnft', ddcNFTMetadataRoutes);
 
