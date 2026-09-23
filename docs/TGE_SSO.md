@@ -449,6 +449,12 @@ somebody else's.)
   2026-09-23 (§7b). The contract is now v0.3.0.
 - **`referral` itself is unchanged** — the user's own code, their inviter's `sub` and a level-1
   count. The complete network is the separate endpoint of §7b, under its own scope.
+- **A Web3Auth signing-key rotation can pause DataDance logins.** DataDance accepts Web3Auth ID
+  tokens only from signing keys it has explicitly approved (pinned). If Web3Auth starts signing
+  with a key DataDance has not approved yet, users cannot log in to DataDance — and therefore
+  cannot reach consent — until DataDance has verified and approved the new key. Tokens already
+  issued to the partner are unaffected. Nothing changes on the partner side; this is a deliberate
+  choice of integrity over availability.
 - **Replay revocation is per process.** The link "code → token issued from it" is kept in memory
   for 5 minutes; after a server restart a replayed code is still refused, but the earlier token
   is not revoked. The token expires within 300 s regardless.
@@ -488,7 +494,8 @@ Environment (see `env.example`): `SSO_ENVIRONMENT`, `SSO_TGE_ENABLED`, `SSO_TGE_
 `SSO_TGE_SECRET_ROTATION_UNTIL`, `SSO_TGE_REDIRECT_URIS`, `SSO_TGE_INITIATE_LOGIN_URI`,
 `SSO_TGE_STATUS_FIELDS`, `SSO_REQUIRE_VERIFIED_SESSION`, plus `PUBLIC_BASE_URL` (now required
 unconditionally — the issuer is never derived from a request header), `APP_PUBLIC_URL`,
-`WEB3AUTH_ALLOWED_VERIFIERS` and `OAUTH_PUBLIC_REGISTRATION_ENABLED`.
+`WEB3AUTH_ALLOWED_VERIFIERS`, `WEB3AUTH_JWKS_PIN_MODE`, `WEB3AUTH_JWKS_PINNED_THUMBPRINTS` and
+`OAUTH_PUBLIC_REGISTRATION_ENABLED`.
 
 - `src/server.js` calls `assertPartnerConfig()` at boot and refuses to start with every problem
   listed (missing hash, http redirect URI outside localhost, fragment, unknown status field,
@@ -496,10 +503,12 @@ unconditionally — the issuer is never derived from a request header), `APP_PUB
 - It then calls `assertFinancialGradeConfig()`: with `SSO_TGE_ENABLED=true` the container also
   refuses to start unless `NODE_ENV=production`, `WEB3AUTH_VERIFY_MODE=enforce`,
   `WEB3AUTH_ALLOW_LEGACY_FALLBACK=false`, `WEB3AUTH_CLIENT_ID` and `WEB3AUTH_ALLOWED_VERIFIERS`
-  are non-empty, `SSO_SESSION_SECRET` is set and differs from `JWT_SECRET`, and `PUBLIC_BASE_URL`
-  / `APP_PUBLIC_URL` are set and https. There is no flag to switch that off — turn
-  `SSO_TGE_ENABLED` off instead. The boot log prints a summary with no secret values. See the
-  README section "金融级加固：合作方 SSO".
+  are non-empty, `WEB3AUTH_JWKS_PIN_MODE=enforce` with a non-empty, well-formed
+  `WEB3AUTH_JWKS_PINNED_THUMBPRINTS` (below), `SSO_SESSION_SECRET` is set and differs from
+  `JWT_SECRET`, and `PUBLIC_BASE_URL` / `APP_PUBLIC_URL` are set and https. There is no flag to
+  switch that off — turn `SSO_TGE_ENABLED` off instead. The boot log prints a summary with no
+  secret values (`jwksPinMode=… jwksPins=<count>`, never the pins). See the README section
+  "金融级加固：合作方 SSO".
 - Generate a secret: `node scripts/genPartnerSecret.js` (prints once; nothing is written).
 - Rotate: move the current hash to `…_PREVIOUS`, set the new hash, set `…_ROTATION_UNTIL`,
   recreate the container; after the deadline remove the previous hash.
@@ -510,3 +519,72 @@ unconditionally — the issuer is never derived from a request header), `APP_PUB
   `ver >= 2` (issued by the verified Web3Auth login); older sessions get `login_required`.
 - Partner tokens are `McpToken` rows with `source = 'partner'`; they are hidden from the
   user-facing token list and cannot be used on `/mcp` or `/oauth/userinfo`.
+
+### Web3Auth signing-key pins (G4) — rotation runbook
+
+**What is pinned.** A Web3Auth ID token is verified against a JWKS fetched over the network, so a
+valid signature only proves "signed by a key that URL served". Whoever can influence that response
+(DNS, a TLS-intercepting proxy, a compromise or malicious rotation at the provider) could serve a
+key of their own — even under the `kid` of the real key — and mint any identity. So after a token
+has fully verified, the backend computes the RFC 7638 SHA-256 thumbprint (base64url, 43 characters)
+of the key that actually verified it — from the key material, never from `kid` — and checks it
+against `WEB3AUTH_JWKS_PINNED_THUMBPRINTS`, one csv for both JWKS sets (`WEB3AUTH_JWKS_URL` and
+`WEB3AUTH_EXTERNAL_JWKS_URL`).
+
+| `WEB3AUTH_JWKS_PIN_MODE` | Key not in the list |
+| --- | --- |
+| `off` | not checked |
+| `log` (default, rollout) | accepted; warning `jwks_key_not_pinned` with `kid`, `thumbprint`, `jwksUrl` |
+| `enforce` (required with `SSO_TGE_ENABLED=true`) | `401 IDTOKEN_KEY_NOT_PINNED`, same line at error level |
+
+Boot refuses a malformed entry (in any mode, reported by position) and `enforce` with an empty
+list. The token is never logged. An unreachable JWKS still fails closed with a 5xx.
+
+**Reading the pins.** The JWKS endpoints are public: pins can be read at any time, no login needed.
+
+```sh
+node scripts/web3authJwksThumbprints.js          # in a container: docker exec <api> node scripts/web3authJwksThumbprints.js
+# kid=… alg=ES256 thumbprint=… jwks=https://api-auth.web3auth.io/jwks      one line per key
+```
+
+(Web3Auth currently uses the thumbprint as the `kid`. The backend does not rely on that.)
+
+**Before pinning, check every key** — the script shows what the endpoint serves right now, which is
+exactly what someone in the network path would control:
+
+1. Run the script from two different networks (the server, and a laptop on another connection).
+   The output must be identical and come from the expected https hosts.
+2. With `WEB3AUTH_JWKS_PIN_MODE=log`, log in once per login method with a real account; then
+   `docker logs <api> 2>&1 | grep '"message":"jwks_key_not_pinned"'` must be empty.
+3. Recommended: whenever Web3Auth publishes its next key (a new key appears in the JWKS before it
+   signs anything), pin the current **and** the next key, so the rotation itself is a non-event.
+
+**When Web3Auth rotates to a key that is not pinned (under `enforce`):**
+
+- *Symptom:* every login fails with `401 IDTOKEN_KEY_NOT_PINNED`. Each attempt logs an error-level
+  `jwks_key_not_pinned` whose `thumbprint` is the new key and whose `jwksUrl` names the set:
+
+  ```sh
+  docker logs <api> 2>&1 | grep '"message":"jwks_key_not_pinned"' \
+    | sed -E 's/.*"jwksUrl":"([^"]*)".*"thumbprint":"([^"]*)".*/\2  \1/' | sort | uniq -c
+  # (log keys are emitted in alphabetical order, so jwksUrl precedes thumbprint)
+  ```
+
+- *Verify the key really is Web3Auth's.* Never pin a key only because it appears in a failing-login
+  log line — an attack produces exactly the same line. Run the script from two networks (the new
+  thumbprint must appear in both, from the expected URL); check Web3Auth's own channels (dashboard,
+  announcements, status page, support) for the rotation; confirm the time the failures started
+  matches the time the key appeared, with no other anomaly (DNS or certificate changes) around it.
+- *Pin and restart.* Append the new thumbprint (keep the old one), recreate / restart the API
+  container, and check the boot line shows `jwksPins=` one higher. Log in once with a real account;
+  no new `jwks_key_not_pinned` line may appear.
+- *Clean up.* Remove the old thumbprint only after the old key has left both JWKS sets and
+  `WEB3AUTH_MAX_TOKEN_AGE` (default 1d) has passed.
+- *There is no temporary bypass.* Setting the mode back to `log` is refused at boot while
+  `SSO_TGE_ENABLED=true`; restoring logins without the new pin means turning the partner flow off.
+
+**The trade-off, stated plainly:** this is a deliberate choice of **integrity over availability**.
+An unannounced rotation to a key that is not pinned stops every DataDance login until an operator
+has verified the key, added its pin and restarted. In exchange, a key the operator has not
+approved can never verify a login. Mitigations: pin current + next keys as soon as Web3Auth
+publishes the next one, and alert on `jwks_key_not_pinned`.

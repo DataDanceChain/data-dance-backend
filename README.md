@@ -113,9 +113,10 @@ docker compose up -d
 - `WEB3AUTH_ALLOW_LEGACY_FALLBACK` (default `false`) is the only switch that still lets a body-asserted identity (`userInfo.email` / `walletAddress` / `xid`) mint a session, and only in `log` with no `idToken`. Rollout: `log` + fallback on → watch the `legacy_login` warning count drop to zero as Wallet builds send the token → fallback off → `enforce` (test, then prod). Old App builds without `idToken` cannot log in once it is off.
 - Legacy `web3auth` rows are linked lazily on first verified login by exactly two routes: (a) the token **proves the wallet the row already holds** (cryptographic; a row with a NULL wallet proves nothing and no longer counts as “wallet-consistent”), or (b) the row is found by the e-mail the token carries **and** the verifier is named in `WEB3AUTH_LEGACY_VERIFIERS` (empty = never) **and** the token asserts `email_verified === true` (`WEB3AUTH_EMAIL_VERIFIED_CLAIM`). The row must also be unlinked, `web3auth`, non-organization and free of a wallet mismatch. Anything else — password (`traditional`) accounts, already-linked rows, an unverified or non-allow-listed e-mail — answers `IDENTITY_CONFLICT` and is never merged. Rationale: the Web3Auth client id ships in the SPA bundle, so an IdP-asserted e-mail alone is not proof of ownership (plan §5 F03). An e-mail-shaped `verifierId` is lower-cased before it is stored as the identity key.
 - **Accepted login connections — `WEB3AUTH_ALLOWED_VERIFIERS` (csv).** The identity key is read from whichever of `aggregateVerifier` / `verifier` / `groupedAuthConnectionId` / `authConnectionId` the token carries first, and that value used to be accepted whatever it said. It is a Web3Auth *connection name*, so anyone who can add a connection in the DataDance Web3Auth project — a console credential, a hijacked dashboard session — could mint a correctly signed token for our audience, choose any `verifierId`, and be that user; no signature check sees it, because the signature is genuine. The list is now the gate: **required under `enforce` (boot refuses an empty list, same shape as the `WEB3AUTH_CLIENT_ID` assertion)**, a token from an unlisted connection is `401 IDTOKEN_VERIFIER_NOT_ALLOWED`, and under `log` it is accepted but logged as `idtoken_verifier_not_allowed` on every request so the rollout cannot end quietly with the list wrong. Include `external-wallet` if sign-in-with-wallet is offered — the synthetic external-wallet identity is not exempt. The list also guards **every** lazy link into an existing account, the wallet-proven route included (that route set no reason and therefore skipped both this list and the `email_verified` requirement).
-- Error codes: `IDTOKEN_REQUIRED` (400), `IDTOKEN_INVALID`, `IDTOKEN_EXPIRED`, `IDTOKEN_ISSUER`, `IDTOKEN_AUDIENCE`, `IDTOKEN_SIGNATURE`, `IDTOKEN_VERIFIER_NOT_ALLOWED`, `WALLET_NOT_IN_TOKEN` (401), `IDENTITY_CONFLICT` (409), `ORG_NOT_ALLOWED`, `ACCOUNT_DISABLED` (403). `ACCOUNT_DISABLED` (`User.disabledAt`) is also refused by `protect`, `authenticate`, password login and MCP tokens.
-- Env (see `env.example`): `WEB3AUTH_VERIFY_MODE`, `WEB3AUTH_CLIENT_ID`, `WEB3AUTH_ALLOWED_VERIFIERS`, `WEB3AUTH_JWKS_URL`, `WEB3AUTH_ISSUERS`, `WEB3AUTH_EXTERNAL_JWKS_URL`, `WEB3AUTH_EXTERNAL_ISSUERS`, `WEB3AUTH_EXTERNAL_AUDIENCE`, `WEB3AUTH_ALGS`, `WEB3AUTH_MAX_TOKEN_AGE`, `WEB3AUTH_VERIFIER_CLAIM`, `WEB3AUTH_VERIFIER_ID_CLAIM`, `WEB3AUTH_EMAIL_CLAIM`, `WEB3AUTH_WALLETS_CLAIM`, `WEB3AUTH_WALLET_MATCH`, `WEB3AUTH_LEGACY_VERIFIERS`, `WEB3AUTH_EMAIL_VERIFIED_CLAIM`, `WEB3AUTH_ALLOW_LEGACY_FALLBACK`. `JWT_EXPIRES_IN` is mandatory in production.
-- 迁移：`20260922100000_user_upstream_identity_and_disable`；单测：`npm test`（`test/unit/web3authIdentity.test.js` 和 `test/unit/web3authLogin.test.js`，本地 JWKS + supertest，无需数据库）
+- **Signing-key pins — `WEB3AUTH_JWKS_PIN_MODE` / `WEB3AUTH_JWKS_PINNED_THUMBPRINTS` (hardening G4).** The JWKS is fetched over the network, so a valid signature only proves "signed by a key that URL served"; whoever can influence that response (DNS, a TLS-intercepting proxy, a compromise or malicious rotation at the provider) can serve a key of their own — even under the real key's `kid` — and mint any identity. After a token has fully verified, the key that actually verified it (`jwtVerify(...).key`, jose's resolved key) is identified by its RFC 7638 SHA-256 thumbprint (base64url, 43 chars, computed from the key material, never from `kid`) and checked against the csv pin list, which covers both JWKS sets. `off` = no check; `log` (default) = accept and warn `jwks_key_not_pinned` with `kid`, `thumbprint`, `jwksUrl`; `enforce` = `401 IDTOKEN_KEY_NOT_PINNED`, same fields at error level (boot refuses `enforce` with an empty list, and any malformed entry). Required as `enforce` when `SSO_TGE_ENABLED=true`. Read the pins from the public JWKS at any time with `node scripts/web3authJwksThumbprints.js`. **Integrity over availability, deliberately:** when Web3Auth rotates to a key that is not pinned, every login fails until the operator verifies the key, pins it and restarts — see the rotation runbook in "🛡 金融级加固 §6" below and `docs/TGE_SSO.md` §14.
+- Error codes: `IDTOKEN_REQUIRED` (400), `IDTOKEN_INVALID`, `IDTOKEN_EXPIRED`, `IDTOKEN_ISSUER`, `IDTOKEN_AUDIENCE`, `IDTOKEN_SIGNATURE`, `IDTOKEN_VERIFIER_NOT_ALLOWED`, `IDTOKEN_KEY_NOT_PINNED`, `WALLET_NOT_IN_TOKEN` (401), `IDENTITY_CONFLICT` (409), `ORG_NOT_ALLOWED`, `ACCOUNT_DISABLED` (403). `ACCOUNT_DISABLED` (`User.disabledAt`) is also refused by `protect`, `authenticate`, password login and MCP tokens.
+- Env (see `env.example`): `WEB3AUTH_VERIFY_MODE`, `WEB3AUTH_CLIENT_ID`, `WEB3AUTH_ALLOWED_VERIFIERS`, `WEB3AUTH_JWKS_PIN_MODE`, `WEB3AUTH_JWKS_PINNED_THUMBPRINTS`, `WEB3AUTH_JWKS_URL`, `WEB3AUTH_ISSUERS`, `WEB3AUTH_EXTERNAL_JWKS_URL`, `WEB3AUTH_EXTERNAL_ISSUERS`, `WEB3AUTH_EXTERNAL_AUDIENCE`, `WEB3AUTH_ALGS`, `WEB3AUTH_MAX_TOKEN_AGE`, `WEB3AUTH_VERIFIER_CLAIM`, `WEB3AUTH_VERIFIER_ID_CLAIM`, `WEB3AUTH_EMAIL_CLAIM`, `WEB3AUTH_WALLETS_CLAIM`, `WEB3AUTH_WALLET_MATCH`, `WEB3AUTH_LEGACY_VERIFIERS`, `WEB3AUTH_EMAIL_VERIFIED_CLAIM`, `WEB3AUTH_ALLOW_LEGACY_FALLBACK`. `JWT_EXPIRES_IN` is mandatory in production.
+- 迁移：`20260922100000_user_upstream_identity_and_disable`；单测：`npm test`（`test/unit/web3authIdentity.test.js`、`test/unit/web3authLogin.test.js` 和 `test/unit/web3authJwksPin.test.js`，本地 JWKS + supertest，无需数据库，不联网）
 
 ## 🛠 开发环境
 
@@ -173,11 +174,13 @@ TGE 页面这条链路上可能有很大金额，所以协议之外的"部署形
 | `WEB3AUTH_ALLOW_LEGACY_FALLBACK=false` | 这是历史上的"请求体自报身份"接管路径 |
 | `WEB3AUTH_CLIENT_ID` 非空 | ID token 的预期受众 |
 | `WEB3AUTH_ALLOWED_VERIFIERS` 非空 | 见下一节，这是"谁能成为任何人"的那把锁 |
+| `WEB3AUTH_JWKS_PIN_MODE=enforce`，且 `WEB3AUTH_JWKS_PINNED_THUMBPRINTS` 非空、每项都是 43 字符 base64url 指纹 | 见 §6：没有运维批准的签名钥匙，不能验证任何一次登录 |
 | `SSO_SESSION_SECRET` 已设且 ≠ `JWT_SECRET` | 这个差异就是"同意页会话打不开别的接口"的全部依据 |
 | `PUBLIC_BASE_URL` / `APP_PUBLIC_URL` 已设且是 https | 签发方标识与同意页来源 |
 
 没有开关可以关掉这组断言：要放松就把 `SSO_TGE_ENABLED` 关掉。启动日志会打印一行摘要
-（`Partner SSO money-path assertions OK: …`），含模式、白名单条数、issuer、同意页来源、动态注册开关状态，不含密钥。
+（`Partner SSO money-path assertions OK: …`），含模式、白名单条数、签名钥匙 pin 模式与条数（`jwksPinMode=… jwksPins=…`，
+只打条数不打值）、issuer、同意页来源、动态注册开关状态，不含密钥。
 
 ### 2. 登录方式白名单 `WEB3AUTH_ALLOWED_VERIFIERS`
 
@@ -219,6 +222,65 @@ TGE 页面这条链路上可能有很大金额，所以协议之外的"部署形
 
 `OAUTH_PUBLIC_REGISTRATION_ENABLED=false` → `POST /oauth/register` 与 CIMD 客户端元数据抓取一律 403，
 活动窗口内不会冒出新的客户端。默认 `true`，保持今天的 ChatGPT / Claude 行为。
+
+### 6. Web3Auth 签名钥匙固定（Web3Auth signing-key pins, G4）与轮换 runbook
+
+**为什么**：后端验 ID token 时从 `WEB3AUTH_JWKS_URL` / `WEB3AUTH_EXTERNAL_JWKS_URL` 现取公钥。签名有效只说明
+"是那个 URL 此刻给出的某把钥匙签的"。谁能影响那一次响应（DNS、做 TLS 拦截的代理、Web3Auth 侧被攻破或恶意轮换），
+谁就能塞进自己的钥匙——甚至挂在真钥匙的 `kid` 名下——然后签出任何人的身份，验签照样通过。`kid` 只是标签，
+钥匙本身由 RFC 7638 指纹（SHA-256，base64url，43 字符，只由公钥参数算出）确定。
+
+**做法**：token 完整验证通过后（签名、iss、aud、exp 都过了），后端对**实际完成验签的那把钥匙**算指纹，
+与 `WEB3AUTH_JWKS_PINNED_THUMBPRINTS`（csv；一份清单同时覆盖社交登录和外部钱包两套 JWKS）比对：
+
+| `WEB3AUTH_JWKS_PIN_MODE` | 钥匙不在清单里 |
+| --- | --- |
+| `off` | 不检查 |
+| `log`（默认，灰度用） | 放行，打 `jwks_key_not_pinned` 告警（`kid`、`thumbprint`、`jwksUrl`） |
+| `enforce` | `401 IDTOKEN_KEY_NOT_PINNED`（与其它 `IDTOKEN_*` 同一条路径、同一响应形状），error 级别同字段日志 |
+
+清单里有格式不对的项（任何模式下），或 `enforce` 配空清单，都拒绝启动（按位置报错，不回显值）。
+`SSO_TGE_ENABLED=true` 时必须是 `enforce`（§1）。日志永远不含 token。JWKS 取不到时照旧 fail closed（5xx）。
+
+**读取指纹**——公开端点，不需要登录，随时可读，所以不存在 verifier 名字那种"先登录一次才知道"的问题：
+
+```sh
+node scripts/web3authJwksThumbprints.js
+#   容器里：docker exec <api 容器> node scripts/web3authJwksThumbprints.js
+#   kid=… alg=ES256 thumbprint=… jwks=https://api-auth.web3auth.io/jwks   ← 每把钥匙一行
+```
+
+目前 Web3Auth 的 `kid` 恰好就是指纹本身；后端**不依赖**这一点，永远从钥匙参数自己算。
+
+**钉之前核对每一把钥匙**（脚本显示的是端点"此刻"返回的内容，而这恰好是网络路径上的攻击者能控制的东西）：
+
+1. 在两个不同网络（服务器上一次，自己电脑换一个网络再一次）各跑一次脚本，两边结果必须完全一致，且来自预期的 https 地址
+   （`api-auth.web3auth.io` / `authjs.web3auth.io`）。
+2. 在 `log` 模式下用真实账号每种登录方式各登一次，然后
+   `docker logs <api 容器> 2>&1 | grep '"message":"jwks_key_not_pinned"'` 必须为空——证明真实 token 的签名钥匙都已在清单里。
+3. **建议**：Web3Auth 公布"下一把"钥匙时（JWKS 里出现一把新钥匙），就把"当前 + 下一把"一起钉上，轮换当天就不会中断。
+
+**轮换 runbook（`enforce` 下 Web3Auth 换了钥匙）**
+
+- **现象**：**每一次登录都失败**，前端拿到 `401 IDTOKEN_KEY_NOT_PINNED`；后端每次打一条 error 级 `jwks_key_not_pinned`，
+  里面的 `thumbprint` 就是新钥匙的指纹，`jwksUrl` 说明是哪一套 JWKS：
+  ```sh
+  docker logs <api 容器> 2>&1 | grep '"message":"jwks_key_not_pinned"' \
+    | sed -E 's/.*"jwksUrl":"([^"]*)".*"thumbprint":"([^"]*)".*/\2  \1/' | sort | uniq -c
+  # 日志是 JSON、键按字母序输出，所以 jwksUrl 一定在 thumbprint 前面
+  ```
+- **核实这把钥匙真是 Web3Auth 的**。**不要**因为它出现在失败日志里就去钉它——攻击者造成的失败长得一模一样：
+  1. 两个不同网络各跑一次 `node scripts/web3authJwksThumbprints.js`，新指纹必须两边都出现、来自预期的 URL。
+  2. 查 Web3Auth 官方渠道（控制台 / 公告 / 状态页 / 支持）有没有轮换说明；拿不准就先问 Web3Auth，再动配置。
+  3. 失败开始的时间与新钥匙出现的时间对得上，同一时段没有别的异常（DNS 变更、证书突变）。
+- **加 pin、重启**：把新指纹追加到 `WEB3AUTH_JWKS_PINNED_THUMBPRINTS`（旧指纹先留着），重建 / 重启 API 容器；
+  启动行里 `jwksPins=` 应该多 1。再用真实账号登录一次确认，`jwks_key_not_pinned` 不再出现。
+- **收尾**：旧钥匙从两套 JWKS 里都消失、且超过 `WEB3AUTH_MAX_TOKEN_AGE`（默认 1d）后，再把旧指纹从清单删掉。
+- **没有"临时放行"开关**：把模式改回 `log` 会被 `SSO_TGE_ENABLED=true` 的启动断言拒绝，要恢复登录只能先关掉合作方流程。这是故意的。
+
+**取舍，明说**：这是**有意选择完整性而不是可用性**。Web3Auth 轮换到没钉过的钥匙时，登录会全部中断，直到有人核实、
+加 pin、重启；换来的是：**运维没批准过的钥匙，永远不能让任何一次登录通过**。缓解办法：提前钉"当前 + 下一把"，
+并给 `jwks_key_not_pinned` 配告警。
 
 ## 🛡 运行加固 (Operational hardening)
 
