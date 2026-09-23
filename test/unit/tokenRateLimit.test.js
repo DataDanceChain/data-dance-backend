@@ -9,12 +9,13 @@
  *   - a per-client_id ceiling (OAUTH_TOKEN_CLIENT_MAX_PER_MIN, default 3000) catches runaway loops,
  *     and only verified credentials can spend it.
  */
-const { describe, it, beforeEach, afterEach } = require('node:test');
+const { describe, it, beforeEach, afterEach, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('crypto');
 const request = require('supertest');
 
 const { installMockPrisma } = require('../helpers/mockPrisma');
+const { listenLoopback } = require('../helpers/loopbackServer');
 
 const prisma = installMockPrisma();
 require.cache[require.resolve('@prisma/client')].exports = {
@@ -44,6 +45,11 @@ delete process.env.SSO_REQUIRE_VERIFIED_SESSION;
 delete process.env.OAUTH_TOKEN_CLIENT_MAX_PER_MIN;
 
 const app = require('../../src/app');
+
+// A loopback-bound server for supertest (see test/helpers/loopbackServer.js).
+let server;
+before(async () => { server = await listenLoopback(app); });
+after(() => new Promise((resolve) => server.close(resolve)));
 const { startAuthorization, decideConsent, issuedTokensByCode } = require('../../src/services/oauthService');
 const { clearRateLimitStore, tokenClientMaxPerMinute } = require('../../src/middlewares/rateLimitMiddleware');
 
@@ -63,7 +69,7 @@ async function mintCode() {
 }
 
 function exchange({ code, verifier, auth = basic('tge-test', SECRET), ip }) {
-  const r = request(app).post('/oauth/token').type('form');
+  const r = request(server).post('/oauth/token').type('form');
   if (auth) r.set('Authorization', auth);
   if (ip) r.set('X-Forwarded-For', ip);
   return r.send({ grant_type: 'authorization_code', code, code_verifier: verifier, redirect_uri: REDIRECT });

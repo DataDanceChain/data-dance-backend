@@ -8,12 +8,13 @@
  *   - a per-client ceiling (OAUTH_TOKEN_CLIENT_MAX_PER_MIN, its own bucket) catches runaway loops,
  *     and only verified credentials can spend it.
  */
-const { describe, it, beforeEach, afterEach } = require('node:test');
+const { describe, it, beforeEach, afterEach, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('crypto');
 const request = require('supertest');
 
 const { installMockPrisma } = require('../helpers/mockPrisma');
+const { listenLoopback } = require('../helpers/loopbackServer');
 
 const prisma = installMockPrisma();
 require.cache[require.resolve('@prisma/client')].exports = {
@@ -41,12 +42,17 @@ Object.assign(process.env, {
 delete process.env.OAUTH_TOKEN_CLIENT_MAX_PER_MIN;
 
 const app = require('../../src/app');
+
+// A loopback-bound server for supertest (see test/helpers/loopbackServer.js).
+let server;
+before(async () => { server = await listenLoopback(app); });
+after(() => new Promise((resolve) => server.close(resolve)));
 const { clearRateLimitStore } = require('../../src/middlewares/rateLimitMiddleware');
 
 const basic = (id, secret) => `Basic ${Buffer.from(`${id}:${secret}`).toString('base64')}`;
 
 function revoke({ token = `ddc_tge_${crypto.randomBytes(16).toString('hex')}`, auth = basic('tge-test', SECRET), ip } = {}) {
-  const r = request(app).post('/oauth/revoke').type('form');
+  const r = request(server).post('/oauth/revoke').type('form');
   if (auth) r.set('Authorization', auth);
   if (ip) r.set('X-Forwarded-For', ip);
   return r.send({ token, token_type_hint: 'access_token' });
@@ -62,8 +68,13 @@ describe('/oauth/revoke limiting', () => {
 
   it('30 authenticated partner revocations from ONE IP within a minute all succeed', async () => {
     const statuses = [];
-    for (let i = 0; i < 30; i++) statuses.push((await revoke()).status);
-    assert.deepEqual([...new Set(statuses)], [200], `statuses: ${statuses.join(' ')}`);
+    let odd = null;
+    for (let i = 0; i < 30; i++) {
+      const r = await revoke();
+      statuses.push(r.status);
+      if (r.status !== 200 && !odd) odd = { i, status: r.status, body: r.text.slice(0, 200), server: r.headers['x-request-id'] ? 'this app' : 'NOT this app (no X-Request-Id)' };
+    }
+    assert.deepEqual([...new Set(statuses)], [200], `statuses: ${statuses.join(' ')} first-odd: ${JSON.stringify(odd)}`);
   });
 
   it('wrong secrets and unauthenticated attempts stay limited per IP (20 per minute)', async () => {
@@ -82,7 +93,7 @@ describe('/oauth/revoke limiting', () => {
     const statuses = [];
     for (let i = 0; i < 6; i++) statuses.push((await revoke({ ip: `198.51.100.${i}` })).status);
     assert.deepEqual(statuses, [200, 200, 200, 200, 200, 429]);
-    const tokenReq = await request(app).post('/oauth/token').type('form').set('Authorization', basic('tge-test', SECRET))
+    const tokenReq = await request(server).post('/oauth/token').type('form').set('Authorization', basic('tge-test', SECRET))
       .send({ grant_type: 'authorization_code', code: 'ddc_code_x', code_verifier: 'v'.repeat(43), redirect_uri: 'https://tge.example.com/oauth/callback' });
     assert.equal(tokenReq.status, 400, 'logouts must not spend the login (token) budget');
   });

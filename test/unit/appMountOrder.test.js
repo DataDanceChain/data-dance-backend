@@ -6,13 +6,14 @@
  * while it answered 401 for the public ticket exchange and for every SSO-session request. This
  * file loads src/app itself so the composition is what is under test.
  */
-const { describe, it, before, beforeEach } = require('node:test');
+const { describe, it, before, beforeEach, after } = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('crypto');
 const request = require('supertest');
 const jwt = require('jsonwebtoken');
 
 const { installMockPrisma } = require('../helpers/mockPrisma');
+const { listenLoopback } = require('../helpers/loopbackServer');
 
 const prisma = installMockPrisma();
 // `protect` constructs its own PrismaClient at load; route it to the same in-memory store.
@@ -46,6 +47,11 @@ Object.assign(process.env, {
 });
 
 const app = require('../../src/app');
+
+// A loopback-bound server for supertest (see test/helpers/loopbackServer.js).
+let server;
+before(async () => { server = await listenLoopback(app); });
+after(() => new Promise((resolve) => server.close(resolve)));
 const { signSsoSession } = require('../../src/routes/ssoRoutes');
 const { clearRateLimitStore } = require('../../src/middlewares/rateLimitMiddleware');
 
@@ -89,14 +95,14 @@ describe('src/app mount order', () => {
   });
 
   it('an unauthenticated POST /api/sso/ticket/exchange reaches its handler (400 TICKET_INVALID, not 401)', async () => {
-    const res = await request(app).post('/api/sso/ticket/exchange').send({});
+    const res = await request(server).post('/api/sso/ticket/exchange').send({});
     assert.equal(res.status, 400, `got ${res.status} ${JSON.stringify(res.body)}`);
     assert.equal(res.body.code, 'TICKET_INVALID');
   });
 
   it('an SSO-session bearer on GET /api/oauth/requests/:id reaches its handler', async () => {
     const { token } = signSsoSession({ userId: user.id, clientId: 'tge-test', jti: 'j-1' });
-    const res = await request(app).get('/api/oauth/requests/req-mount-1').set('Authorization', `Bearer ${token}`);
+    const res = await request(server).get('/api/oauth/requests/req-mount-1').set('Authorization', `Bearer ${token}`);
     assert.equal(res.status, 200, `got ${res.status} ${JSON.stringify(res.body)}`);
     assert.equal(res.body.data.id, 'req-mount-1');
     assert.equal(res.body.data.clientId, 'tge-test');
@@ -104,7 +110,7 @@ describe('src/app mount order', () => {
 
   it('an SSO-session bearer on POST /api/oauth/consent reaches its handler', async () => {
     const { token } = signSsoSession({ userId: user.id, clientId: 'tge-test', jti: 'j-2' });
-    const res = await request(app)
+    const res = await request(server)
       .post('/api/oauth/consent')
       .set('Authorization', `Bearer ${token}`)
       .send({ requestId: 'req-mount-1', allow: false });
@@ -114,26 +120,26 @@ describe('src/app mount order', () => {
 
   it('an expired SSO session is answered by the consent principal (SSO_SESSION_EXPIRED), not by a generic 401', async () => {
     const { token } = signSsoSession({ userId: user.id, clientId: 'tge-test', jti: 'j-3' }, { ttlSec: 1, now: Date.now() - 60_000 });
-    const res = await request(app).get('/api/oauth/requests/req-mount-1').set('Authorization', `Bearer ${token}`);
+    const res = await request(server).get('/api/oauth/requests/req-mount-1').set('Authorization', `Bearer ${token}`);
     assert.equal(res.status, 401);
     assert.equal(res.body.code, 'SSO_SESSION_EXPIRED');
   });
 
   it('the consent request summary stays readable without a credential', async () => {
-    const res = await request(app).get('/api/oauth/requests/req-mount-1');
+    const res = await request(server).get('/api/oauth/requests/req-mount-1');
     assert.equal(res.status, 200, `got ${res.status} ${JSON.stringify(res.body)}`);
   });
 
   it('crawler endpoints still demand a user JWT', async () => {
     for (const [method, path] of [['get', '/api/crawler-tasks'], ['post', '/api/crawler-tasks']]) {
-      const res = await request(app)[method](path).send({});
+      const res = await request(server)[method](path).send({});
       assert.equal(res.status, 401, `${method.toUpperCase()} ${path} → ${res.status}`);
     }
     const { token } = signSsoSession({ userId: user.id, clientId: 'tge-test', jti: 'j-4' });
-    const withSession = await request(app).get('/api/crawler-tasks').set('Authorization', `Bearer ${token}`);
+    const withSession = await request(server).get('/api/crawler-tasks').set('Authorization', `Bearer ${token}`);
     assert.equal(withSession.status, 401, 'an SSO session must not open a first-party endpoint');
     const userJwt = jwt.sign({ id: user.id, ver: 2 }, JWT_SECRET, { expiresIn: '5m' });
-    const ok = await request(app).get('/api/crawler-tasks').set('Authorization', `Bearer ${userJwt}`);
+    const ok = await request(server).get('/api/crawler-tasks').set('Authorization', `Bearer ${userJwt}`);
     assert.notEqual(ok.status, 401, 'a user JWT must still be accepted by the crawler routes');
   });
 
@@ -143,11 +149,11 @@ describe('src/app mount order', () => {
     const a = jwt.sign({ id: user.id, ver: 2 }, JWT_SECRET, { expiresIn: '5m' });
     const b = jwt.sign({ id: other.id, ver: 2 }, JWT_SECRET, { expiresIn: '5m' });
     for (let i = 0; i < 10; i++) {
-      await request(app).post('/api/oauth/consent').set('Authorization', `Bearer ${a}`).send({ requestId: `nope-${i}`, allow: false });
+      await request(server).post('/api/oauth/consent').set('Authorization', `Bearer ${a}`).send({ requestId: `nope-${i}`, allow: false });
     }
-    const aOver = await request(app).post('/api/oauth/consent').set('Authorization', `Bearer ${a}`).send({ requestId: 'nope-x', allow: false });
+    const aOver = await request(server).post('/api/oauth/consent').set('Authorization', `Bearer ${a}`).send({ requestId: 'nope-x', allow: false });
     assert.equal(aOver.status, 429, 'the 11th decision of one user within a minute is limited');
-    const bFirst = await request(app).post('/api/oauth/consent').set('Authorization', `Bearer ${b}`).send({ requestId: 'nope-y', allow: false });
+    const bFirst = await request(server).post('/api/oauth/consent').set('Authorization', `Bearer ${b}`).send({ requestId: 'nope-y', allow: false });
     assert.notEqual(bFirst.status, 429, 'another user on the same IP is not');
   });
 });

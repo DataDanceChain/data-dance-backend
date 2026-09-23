@@ -6,13 +6,14 @@
  * and logged at error level. The in-memory mock accepts `undefined` silently, so this suite makes
  * findUnique behave like the real client for exactly that input.
  */
-const { describe, it, beforeEach } = require('node:test');
+const { describe, it, beforeEach, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('crypto');
 const request = require('supertest');
 const jwt = require('jsonwebtoken');
 
 const { installMockPrisma } = require('../helpers/mockPrisma');
+const { listenLoopback } = require('../helpers/loopbackServer');
 
 const prisma = installMockPrisma();
 require.cache[require.resolve('@prisma/client')].exports = {
@@ -50,6 +51,11 @@ Object.assign(process.env, {
 });
 
 const app = require('../../src/app');
+
+// A loopback-bound server for supertest (see test/helpers/loopbackServer.js).
+let server;
+before(async () => { server = await listenLoopback(app); });
+after(() => new Promise((resolve) => server.close(resolve)));
 const { clearRateLimitStore } = require('../../src/middlewares/rateLimitMiddleware');
 
 const user = { id: 'user-rid-1', email: 'rid@example.com', isOrganization: false, userType: 'regular', disabledAt: null };
@@ -69,7 +75,7 @@ describe('POST /api/oauth/consent requestId validation', () => {
     ['absurdly long', { requestId: 'r'.repeat(300), allow: true }],
   ]) {
     it(`${label} requestId → 400 invalid_request, never 500`, async () => {
-      const res = await request(app).post('/api/oauth/consent').set('Authorization', bearer()).send(body);
+      const res = await request(server).post('/api/oauth/consent').set('Authorization', bearer()).send(body);
       assert.equal(res.status, 400, `got ${res.status} ${JSON.stringify(res.body)}`);
       assert.equal(res.body.error, 'invalid_request');
       assert.match(res.body.error_description, /requestId/);
@@ -77,7 +83,7 @@ describe('POST /api/oauth/consent requestId validation', () => {
   }
 
   it('a well-formed but unknown requestId is still the ordinary "expired" answer', async () => {
-    const res = await request(app).post('/api/oauth/consent').set('Authorization', bearer()).send({ requestId: 'no-such-request', allow: true });
+    const res = await request(server).post('/api/oauth/consent').set('Authorization', bearer()).send({ requestId: 'no-such-request', allow: true });
     assert.equal(res.status, 400);
     assert.equal(res.body.error, 'invalid_request');
     assert.match(res.body.error_description, /expired/);
