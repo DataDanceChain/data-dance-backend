@@ -140,6 +140,28 @@ function requireScope(scope) {
 router.use(lim('partner'));
 
 /**
+ * G6, minimal: every successful partner read writes ONE structured `partner.access` line — who
+ * (client + DataDance user), when (the logger's timestamp), through which token, and exactly which
+ * keys left DataDance. It is a log line: append-only on stdout; durable, tamper-evident storage is
+ * log shipping (G7). No token, no field VALUES. `accessLog.write` is replaceable for tests.
+ */
+const accessLog = { write: (entry) => logger.info('partner.access', entry) };
+
+function recordAccess(req, endpoint, body, extra = {}) {
+  const { client, user, token } = req.partner;
+  accessLog.write({
+    reqId: req.reqId || null,
+    clientId: client.clientId,
+    userId: user.id,
+    tokenId: token.id || null,
+    endpoint,
+    scope: token.scope,
+    fields: Object.keys(body).sort(),
+    ...extra,
+  });
+}
+
+/**
  * Both gates in front of an optional field:
  *   - the token must carry the field's scope (the partner asked for it and the user allowed it);
  *   - the environment must have frozen the field in SSO_TGE_STATUS_FIELDS.
@@ -180,7 +202,9 @@ function meBody(req) {
 
 router.get('/me', requirePartnerToken, readOnlyRequest, requireScope('tge:identity'), (req, res) => {
   res.set('Cache-Control', 'no-store');
-  return res.json(meBody(req));
+  const body = meBody(req);
+  recordAccess(req, 'me', body);
+  return res.json(body);
 });
 
 /**
@@ -237,6 +261,7 @@ router.get('/status', requirePartnerToken, readOnlyRequest, requireScope('tge:st
     } else {
       res.set('Cache-Control', `private, max-age=${PARTNER_STATUS_CACHE_MAX_AGE_SEC}`);
     }
+    recordAccess(req, 'status', body);
     return res.json(body);
   } catch (error) {
     return next(error);
@@ -259,5 +284,6 @@ router.use((error, req, res, next) => {
 module.exports = router;
 module.exports.requirePartnerToken = requirePartnerToken;
 module.exports.accountStatus = accountStatus;
+module.exports.accessLog = accessLog;
 module.exports.meBody = meBody;
 module.exports.referralSummary = referralSummary;

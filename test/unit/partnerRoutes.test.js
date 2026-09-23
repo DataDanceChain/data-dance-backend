@@ -880,3 +880,55 @@ describe('POST /oauth/register kill switch (item 11)', () => {
     }
   });
 });
+
+/**
+ * G6 (minimal): every successful partner read writes one `partner.access` record — who, through
+ * which token, which endpoint, and exactly which KEYS left DataDance. Never a token, never values.
+ */
+describe('partner access record (G6)', () => {
+  const { accessLog } = require('../../src/routes/partnerTgeRoutes');
+  beforeEach(() => clearRateLimitStore());
+
+  async function capture(fn) {
+    const entries = [];
+    const original = accessLog.write;
+    accessLog.write = (entry) => entries.push(entry);
+    try {
+      await fn();
+    } finally {
+      accessLog.write = original;
+    }
+    return entries;
+  }
+
+  it('/me and /status each write one record naming the client, user, endpoint and returned keys', async () => {
+    const token = await mintToken('tge:identity tge:status');
+    let me;
+    let st;
+    const entries = await capture(async () => {
+      me = await request(app).get('/partner/tge/me').set('Authorization', `Bearer ${token}`);
+      st = await request(app).get('/partner/tge/status').set('Authorization', `Bearer ${token}`);
+    });
+    assert.equal(me.status, 200);
+    assert.equal(st.status, 200);
+    assert.equal(entries.length, 2);
+    assert.deepEqual(entries.map((e) => e.endpoint), ['me', 'status']);
+    for (const [entry, res] of [[entries[0], me], [entries[1], st]]) {
+      assert.equal(entry.clientId, 'tge-test');
+      assert.equal(entry.userId, user.id);
+      assert.deepEqual(entry.fields, Object.keys(res.body).sort());
+      assert.equal(entry.scope, 'tge:identity tge:status');
+      assert.ok(!JSON.stringify(entry).includes(token), 'the access token never reaches the record');
+      assert.ok(!JSON.stringify(entry).includes(user.email), 'no field value reaches the record');
+    }
+  });
+
+  it('a refused read writes no access record', async () => {
+    const token = await mintToken('tge:identity');
+    const entries = await capture(async () => {
+      const st = await request(app).get('/partner/tge/status').set('Authorization', `Bearer ${token}`);
+      assert.equal(st.status, 403);
+    });
+    assert.equal(entries.length, 0);
+  });
+});
