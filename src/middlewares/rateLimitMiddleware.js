@@ -38,7 +38,7 @@ function sendRateLimited(req, res, { message, retryAfter, errorFormat, code }) {
  * Custom rate limiter middleware
  * @param {Object} options - Configuration options
  * @param {number} options.windowMs - Time window in milliseconds
- * @param {number} options.max - Maximum number of requests per window
+ * @param {number|Function} options.max - Maximum number of requests per window (or `(req) => number`)
  * @param {string} options.message - Error message when limit exceeded
  * @param {boolean} options.skipSuccessfulRequests - Skip counting successful requests (count only status >= 400)
  * @param {Function} options.keyGenerator - Function to generate unique key for each client
@@ -61,6 +61,9 @@ function createRateLimiter(options = {}) {
   } = options;
 
   return async (req, res, next) => {
+    // `max` may be a function read per request, so an env-configured ceiling can be sized (and
+    // tested) without rebuilding the limiter.
+    const limit = typeof max === 'function' ? max(req) : max;
     const key = `${name}:${keyGenerator(req) || 'anonymous'}`;
     const current = now();
     const windowStart = current - windowMs;
@@ -82,7 +85,7 @@ function createRateLimiter(options = {}) {
       logger.warn('Rate limit exceeded', {
         key,
         requests: clientData.requests.length,
-        limit: max,
+        limit,
         retryAfter: Math.ceil(retryAfter)
       });
       return sendRateLimited(req, res, { message, retryAfter, errorFormat, code });
@@ -93,7 +96,7 @@ function createRateLimiter(options = {}) {
     clientData.blocked = false;
 
     // Check if limit would be exceeded
-    if (clientData.requests.length >= max) {
+    if (clientData.requests.length >= limit) {
       // Block for the remainder of the window
       clientData.blocked = true;
       clientData.blockUntil = clientData.requests[0] + windowMs;
@@ -102,7 +105,7 @@ function createRateLimiter(options = {}) {
       logger.warn('Rate limit exceeded', {
         key,
         requests: clientData.requests.length,
-        limit: max,
+        limit,
         retryAfter: Math.ceil(retryAfter)
       });
       return sendRateLimited(req, res, { message, retryAfter, errorFormat, code });
@@ -132,8 +135,8 @@ function createRateLimiter(options = {}) {
     }
 
     // Add rate limit headers
-    res.setHeader('X-RateLimit-Limit', max);
-    res.setHeader('X-RateLimit-Remaining', Math.max(0, max - clientData.requests.length));
+    res.setHeader('X-RateLimit-Limit', limit);
+    res.setHeader('X-RateLimit-Remaining', Math.max(0, limit - clientData.requests.length));
     res.setHeader('X-RateLimit-Reset', new Date(current + windowMs).toISOString());
 
     next();
@@ -156,6 +159,13 @@ const keyGenerators = {
     return `tok:${crypto.createHash('sha256').update(match[1]).digest('hex')}`;
   },
 };
+
+/** Per-client ceiling for authenticated confidential token requests; env, read per request. */
+const DEFAULT_TOKEN_CLIENT_MAX_PER_MIN = 3000;
+function tokenClientMaxPerMinute(env = process.env) {
+  const parsed = Number.parseInt(String(env.OAUTH_TOKEN_CLIENT_MAX_PER_MIN ?? '').trim(), 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_TOKEN_CLIENT_MAX_PER_MIN;
+}
 
 /**
  * Pre-configured rate limiters for different endpoints
@@ -233,13 +243,29 @@ const rateLimiters = {
     keyGenerator: keyGenerators.ip
   }),
 
-  // POST /oauth/token
+  // POST /oauth/token — per IP, for every request that does NOT present valid confidential-client
+  // credentials: unauthenticated / public-client exchanges and failed client authentication (the
+  // brute-force surface). Counted on entry. The partner's authenticated exchanges never touch this
+  // bucket: they all come from ONE server IP, and 20/min per IP capped a whole campaign at ~20
+  // logins a minute. See oauthRoutes.tokenRateLimit.
   oauthToken: createRateLimiter({
     name: 'oauthToken',
     windowMs: 60 * 1000,
     max: 20,
     message: 'Too many token requests. Please wait a minute.',
     keyGenerator: keyGenerators.ip
+  }),
+
+  // POST /oauth/token — per confidential client_id, only for requests whose client credentials
+  // VERIFIED (so nobody without the secret can spend a partner's budget). A runaway-loop catcher,
+  // NOT a security control. Sized from the assumption that a campaign peaks at ~50 logins/s:
+  // OAUTH_TOKEN_CLIENT_MAX_PER_MIN, default 3000.
+  oauthTokenClient: createRateLimiter({
+    name: 'oauthTokenClient',
+    windowMs: 60 * 1000,
+    max: () => tokenClientMaxPerMinute(),
+    message: 'Too many token requests for this client. Please wait a minute.',
+    keyGenerator: (req) => `client:${req.oauthTokenClientId || 'unknown'}`
   }),
 
   // POST /oauth/revoke
@@ -334,5 +360,7 @@ module.exports = {
   createRateLimiter,
   rateLimiters,
   keyGenerators,
-  clearRateLimitStore
+  clearRateLimitStore,
+  tokenClientMaxPerMinute,
+  DEFAULT_TOKEN_CLIENT_MAX_PER_MIN
 };

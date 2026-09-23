@@ -15,7 +15,7 @@ const {
 
 const EXPECTED_LIMITERS = [
   'upload', 'general', 'auth', 'public', 'verify',
-  'web3authLogin', 'oauthRegister', 'oauthAuthorize', 'oauthToken', 'oauthRevoke',
+  'web3authLogin', 'oauthRegister', 'oauthAuthorize', 'oauthToken', 'oauthTokenClient', 'oauthRevoke',
   'consent', 'partner', 'opsLogin', 'ssoTicket', 'ssoExchange',
 ];
 

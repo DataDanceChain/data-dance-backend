@@ -3,7 +3,7 @@ const prisma = require('../utils/prisma');
 const { protect } = require('../middlewares/authMiddleware');
 const { rateLimiters } = require('../middlewares/rateLimitMiddleware');
 const { createLogger } = require('../utils/logger');
-const { PARTNER_REALM } = require('../constants/partnerClient');
+const { PARTNER_REALM, getPartnerClient, verifyClientSecret } = require('../constants/partnerClient');
 const { verifySsoSession, looksLikeSsoSession } = require('./ssoRoutes');
 const {
   OAuthError,
@@ -18,6 +18,7 @@ const {
   exchangeRefreshToken,
   revokeToken,
   userInfoFromBearer,
+  presentedClientCredentials,
 } = require('../services/oauthService');
 
 const router = express.Router();
@@ -217,7 +218,45 @@ router.get('/oauth/authorize', lim('oauthAuthorize'), async (req, res) => {
   }
 });
 
-router.post('/oauth/token', lim('oauthToken'), async (req, res) => {
+/**
+ * The confidential client whose credentials THIS request presents and which VERIFY (enabled partner
+ * client, correct secret), or null. Cheap: one sha256 per request, no database. Any malformed or
+ * ambiguous credential is simply "not authenticated" here — the handler still answers it properly.
+ */
+function verifiedConfidentialClientId(req) {
+  try {
+    const presented = presentedClientCredentials(req, req.body || {});
+    if (!presented || !presented.clientSecret) return null;
+    const client = getPartnerClient(presented.clientId, req);
+    if (!client || !client.enabled) return null;
+    return verifyClientSecret(client, presented.clientSecret) ? client.clientId : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * /oauth/token limiting (A4). The partner exchanges every user's code from ONE server IP, so a
+ * per-IP budget that also counts its authenticated exchanges caps the whole campaign (it was 20 a
+ * minute). Therefore:
+ *   - verified confidential client → per-client_id ceiling only (OAUTH_TOKEN_CLIENT_MAX_PER_MIN,
+ *     default 3000; a runaway-loop catcher, not a security control). Its successes AND its
+ *     invalid_grant answers (double submits, expired codes — ordinary user behaviour at campaign
+ *     scale) never spend the per-IP budget;
+ *   - everything else — no/unknown client authentication, a wrong secret, public (MCP) clients —
+ *     → the per-IP limiter as before, counted on entry. That is the brute-force surface: nobody
+ *     without the secret gets past it, and codes/verifiers of public clients stay IP-limited.
+ */
+function tokenRateLimit(req, res, next) {
+  const clientId = verifiedConfidentialClientId(req);
+  if (clientId) {
+    req.oauthTokenClientId = clientId;
+    return lim('oauthTokenClient')(req, res, next);
+  }
+  return lim('oauthToken')(req, res, next);
+}
+
+router.post('/oauth/token', tokenRateLimit, async (req, res) => {
   res.set('Cache-Control', 'no-store');
   res.set('Pragma', 'no-cache');
   try {
