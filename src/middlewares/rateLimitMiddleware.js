@@ -268,13 +268,26 @@ const rateLimiters = {
     keyGenerator: (req) => `client:${req.oauthTokenClientId || 'unknown'}`
   }),
 
-  // POST /oauth/revoke
+  // POST /oauth/revoke — per IP for every request WITHOUT verified confidential-client credentials
+  // (the brute-force surface). A partner revoking on each user logout does it from one server IP,
+  // so its verified requests use oauthRevokeClient instead. See oauthRoutes.clientAwareLimit.
   oauthRevoke: createRateLimiter({
     name: 'oauthRevoke',
     windowMs: 60 * 1000,
     max: 20,
     message: 'Too many revocation requests. Please wait a minute.',
     keyGenerator: keyGenerators.ip
+  }),
+
+  // POST /oauth/revoke — per verified confidential client_id. Same ceiling value as the token
+  // endpoint (OAUTH_TOKEN_CLIENT_MAX_PER_MIN, default 3000) but its OWN bucket, so logouts never
+  // spend the login budget. A runaway-loop catcher, not a security control.
+  oauthRevokeClient: createRateLimiter({
+    name: 'oauthRevokeClient',
+    windowMs: 60 * 1000,
+    max: () => tokenClientMaxPerMinute(),
+    message: 'Too many revocation requests for this client. Please wait a minute.',
+    keyGenerator: (req) => `client:${req.oauthTokenClientId || 'unknown'}`
   }),
 
   // POST /api/oauth/consent — per signed-in user, IP before the principal is known

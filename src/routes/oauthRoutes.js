@@ -247,14 +247,20 @@ function verifiedConfidentialClientId(req) {
  *     → the per-IP limiter as before, counted on entry. That is the brute-force surface: nobody
  *     without the secret gets past it, and codes/verifiers of public clients stay IP-limited.
  */
-function tokenRateLimit(req, res, next) {
-  const clientId = verifiedConfidentialClientId(req);
-  if (clientId) {
-    req.oauthTokenClientId = clientId;
-    return lim('oauthTokenClient')(req, res, next);
-  }
-  return lim('oauthToken')(req, res, next);
+function clientAwareLimit(ipLimiter, clientLimiter) {
+  return (req, res, next) => {
+    const clientId = verifiedConfidentialClientId(req);
+    if (clientId) {
+      req.oauthTokenClientId = clientId;
+      return lim(clientLimiter)(req, res, next);
+    }
+    return lim(ipLimiter)(req, res, next);
+  };
 }
+
+const tokenRateLimit = clientAwareLimit('oauthToken', 'oauthTokenClient');
+// /oauth/revoke gets the same split: the partner revokes on each user logout from one server IP.
+const revokeRateLimit = clientAwareLimit('oauthRevoke', 'oauthRevokeClient');
 
 router.post('/oauth/token', tokenRateLimit, async (req, res) => {
   res.set('Cache-Control', 'no-store');
@@ -273,7 +279,7 @@ router.post('/oauth/token', tokenRateLimit, async (req, res) => {
   }
 });
 
-router.post('/oauth/revoke', lim('oauthRevoke'), async (req, res) => {
+router.post('/oauth/revoke', revokeRateLimit, async (req, res) => {
   try {
     const body = req.body || {};
     await revokeToken(body.token || body.refresh_token, { req, body });

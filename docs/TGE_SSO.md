@@ -333,11 +333,12 @@ Takes effect on the next `/partner/tge/*` call. `401 invalid_client` without cre
 
 ## 10. Rate limits
 
-Per IP: `/oauth/authorize` 30/min, `/oauth/revoke` 20/min, and `/oauth/token` 20/min **for
+Per IP: `/oauth/authorize` 30/min, and `/oauth/token` and `/oauth/revoke` 20/min each **for
 requests without valid client authentication** (no credentials, a wrong secret — the brute-force
-surface). A token request whose client credentials verify is **not** limited per IP — your backend
-exchanges every user's code from one address — but by a per-client ceiling sized for a campaign
-peak (3000/min by default; it exists to stop a runaway loop, not to meter you). Per token:
+surface). A token or revocation request whose client credentials verify is **not** limited per IP —
+your backend exchanges every user's code and revokes every logout from one address — but by a
+per-client ceiling sized for a campaign peak (3000/min by default, counted separately for token and
+revoke; it exists to stop a runaway loop, not to meter you). Per token:
 `/partner/tge/*` 120/min — unchanged by `points` and `referral`. The limit is sized for a partner
 backend reading once per user session; it is not a bulk-export budget. `429` bodies use the OAuth
 error shape with `error=slow_down` and carry `Retry-After`. Inside DataDance, consent decisions are
