@@ -1,6 +1,7 @@
 const app = require('./app');
 const dotenv = require('dotenv');
 const { assertPartnerConfig, assertFinancialGradeConfig } = require('./constants/partnerClient');
+const { applyPartnerKillSwitch } = require('./services/partnerKillSwitch');
 
 // 加载环境变量
 dotenv.config();
@@ -13,6 +14,12 @@ console.log(
     ? `Partner SSO enabled [${partnerSso.environment}] client=${partnerSso.clientId} redirectUris=${partnerSso.redirectUriCount} statusFields=${partnerSso.statusFields.join(',') || '(none)'} verifiedSession=${partnerSso.requireVerifiedSession} rotationOpen=${partnerSso.rotationOpen}`
     : 'Partner SSO disabled',
 );
+// Kill switch, boot half: with the partner flow OFF, revoke every outstanding partner token so a
+// later re-enable cannot revive one. Asynchronous and never throws — the partner paths are already
+// closed while disabled, so nothing waits on it; a failure is logged at error level.
+applyPartnerKillSwitch(partnerSso).then((result) => {
+  if (!partnerSso.enabled) console.log(`Partner SSO kill switch: revoked ${result.revoked} outstanding partner token(s)${result.error ? ' — REVOKE FAILED, see error log' : ''}`);
+});
 
 // Money path: SSO_TGE_ENABLED=true also requires the deployment shape around it to be the
 // hardened one (production, enforced ID-token verification with an explicit connection

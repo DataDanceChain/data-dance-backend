@@ -78,6 +78,17 @@ async function issuePartnerToken(userId, client, { resource, scope } = {}) {
   return { token, id: row.id, expiresAt: row.expiresAt, createdAt: row.createdAt, expiresIn: ttlSec };
 }
 
+/**
+ * Delete every partner (TGE) access token, live or expired. Used by the kill switch at a boot with
+ * SSO_TGE_ENABLED=false (src/services/partnerKillSwitch.js), so that switching back on cannot
+ * revive a token issued before the switch was turned off. MCP and manual tokens are untouched.
+ * Returns the number of tokens removed.
+ */
+async function revokeAllPartnerTokens() {
+  const result = await prisma.mcpToken.deleteMany({ where: { source: PARTNER_SOURCE } });
+  return result.count;
+}
+
 async function revokeMcpToken(userId, tokenId) {
   const result = await prisma.mcpToken.deleteMany({
     where: { id: tokenId, userId },
@@ -151,6 +162,7 @@ module.exports = {
   listMcpTokens,
   issueMcpToken,
   issuePartnerToken,
+  revokeAllPartnerTokens,
   revokeMcpToken,
   findUserByMcpToken,
   findUserByPartnerToken,
