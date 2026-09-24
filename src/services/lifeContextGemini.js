@@ -27,8 +27,7 @@ function defaultGeminiModel() {
 
 function languageHint(locale) {
   const code = String(locale || 'en').toLowerCase();
-  if (code.startsWith('zh-tw') || code.startsWith('zh-hant')) return 'Traditional Chinese';
-  if (code.startsWith('zh')) return 'Simplified Chinese';
+  if (code.startsWith('zh')) return 'Traditional Chinese';
   if (code.startsWith('ja')) return 'Japanese';
   return 'English';
 }

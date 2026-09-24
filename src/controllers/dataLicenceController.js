@@ -30,6 +30,9 @@ exports.getDataLicence = async (req, res) => {
 exports.grantDataLicence = async (req, res) => {
   try {
     if (!requireSubject(req, res)) return;
+    if (req.body?.accepted === false) {
+      return res.json({ status: 'success', data: await withdrawConsent(req.user.id) });
+    }
     if (req.body?.accepted !== true) {
       return res.status(400).json({
         status: 'fail',
