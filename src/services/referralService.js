@@ -49,6 +49,7 @@ async function fetchReferrals(userId, level, maxLevel) {
       nickname: r.invitee.name,
       level,
       qualified: withUploads.has(r.invitee.id),
+      inviteTime: r.createdAt,
       referrals: await fetchReferrals(r.invitee.id, level + 1, maxLevel)
     };
     result.push(node);
