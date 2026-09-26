@@ -465,6 +465,7 @@ module.exports = {
   listRedemptions,
   attachRedemptionProof,
   confirmRedemption,
+  syncRedemptionCost,
   publicAllocation,
   publicRedemption,
   summarizeOrder,

@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const commerceController = require('../controllers/commerceController');
+const disbursementController = require('../controllers/disbursementController');
 const { authenticate, isOrganization } = require('../middlewares/auth');
 const { uploadCommerceFile } = require('../middlewares/uploadMiddleware');
 
@@ -45,5 +46,6 @@ router.get('/redemptions', commerceController.listRedemptions);
 router.post('/redemptions', uploadCommerceFile.single('file'), commerceController.createRedemption);
 router.post('/redemptions/:id/proof', uploadCommerceFile.single('file'), commerceController.attachRedemptionProof);
 router.post('/redemptions/:id/confirm', commerceController.confirmRedemption);
+router.post('/redemptions/:id/disburse', disbursementController.disburse);
 
 module.exports = router;

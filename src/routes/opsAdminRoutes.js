@@ -10,6 +10,7 @@ const {
   exportPoints,
 } = require('../controllers/opsAdminController');
 const opsCommerce = require('../controllers/opsCommerceController');
+const disbursement = require('../controllers/disbursementController');
 const {
   listPrivacyRequests,
   resolvePrivacyRequest,
@@ -69,6 +70,9 @@ mount('post', '/merchants/:userId/credit', opsCommerce.creditMerchant);
 mount('post', '/merchants/:userId/kyc', opsCommerce.reviewMerchantKyc);
 mount('get', '/orders', opsCommerce.listOrders);
 mount('post', '/orders/:id/attest', opsCommerce.attestOrder);
+mount('get', '/disbursements', disbursement.opsList);
+mount('post', '/disbursements/items/:id/process', disbursement.opsRetry);
+mount('post', '/disbursements/redemptions/:id/disburse', disbursement.opsDisburse);
 mount('get', '/privacy-requests', listPrivacyRequests);
 mount('post', '/privacy-requests/:id', resolvePrivacyRequest);
 mount('get', '/operations', listOperations);

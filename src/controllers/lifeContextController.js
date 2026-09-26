@@ -1,7 +1,7 @@
 const { createLogger } = require('../utils/logger');
 const { isLifePrivacyLevel, mcpEndpointUrl, publicBaseUrl } = require('../constants/lifeContext');
 const { getSettings, upsertSettings, saveRefined } = require('../services/lifeContextSettings');
-const { asRefined } = require('../services/lifeContextGemini');
+const { asRefined, cleanCrawlerTraces } = require('../services/lifeContextGemini');
 const { loadPortrait, loadVault, refinePortrait } = require('../services/lifeContextDistill');
 const { issueMcpToken, listMcpTokens, revokeMcpToken } = require('../services/mcpTokenService');
 
@@ -107,6 +107,30 @@ async function postSavedRefined(req, res) {
   }
 }
 
+async function postClean(req, res) {
+  try {
+    const language = typeof req.body?.language === 'string' ? req.body.language : 'en';
+    const traces = Array.isArray(req.body?.traces) ? req.body.traces : [];
+    const cleaned = await cleanCrawlerTraces(
+      traces
+        .map((row) => ({
+          id: String(row?.id || ''),
+          source: String(row?.source || ''),
+          title: String(row?.title || ''),
+        }))
+        .filter((row) => row.id),
+      language,
+    );
+    res.json({ status: 'success', data: { drop: cleaned.drop, model: cleaned.model } });
+  } catch (error) {
+    logger.error('postClean failed', error);
+    if (error.code === 'NO_GEMINI') {
+      return res.status(503).json({ status: 'error', message: error.message });
+    }
+    res.status(502).json({ status: 'error', message: error.message || 'Could not clean records.' });
+  }
+}
+
 async function postRefine(req, res) {
   try {
     const language = typeof req.body?.language === 'string' ? req.body.language : 'en';
@@ -148,5 +172,6 @@ module.exports = {
   createToken,
   deleteToken,
   postRefine,
+  postClean,
   postSavedRefined,
 };

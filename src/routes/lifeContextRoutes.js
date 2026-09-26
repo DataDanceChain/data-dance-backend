@@ -7,6 +7,7 @@ const {
   createToken,
   deleteToken,
   postRefine,
+  postClean,
   postSavedRefined,
 } = require('../controllers/lifeContextController');
 
@@ -16,6 +17,7 @@ router.use(protect);
 router.get('/', getStatus);
 router.patch('/settings', updateSettings);
 router.post('/refine', postRefine);
+router.post('/clean', postClean);
 router.post('/refined', postSavedRefined);
 router.get('/tokens', getTokens);
 router.post('/tokens', createToken);
