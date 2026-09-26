@@ -75,6 +75,7 @@ model User {
   campaignApplications     CampaignApplication[]
   campaignRaffleTickets    CampaignRaffleTicket[]
   campaignRaffleWins       CampaignRaffleWin[]
+  disbursementItems        DisbursementItem[]
 }
 
 model UserProfile {
@@ -785,12 +786,86 @@ model PointsRedemption {
   notes           String?
   createdAt       DateTime       @default(now())
   updatedAt       DateTime       @updatedAt
-  order           PurchaseOrder? @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  user            User?          @relation(fields: [userId], references: [id])
+  order             PurchaseOrder?    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  user              User?             @relation(fields: [userId], references: [id])
+  disbursementItem  DisbursementItem?
 
   @@index([orderId])
   @@index([emailNormalized])
   @@index([status])
+}
+
+/// Automated BSC USDT payouts. Partner rows are volume records, not data uploads.
+model DisbursementPartner {
+  id           String              @id @default(uuid())
+  slug         String              @unique
+  name         String
+  status       String              @default("active")
+  createdAt    DateTime            @default(now())
+  updatedAt    DateTime            @updatedAt
+  batches      DisbursementBatch[]
+  items        DisbursementItem[]
+}
+
+model DisbursementBatch {
+  id              String              @id @default(uuid())
+  partnerId       String?
+  origin          String
+  externalBatchId String?
+  status          String              @default("accepted")
+  itemCount       Int                 @default(0)
+  totalAmount     Float               @default(0)
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
+  partner         DisbursementPartner? @relation(fields: [partnerId], references: [id])
+  items           DisbursementItem[]
+
+  @@unique([partnerId, externalBatchId])
+  @@index([origin])
+  @@index([status])
+}
+
+model DisbursementItem {
+  id                  String               @id @default(uuid())
+  payoutId            String               @unique
+  batchId             String?
+  partnerId           String?
+  origin              String
+  recordClass         String
+  countsAsDataUpload  Boolean              @default(false)
+  countsAsDataTrade   Boolean              @default(false)
+  externalUserRef     String?
+  email               String?
+  emailNormalized     String?
+  userId              String?
+  redemptionId        String?              @unique
+  walletAddress       String
+  amount              Float
+  asset               String               @default("USDT")
+  chainId             Int                  @default(56)
+  tokenAddress        String
+  reason              String?
+  status              String               @default("accepted")
+  txHash              String?
+  attestationHash     String?
+  attestationTxHash   String?
+  attestationPayload  Json?
+  attestedAt          DateTime?
+  failureReason       String?
+  submittedAt         DateTime?
+  confirmedAt         DateTime?
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+  batch               DisbursementBatch?   @relation(fields: [batchId], references: [id])
+  partner             DisbursementPartner? @relation(fields: [partnerId], references: [id])
+  user                User?                @relation(fields: [userId], references: [id])
+  redemption          PointsRedemption?    @relation(fields: [redemptionId], references: [id])
+
+  @@index([origin])
+  @@index([recordClass])
+  @@index([status])
+  @@index([partnerId])
+  @@index([emailNormalized])
 }
 
 /// Distilled lifestyle share settings for Connect AI (ChatGPT / Claude MCP).
