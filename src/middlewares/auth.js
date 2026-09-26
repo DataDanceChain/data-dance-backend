@@ -37,8 +37,17 @@ exports.authenticate = async (req, res, next) => {
       });
     }
 
+    if (user.disabledAt) {
+      return res.status(403).json({
+        status: 'fail',
+        code: 'ACCOUNT_DISABLED',
+        message: '账号已停用'
+      });
+    }
+
     // 将用户信息添加到请求对象
     req.user = user;
+    req.authClaims = decoded;
     next();
   } catch (error) {
     if (error.name === 'JsonWebTokenError') {

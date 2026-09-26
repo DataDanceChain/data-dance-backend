@@ -5,8 +5,10 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const { errorHandler } = require('./middlewares/errorMiddleware');
+const { requestIdMiddleware } = require('./middlewares/requestIdMiddleware');
+const { corsOrigins } = require('./constants/corsOrigins');
 const xRoutes = require('./routes/xRoutes'); // Updated import
-const { createLogger } = require('./utils/logger');
+const { createLogger, redactUrl } = require('./utils/logger');
 
 // 导入路由
 const authRoutes = require('./routes/authRoutes');
@@ -38,6 +40,7 @@ const disbursementRoutes = require('./routes/disbursementRoutes');
 const lifeContextRoutes = require('./routes/lifeContextRoutes');
 const mcpRoutes = require('./routes/mcpRoutes');
 const oauthRoutes = require('./routes/oauthRoutes');
+const ssoRoutes = require('./routes/ssoRoutes');
 
 const app = express();
 
@@ -77,28 +80,9 @@ const upload = multer({
 // 将 multer 实例添加到 app 对象中，以便路由可以使用
 app.set('upload', upload);
 
-// CORS 配置
-const localFrontendOrigins = [
-  'http://localhost:8100',
-  'http://localhost:3000',
-  'http://localhost:3001',
-  'http://127.0.0.1:3000',
-  'http://127.0.0.1:3001',
-];
-const configuredOrigins = (process.env.FRONTEND_URL || '')
-  .split(',')
-  .map((value) => value.trim())
-  .filter(Boolean);
-const publicOrigins = [
-  'https://app.datadance.ai',
-  'https://business.datadance.ai',
-  'https://admin.datadance.ai',
-  'http://localhost:5174',
-];
+// CORS 配置（生产/开发两份来源清单见 src/constants/corsOrigins.js；localhost:5174 只在开发清单里）
 const corsOptions = {
-  origin: configuredOrigins.length || process.env.NODE_ENV === 'production'
-    ? [...new Set([...configuredOrigins, ...publicOrigins])]
-    : localFrontendOrigins,
+  origin: corsOrigins(),
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
   allowedHeaders: [
@@ -111,12 +95,27 @@ const corsOptions = {
     'Mcp-Method',
     'Mcp-Name',
   ],
-  exposedHeaders: ['Content-Range', 'X-Content-Range', 'WWW-Authenticate']
+  exposedHeaders: ['Content-Range', 'X-Content-Range', 'WWW-Authenticate', 'X-Request-Id']
 };
+
+// Reverse proxy hops to trust. DEFAULT 1, and the default matters: production's nginx sets only
+// Host/Upgrade/Connection and does NOT append to X-Forwarded-For, so the container sees exactly one
+// entry — the one Cloudflare wrote, which is the real client. Trusting 2 hops would make Express
+// skip that entry and fall back to whatever the CLIENT sent, i.e. every IP-keyed rate limit becomes
+// forgeable by sending your own X-Forwarded-For. Verify against one real request before a launch
+// (the value is echoed in the boot summary); set 0 only if the origin is ever exposed directly.
+const trustProxyHops = Number(process.env.TRUST_PROXY_HOPS ?? 1);
+app.set('trust proxy', Number.isFinite(trustProxyHops) ? trustProxyHops : 2);
+
+// 请求 ID：reqId 永远由我们生成（审计锚点不能由被审计方挑选）；上游送来的 X-Request-Id 只作为
+// upstreamRequestId 并排记录，用于跨系统对账，绝不当主键。见 src/middlewares/requestIdMiddleware.js
+app.use(requestIdMiddleware);
 
 // 中间件 - 生产环境也需要 CORS
 app.use(cors(corsOptions));
 app.use(express.json({ limit: '20mb' }));
+// 访问日志里的 URL 脱敏：query 中的 token / code / ticket 等值不落盘
+morgan.token('url', (req) => redactUrl(req.originalUrl || req.url));
 app.use(morgan('dev'));
 
 // Add request logging
@@ -170,6 +169,15 @@ app.use('/data-pack', express.static(path.join(__dirname, '../public/data-pack')
 }));
 
 // 路由
+// The OAuth / SSO surface is mounted FIRST, on purpose. Several routers below are mounted at the
+// bare `/api` prefix, and one of them (crawlerRoutes) applies `router.use(protect)` to everything
+// that reaches it — mounted after it, the public ticket exchange, the credential-less consent
+// summary and every SSO-session request were answered 401 by that `protect` before their own
+// handlers ran. Both routers only claim their own paths (/api/sso/*, /.well-known/*, /oauth/*,
+// /api/oauth/*) and neither has a path-less `router.use`, so mounting them first changes nothing
+// else. test/unit/appMountOrder.test.js loads this file to keep it that way.
+app.use('/api/sso', ssoRoutes);
+app.use('/', oauthRoutes);
 app.use('/api/ops', opsAdminRoutes);
 app.use('/api/campaigns', campaignRoutes);
 app.use('/api/auth', authRoutes);
@@ -199,7 +207,7 @@ app.use('/api/commerce', commerceRoutes);
 app.use('/api/disbursements', disbursementRoutes);
 app.use('/api/life-context', lifeContextRoutes);
 app.use('/mcp', mcpRoutes);
-app.use('/', oauthRoutes);
+app.use('/partner/tge', require('./routes/partnerTgeRoutes'));
 // DDC NFT Metadata API - 需要后端权限控制
 app.use('/metadata/ddcnft', ddcNFTMetadataRoutes);
 

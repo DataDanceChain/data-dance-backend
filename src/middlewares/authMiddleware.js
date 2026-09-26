@@ -36,8 +36,17 @@ const protect = async (req, res, next) => {
       });
     }
 
+    if (currentUser.disabledAt) {
+      return res.status(403).json({
+        status: 'fail',
+        code: 'ACCOUNT_DISABLED',
+        message: 'This account has been disabled.'
+      });
+    }
+
     // 将用户信息添加到请求对象
     req.user = currentUser;
+    req.authClaims = decoded;
     next();
   } catch (error) {
     return res.status(401).json({

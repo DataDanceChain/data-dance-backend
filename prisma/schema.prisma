@@ -31,6 +31,10 @@ model User {
   updatedAt                DateTime                  @updatedAt
   totalPoints              Float                     @default(0)
   organizationId           String?
+  web3authVerifier         String?
+  web3authVerifierId       String?
+  web3authLinkedAt         DateTime?
+  disabledAt               DateTime?
   createdActivities        Activity[]
   activityClaims           ActivityClaim[]
   transactions             AssetTransaction[]
@@ -75,7 +79,10 @@ model User {
   campaignApplications     CampaignApplication[]
   campaignRaffleTickets    CampaignRaffleTicket[]
   campaignRaffleWins       CampaignRaffleWin[]
+  ssoTickets               SsoTicket[]
   disbursementItems        DisbursementItem[]
+
+  @@unique([web3authVerifier, web3authVerifierId])
 }
 
 model UserProfile {
@@ -958,9 +965,32 @@ model OAuthAuthorization {
   expiresAt           DateTime
   consumedAt          DateTime?
   createdAt           DateTime  @default(now())
+  /// sha256 of the initiator nonce carried by the `__Host-ddc_authz` cookie of the browser that
+  /// started this authorization. The consent decision must present the same nonce, so a consent
+  /// link forwarded to another browser cannot mint a code for the initiator (authorization
+  /// request fixation). NULL = started by a path that could not set a cookie: unbound.
+  initiatorHash       String?
+  initiatorBoundAt    DateTime?
+  /// How many consent approvals arrived with a missing/wrong initiator cookie. Telemetry only.
+  initiatorMismatchCount Int    @default(0)
   user                User?     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([clientId])
+}
+
+/// Phase 3 App->browser hand-off. A ticket must be single-use, which needs server state;
+/// only its sha256 is stored, so a leaked row cannot be redeemed. TTL 60 s (SSO_TICKET_TTL_SEC).
+model SsoTicket {
+  id         String    @id @default(uuid())
+  ticketHash String    @unique
+  userId     String
+  clientId   String
+  expiresAt  DateTime
+  consumedAt DateTime?
+  createdAt  DateTime  @default(now())
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([expiresAt])
 }
 
 model OAuthRefreshToken {

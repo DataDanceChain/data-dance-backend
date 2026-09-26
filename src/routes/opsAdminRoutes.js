@@ -16,6 +16,7 @@ const {
   resolvePrivacyRequest,
 } = require('../controllers/opsPrivacyController');
 const { protectOps } = require('../middlewares/opsAuthMiddleware');
+const { rateLimiters } = require('../middlewares/rateLimitMiddleware');
 const { uploadCampaignCover } = require('../middlewares/uploadMiddleware');
 const opsCampaigns = require('../controllers/opsCampaignController');
 
@@ -45,7 +46,7 @@ function acceptCampaignCover(req, res, next) {
   });
 }
 
-router.post('/auth/login', login);
+router.post('/auth/login', rateLimiters.opsLogin, login);
 router.use(protectOps);
 mount('get', '/campaigns', opsCampaigns.list);
 mount('post', '/campaigns/translate', opsCampaigns.translate || opsTranslate.translate);
