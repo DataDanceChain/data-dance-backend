@@ -117,6 +117,7 @@
    - `category`: 类别名称（如 `fashion-apparel`, `electronics` 等）
 3. **账户类型**: 所有账户均为组织类型（`isOrganization: true`）
 4. **权限**: 所有账户默认拥有 `USER` 角色
+5. **与商务演示种子的关系**: `scripts/seedCommerceDemo.js` 需要 `merchant-asia-electronics@datadance.io` 和 `merchant-north-america-electronics@datadance.io`（以及 `official@datadance.io`、买家 `test-buyer@datadance.io`）。它按邮箱查找，缺失时自行创建，名称带 `(Demo)` 标注，密码是脚本运行时生成并只打印一次的随机密码（或 `COMMERCE_DEMO_PASSWORD`）。如果演示种子先于 `createMerchantsAndDataNFTs.js` 运行，这两个商家会被数据包脚本原样复用，**统一密码 `Merchant@123` 对它们不适用**；反过来先建商家再跑演示种子，则账号和密码都保持不变。
 
 ---
 
