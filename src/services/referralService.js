@@ -754,6 +754,85 @@ async function getSummerTravel2026Stats(userId) {
   };
 }
 
+/**
+ * Upper bound on the upline walk. Real invite chains are a handful of levels deep; the cap only
+ * exists so corrupt data can never keep a request (and the late-bind lock) busy indefinitely.
+ */
+const REFERRAL_UPLINE_WALK_LIMIT = 1000;
+
+function referralCycleError() {
+  const err = new Error(
+    'This referral code belongs to someone in your own invite network, so it cannot be your inviter'
+  );
+  err.code = 'REFERRAL_CYCLE';
+  return err;
+}
+
+/**
+ * Would making `inviterId` the inviter of `inviteeId` close a ring (A invites B, then A binds B's
+ * code: A→B→A)? Walks the proposed inviter's upline one Referral row at a time (inviteeId is
+ * unique, so each user has at most one inviter) and reports a cycle when the walk reaches the
+ * invitee. A ring already in the data above the inviter is detected by the visited set and ends
+ * the walk (the new edge does not close it: the invitee is not on it); hitting the depth cap is
+ * reported as a cycle so an unprovable bind fails closed.
+ *
+ * @returns {Promise<{ cycle: boolean, reason: 'cycle' | 'root' | 'existing_ring' | 'depth_cap', hops: number }>}
+ */
+async function findReferralCycle(inviteeId, inviterId, db = prisma) {
+  const visited = new Set();
+  let current = inviterId;
+  for (let hops = 0; hops < REFERRAL_UPLINE_WALK_LIMIT; hops += 1) {
+    if (current === inviteeId) return { cycle: true, reason: 'cycle', hops };
+    if (visited.has(current)) return { cycle: false, reason: 'existing_ring', hops };
+    visited.add(current);
+    const row = await db.referral.findUnique({
+      where: { inviteeId: current },
+      select: { inviterId: true },
+    });
+    if (!row) return { cycle: false, reason: 'root', hops };
+    current = row.inviterId;
+  }
+  return { cycle: true, reason: 'depth_cap', hops: REFERRAL_UPLINE_WALK_LIMIT };
+}
+
+/**
+ * Creates the Referral row for an ALREADY-REGISTERED user who binds an inviter later (POST
+ * /api/referrals/use-code and a code sent with a later web3auth login), refusing with
+ * REFERRAL_CYCLE when the bind would close a ring (decision 11 B, 2026-09-26). Signup with a code
+ * does not come here: a brand-new user has no downline, so their bind cannot close a ring.
+ *
+ * Concurrency: A binding B's code while B binds A's code would each walk an upline that does not
+ * yet contain the other's uncommitted row, and both would commit A→B→A. Locking the two users'
+ * rows does not cover longer rings (A binds X while Y binds B, with A→B and Y→X already present:
+ * the two binds touch disjoint users yet close X→A→B→Y→X). So every late bind takes one
+ * transaction-scoped advisory lock, re-walks the upline under it, and inserts before releasing it
+ * at commit; under READ COMMITTED each statement then sees every earlier late bind. Late binds are
+ * rare and the critical section is a few indexed lookups, so serialising them costs nothing
+ * noticeable, and unlike SERIALIZABLE it needs no retry loop. Rewards are settled by the caller
+ * after this commits (see settleReferral in web3AuthController for why they cannot share the tx).
+ */
+async function createLateBindReferral({ inviteeId, inviterId, code, campaignSlug = null }) {
+  return prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('ddc:referral-late-bind'))`;
+    const walk = await findReferralCycle(inviteeId, inviterId, tx);
+    if (walk.cycle) {
+      logger.warn('Late referral bind refused: would create a cycle', {
+        inviteeId,
+        inviterId,
+        reason: walk.reason,
+        hops: walk.hops,
+      });
+      throw referralCycleError();
+    }
+    if (walk.reason === 'existing_ring') {
+      logger.warn('Referral upline already contains a ring', { inviteeId, inviterId });
+    }
+    return tx.referral.create({
+      data: { inviterId, inviteeId, code, campaignSlug },
+    });
+  });
+}
+
 async function useReferralCode(userId, code, referralCampaignRaw = null) {
   let campaignSlug = null;
   try {
@@ -810,13 +889,11 @@ async function useReferralCode(userId, code, referralCampaignRaw = null) {
   }
 
   try {
-    const referralData = await prisma.referral.create({
-      data: {
-        inviterId: inviter.id,
-        inviteeId: userId,
-        code,
-        campaignSlug,
-      },
+    const referralData = await createLateBindReferral({
+      inviterId: inviter.id,
+      inviteeId: userId,
+      code,
+      campaignSlug,
     });
 
     if (campaignSlug === MOTHERS_DAY_2026_SLUG) {
@@ -835,6 +912,7 @@ async function useReferralCode(userId, code, referralCampaignRaw = null) {
       createdAt: referralData.createdAt,
     };
   } catch (error) {
+    if (error.code === 'REFERRAL_CYCLE') throw error; // expected refusal, logged by createLateBindReferral
     console.error('Transaction error in useReferralCode:', error);
     if (error.code === 'P2002') {
       const err = new Error('User has already been referred');
@@ -856,6 +934,8 @@ module.exports = {
   processCampaignReferral,
   getReferralStatus,
   useReferralCode,
+  findReferralCycle,
+  createLateBindReferral,
   countCampaignInvitesAsInviter,
   countSummerTravelSettledInvites,
   getSummerTravel2026Stats,

@@ -108,11 +108,12 @@ async function settleReferral(userId, referrerId, campaignSlug, referralCode) {
   }
 }
 
-/** Neutral wording per reason; never names the account's existing inviter. */
+/** Neutral wording per reason; never names the account's existing inviter or a code's owner. */
 const NOT_APPLIED_MESSAGES = {
   ALREADY_REFERRED: 'This account already has an inviter, so the referral code was not applied.',
   INVALID_CODE: 'The referral code was not recognised, so it was not applied.',
   SELF_REFERRAL_NOT_ALLOWED: 'You cannot use your own referral code, so it was not applied.',
+  REFERRAL_CYCLE: 'This referral code belongs to someone in your own invite network, so it was not applied.',
 };
 const NOT_APPLIED_DEFAULT = 'The referral code was not applied.';
 
@@ -151,8 +152,12 @@ async function applyReferralToExistingUser(user, referralCode, campaignSlug, inv
     const referrerId = referralData.referrerId;
     await assertInviterEligible(referrerId, campaignSlug);
 
-    await prisma.referral.create({
-      data: { inviterId: referrerId, inviteeId: user.id, code: referralCode, campaignSlug },
+    // Refuses a bind that would close a referral ring (REFERRAL_CYCLE, decision 11 B).
+    await referralService.createLateBindReferral({
+      inviterId: referrerId,
+      inviteeId: user.id,
+      code: referralCode,
+      campaignSlug,
     });
     bound = true;
     await settleReferral(user.id, referrerId, campaignSlug, referralCode);
@@ -165,6 +170,8 @@ async function applyReferralToExistingUser(user, referralCode, campaignSlug, inv
       logger.error('referral_settle_failed_at_login', { userId: user.id, error: error.message });
       return applied;
     }
+    // Decision 11 B refuses the bind, not the login (createLateBindReferral already logged it).
+    if (error.code === 'REFERRAL_CYCLE') return notApplied('REFERRAL_CYCLE');
     if (error instanceof HttpReply) return notApplied(error.body.code);
     if (error.code === 'P2002') return notApplied('ALREADY_REFERRED', { race: true });
     logger.error('Referral code validation error for existing user', {
