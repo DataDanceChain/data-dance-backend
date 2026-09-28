@@ -119,6 +119,10 @@ exports.update = async (req, res) => {
     const parsed = parseDraft({
       ...(req.body || {}),
       i18n: req.body?.i18n || req.body?.config?.i18n || existing.config?.i18n,
+      // The admin form has no SSO field, so a save that omits it keeps the stored id instead of
+      // silently dropping the SSO hand-off; an explicit "" still clears it.
+      ssoClientId:
+        req.body?.ssoClientId ?? req.body?.config?.ssoClientId ?? existing.config?.ssoClientId,
     });
     if (parsed.error) return fail(res, 400, parsed.error);
     if (parsed.data.slug !== existing.slug) {
