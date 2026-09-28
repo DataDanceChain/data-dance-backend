@@ -39,18 +39,37 @@ function sanitizeUser(user) {
   return safeUser;
 }
 
-async function resolveCampaign(req) {
+/**
+ * Returns `{ campaignSlug, inviteError }`. An unusable campaign is not thrown here: it only
+ * refuses a NEW registration (as before); for an existing account it is reported in
+ * `invitationStatus` and the login goes ahead.
+ */
+async function resolveCampaign(req, referralCode) {
   let campaignSlug = null;
   try {
     campaignSlug = normalizeReferralCampaignInput(req.body.referralCampaign ?? req.body.campaign);
     await assertReferralCampaignUsable(campaignSlug);
   } catch (e) {
     if (e.code === 'INVALID_CAMPAIGN' || e.code === 'CAMPAIGN_INACTIVE') {
-      throw reply(400, { status: 'fail', code: e.code, message: e.message });
+      return {
+        campaignSlug: null,
+        inviteError: reply(400, { status: 'fail', code: e.code, message: e.message }),
+      };
     }
     throw e;
   }
-  return campaignSlug;
+  if (campaignSlug && !referralCode) {
+    return {
+      campaignSlug,
+      inviteError: reply(400, {
+        status: 'fail',
+        code: 'CAMPAIGN_REQUIRES_REFERRAL_CODE',
+        message:
+          'This campaign requires signing up through an invite link that includes a referral code.',
+      }),
+    };
+  }
+  return { campaignSlug, inviteError: null };
 }
 
 function referralFailure(referralData) {
@@ -88,52 +107,70 @@ async function settleReferral(userId, referrerId, campaignSlug, referralCode) {
   }
 }
 
-/** Existing-user referral handling; returns invitationStatus or null. Behaviour unchanged. */
-async function applyReferralToExistingUser(user, referralCode, campaignSlug) {
-  if (!referralCode) return null;
+/** Neutral wording per reason; never names the account's existing inviter. */
+const NOT_APPLIED_MESSAGES = {
+  ALREADY_REFERRED: 'This account already has an inviter, so the referral code was not applied.',
+  INVALID_CODE: 'The referral code was not recognised, so it was not applied.',
+  SELF_REFERRAL_NOT_ALLOWED: 'You cannot use your own referral code, so it was not applied.',
+};
+const NOT_APPLIED_DEFAULT = 'The referral code was not applied.';
 
-  // 检查用户是否已经被邀请过
-  const existingReferral = await prisma.referral.findUnique({
-    where: { inviteeId: user.id },
-    include: { inviter: { select: { id: true, name: true } } },
-  });
-  if (existingReferral) {
-    throw reply(400, {
-      status: 'fail',
-      code: 'ALREADY_REFERRED',
-      message: 'User has already been referred',
-      data: {
-        inviterId: existingReferral.inviterId,
-        inviterName: existingReferral.inviter?.name,
-        code: existingReferral.code,
-        createdAt: existingReferral.createdAt,
-      },
-    });
-  }
+function referralNotApplied(code) {
+  return { success: false, code, message: NOT_APPLIED_MESSAGES[code] || NOT_APPLIED_DEFAULT };
+}
 
+/**
+ * Existing-user referral handling; returns invitationStatus or null. It never fails the login:
+ * a code (or campaign) that cannot be applied is reported as `{ success: false, code, message }`
+ * and the session is issued as usual. Otherwise a user who already has an inviter and opens
+ * anyone's invite link could not sign in again while the link's code stayed pending.
+ */
+async function applyReferralToExistingUser(user, referralCode, campaignSlug, inviteError) {
+  if (!referralCode && !inviteError) return null;
+
+  const notApplied = (code, meta = {}) => {
+    logger.info('referral_not_applied_at_login', { userId: user.id, code, campaignSlug, ...meta });
+    return referralNotApplied(code);
+  };
+
+  if (inviteError) return notApplied(inviteError.body.code);
+
+  const applied = {
+    success: true,
+    code: 'REFERRAL_SUCCESSFUL',
+    message: 'Successfully used referral code',
+  };
+  let bound = false;
   try {
+    const existingReferral = await prisma.referral.findUnique({ where: { inviteeId: user.id } });
+    if (existingReferral) return notApplied('ALREADY_REFERRED');
+
     const referralData = await validateReferralCode(referralCode, user.id);
-    if (!referralData.valid) throw referralFailure(referralData);
+    if (!referralData.valid) return notApplied(referralData.errorCode || 'INVALID_REFERRAL_CODE');
     const referrerId = referralData.referrerId;
     await assertInviterEligible(referrerId, campaignSlug);
 
     await prisma.referral.create({
       data: { inviterId: referrerId, inviteeId: user.id, code: referralCode, campaignSlug },
     });
+    bound = true;
     await settleReferral(user.id, referrerId, campaignSlug, referralCode);
 
-    return { success: true, code: 'REFERRAL_SUCCESSFUL', message: 'Successfully used referral code' };
+    return applied;
   } catch (error) {
-    if (error instanceof HttpReply) throw error;
+    if (bound) {
+      // The relation is recorded; only the reward step failed. Say so loudly for a re-settle,
+      // and do not tell the user a code that is now bound was "not applied".
+      logger.error('referral_settle_failed_at_login', { userId: user.id, error: error.message });
+      return applied;
+    }
+    if (error instanceof HttpReply) return notApplied(error.body.code);
+    if (error.code === 'P2002') return notApplied('ALREADY_REFERRED', { race: true });
     logger.error('Referral code validation error for existing user', {
       userId: user.id,
       error: error.message,
     });
-    throw reply(500, {
-      status: 'error',
-      code: 'REFERRAL_VALIDATION_ERROR',
-      message: 'Failed to validate referral code',
-    });
+    return referralNotApplied('REFERRAL_VALIDATION_ERROR');
   }
 }
 
@@ -179,7 +216,7 @@ function sendLogin(res, httpStatus, token, user, invitationStatus) {
  * Verified path: identity comes only from the Web3Auth ID token; the user is resolved by
  * the upstream identity pair. Referral / points side-effects are identical to the legacy path.
  */
-async function verifiedLogin(req, res, { mode, referralCode, campaignSlug }) {
+async function verifiedLogin(req, res, { mode, referralCode, campaignSlug, inviteError }) {
   const { idToken, walletAddress, xUsername, xAccessToken, xRefreshToken } = req.body;
 
   if (walletAddress && !WALLET_RE.test(walletAddress)) {
@@ -199,7 +236,9 @@ async function verifiedLogin(req, res, { mode, referralCode, campaignSlug }) {
   const { user: resolved, action } = await resolveUser(identity, {
     walletAddress: boundAddress,
     prepareCreate: async () => {
-      // New registration: validate the referral code before the row exists (as today, keyed by e-mail).
+      // New registration: an unusable campaign still refuses it, as before.
+      if (inviteError) throw inviteError;
+      // Validate the referral code before the row exists (as today, keyed by e-mail).
       referrerId = await validateReferralForNewUser(
         referralCode,
         campaignSlug,
@@ -249,7 +288,12 @@ async function verifiedLogin(req, res, { mode, referralCode, campaignSlug }) {
   }
 
   // Existing user (hit by pair, or legacy row just backfilled)
-  const invitationStatus = await applyReferralToExistingUser(resolved, referralCode, campaignSlug);
+  const invitationStatus = await applyReferralToExistingUser(
+    resolved,
+    referralCode,
+    campaignSlug,
+    inviteError
+  );
 
   const updateData = {
     // Display data only from the verified token, and only when empty
@@ -300,7 +344,7 @@ async function verifiedLogin(req, res, { mode, referralCode, campaignSlug }) {
  * WEB3AUTH_ALLOW_LEGACY_FALLBACK=true and NO idToken supplied. Sessions minted here carry no
  * `ver` claim. A token that was supplied and rejected never arrives here.
  */
-async function legacyLogin(req, res, { mode, referralCode, campaignSlug }) {
+async function legacyLogin(req, res, { mode, referralCode, campaignSlug, inviteError }) {
   const { userInfo, walletAddress, xid, xUsername, xAccessToken, xRefreshToken } = req.body;
 
   // 1. 基础验证
@@ -350,7 +394,12 @@ async function legacyLogin(req, res, { mode, referralCode, campaignSlug }) {
     }
 
     // 处理现有用户的邀请码逻辑
-    const invitationStatus = await applyReferralToExistingUser(user, referralCode, campaignSlug);
+    const invitationStatus = await applyReferralToExistingUser(
+      user,
+      referralCode,
+      campaignSlug,
+      inviteError
+    );
 
     // 更新用户信息，包括新的社交账号信息（不再覆盖 authType：密码账号保持 traditional）
     const updateData = {
@@ -395,6 +444,11 @@ async function legacyLogin(req, res, { mode, referralCode, campaignSlug }) {
   }
 
   // 4. 处理新用户注册
+  // An unusable campaign still refuses a new registration, as before — and ahead of
+  // INCOMPLETE_INFO, as before: the client sends that user on to /complete-profile with the
+  // pending code and campaign, where a bad campaign could never be dropped again.
+  if (inviteError) throw inviteError;
+
   if (!userInfo?.email || !walletAddress) {
     throw reply(400, {
       status: 'fail',
@@ -478,18 +532,9 @@ exports.web3authLogin = async (req, res) => {
     const referralCodeRaw = req.body.referralCode;
     const referralCode = referralCodeRaw ? String(referralCodeRaw).trim() : null;
     const idToken = typeof req.body.idToken === 'string' ? req.body.idToken.trim() : '';
-    const campaignSlug = await resolveCampaign(req);
+    const { campaignSlug, inviteError } = await resolveCampaign(req, referralCode);
 
-    if (campaignSlug && !referralCode) {
-      return res.status(400).json({
-        status: 'fail',
-        code: 'CAMPAIGN_REQUIRES_REFERRAL_CODE',
-        message:
-          'This campaign requires signing up through an invite link that includes a referral code.',
-      });
-    }
-
-    const ctx = { mode, referralCode, campaignSlug };
+    const ctx = { mode, referralCode, campaignSlug, inviteError };
 
     if (mode !== 'off') {
       if (idToken) {
