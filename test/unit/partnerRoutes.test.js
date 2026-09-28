@@ -498,7 +498,7 @@ describe('/partner/tge — per-field scopes', () => {
   it('/status adds the referral summary, with and without an inviter', async () => {
     await withFields(ALL_FIELDS, async () => {
       const alone = await status(await mintToken(FULL_SCOPE));
-      assert.deepEqual(alone.body.referral, { code: 'AB23CD', inviter_sub: null, direct_invitees: 0 });
+      assert.deepEqual(alone.body.referral, { code: 'DDC-AB23CD', inviter_sub: null, direct_invitees: 0 });
 
       await prisma.referral.create({ data: { inviterId: 'upline-1', inviteeId: user.id, code: 'ZZ99ZZ', campaignSlug: null } });
       await prisma.referral.create({ data: { inviterId: user.id, inviteeId: 'downline-1', code: 'AB23CD', campaignSlug: null } });
@@ -511,7 +511,7 @@ describe('/partner/tge — per-field scopes', () => {
       await prisma.referral.create({ data: { inviterId: 'stranger', inviteeId: 'downline-4', code: 'QQ33QQ', campaignSlug: null } });
 
       const res = await status(await mintToken(FULL_SCOPE));
-      assert.deepEqual(res.body.referral, { code: 'AB23CD', inviter_sub: 'upline-1', direct_invitees: 3 });
+      assert.deepEqual(res.body.referral, { code: 'DDC-AB23CD', inviter_sub: 'upline-1', direct_invitees: 3 });
     });
   });
 
@@ -779,7 +779,7 @@ describe('/partner/tge is read-only (item 5)', () => {
   it('a display code the user already has is still served', async () => {
     prisma.user.rows[0].referralCode = 'AB23CD';
     const res = await statusWith('registered_at,referral');
-    assert.equal(res.body.referral.code, 'AB23CD');
+    assert.equal(res.body.referral.code, 'DDC-AB23CD');
   });
 
   it('the guard fires: a write attempted while a partner request is in flight throws', async () => {

@@ -37,6 +37,7 @@ const { issueConfirmToken, verifyConfirmToken } = require('../services/referralB
 const { findUserByPartnerToken } = require('../services/mcpTokenService');
 const { hasActiveConsent } = require('../services/dataLicenceConsent');
 const { isDisplayReferralCode, getInviterId, countDirectInvitees } = require('../utils/referralUtils');
+const { formatReferralCodeForDisplay, normalizeReferralCodeInput } = require('../utils/referralCodeFormat');
 const { createLogger } = require('../utils/logger');
 const prisma = require('../utils/prisma');
 const { installReadOnlyGuard, runReadOnly } = require('../utils/prismaReadOnly');
@@ -235,7 +236,8 @@ async function referralSummary(user) {
   // only if the user already has one in display form; a legacy code reads as `null`, exactly as
   // the contract's "a display code could not be resolved". Allocation belongs to the Wallet,
   // where the user is present and the write has a reason.
-  const code = isDisplayReferralCode(user.referralCode) ? user.referralCode : null;
+  // Shown as "DDC-XXXXXX" (decision 36); the stored code has no prefix.
+  const code = isDisplayReferralCode(user.referralCode) ? formatReferralCodeForDisplay(user.referralCode) : null;
   const [inviterSub, directInvitees] = await Promise.all([getInviterId(user.id), countDirectInvitees(user.id)]);
   return { code, inviter_sub: inviterSub, direct_invitees: directInvitees };
 }
@@ -388,7 +390,7 @@ function recordBindStep(req, step, outcome, code, extra = {}) {
     userId: user.id,
     tokenId: token.id || null,
     outcome,
-    codePrefix: codePrefix(code),
+    codePrefix: codePrefix(normalizeReferralCodeInput(code)),
     ...extra,
   });
 }
@@ -436,7 +438,7 @@ router.post('/referral/bind/check', ...bindGates, readOnlyRequest, async (req, r
     recordBindStep(req, 'check', result.outcome, code);
     return res.status(200).json({
       valid: true,
-      code: result.canonical,
+      code: formatReferralCodeForDisplay(result.canonical),
       confirm_token: token,
       expires_in: expiresIn,
       ...(result.already ? { already: true } : {}),

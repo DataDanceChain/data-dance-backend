@@ -2,6 +2,7 @@ const bcrypt = require('bcryptjs');
 const { generateToken } = require('../utils/jwtUtils');
 const prisma = require('../utils/prisma');
 const { findUserByReferralCode, generateUniqueReferralCode } = require('../utils/referralUtils');
+const { normalizeReferralCodeInput, withDisplayReferralCode } = require('../utils/referralCodeFormat');
 const referralService = require('../services/referralService');
 const {
   MOTHERS_DAY_2026_SLUG,
@@ -27,7 +28,8 @@ exports.register = async (req, res) => {
       campaign,
     } = req.body;
 
-    const referralCodeFromRequest = referralCodeRaw ? String(referralCodeRaw).trim() : null;
+    // "DDC-ABC123" / "abc123" → "ABC123": the prefix is display-only and never stored.
+    const referralCodeFromRequest = normalizeReferralCodeInput(referralCodeRaw);
 
     let campaignSlug = null;
     try {
@@ -149,7 +151,7 @@ exports.register = async (req, res) => {
       status: 'success',
       data: {
         token,
-        user: userWithoutSensitive
+        user: withDisplayReferralCode(userWithoutSensitive)
       }
     });
   } catch (error) {
@@ -225,7 +227,7 @@ exports.login = async (req, res) => {
       status: 'success',
       data: {
         token,
-        user: userWithoutSensitive
+        user: withDisplayReferralCode(userWithoutSensitive)
       }
     });
   } catch (error) {

@@ -147,7 +147,7 @@ const STATUS_FIELD_CATALOG = Object.freeze({
     presence: 'omit',
     source: 'User.referralCode + Referral rows for this user (inviteeId for the inviter, level-1 inviterId count)',
     meaning:
-      '{ code, inviter_sub, direct_invitees }. One id (the inviter, so the partner can pay an upline rebate) and one count (for a leaderboard). The complete network, every upline and downline at any depth, is GET /partner/tge/referral-network (scope tge:referral_network).',
+      '{ code, inviter_sub, direct_invitees }. `code` is the user\'s invite code as shown to people, "DDC-XXXXXX" (the same code is accepted with or without the prefix). One id (the inviter, so the partner can pay an upline rebate) and one count (for a leaderboard). The complete network, every upline and downline at any depth, is GET /partner/tge/referral-network (scope tge:referral_network).',
     nullMeaning:
       '`inviter_sub` is null when nobody invited this user; `code` is null when a display code could not be resolved.',
     cacheTtlSec: PARTNER_REFERRAL_CACHE_MAX_AGE_SEC,
