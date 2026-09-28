@@ -23,9 +23,19 @@ const logger = createLogger('distributionService');
  * @param {number} baseRewardAmount - Base reward points earned by the user
  * @param {object} tx - Prisma transaction client to ensure atomic operations
  * @param {string} sourceTaskId - Original task ID that triggered distribution (for audit)
+ * @param {object} [options]
+ * @param {(since: Date) => Promise<boolean>} [options.activityCountsSince] - For points whose
+ *   qualifying activity may predate the moment of payment (a task claimed now but completed
+ *   earlier). Called per level with the latest bind time (Referral.createdAt) on the path from the
+ *   earner up to that level's referrer; the walk stops at the first level for which the activity
+ *   does not count. Late-bound relations only earn from activity at or after the bind
+ *   (Sloan, 2026-09-28: 后绑码的邀请关系方面的奖励只算绑定后的). Omit it when the activity is
+ *   happening now (an upload, a bonus paid for an upload): the chain as it stands already only
+ *   contains relations bound before that activity.
  * @returns {Promise<{distributedRewards: Array, totalDistributed: number}>}
  */
-async function distributeUplineRewards(userId, baseRewardAmount, tx, sourceTaskId = null) {
+async function distributeUplineRewards(userId, baseRewardAmount, tx, sourceTaskId = null, options = {}) {
+  const { activityCountsSince } = options;
   const { uplineRewardPercentages, maxLevels, roundingMode } = businessRules.rewardDistribution;
   logger.info(DISTRIBUTION_MESSAGES.START_DISTRIBUTION(userId, baseRewardAmount, maxLevels), { 
     sourceTaskId,
@@ -34,6 +44,8 @@ async function distributeUplineRewards(userId, baseRewardAmount, tx, sourceTaskI
   const distributedRewards = [];
   let currentUserId = userId;
   let totalDistributed = 0;
+  let pathBoundAt = null; // latest bind on the path from the earner to the current referrer
+  let passedBoundAt = null; // last cutoff activityCountsSince accepted; skip re-asking for the same one
 
   try {
     for (let level = 0; level < Math.min(uplineRewardPercentages.length, maxLevels); level++) {
@@ -61,6 +73,27 @@ async function distributeUplineRewards(userId, baseRewardAmount, tx, sourceTaskI
       }
 
       const referrerId = referral.inviterId;
+
+      if (activityCountsSince) {
+        const boundAt = referral.createdAt ? new Date(referral.createdAt) : null;
+        if (boundAt && (!pathBoundAt || boundAt > pathBoundAt)) pathBoundAt = boundAt;
+        // The cutoff only moves later going up, so once the activity predates it no higher level counts.
+        const alreadyPassed = passedBoundAt && pathBoundAt && passedBoundAt.getTime() === pathBoundAt.getTime();
+        if (pathBoundAt && !alreadyPassed) {
+          if (!(await activityCountsSince(pathBoundAt))) {
+            logger.info('Upline distribution stopped: activity predates the referral bind', {
+              userId,
+              sourceTaskId,
+              level: level + 1,
+              referrerId,
+              boundAt: pathBoundAt,
+            });
+            break;
+          }
+          passedBoundAt = pathBoundAt;
+        }
+      }
+
       const rawReward = baseRewardAmount * percentage;
       
       // Apply decimal rounding based on configuration

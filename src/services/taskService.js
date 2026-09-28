@@ -30,7 +30,24 @@ function startOfUtcDay(date = new Date()) {
   return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
 }
 
-async function hasDailyEvent(userId, type, day = startOfUtcDay(new Date())) {
+function referralTaskProgress(task, qualifiedLevelCounts) {
+  const level = parseInt(task.id.split('-')[1], 10) || 1;
+  return (qualifiedLevelCounts?.[level] || 0) > 0 ? 1 : 0;
+}
+
+/** `since` (optional Date) keeps only rows created at or after it; see claimActivityCountsSince. */
+function createdSince(since) {
+  return since ? { createdAt: { gte: since } } : {};
+}
+
+async function hasDailyEvent(userId, type, day = startOfUtcDay(new Date()), since = null) {
+  if (since) {
+    const recent = await prisma.userDailyEvent.findFirst({
+      where: { userId, type, day, ...createdSince(since) },
+      select: { id: true }
+    });
+    return !!recent;
+  }
   const existing = await prisma.userDailyEvent.findUnique({
     where: { userId_type_day: { userId, type, day } },
     select: { id: true }
@@ -68,12 +85,13 @@ async function getConsecutiveCheckInStreak(userId, today = startOfUtcDay(new Dat
   return streak;
 }
 
-async function countCheckInsSince(userId, sinceDay) {
+async function countCheckInsSince(userId, sinceDay, since = null) {
   return prisma.userDailyEvent.count({
     where: {
       userId,
       type: 'CHECK_IN',
-      day: { gte: sinceDay }
+      day: { gte: sinceDay },
+      ...createdSince(since)
     }
   });
 }
@@ -137,11 +155,15 @@ const awardStrategies = {
         qualifiedLevelCounts: referralOverview.qualifiedLevelCounts || {},
       };
     },
-    computeProgress: async (task, userId, { qualifiedLevelCounts }) => {
-      const level = parseInt(task.id.split('-')[1], 10) || 1;
-      const qualified = qualifiedLevelCounts?.[level] || 0;
-      return qualified > 0 ? 1 : 0;
-    }
+    computeProgress: async (task, userId, { qualifiedLevelCounts }) => referralTaskProgress(task, qualifiedLevelCounts),
+    // Upline-rebate check (claimActivityCountsSince): re-judge the tree `prepare` already loaded,
+    // counting only descendants who qualified at or after `since`, instead of walking it again
+    // inside the claim transaction.
+    progressSince: async (task, userId, context, since) => {
+      const { qualifiedLevelCountsSince } = require('./referralService');
+      const referrals = context?.referralOverview?.referrals || [];
+      return referralTaskProgress(task, await qualifiedLevelCountsSince(referrals, since));
+    },
   },
   'assets-collection': {
     unlock: async (userId) => { const count = await assetService.getUserNFTCount(userId);
@@ -201,19 +223,20 @@ const awardStrategies = {
     }
   },
   'new-user-bonus': {
-    prepare: async (userId) => {
+    acceptsSince: true,
+    prepare: async (userId, { since } = {}) => {
       const user = await prisma.user.findUnique({ where: { id: userId }, select: { createdAt: true } });
       const campaignStart = startOfUtcDay(user?.createdAt || new Date());
       const campaignEnd = new Date(campaignStart);
       campaignEnd.setUTCDate(campaignEnd.getUTCDate() + 30);
 
-      const checkInCount = await countCheckInsSince(userId, campaignStart);
+      const checkInCount = await countCheckInsSince(userId, campaignStart, since);
 
       const sources = ['amazon', 'booking', 'airbnb', 'luma'];
       const uploadedSources = await Promise.all(
         sources.map(async (source) => {
           const count = await prisma.crawlerData.count({
-            where: rewardEligibleUploadWhere({ userId, source }),
+            where: rewardEligibleUploadWhere({ userId, source, ...createdSince(since) }),
           });
           return count > 0 ? source : null;
         })
@@ -264,15 +287,17 @@ const awardStrategies = {
     }
   },
   'daily-tasks': {
-    prepare: async (userId) => {
+    acceptsSince: true,
+    prepare: async (userId, { since } = {}) => {
       const today = startOfUtcDay(new Date());
       const [checkedInToday, visitedToday, streak] = await Promise.all([
-        hasDailyEvent(userId, 'CHECK_IN', today),
-        hasDailyEvent(userId, 'REWARDS_HUB_VISIT', today),
+        hasDailyEvent(userId, 'CHECK_IN', today, since),
+        hasDailyEvent(userId, 'REWARDS_HUB_VISIT', today, since),
         getConsecutiveCheckInStreak(userId, today)
       ]);
+      const uploadsFrom = since && since > today ? since : today;
       const uploadsToday = await prisma.crawlerData.count({
-        where: rewardEligibleUploadWhere({ userId, createdAt: { gte: today } }),
+        where: rewardEligibleUploadWhere({ userId, createdAt: { gte: uploadsFrom } }),
       });
       return { today, checkedInToday, visitedToday, streak, uploadsToday };
     },
@@ -288,7 +313,8 @@ const awardStrategies = {
       // Amazon tasks are always unlocked for users
       await recordTaskProgress(userId, 'amazon-order-submit', 1);
     },
-    prepare: async (userId) => {
+    acceptsSince: true,
+    prepare: async (userId, { since } = {}) => {
       // Get Amazon CrawlerTask with taskId (may be missing if created before taskId was set)
       const crawlerTask = await prisma.crawlerTask.findFirst({
         where: { userId, source: 'amazon', taskId: 'amazon_orders' },
@@ -302,12 +328,13 @@ const awardStrategies = {
             userId,
             source: 'amazon',
             taskId: crawlerTask.id,
+            ...createdSince(since),
           }),
         });
       }
       
       const totalCount = await prisma.crawlerData.count({
-        where: rewardEligibleUploadWhere({ userId, source: 'amazon' }),
+        where: rewardEligibleUploadWhere({ userId, source: 'amazon', ...createdSince(since) }),
       });
       
       // When no CrawlerTask with taskId exists, use totalCount so doneCount is not stuck at 0
@@ -333,7 +360,8 @@ const awardStrategies = {
         await recordTaskProgress(userId, taskId, 1);
       }
     },
-    prepare: async (userId) => {
+    acceptsSince: true,
+    prepare: async (userId, { since } = {}) => {
       // Get all Airbnb CrawlerTasks with taskId
       const crawlerTasks = await prisma.crawlerTask.findMany({
         where: { userId, source: 'airbnb' },
@@ -348,7 +376,8 @@ const awardStrategies = {
             where: {
               userId,
               source: 'airbnb',
-              taskId: ct.id
+              taskId: ct.id,
+              ...createdSince(since)
             }
           });
           countsByTaskId[ct.taskId] = count;
@@ -357,7 +386,7 @@ const awardStrategies = {
       
       // Fallback: total count by source (for backward compatibility)
       const totalCount = await prisma.crawlerData.count({
-        where: { userId, source: 'airbnb' }
+        where: { userId, source: 'airbnb', ...createdSince(since) }
       });
       
       return { countsByTaskId, totalCount };
@@ -380,7 +409,8 @@ const awardStrategies = {
         await recordTaskProgress(userId, taskId, 1);
       }
     },
-    prepare: async (userId) => {
+    acceptsSince: true,
+    prepare: async (userId, { since } = {}) => {
       const crawlerTasks = await prisma.crawlerTask.findMany({
         where: { userId, source: 'booking' },
         select: { id: true, taskId: true }
@@ -392,14 +422,15 @@ const awardStrategies = {
             where: {
               userId,
               source: 'booking',
-              taskId: ct.id
+              taskId: ct.id,
+              ...createdSince(since)
             }
           });
           countsByTaskId[ct.taskId] = count;
         }
       }
       const totalCount = await prisma.crawlerData.count({
-        where: { userId, source: 'booking' }
+        where: { userId, source: 'booking', ...createdSince(since) }
       });
       return { countsByTaskId, totalCount };
     },
@@ -419,7 +450,8 @@ const awardStrategies = {
       // Luma tasks are always unlocked for users
       await recordTaskProgress(userId, 'luma-event-submit', 1);
     },
-    prepare: async (userId) => {
+    acceptsSince: true,
+    prepare: async (userId, { since } = {}) => {
       // Get Luma CrawlerTask with taskId
       const crawlerTask = await prisma.crawlerTask.findFirst({
         where: { userId, source: 'luma', taskId: 'luma_events' },
@@ -432,14 +464,15 @@ const awardStrategies = {
           where: {
             userId,
             source: 'luma',
-            taskId: crawlerTask.id
+            taskId: crawlerTask.id,
+            ...createdSince(since)
           }
         });
       }
       
       // Fallback: total count by source
       const totalCount = await prisma.crawlerData.count({
-        where: { userId, source: 'luma' }
+        where: { userId, source: 'luma', ...createdSince(since) }
       });
       
       return { countsByTaskId: { 'luma_events': countByTaskId }, totalCount };
@@ -473,7 +506,9 @@ const awardStrategies = {
         }
       }
     },
-    prepare: async (userId) => {
+    // `since` narrows the order uploads; follow-x / join-telegram carry no activity time.
+    acceptsSince: true,
+    prepare: async (userId, { since } = {}) => {
       // Get count of December 2025 Amazon orders
       const DECEMBER_2025_START = new Date('2025-12-01T00:00:00Z');
       const DECEMBER_2025_END = new Date('2025-12-31T23:59:59Z');
@@ -488,6 +523,7 @@ const awardStrategies = {
             gte: DECEMBER_2025_START,
             lte: DECEMBER_2025_END,
           },
+          ...createdSince(since),
         }),
         select: { id: true, timestamp: true },
       });
@@ -801,6 +837,27 @@ async function recordTaskProgress(userId, taskId, delta) {
   return ut;
 }
 
+/**
+ * Whether a claimed task counts, for the upline rebate, as activity at or after `since` (a bind time
+ * on the claimant's referral path). Rule (Sloan, 2026-09-28: 后绑码的邀请关系方面的奖励只算绑定后的):
+ * a late-bound inviter chain earns nothing from a task the claimant completed before binding, even
+ * when it is claimed afterwards. Strategies with timestamped evidence (uploads, check-ins, daily
+ * events) set `acceptsSince` and recompute progress from that evidence alone; referral-rewards sets
+ * `progressSince` and re-judges the referral tree already loaded in `context`. The rest (profile,
+ * early registration, NFT/badge/DDC holdings, social tasks) have no activity time to compare, so the
+ * claim itself is taken as the activity and the rebate is paid.
+ */
+function claimActivityCountsSince(task, userId, strategy, context) {
+  if (strategy?.progressSince) {
+    return async (since) => (await strategy.progressSince(task, userId, context, since)) >= 1;
+  }
+  if (!strategy?.acceptsSince || !strategy.prepare || !strategy.computeProgress) return undefined;
+  return async (since) => {
+    const context = await strategy.prepare(userId, { since });
+    return (await strategy.computeProgress(task, userId, context)) >= 1;
+  };
+}
+
 async function claimTask(userId, taskId) {
   try {
     const result = await prisma.$transaction(async (tx) => {
@@ -920,7 +977,9 @@ async function claimTask(userId, taskId) {
 
       // 新增: 处理上级分润奖励（所有任务都享受分润）
       try {
-        const distributionResult = await distributeUplineRewards(userId, pointsAwarded, tx, taskId);
+        const distributionResult = await distributeUplineRewards(userId, pointsAwarded, tx, taskId, {
+          activityCountsSince: claimActivityCountsSince(task, userId, strategy, context),
+        });
         logger.info('上级分润处理完成', {
           userId,
           taskId,

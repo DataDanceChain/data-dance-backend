@@ -75,7 +75,7 @@ function rowLooksLikeStay(row, rules) {
 async function countUserSummerStayOrders(
   userId,
   db = prisma,
-  { duringCampaignOnly = true, rules } = {},
+  { duringCampaignOnly = true, rules, since } = {},
 ) {
   const active = rules || (await resolveStayBonusRules());
   if (!active?.sites?.length) return 0;
@@ -89,6 +89,15 @@ async function countUserSummerStayOrders(
       lte: active.endUtc,
     };
   }
+  // Referral settlement passes the invitee's bind time: stays uploaded before binding never count.
+  if (since) {
+    const floor = where.createdAt?.gte;
+    const sinceDate = new Date(since);
+    where.createdAt = {
+      ...(where.createdAt || {}),
+      gte: floor && new Date(floor).getTime() > sinceDate.getTime() ? floor : sinceDate,
+    };
+  }
   const rows = await db.crawlerData.findMany({
     where,
     select: { id: true, source: true, payload: true },
@@ -96,9 +105,11 @@ async function countUserSummerStayOrders(
   return rows.filter((row) => rowLooksLikeStay(row, active)).length;
 }
 
-async function hasCompletedFirstValidSummerOrder(userId, db = prisma) {
+/** `since` (optional Date): only stays uploaded at or after it count (see countUserSummerStayOrders). */
+async function hasCompletedFirstValidSummerOrder(userId, db = prisma, { since } = {}) {
   const count = await countUserSummerStayOrders(userId, db, {
     duringCampaignOnly: true,
+    since,
   });
   return count > 0;
 }

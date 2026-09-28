@@ -18,7 +18,7 @@ const { assertReferralCampaignUsable, resolveStayBonusRules } = require('../util
 const { getReferralRulesPayload } = require('../constants/referralCopy');
 const {
   hasCompletedFirstValidUpload,
-  getUsersWithValidUploads,
+  getLatestValidUploadAt,
 } = require('../utils/firstValidUpload');
 const {
   hasCompletedFirstValidSummerOrder,
@@ -31,6 +31,94 @@ const { ensureDisplayReferralCode, findUserByReferralCode } = require('../utils/
 /** Standard (non-campaign) direct referral — immediate inviter bonus and upline distribution base */
 const DIRECT_REFERRAL_BONUS_POINTS = 150;
 
+function laterOf(a, b) {
+  if (!a) return b || null;
+  if (!b) return a;
+  return new Date(a).getTime() >= new Date(b).getTime() ? a : b;
+}
+
+/** inviteeId -> when the inviter's 150-point REFERRAL_DIRECT bonus for them was first paid. */
+async function getDirectBonusPaidAt(inviteeIds) {
+  const paidAt = new Map();
+  if (!inviteeIds.length) return paidAt;
+  const rows = await prisma.point.findMany({
+    where: { source: 'REFERRAL_DIRECT', sourceId: { in: inviteeIds } },
+    select: { sourceId: true, createdAt: true },
+  });
+  for (const row of rows) {
+    const prev = paidAt.get(row.sourceId);
+    if (!prev || new Date(row.createdAt) < new Date(prev)) paidAt.set(row.sourceId, row.createdAt);
+  }
+  return paidAt;
+}
+
+const atOrAfter = (a, b) => new Date(a).getTime() >= new Date(b).getTime();
+
+/**
+ * Per-node facts behind `qualified`, kept off the API payload (node -> facts), so a loaded tree can
+ * be re-judged under a later floor without walking it again (see qualifiedLevelCountsSince).
+ * facts = { id, inviteTime, latestUploadAt (null: no eligible upload ever), bonusPaidAt
+ * (undefined: not looked up yet, null: never paid) }.
+ */
+const referralNodeFacts = new WeakMap();
+
+/**
+ * Rule (Sloan, 2026-09-28: 后绑码的邀请关系方面的奖励只算绑定后的): an invitee qualifies through an
+ * upload made at or after the latest bind on the path from the viewer down to them (their own bind
+ * and every bind in between). So when a user with an existing downline binds an inviter late, that
+ * downline's earlier activity counts for nobody above the new bind. For a chain where everyone signed
+ * up with a code, each parent's bind precedes the child's, so this is just the invitee's own bind.
+ * `floor` is the cutoff inherited from above: null for the viewer's own overview, or the claimant's
+ * own (upward) bind time for an upline-rebate check.
+ *
+ * Never take back what was earned: an invitee whose direct bonus was already paid (possibly under the
+ * pre-2026-09-28 rule, for an upload made before a late bind) stays qualified, if paid at or after
+ * `floor`. Like everyone else they still need an eligible upload at some point: before 2026-06-02
+ * (ef34c4c) the bonus was paid at signup with no upload at all, and those invitees stay unqualified,
+ * exactly as on main.
+ */
+function needsBonusLookup(facts, floor) {
+  if (!facts.latestUploadAt || facts.bonusPaidAt !== undefined) return false;
+  return !atOrAfter(facts.latestUploadAt, laterOf(floor, facts.inviteTime));
+}
+
+function isQualified(facts, floor) {
+  if (!facts.latestUploadAt) return false;
+  if (atOrAfter(facts.latestUploadAt, laterOf(floor, facts.inviteTime))) return true;
+  return Boolean(facts.bonusPaidAt) && (!floor || atOrAfter(facts.bonusPaidAt, floor));
+}
+
+/** Looks up the bonus payment only for invitees whose uploads all predate their cutoff (none in a
+ * tree where everyone signed up with a code), in one query. */
+async function fillBonusPaidAt(factsList) {
+  if (!factsList.length) return;
+  const paidAt = await getDirectBonusPaidAt([...new Set(factsList.map((f) => f.id))]);
+  for (const f of factsList) f.bonusPaidAt = paidAt.get(f.id) || null;
+}
+
+/** Depth-first over a loaded tree with each node's cutoff: `floor` at the top, then the later of it
+ * and every bind on the way down. */
+function visitWithFloor(nodes, floor, fn) {
+  for (const n of nodes) {
+    const facts = referralNodeFacts.get(n);
+    if (!facts) throw new Error('referral node was not loaded by getReferralOverview');
+    fn(n, facts, floor);
+    visitWithFloor(n.referrals, laterOf(floor, facts.inviteTime), fn);
+  }
+}
+
+/** Every node that needs its bonus payment looked up under `floor`, across the whole tree, in one
+ * query (none in a tree where everyone signed up with a code). */
+async function fillBonusPaidAtForTree(referrals, floor) {
+  const missing = [];
+  visitWithFloor(referrals, floor, (n, facts, nodeFloor) => {
+    if (needsBonusLookup(facts, nodeFloor)) missing.push(facts);
+  });
+  await fillBonusPaidAt(missing);
+}
+
+/** Loads the tree and each node's facts; `qualified` is judged afterwards by judgeReferralTree, so
+ * the bonus lookup is one query for the whole tree rather than one per parent. */
 async function fetchReferrals(userId, level, maxLevel) {
   if (level > maxLevel) return [];
   // Standard referral rewards UI / tasks only apply to non-campaign invites.
@@ -39,8 +127,7 @@ async function fetchReferrals(userId, level, maxLevel) {
     where: { inviterId: userId, campaignSlug: null },
     include: { invitee: { select: { id: true, email: true, name: true } } }
   });
-  const inviteeIds = refs.map((r) => r.invitee.id);
-  const withUploads = await getUsersWithValidUploads(inviteeIds);
+  const latestUploadAt = await getLatestValidUploadAt(refs.map((r) => r.invitee.id));
   const result = [];
   for (const r of refs) {
     const node = {
@@ -48,13 +135,43 @@ async function fetchReferrals(userId, level, maxLevel) {
       email: r.invitee.email,
       nickname: r.invitee.name,
       level,
-      qualified: withUploads.has(r.invitee.id),
+      qualified: false,
       inviteTime: r.createdAt,
       referrals: await fetchReferrals(r.invitee.id, level + 1, maxLevel)
     };
+    referralNodeFacts.set(node, {
+      id: r.invitee.id,
+      inviteTime: r.createdAt,
+      latestUploadAt: latestUploadAt.get(r.invitee.id) || null,
+      bonusPaidAt: undefined,
+    });
     result.push(node);
   }
   return result;
+}
+
+/** Sets `qualified` on every node of a freshly loaded tree under `floor`. */
+async function judgeReferralTree(referrals, floor) {
+  await fillBonusPaidAtForTree(referrals, floor);
+  visitWithFloor(referrals, floor, (n, facts, nodeFloor) => {
+    n.qualified = isQualified(facts, nodeFloor);
+  });
+}
+
+/**
+ * Qualified descendants per level of an already-loaded tree (getReferralOverview(...).referrals)
+ * under the extra cutoff `since`: the same answer as getReferralOverview(userId, { since }), but
+ * without walking the tree again. At most one extra query, and only when some descendant's
+ * uploads all predate their cutoff. The task-claim upline-rebate check uses it.
+ */
+async function qualifiedLevelCountsSince(referrals, since) {
+  const floor = since || null;
+  await fillBonusPaidAtForTree(referrals, floor);
+  const counts = { 1: 0, 2: 0, 3: 0, 4: 0 };
+  visitWithFloor(referrals, floor, (n, facts, nodeFloor) => {
+    if (counts[n.level] != null && isQualified(facts, nodeFloor)) counts[n.level]++;
+  });
+  return counts;
 }
 
 function countQualifiedReferralsByLevel(nodes, counts = { 1: 0, 2: 0, 3: 0, 4: 0 }) {
@@ -73,9 +190,14 @@ async function hasReferralRewardsBeenProcessedForInvitee(inviteeId) {
   return Boolean(existing);
 }
 
-async function getReferralOverview(userId) {
+/**
+ * `since` (optional Date): count only descendants who qualified at or after it. The task claim path
+ * passes the claimant's own bind time when deciding whether their upline earns a rebate.
+ */
+async function getReferralOverview(userId, { since } = {}) {
   // fetch nested referrals up to 4 levels for user info
   const referrals = await fetchReferrals(userId, 1, 4);
+  await judgeReferralTree(referrals, since || null);
   // flatten to count network size
   const flatten = (nodes) => nodes.reduce((acc, n) => acc + 1 + flatten(n.referrals), 0);
   // count referrals per level (levels 1-4)
@@ -290,7 +412,20 @@ async function assertSummerTravelInviterEligible(inviterId) {
   }
 }
 
-async function tryProcessSummerTravelReferralRewards(inviteeId, inviterId) {
+/**
+ * When the invitee bound their inviter (Referral.createdAt). Referral rewards count only the
+ * invitee's activity at or after this instant (Sloan, 2026-09-28: 后绑码的邀请关系方面的奖励只算绑定后的).
+ * For a user who signed up with a code this is their registration, so nothing changes for them.
+ */
+async function getReferralBindTime(inviteeId) {
+  const referral = await prisma.referral.findUnique({
+    where: { inviteeId },
+    select: { createdAt: true },
+  });
+  return referral?.createdAt || null;
+}
+
+async function tryProcessSummerTravelReferralRewards(inviteeId, inviterId, boundAt = null) {
   const stayRules = await resolveStayBonusRules();
   if (!stayRules?.isActive) {
     logger.info('Summer Travel referral settlement skipped — campaign inactive', {
@@ -299,7 +434,12 @@ async function tryProcessSummerTravelReferralRewards(inviteeId, inviterId) {
     });
     return { skipped: true, reason: 'campaign_inactive' };
   }
-  if (!(await hasCompletedFirstValidSummerOrder(inviteeId))) {
+  const since = boundAt || (await getReferralBindTime(inviteeId));
+  if (!since) {
+    logger.info('Summer Travel referral settlement skipped — no referral row', { inviteeId, inviterId });
+    return { skipped: true, reason: 'no_referral' };
+  }
+  if (!(await hasCompletedFirstValidSummerOrder(inviteeId, prisma, { since }))) {
     logger.info('Summer Travel referral deferred until invitee summer stay upload', {
       inviteeId,
       inviterId,
@@ -388,10 +528,17 @@ async function processReferralRewardsForInvitee(newUserId, inviterId, referralCo
 }
 
 /**
- * Standard referral: link at signup, pay inviter only after invitee's first valid upload.
+ * Standard referral: link at signup, pay inviter only after invitee's first valid upload made at or
+ * after the bind. A user who binds a code after registering has to upload again before the inviter
+ * (and, through the direct bonus, the upline and referral-N tasks) is rewarded.
  */
-async function tryProcessReferralRewardsIfEligible(newUserId, inviterId, referralCode) {
-  if (!(await hasCompletedFirstValidUpload(newUserId))) {
+async function tryProcessReferralRewardsIfEligible(newUserId, inviterId, referralCode, boundAt = null) {
+  const since = boundAt || (await getReferralBindTime(newUserId));
+  if (!since) {
+    logger.info('Referral rewards skipped — no referral row for invitee', { inviteeId: newUserId, inviterId });
+    return { skipped: true, reason: 'no_referral' };
+  }
+  if (!(await hasCompletedFirstValidUpload(newUserId, prisma, { since }))) {
     logger.info('Referral rewards deferred until invitee first valid upload', {
       inviteeId: newUserId,
       inviterId,
@@ -404,19 +551,19 @@ async function tryProcessReferralRewardsIfEligible(newUserId, inviterId, referra
 async function onInviteeFirstValidUpload(userId) {
   const referral = await prisma.referral.findUnique({
     where: { inviteeId: userId },
-    select: { inviterId: true, code: true, campaignSlug: true },
+    select: { inviterId: true, code: true, campaignSlug: true, createdAt: true },
   });
   if (!referral) {
     return { skipped: true };
   }
   if (referral.campaignSlug === SUMMER_TRAVEL_2026_SLUG) {
-    return tryProcessSummerTravelReferralRewards(userId, referral.inviterId);
+    return tryProcessSummerTravelReferralRewards(userId, referral.inviterId, referral.createdAt);
   }
   if (referral.campaignSlug) {
     // Other campaigns (e.g. Mother's Day) settle at signup, not on upload.
     return { skipped: true };
   }
-  return tryProcessReferralRewardsIfEligible(userId, referral.inviterId, referral.code);
+  return tryProcessReferralRewardsIfEligible(userId, referral.inviterId, referral.code, referral.createdAt);
 }
 
 async function processReferral(newUserId, inviterId, referralCode) {
@@ -632,7 +779,7 @@ async function useReferralCode(userId, code, referralCampaignRaw = null) {
     } else if (campaignSlug === SUMMER_TRAVEL_2026_SLUG) {
       // Relation only — settle after invitee's first valid summer stay upload.
     } else {
-      await processReferral(userId, inviter.id, code);
+      await tryProcessReferralRewardsIfEligible(userId, inviter.id, code, referralData.createdAt);
     }
 
     return {
@@ -655,6 +802,7 @@ async function useReferralCode(userId, code, referralCampaignRaw = null) {
 
 module.exports = {
   getReferralOverview,
+  qualifiedLevelCountsSince,
   claimReferralRewards,
   processReferral,
   processReferralRewardsForInvitee,
