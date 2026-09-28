@@ -277,7 +277,7 @@ describe('startAuthorization', () => {
 
     it('accepts a well-formed display code lowercase, and the legacy DD-######## form', async () => {
       await startAuthorization(req, partnerQuery({ referral_code: 'ab23cd' }));
-      assert.equal(prisma.oAuthAuthorization.rows[0].referralCode, 'ab23cd');
+      assert.equal(prisma.oAuthAuthorization.rows[0].referralCode, 'AB23CD');
       prisma.reset();
       prisma.user.rows.push({ ...user }, { ...orgUser });
       await startAuthorization(req, partnerQuery({ referral_code: 'DD-a1b2c3d4' }));
@@ -289,8 +289,17 @@ describe('startAuthorization', () => {
       assert.equal(prisma.oAuthAuthorization.rows[0].referralCode, 'AB23CD');
     });
 
+    it('decision 36: accepts the DDC- display form in any spelling and stores only the bare code', async () => {
+      for (const shown of ['DDC-AB23CD', 'ddc ab23cd', 'DDC-AB2-3CD', 'ddcab23cd']) {
+        prisma.reset();
+        prisma.user.rows.push({ ...user }, { ...orgUser });
+        await startAuthorization(req, partnerQuery({ referral_code: shown }));
+        assert.equal(prisma.oAuthAuthorization.rows[0].referralCode, 'AB23CD', shown);
+      }
+    });
+
     it('rejects a malformed referral_code with invalid_request (redirectable) and stores no row', async () => {
-      for (const bad of ['AB', 'AB23CD!', 'DD1234567', 'not-a-code', '0O1IL2', 'x'.repeat(40)]) {
+      for (const bad of ['AB', 'AB23CD!', 'DD1234567', 'not-a-code', '0O1IL2', 'DDC-0O1IL2', 'DDC-AB23C', 'x'.repeat(40)]) {
         await rejects(startAuthorization(req, partnerQuery({ referral_code: bad })), { error: 'invalid_request', redirectable: true });
       }
       assert.equal(prisma.oAuthAuthorization.rows.length, 0);
@@ -345,7 +354,7 @@ describe('getConsentRequest', () => {
   it('round-trips referralCode for the Wallet to prefill, and reports null when none was sent', async () => {
     const url = await startAuthorization(req, partnerQuery({ referral_code: 'AB23CD' }));
     const data = await getConsentRequest(new URL(url).searchParams.get('request'));
-    assert.equal(data.referralCode, 'AB23CD');
+    assert.equal(data.referralCode, 'DDC-AB23CD', 'decision 36: the backend formats the prefill');
 
     const url2 = await startAuthorization(req, partnerQuery());
     const data2 = await getConsentRequest(new URL(url2).searchParams.get('request'));

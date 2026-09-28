@@ -15,6 +15,7 @@ const {
 } = require('../constants/partnerClient');
 const { isCEndSubject } = require('./dataLicenceConsent');
 const { isValidReferralCodeFormat } = require('../utils/referralUtils');
+const { normalizeReferralCodeInput, formatReferralCodeForDisplay } = require('../utils/referralCodeFormat');
 
 const { createLogger } = require('../utils/logger');
 
@@ -465,7 +466,7 @@ async function startAuthorization(req, query, res) {
       if (!isValidReferralCodeFormat(rawReferralCode)) {
         throw new OAuthError(400, 'invalid_request', 'referral_code is not a valid referral code format.');
       }
-      referralCode = rawReferralCode.trim().replace(/\s+/g, '');
+      referralCode = normalizeReferralCodeInput(rawReferralCode.trim().replace(/\s+/g, ''));
     }
     // Bind BEFORE the row is written, so a row never exists without the hash of the cookie that
     // was actually set on this response.
@@ -525,7 +526,7 @@ async function getConsentRequest(id) {
     resource: row.resource,
     // Prefill only: the Wallet login/registration page may show this, but binding it to the
     // account only ever happens through the normal login/registration path the user performs.
-    referralCode: row.referralCode || null,
+    referralCode: formatReferralCodeForDisplay(row.referralCode || null),
     expiresAt: row.expiresAt,
   };
 }

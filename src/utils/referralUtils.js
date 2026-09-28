@@ -5,9 +5,17 @@ const { createLogger } = require('./logger');
 
 const logger = createLogger('referralUtils');
 
-// 32 characters. Skip 0/O and 1/I/L so codes stay easy to read aloud.
-const ALPHABET = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
-const CODE_LENGTH = 6;
+const {
+  ALPHABET,
+  CODE_LENGTH,
+  DISPLAY_CODE_PREFIX,
+  isDisplayCode,
+  bareDisplayReferralCode,
+  normalizeReferralCodeInput,
+  formatReferralCodeForDisplay,
+  withDisplayReferralCode,
+} = require('./referralCodeFormat');
+
 const ALLOCATE_ATTEMPTS = 16;
 
 function generateReferralCode() {
@@ -19,9 +27,7 @@ function generateReferralCode() {
 }
 
 function isDisplayReferralCode(code) {
-  return typeof code === 'string'
-    && code.length === CODE_LENGTH
-    && [...code].every((character) => ALPHABET.includes(character));
+  return isDisplayCode(code);
 }
 
 // The legacy long-form code (see referralCodeLookupValues below): "DD" + 8 alphanumeric
@@ -40,7 +46,7 @@ function isValidReferralCodeFormat(raw) {
   if (typeof raw !== 'string') return false;
   const compact = raw.trim().replace(/\s+/g, '');
   if (!compact || compact.length > 32) return false;
-  if (isDisplayReferralCode(compact.toUpperCase())) return true;
+  if (bareDisplayReferralCode(compact)) return true; // AB23CD, ab23cd, DDC-AB23CD, ddc ab23cd
   return LEGACY_CODE_PATTERN.test(compact.replace(/-/g, ''));
 }
 
@@ -63,6 +69,14 @@ function referralCodeLookupValues(raw) {
     values.add(`DD-${body}`);
     values.add(`DD-${body.toLowerCase()}`);
     values.add(`DD-${body.toUpperCase()}`);
+  }
+
+  // A display code typed with the "DDC-" prefix (or without it, in any case, with spaces or
+  // hyphens) also resolves to the bare stored code.
+  const bare = bareDisplayReferralCode(compact);
+  if (bare) {
+    values.add(bare);
+    values.add(bare.toLowerCase());
   }
 
   return [...values];
@@ -207,7 +221,7 @@ async function validateReferralCode(code, userId = null) {
               data: {
                 inviterId: existingReferral.inviterId,
                 inviterName: existingReferral.inviter?.name,
-                code: existingReferral.code,
+                code: formatReferralCodeForDisplay(existingReferral.code),
                 createdAt: existingReferral.createdAt,
               },
             };
@@ -249,7 +263,7 @@ async function validateReferralCode(code, userId = null) {
             data: {
               inviterId: existingReferral.inviterId,
               inviterName: existingReferral.inviter?.name,
-              code: existingReferral.code,
+              code: formatReferralCodeForDisplay(existingReferral.code),
               createdAt: existingReferral.createdAt,
             },
           };
@@ -303,4 +317,9 @@ module.exports = {
   validateReferralCode,
   getInviterId,
   countDirectInvitees,
+  DISPLAY_CODE_PREFIX,
+  bareDisplayReferralCode,
+  normalizeReferralCodeInput,
+  formatReferralCodeForDisplay,
+  withDisplayReferralCode,
 };
