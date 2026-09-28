@@ -1,5 +1,7 @@
 /**
- * Read-only partner (TGE) resource: `/partner/tge/me` and `/partner/tge/status`.
+ * Read-only partner (TGE) resource: `/partner/tge/me`, `/partner/tge/status` and
+ * `/partner/tge/referral-network` — plus ONE deliberate write, `POST /partner/tge/referral/bind`
+ * (decision 30 A), which is the only route here outside the read-only guard.
  *
  * Auth: `Authorization: Bearer ddc_tge_…` only (never a query string). The token must have
  * been issued to the static partner client for THIS audience (`${PUBLIC_BASE_URL}/partner/tge`)
@@ -20,7 +22,10 @@ const {
   maskEmail,
   realEmail,
   checksumWalletAddress,
+  referralBindEnabled,
 } = require('../constants/partnerClient');
+const { isReferralRewardsFeaturesDisabled } = require('../constants/referralRewardsFeature');
+const { bindReferralForPartner, parseBindCode, codePrefix } = require('../services/partnerReferralBind');
 const { findUserByPartnerToken } = require('../services/mcpTokenService');
 const { hasActiveConsent } = require('../services/dataLicenceConsent');
 const { isDisplayReferralCode, getInviterId, countDirectInvitees } = require('../utils/referralUtils');
@@ -304,6 +309,89 @@ router.get('/referral-network', requirePartnerToken, readOnlyRequest, networkSer
   }
 });
 
+/**
+ * POST /partner/tge/referral/bind  { code } — decision 30 A (Sloan, 2026-09-28).
+ *
+ * THE ONE PARTNER WRITE, and deliberately mounted WITHOUT `readOnlyRequest`. TGE will not let a user
+ * without an inviter subscribe, so it must be able to bind the code the user typed there; making
+ * the user leave TGE for the Wallet to do it would lose most of them. Everything else on this
+ * router stays process-enforced read-only: the guard is opened per route, not router-wide, and
+ * test/unit/partnerReferralBind.test.js fails if any other route is ever mounted without it.
+ *
+ * What keeps this write narrow:
+ *   - it acts only for the token's own user (`sub`); a `sub` / `user_id` in the query or body is
+ *     refused, as everywhere on this router;
+ *   - it needs its own scope, `tge:referral_bind` (never default-granted), and the environment
+ *     must switch it on (SSO_TGE_REFERRAL_BIND; otherwise 404 not_available);
+ *   - it runs the same service as POST /api/referrals/use-code (late-bind lock + cycle check,
+ *     decision 11 B; reward timing unchanged), and never replaces an existing inviter (29 A);
+ *   - the referral kill switch (DISABLE_REFERRAL_REWARDS_FEATURES) refuses it like /api/referrals;
+ *   - 10 attempts a minute per access token on top of the partner limiter, and one audit line per
+ *     attempt (`partner.referral_bound` / `partner.referral_bind_refused`), never the full code.
+ */
+function referralBindServed(req, res, next) {
+  if (!referralBindEnabled()) {
+    res.set('Cache-Control', 'no-store');
+    return res.status(404).json({ error: 'not_available', error_description: 'Referral binding is not served in this environment.' });
+  }
+  return next();
+}
+
+function referralFeaturesEnabled(req, res, next) {
+  if (isReferralRewardsFeaturesDisabled()) {
+    return sendError(req, res, 403, 'referral_features_disabled', 'Referral features are temporarily unavailable.');
+  }
+  return next();
+}
+
+/** Audit trail for the write. Replaceable for tests, like accessLog. No token, no full code. */
+const bindLog = {
+  write: (event, entry) => (event === 'partner.referral_bound' ? logger.info(event, entry) : logger.warn(event, entry)),
+};
+
+function recordBind(req, outcome, code, inviterSub = null) {
+  const { client, user, token } = req.partner;
+  bindLog.write(outcome === 'bound' || outcome === 'already' ? 'partner.referral_bound' : 'partner.referral_bind_refused', {
+    reqId: req.reqId || null,
+    clientId: client.clientId,
+    userId: user.id,
+    tokenId: token.id || null,
+    outcome,
+    codePrefix: codePrefix(code),
+    ...(inviterSub ? { inviterSub } : {}),
+  });
+}
+
+router.post(
+  '/referral/bind',
+  requirePartnerToken,
+  referralBindServed,
+  requireScope('tge:referral_bind'),
+  referralFeaturesEnabled,
+  lim('partnerReferralBind'),
+  async (req, res, next) => {
+    res.set('Cache-Control', 'no-store');
+    const body = req.body && typeof req.body === 'object' ? req.body : {};
+    if (body.sub !== undefined || body.user_id !== undefined) {
+      recordBind(req, 'invalid_request', null);
+      return sendError(req, res, 400, 'invalid_request', 'The subject is taken from the token; sub/user_id are not accepted.');
+    }
+    const code = parseBindCode(body);
+    if (!code) {
+      recordBind(req, 'invalid_request', null);
+      return sendError(req, res, 400, 'invalid_request', 'code is required: a non-empty invite code string.');
+    }
+    try {
+      const result = await bindReferralForPartner(req.partner.user.id, code);
+      recordBind(req, result.outcome, code, result.inviterSub);
+      return res.status(result.status).json(result.body);
+    } catch (error) {
+      recordBind(req, 'error', code);
+      return next(error);
+    }
+  }
+);
+
 router.use((req, res) => sendError(req, res, 404, 'invalid_request', 'Unknown partner endpoint.'));
 
 // Errors thrown inside this router never fall through to the HTML/stack-trace handler.
@@ -322,3 +410,5 @@ module.exports.accountStatus = accountStatus;
 module.exports.accessLog = accessLog;
 module.exports.meBody = meBody;
 module.exports.referralSummary = referralSummary;
+module.exports.readOnlyRequest = readOnlyRequest;
+module.exports.bindLog = bindLog;

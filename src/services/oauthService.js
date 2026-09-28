@@ -16,6 +16,8 @@ const {
 const { isCEndSubject } = require('./dataLicenceConsent');
 
 const { createLogger } = require('../utils/logger');
+// The write scope's gates (decision 30 A); kept on their own line, apart from the main import.
+const { availablePartnerScopes, referralBindEnabled, requiresManualConsent } = require('../constants/partnerClient');
 
 const logger = createLogger('oauthService');
 
@@ -204,7 +206,7 @@ function metadataDocuments(req) {
     registration_endpoint: `${issuer}/oauth/register`,
     userinfo_endpoint: `${issuer}/oauth/userinfo`,
     revocation_endpoint: `${issuer}/oauth/revoke`,
-    scopes_supported: [...MCP_SCOPES, ...PARTNER_SCOPES],
+    scopes_supported: [...MCP_SCOPES, ...availablePartnerScopes()],
     response_types_supported: ['code'],
     grant_types_supported: ['authorization_code', 'refresh_token'],
     code_challenge_methods_supported: ['S256'],
@@ -228,7 +230,7 @@ function metadataDocuments(req) {
     resource_name: 'DataDance partner API (TGE)',
     authorization_servers: [issuer],
     bearer_methods_supported: ['header'],
-    scopes_supported: [...PARTNER_SCOPES],
+    scopes_supported: availablePartnerScopes(),
   };
   return { issuer, resource, partnerResource, as, resourceDoc, partnerResourceDoc };
 }
@@ -263,6 +265,12 @@ function parsePartnerScope(value) {
   }
   if (unknown.length) {
     throw new OAuthError(400, 'invalid_scope', `Unknown scope: ${unknown.join(' ')}.`);
+  }
+  // The write scope exists only while its route is switched on: a user is never asked to
+  // approve a permanent inviter bind this environment does not serve.
+  const unavailable = requested.filter((item) => !availablePartnerScopes().includes(item));
+  if (unavailable.length) {
+    throw new OAuthError(400, 'invalid_scope', `Scope not available in this environment: ${unavailable.join(' ')}.`);
   }
   return PARTNER_SCOPES.filter((item) => requested.includes(item)).join(' ');
 }
@@ -557,6 +565,20 @@ async function decideConsent(user, requestId, allow, ctx = {}) {
   // A denial is accepted from any browser: it only ever destroys the request, and refusing it
   // would leave a fixated request alive for the attacker.
   if (!allow) return finish({ error: 'access_denied' });
+
+  // tge:referral_bind (decision 30 A) sets the user's inviter for good (29 A). Two extra rules for
+  // an Allow that carries it:
+  //   - an automatic Allow (`ctx.auto`, SSO_TGE_AUTO_APPROVE) is refused with 403
+  //     consent_required before anything is consumed, so the request stays decidable and the
+  //     Wallet falls back to its Allow / Deny page: the user must tap Allow themselves;
+  //   - the switch was turned off after /oauth/authorize → the request ends as invalid_scope
+  //     (consumed, back to the partner), never a token for a write that is not being served.
+  if (partner && requiresManualConsent(row.scope)) {
+    if (ctx && ctx.auto === true) {
+      throw new OAuthError(403, 'consent_required', 'This request includes a permission that must be approved by hand.');
+    }
+    if (!referralBindEnabled()) return finish({ error: 'invalid_scope' });
+  }
 
   // The approval must come back from the browser that STARTED this authorization, or the code
   // would be minted into an authorization someone else set up (RFC 9700 §4.14 request fixation).
