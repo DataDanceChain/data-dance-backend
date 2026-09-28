@@ -8,6 +8,7 @@ const {
   normalizeCrawlerSource,
 } = require('../constants/crawlerSources');
 const { buildCampaignI18n, firstFilled } = require('./campaignI18n');
+const { readPartnerConfig } = require('../constants/partnerClient');
 
 const TEMPLATES = new Set([
   'HOME_CARD',
@@ -147,6 +148,30 @@ function validateCta(kind, value) {
   }
 }
 
+/**
+ * The partner SSO client an EXTERNAL home card hands the App user off to, so the partner page
+ * opens already signed in instead of asking for a second login. Only the one partner client this
+ * deployment is configured with (SSO_TGE_CLIENT_ID: "tge" in production, "tge-local" locally) is
+ * accepted; the id is public (it is in the partner's authorize URL). Blank → null.
+ */
+function parseSsoClientId(ctaKind, raw) {
+  if (ctaKind !== 'EXTERNAL') return { value: null };
+  const clientId = String(raw ?? '').trim();
+  if (!clientId) return { value: null };
+  // The configured id only (not getPartnerClient): saving a card must not depend on the OAuth
+  // issuer URL being set, and the id alone is what the App hands to /sso/app-ticket.
+  const configuredId = readPartnerConfig().clientId;
+  if (clientId !== configuredId) {
+    const shown = clientId.slice(0, 64);
+    return {
+      error: configuredId
+        ? `Unknown SSO client "${shown}": this server only knows "${configuredId}"`
+        : `Unknown SSO client "${shown}": no partner SSO client is configured on this server`,
+    };
+  }
+  return { value: clientId };
+}
+
 function parseHomeConfig(body) {
   const ctaKind = String(body.ctaKind || 'ROUTE').trim();
   const ctaValue = String(body.ctaValue || '').trim();
@@ -156,6 +181,8 @@ function parseHomeConfig(body) {
   if (coverImageUrl && !isCoverImageUrl(coverImageUrl)) {
     return { error: 'Cover image must be an uploaded file or an https DataDance / X URL' };
   }
+  const sso = parseSsoClientId(ctaKind, body.ssoClientId ?? body.config?.ssoClientId);
+  if (sso.error) return { error: sso.error };
   return {
     ctaKind,
     ctaValue,
@@ -165,6 +192,7 @@ function parseHomeConfig(body) {
       shareTextZh: stripText(body.shareTextZh || body.config?.shareTextZh, 280) || null,
       shareTextJa: stripText(body.shareTextJa || body.config?.shareTextJa, 280) || null,
       shareTextZhTw: stripText(body.shareTextZhTw || body.config?.shareTextZhTw, 280) || null,
+      ssoClientId: sso.value,
     },
   };
 }
@@ -534,7 +562,14 @@ function toPublicCard(row) {
   const config = row.config && typeof row.config === 'object' ? row.config : {};
   const publicConfig =
     row.template === 'HOME_CARD'
-      ? { shareTextEn: config.shareTextEn || null, shareTextZh: config.shareTextZh || null }
+      ? {
+          shareTextEn: config.shareTextEn || null,
+          shareTextZh: config.shareTextZh || null,
+          ssoClientId:
+            row.ctaKind === 'EXTERNAL' && typeof config.ssoClientId === 'string' && config.ssoClientId.trim()
+              ? config.ssoClientId.trim()
+              : null,
+        }
       : row.template === 'CONNECT_BOOST'
         ? { sites: Array.isArray(config.sites) ? config.sites : [], multiplier: Number(config.multiplier) || 1 }
         : row.template === 'REFERRAL_BOOST'
