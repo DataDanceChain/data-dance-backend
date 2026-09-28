@@ -2,9 +2,11 @@
  * Hand-rolled in-memory Prisma stand-in for unit tests. Installed into require.cache in place
  * of src/utils/prisma.js BEFORE any service is required, so no test needs a database.
  *
- * Supported: findUnique / findFirst / findMany / count / create / update / updateMany / delete /
- * deleteMany with `where` conditions on scalar equality, null, and { gt, gte, lt, lte, not,
- * in, equals }; `include` for the relations declared below (with optional `select`).
+ * Supported: findUnique / findFirst / findMany / count / create / update / upsert / updateMany /
+ * delete / deleteMany / groupBy (`by` one column, optional `_max`) with `where` conditions on scalar
+ * equality, null, { gt, gte, lt, lte, not, in, equals }, `NOT: {...}` and JSON path filters
+ * (`{ path: [...], equals }`); `{ increment }` in update data; `include` for the relations
+ * declared below (to-one with optional `select`, to-many with optional `where`).
  * `select` is ignored on reads — the whole row comes back — so a test must never rely on it to
  * hide a column.
  */
@@ -48,8 +50,19 @@ function isConditionObject(cond) {
   );
 }
 
+/** Prisma JSON filter: `metadata: { path: ['a', 'b'], equals: 'x' }`. */
+function isJsonPathFilter(cond) {
+  return cond && typeof cond === 'object' && Array.isArray(cond.path);
+}
+
 function matches(row, where = {}) {
   return Object.entries(where).every(([key, cond]) => {
+    if (key === 'NOT') return !matches(row, cond);
+    if (isJsonPathFilter(cond)) {
+      const { path: jsonPath, ...rest } = cond;
+      const value = jsonPath.reduce((obj, part) => (obj == null ? undefined : obj[part]), row[key]);
+      return matchValue(value, rest);
+    }
     // Prisma passes a compound unique key as `a_b: { a, b }`; match its parts against the row.
     if (cond && typeof cond === 'object' && !Array.isArray(cond) && !(cond instanceof Date) && !isConditionObject(cond)) {
       return matches(row, cond);
@@ -67,6 +80,12 @@ function makeModel(store, name, { relations = {} } = {}) {
       if (!spec) continue;
       const def = relations[rel];
       if (!def) throw new Error(`mockPrisma: unknown relation ${name}.${rel}`);
+      if (def.many) {
+        out[rel] = (store[def.model] || [])
+          .filter((t) => t[def.references] === row[def.field] && matches(t, spec.where || {}))
+          .map((t) => ({ ...t }));
+        continue;
+      }
       const target = (store[def.model] || []).find((t) => t[def.references] === row[def.field]) || null;
       if (target && spec.select) {
         out[rel] = Object.fromEntries(Object.keys(spec.select).filter((k) => spec.select[k]).map((k) => [k, target[k]]));
@@ -76,11 +95,18 @@ function makeModel(store, name, { relations = {} } = {}) {
     }
     return out;
   };
+  const applyData = (row, data) => {
+    for (const [key, value] of Object.entries(data)) {
+      if (value && typeof value === 'object' && 'increment' in value) row[key] = (row[key] || 0) + value.increment;
+      else row[key] = value;
+    }
+    return row;
+  };
   return {
     rows,
     findUnique: async ({ where, include }) => withInclude(rows.find((r) => matches(r, where)) || null, include),
     findFirst: async ({ where, include } = {}) => withInclude(rows.find((r) => matches(r, where)) || null, include),
-    findMany: async ({ where } = {}) => rows.filter((r) => matches(r, where)).map((r) => ({ ...r })),
+    findMany: async ({ where, include } = {}) => rows.filter((r) => matches(r, where)).map((r) => withInclude({ ...r }, include)),
     count: async ({ where } = {}) => rows.filter((r) => matches(r, where)).length,
     create: async ({ data }) => {
       const row = { id: crypto.randomUUID(), createdAt: new Date(), ...data };
@@ -90,8 +116,14 @@ function makeModel(store, name, { relations = {} } = {}) {
     update: async ({ where, data }) => {
       const row = rows.find((r) => matches(r, where));
       if (!row) throw new Error(`mockPrisma: ${name} record not found`);
-      Object.assign(row, data);
-      return { ...row };
+      return { ...applyData(row, data) };
+    },
+    upsert: async ({ where, update, create }) => {
+      const row = rows.find((r) => matches(r, where));
+      if (row) return { ...applyData(row, update || {}) };
+      const created = { id: crypto.randomUUID(), createdAt: new Date(), ...create };
+      rows.push(created);
+      return { ...created };
     },
     updateMany: async ({ where, data }) => {
       const hit = rows.filter((r) => matches(r, where));
@@ -102,6 +134,25 @@ function makeModel(store, name, { relations = {} } = {}) {
       const index = rows.findIndex((r) => matches(r, where));
       if (index < 0) throw new Error(`mockPrisma: ${name} record not found`);
       return rows.splice(index, 1)[0];
+    },
+    groupBy: async ({ by, where, _max } = {}) => {
+      if (!Array.isArray(by) || by.length !== 1) throw new Error('mockPrisma: groupBy supports one `by` column');
+      const [column] = by;
+      const groups = new Map();
+      for (const r of rows.filter((row) => matches(row, where))) {
+        if (!groups.has(r[column])) groups.set(r[column], []);
+        groups.get(r[column]).push(r);
+      }
+      return [...groups.entries()].map(([value, members]) => {
+        const out = { [column]: value };
+        if (_max) {
+          out._max = {};
+          for (const field of Object.keys(_max).filter((k) => _max[k])) {
+            out._max[field] = members.reduce((best, m) => (best == null || m[field] > best ? m[field] : best), null);
+          }
+        }
+        return out;
+      });
     },
     deleteMany: async ({ where } = {}) => {
       const before = rows.length;
@@ -125,7 +176,21 @@ function createMockPrisma() {
       relations: { user: { model: 'user', field: 'userId', references: 'id' } },
     }),
     dataLicenceConsent: makeModel(store, 'dataLicenceConsent'),
-    referral: makeModel(store, 'referral'),
+    referral: makeModel(store, 'referral', {
+      relations: {
+        invitee: { model: 'user', field: 'inviteeId', references: 'id' },
+        inviter: { model: 'user', field: 'inviterId', references: 'id' },
+      },
+    }),
+    crawlerData: makeModel(store, 'crawlerData'),
+    point: makeModel(store, 'point'),
+    task: makeModel(store, 'task', {
+      relations: { UserTasks: { model: 'userTask', field: 'id', references: 'taskId', many: true } },
+    }),
+    userTask: makeModel(store, 'userTask'),
+    userAward: makeModel(store, 'userAward'),
+    userDailyEvent: makeModel(store, 'userDailyEvent'),
+    crawlerTask: makeModel(store, 'crawlerTask'),
     ssoTicket: makeModel(store, 'ssoTicket'),
     /** Interactive transactions run inline: the mock is single-threaded and never rolls back. */
     async $transaction(arg) {
