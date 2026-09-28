@@ -24,6 +24,26 @@ function isDisplayReferralCode(code) {
     && [...code].every((character) => ALPHABET.includes(character));
 }
 
+// The legacy long-form code (see referralCodeLookupValues below): "DD" + 8 alphanumeric
+// characters, an optional hyphen after "DD", case-insensitive.
+const LEGACY_CODE_PATTERN = /^DD[A-Z0-9]{8}$/i;
+
+/**
+ * Format-only check: does `raw` look like a referral code this app could ever issue, WITHOUT
+ * looking anything up? Accepts exactly what `referralCodeLookupValues` below would search for —
+ * the 6-character display code or the legacy "DD########" code, case-insensitive, tolerant of
+ * surrounding/internal whitespace and (for the legacy form) a hyphen after "DD" — and nothing
+ * else. Used where a caller must reject a malformed code before any database access (e.g.
+ * /oauth/authorize's optional referral_code, which must not become a code-enumeration oracle).
+ */
+function isValidReferralCodeFormat(raw) {
+  if (typeof raw !== 'string') return false;
+  const compact = raw.trim().replace(/\s+/g, '');
+  if (!compact || compact.length > 32) return false;
+  if (isDisplayReferralCode(compact.toUpperCase())) return true;
+  return LEGACY_CODE_PATTERN.test(compact.replace(/-/g, ''));
+}
+
 function referralCodeLookupValues(raw) {
   const compact = String(raw || '').trim().replace(/\s+/g, '');
   if (!compact) return [];
@@ -38,7 +58,7 @@ function referralCodeLookupValues(raw) {
     noHyphen.toLowerCase(),
   ]);
 
-  if (/^DD[A-Z0-9]{8}$/i.test(noHyphen)) {
+  if (LEGACY_CODE_PATTERN.test(noHyphen)) {
     const body = noHyphen.slice(2);
     values.add(`DD-${body}`);
     values.add(`DD-${body.toLowerCase()}`);
@@ -276,6 +296,7 @@ module.exports = {
   generateReferralCode,
   generateUniqueReferralCode,
   isDisplayReferralCode,
+  isValidReferralCodeFormat,
   ensureDisplayReferralCode,
   referralCodeLookupValues,
   findUserByReferralCode,
