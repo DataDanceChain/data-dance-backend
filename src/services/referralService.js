@@ -194,6 +194,34 @@ async function claimReferralRewards(userId) {
 }
 
 /**
+ * Pays a referral bonus at most once, even when two requests reach the payout together (two uploads
+ * in parallel, or a login overlapping an upload). Point has no unique key, so the lookup callers do
+ * before this is only a fast path. `pay` must update the inviter's User row before anything else and
+ * then call assertNotPaidYet: that row lock is held until commit, so a concurrent payout for the same
+ * invitee (who has exactly one inviter) waits on it, and its re-check then sees the first payout's
+ * committed Point row (under READ COMMITTED every statement takes a fresh snapshot) and rolls back.
+ * Resolves true when this call paid, false when another request already had.
+ */
+async function payOnceInTransaction(pay) {
+  try {
+    await prisma.$transaction(pay);
+    return true;
+  } catch (err) {
+    if (err?.code === 'REFERRAL_ALREADY_PAID') return false;
+    throw err;
+  }
+}
+
+async function assertNotPaidYet(tx, where) {
+  const existing = await tx.point.findFirst({ where, select: { id: true } });
+  if (existing) {
+    const err = new Error('Referral reward already paid');
+    err.code = 'REFERRAL_ALREADY_PAID';
+    throw err;
+  }
+}
+
+/**
  * Process a new referral: create Referral row and propagate progress up to 4 levels
  * @param {string} newUserId - the invitee user ID
  * @param {string} inviterId - the direct inviter user ID
@@ -241,11 +269,12 @@ async function processCampaignReferral(newUserId, inviterId, campaignSlug) {
     return { skipped: true, reason: 'already_processed' };
   }
 
-  await prisma.$transaction(async (tx) => {
+  const paid = await payOnceInTransaction(async (tx) => {
     await tx.user.update({
       where: { id: inviterId },
       data: { totalPoints: { increment: inviterAmount } },
     });
+    await assertNotPaidYet(tx, { userId: inviterId, source: inviterSource, sourceId: newUserId });
     await tx.point.create({
       data: {
         userId: inviterId,
@@ -267,6 +296,14 @@ async function processCampaignReferral(newUserId, inviterId, campaignSlug) {
       },
     });
   });
+  if (!paid) {
+    logger.info('Campaign referral rewards already issued by a concurrent request', {
+      campaignSlug,
+      inviterId,
+      inviteeId: newUserId,
+    });
+    return { skipped: true, reason: 'already_processed' };
+  }
 
   logger.info('Campaign referral rewards issued', {
     campaignSlug,
@@ -317,11 +354,12 @@ async function processReferralRewardsForInvitee(newUserId, inviterId, referralCo
 
   try {
     // Award direct referral bonus (standard / non-campaign) after first valid upload
-    await prisma.$transaction(async (tx) => {
+    const paid = await payOnceInTransaction(async (tx) => {
       await tx.user.update({
         where: { id: inviterId },
         data: { totalPoints: { increment: DIRECT_REFERRAL_BONUS_POINTS } }
       });
+      await assertNotPaidYet(tx, { source: 'REFERRAL_DIRECT', sourceId: newUserId });
 
       await tx.point.create({
         data: {
@@ -356,6 +394,10 @@ async function processReferralRewardsForInvitee(newUserId, inviterId, referralCo
         });
       }
     });
+    if (!paid) {
+      logger.info('Referral rewards already processed for invitee by a concurrent request', { newUserId, inviterId });
+      return { alreadyProcessed: true };
+    }
 
     try {
       const { awardReferralBoost, syncRaffleTicketsForInviter } = require('./campaignEffects');

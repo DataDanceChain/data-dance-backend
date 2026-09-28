@@ -1,14 +1,33 @@
 const prisma = require('./prisma');
 
+// Prisma.DbNull, taken from the runtime the generated client itself uses: unit tests replace
+// '@prisma/client' with a stub that has no `Prisma` namespace, and this module loads under them.
+const { Prisma } = require('@prisma/client');
+const DB_NULL = Prisma?.DbNull ?? require('@prisma/client/runtime/library').objectEnumValues.instances.DbNull;
+
 /**
  * Seeded data-pack rows are personal inventory only — never reward-eligible.
  * Use this in any crawlerData count that unlocks points / referral / tasks.
+ *
+ * Ordinary App uploads carry no `importSource` key. On Postgres `metadata #> '{importSource}'` is
+ * then SQL NULL, so a bare `NOT (importSource = 'data-pack')` is NULL too and silently drops every
+ * ordinary upload. The inner `NOT importSource IS NULL` turns the missing-key case into FALSE, so
+ * the whole filter is `NOT (importSource = 'data-pack' AND importSource IS NOT NULL)`: TRUE for a
+ * missing key, JSON null, non-object metadata or any other importSource; FALSE only for data-pack.
  */
 const NOT_DATA_PACK_IMPORT = {
   NOT: {
     metadata: {
       path: ['importSource'],
       equals: 'data-pack',
+    },
+    AND: {
+      NOT: {
+        metadata: {
+          path: ['importSource'],
+          equals: DB_NULL,
+        },
+      },
     },
   },
 };
