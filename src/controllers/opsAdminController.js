@@ -2,6 +2,24 @@ const jwt = require('jsonwebtoken');
 const prisma = require('../utils/prisma');
 const { OPS_TOKEN_TYPE } = require('../middlewares/opsAuthMiddleware');
 const { getUsersWithValidUploads } = require('../utils/firstValidUpload');
+const {
+  bareDisplayReferralCode,
+  formatReferralCodeForDisplay,
+  withDisplayReferralCode,
+} = require('../utils/referralCodeFormat');
+
+/**
+ * `referralCode` search clauses for an ops query. Codes are shown as "DDC-XXXXXX" but stored
+ * bare, so a pasted "DDC-ABC123" (or a "DDC-AB" fragment) must also search the bare form.
+ */
+function referralCodeSearch(q) {
+  const terms = new Set([q]);
+  const bare = bareDisplayReferralCode(q);
+  if (bare) terms.add(bare);
+  const fragment = /^DDC[\s-]+(.+)$/i.exec(q);
+  if (fragment) terms.add(fragment[1].replace(/[\s-]+/g, ''));
+  return [...terms].map((term) => ({ referralCode: { contains: term, mode: 'insensitive' } }));
+}
 
 const USER_SELECT = {
   id: true,
@@ -64,7 +82,7 @@ exports.searchUsers = async (req, res) => {
         OR: [
           { email: { contains: q, mode: 'insensitive' } },
           { walletAddress: { contains: q, mode: 'insensitive' } },
-          { referralCode: { contains: q, mode: 'insensitive' } },
+          ...referralCodeSearch(q),
           { name: { contains: q, mode: 'insensitive' } },
           { id: q },
         ],
@@ -73,7 +91,7 @@ exports.searchUsers = async (req, res) => {
       take: 30,
       orderBy: { createdAt: 'desc' },
     });
-    return res.json({ status: 'success', data: { users, count: users.length } });
+    return res.json({ status: 'success', data: { users: users.map(withDisplayReferralCode), count: users.length } });
   } catch (error) {
     console.error('Ops search error:', error);
     return res.status(500).json({ status: 'error', message: 'Server error' });
@@ -148,7 +166,7 @@ exports.getUserDetail = async (req, res) => {
     return res.json({
       status: 'success',
       data: {
-        user,
+        user: withDisplayReferralCode(user),
         points: {
           totalPointsField: user.totalPoints,
           ledgerTotal,
@@ -165,16 +183,16 @@ exports.getUserDetail = async (req, res) => {
           invitedBy: asInvitee
             ? {
                 inviterId: asInvitee.inviterId,
-                code: asInvitee.code,
+                code: formatReferralCodeForDisplay(asInvitee.code),
                 campaignSlug: asInvitee.campaignSlug,
                 createdAt: asInvitee.createdAt,
-                inviter: asInvitee.inviter,
+                inviter: withDisplayReferralCode(asInvitee.inviter),
               }
             : null,
           invitees: invitees.map((r) => ({
             id: r.id,
             inviteeId: r.inviteeId,
-            code: r.code,
+            code: formatReferralCodeForDisplay(r.code),
             createdAt: r.createdAt,
             invitee: r.invitee,
             hasValidUpload: withUploads.has(r.inviteeId),
@@ -389,7 +407,7 @@ function pointsUserWhere({ q, min, max, zeros }) {
       { email: { contains: q, mode: 'insensitive' } },
       { name: { contains: q, mode: 'insensitive' } },
       { walletAddress: { contains: q, mode: 'insensitive' } },
-      { referralCode: { contains: q, mode: 'insensitive' } },
+      ...referralCodeSearch(q),
       { id: q },
     ];
   }
@@ -449,7 +467,7 @@ exports.listPoints = async (req, res) => {
       status: 'success',
       data: {
         summary,
-        items,
+        items: items.map(withDisplayReferralCode),
         pagination: {
           page: parsed.page,
           limit: parsed.limit,
@@ -497,7 +515,7 @@ exports.exportPoints = async (req, res) => {
           csvCell(row.email),
           csvCell(row.name),
           csvCell(row.walletAddress),
-          csvCell(row.referralCode),
+          csvCell(formatReferralCodeForDisplay(row.referralCode)),
           csvCell(row.totalPoints),
           csvCell(row.id),
           csvCell(row.createdAt.toISOString()),

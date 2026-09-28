@@ -1,5 +1,6 @@
 const bcrypt = require('bcryptjs');
 const prisma = require('../utils/prisma');
+const { formatReferralCodeForDisplay, withDisplayReferralCode } = require('../utils/referralCodeFormat');
 
 /**
  * 获取当前用户信息
@@ -78,7 +79,7 @@ exports.updateMe = async (req, res) => {
 
     res.status(200).json({
       status: 'success',
-      data: userWithoutPassword
+      data: withDisplayReferralCode(userWithoutPassword)
     });
   } catch (error) {
     res.status(500).json({
@@ -273,7 +274,7 @@ exports.updateWalletAddress = async (req, res) => {
       status: 'success',
       message: '钱包地址已绑定',
       data: {
-        user: userWithoutSensitive
+        user: withDisplayReferralCode(userWithoutSensitive)
       }
     });
   } catch (error) {
@@ -339,7 +340,7 @@ exports.generateWallet = async (req, res) => {
       status: 'success',
       message: '钱包已生成',
       data: {
-        user: userWithoutSensitive
+        user: withDisplayReferralCode(userWithoutSensitive)
       }
     });
   } catch (error) {
@@ -422,7 +423,7 @@ exports.importWallet = async (req, res) => {
       status: 'success',
       message: '钱包已导入',
       data: {
-        user: userWithoutSensitive
+        user: withDisplayReferralCode(userWithoutSensitive)
       }
     });
   } catch (error) {
@@ -470,7 +471,7 @@ exports.getReferralCode = async (req, res) => {
 
     res.status(200).json({
       status: 'success',
-      data: { code }
+      data: { code: formatReferralCodeForDisplay(code) }
     });
   } catch (error) {
     console.error('Error getting referral code:', error);
