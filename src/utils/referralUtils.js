@@ -1,6 +1,7 @@
 const crypto = require('crypto');
 const { Prisma } = require('@prisma/client');
 const prisma = require('./prisma');
+const { runVettedRawRead } = require('./prismaReadOnly');
 const { createLogger } = require('./logger');
 
 const logger = createLogger('referralUtils');
@@ -85,13 +86,17 @@ function referralCodeLookupValues(raw) {
 async function findUserByReferralCode(code, select = { id: true, email: true }) {
   const values = [...new Set(referralCodeLookupValues(code).map((value) => value.toLowerCase()))];
   if (values.length === 0) return null;
-  const rows = await prisma.$queryRaw`
+  // A fixed, parameterised SELECT: vetted for the partner API's read-only scope, where
+  // POST /partner/tge/referral/bind/check resolves the typed code through here. `async` + `await`
+  // on purpose: a PrismaPromise is lazy and runs when it is awaited, so it must be awaited INSIDE
+  // the vetted scope, not by the caller after runVettedRawRead has returned.
+  const rows = await runVettedRawRead('referralUtils.findUserByReferralCode', async () => await prisma.$queryRaw`
     SELECT id, email, name, "referralCode"
     FROM "User"
     WHERE LOWER("referralCode") IN (${Prisma.join(values)})
        OR LOWER(COALESCE("legacyReferralCode", '')) IN (${Prisma.join(values)})
     LIMIT 1
-  `;
+  `);
   const row = rows[0];
   if (!row) return null;
   const picked = {};

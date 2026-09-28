@@ -18,6 +18,8 @@ const { isCEndSubject } = require('./dataLicenceConsent');
 const { isValidReferralCodeFormat } = require('../utils/referralUtils');
 
 const { createLogger } = require('../utils/logger');
+// The write scope's gate (decision 30 A); kept on their own line, apart from the main import.
+const { availablePartnerScopes, referralBindEnabled } = require('../constants/partnerClient');
 
 const logger = createLogger('oauthService');
 
@@ -229,7 +231,7 @@ function metadataDocuments(req) {
     registration_endpoint: `${issuer}/oauth/register`,
     userinfo_endpoint: `${issuer}/oauth/userinfo`,
     revocation_endpoint: `${issuer}/oauth/revoke`,
-    scopes_supported: [...MCP_SCOPES, ...PARTNER_SCOPES],
+    scopes_supported: [...MCP_SCOPES, ...availablePartnerScopes()],
     response_types_supported: ['code'],
     grant_types_supported: ['authorization_code', 'refresh_token'],
     code_challenge_methods_supported: ['S256'],
@@ -253,7 +255,7 @@ function metadataDocuments(req) {
     resource_name: 'DataDance partner API (TGE)',
     authorization_servers: [issuer],
     bearer_methods_supported: ['header'],
-    scopes_supported: [...PARTNER_SCOPES],
+    scopes_supported: availablePartnerScopes(),
   };
   return { issuer, resource, partnerResource, as, resourceDoc, partnerResourceDoc };
 }
@@ -288,6 +290,12 @@ function parsePartnerScope(value) {
   }
   if (unknown.length) {
     throw new OAuthError(400, 'invalid_scope', `Unknown scope: ${unknown.join(' ')}.`);
+  }
+  // The write scope exists only while its route is switched on: a user is never asked to
+  // approve a permanent inviter bind this environment does not serve.
+  const unavailable = requested.filter((item) => !availablePartnerScopes().includes(item));
+  if (unavailable.length) {
+    throw new OAuthError(400, 'invalid_scope', `Scope not available in this environment: ${unavailable.join(' ')}.`);
   }
   return PARTNER_SCOPES.filter((item) => requested.includes(item)).join(' ');
 }
@@ -613,6 +621,15 @@ async function decideConsent(user, requestId, allow, ctx = {}) {
   // A denial is accepted from any browser: it only ever destroys the request, and refusing it
   // would leave a fixated request alive for the attacker.
   if (!allow) return finish({ error: 'access_denied' });
+
+  // tge:referral_bind (decision 30 A) is approved like any other scope, by hand or automatically
+  // (item 35: the confirmation is the partner's own dialog plus the bind's confirm_token, not this
+  // consent). One rule stays: the switch was turned off after /oauth/authorize → the request ends
+  // as invalid_scope (consumed, back to the partner) on ANY Allow, never a token for a write that
+  // is not being served.
+  if (partner && String(row.scope || '').split(/\s+/).includes('tge:referral_bind') && !referralBindEnabled()) {
+    return finish({ error: 'invalid_scope' });
+  }
 
   // The approval must come back from the browser that STARTED this authorization, or the code
   // would be minted into an authorization someone else set up (RFC 9700 §4.14 request fixation).

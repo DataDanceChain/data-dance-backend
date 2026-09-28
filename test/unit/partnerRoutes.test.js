@@ -123,7 +123,8 @@ describe('discovery', () => {
     const pr = await request(app).get('/.well-known/oauth-protected-resource/partner/tge');
     assert.equal(pr.status, 200);
     assert.equal(pr.body.resource, PARTNER_RESOURCE);
-    assert.deepEqual(pr.body.scopes_supported, [...PARTNER_SCOPES]);
+    // SSO_TGE_REFERRAL_BIND is unset here, so the write scope is not offered (decision 30 A).
+    assert.deepEqual(pr.body.scopes_supported, PARTNER_SCOPES.filter((s) => s !== 'tge:referral_bind'));
   });
 });
 

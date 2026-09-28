@@ -57,8 +57,9 @@ function runWritable(fn) {
  * Inside a read-only scope, allow `$queryRaw` for the duration of `fn` — and nothing else: model
  * writes and `$executeRaw` stay refused. Raw SQL is refused by default because a statement can hide
  * a write (`WITH x AS (DELETE …) SELECT …`); this is the explicit, named exception for vetted,
- * fixed, parameterised SELECTs. Its only caller is src/services/referralNetwork.js (recursive CTEs
- * the Prisma query API cannot express). Outside a read-only scope it just runs `fn`.
+ * fixed, parameterised SELECTs. Callers: src/services/referralNetwork.js (recursive CTEs the Prisma
+ * query API cannot express) and referralUtils.findUserByReferralCode (the case-insensitive code
+ * lookup that /partner/tge/referral/bind/check runs). Outside a read-only scope it just runs `fn`.
  */
 function runVettedRawRead(label, fn) {
   const scope = readOnlyScope();

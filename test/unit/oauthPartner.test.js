@@ -906,7 +906,8 @@ describe('metadataDocuments', () => {
     assert.equal(partnerResourceDoc.resource, PARTNER_RESOURCE);
     assert.deepEqual(partnerResourceDoc.authorization_servers, [ISSUER]);
     assert.deepEqual(partnerResourceDoc.bearer_methods_supported, ['header']);
-    assert.deepEqual(partnerResourceDoc.scopes_supported, [...PARTNER_SCOPES]);
+    // SSO_TGE_REFERRAL_BIND is unset here, so the write scope is not offered (decision 30 A).
+    assert.deepEqual(partnerResourceDoc.scopes_supported, PARTNER_SCOPES.filter((s) => s !== 'tge:referral_bind'));
     assert.equal(resourceDoc.resource, MCP_RESOURCE);
   });
 });

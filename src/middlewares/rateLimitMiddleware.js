@@ -309,6 +309,17 @@ const rateLimiters = {
     errorFormat: 'oauth'
   }),
 
+  // POST /partner/tge/referral/bind — per partner access token, ON TOP of `partner`. A user binds
+  // an inviter once; ten tries a minute covers typos and retries, not a walk through the code space.
+  partnerReferralBind: createRateLimiter({
+    name: 'partnerReferralBind',
+    windowMs: 60 * 1000,
+    max: 10,
+    message: 'Too many referral bind attempts for this access token. Retry after the indicated delay.',
+    keyGenerator: keyGenerators.bearerTokenHash,
+    errorFormat: 'oauth'
+  }),
+
   // POST /api/ops/auth/login — 5 failures per 15 minutes per IP; successes are free
   opsLogin: createRateLimiter({
     name: 'opsLogin',

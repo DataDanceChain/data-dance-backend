@@ -37,6 +37,14 @@ const PARTNER_SCOPES = Object.freeze([
   // Sloan, 2026-09-23: the partner may read the user's COMPLETE referral network (every upline,
   // every downline, any depth) — GET /partner/tge/referral-network. Also frozen per environment.
   'tge:referral_network',
+  // Sloan, 2026-09-28 (decision 30 A): the ONE write scope. POST /partner/tge/referral/bind binds
+  // an invite code as the signed-in user's inviter (TGE: no inviter, no subscription). Never part
+  // of PARTNER_DEFAULT_SCOPE; the consent page lists it as `referral_bind`. Item 35 (same day): it
+  // may be auto-approved like the read scopes (SSO_TGE_AUTO_APPROVE) — the confirmation moved to
+  // the bind itself: the partner's own confirm dialog, enforced by /referral/bind/check's
+  // confirm_token. Switched per environment (SSO_TGE_REFERRAL_BIND, default off → the route is 404
+  // not_available and /oauth/authorize answers invalid_scope; see availablePartnerScopes).
+  'tge:referral_bind',
 ]);
 const PARTNER_DEFAULT_SCOPE = 'tge:identity';
 const PARTNER_REQUEST_TTL_MS = 10 * 60 * 1000;
@@ -592,6 +600,28 @@ function assertFinancialGradeConfig(env = process.env) {
   };
 }
 
+/**
+ * SSO_TGE_REFERRAL_BIND — per-environment switch for POST /partner/tge/referral/bind, the partner
+ * API's only write. Default (unset, or anything but `true`) is OFF: the route answers 404
+ * not_available, the same way an unlisted referral_network does, and the scope cannot be requested
+ * (availablePartnerScopes). Read per request, so an operator can shut it without a deploy.
+ * Rollout: do not turn it on before the Wallet ships dedicated consent copy for `referral_bind`
+ * in every consent language; its generic fallback line reads like a data item, not a write.
+ */
+function referralBindEnabled(env = process.env) {
+  return flag(env.SSO_TGE_REFERRAL_BIND);
+}
+
+/**
+ * The partner scopes this environment offers right now: PARTNER_SCOPES minus `tge:referral_bind`
+ * while SSO_TGE_REFERRAL_BIND is off. /oauth/authorize (invalid_scope) and the `scopes_supported`
+ * metadata both read this, so the consent line for the write and the write route open together
+ * under one switch — never a consent a user can approve for a route that is not live yet.
+ */
+function availablePartnerScopes(env = process.env) {
+  return PARTNER_SCOPES.filter((item) => item !== 'tge:referral_bind' || referralBindEnabled(env));
+}
+
 module.exports = {
   PARTNER_KIND,
   PARTNER_REALM,
@@ -624,4 +654,6 @@ module.exports = {
   sha256Hex,
   assertPartnerConfig,
   assertFinancialGradeConfig,
+  referralBindEnabled,
+  availablePartnerScopes,
 };
