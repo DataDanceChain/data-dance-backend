@@ -1,8 +1,21 @@
 const jwt = require('jsonwebtoken');
 const { PrismaClient } = require('@prisma/client');
+const { createLogger } = require('../utils/logger');
+const {
+  classifyAuthError,
+  logAuthError,
+  sendDatabaseUnavailable,
+} = require('./authErrors');
 const prisma = new PrismaClient();
+const logger = createLogger('auth');
 
+/**
+ * Same contract as authMiddleware.protect: 401 only for header/JWT/user-missing
+ * failures, 503 + Retry-After when the database cannot be reached, otherwise
+ * the app's error handler. See ./authErrors.js.
+ */
 exports.authenticate = async (req, res, next) => {
+  let token;
   try {
     // 从请求头获取 token
     const authHeader = req.header('Authorization');
@@ -14,7 +27,7 @@ exports.authenticate = async (req, res, next) => {
     }
 
     // 验证 token 格式
-    const token = authHeader.replace('Bearer ', '');
+    token = authHeader.replace('Bearer ', '');
     if (!token) {
       return res.status(401).json({
         status: 'fail',
@@ -24,7 +37,15 @@ exports.authenticate = async (req, res, next) => {
 
     // 验证 token
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    
+
+    // A token without a user id is an auth failure, not a query to run.
+    if (!decoded || typeof decoded.id !== 'string' || !decoded.id) {
+      return res.status(401).json({
+        status: 'fail',
+        message: '无效的认证令牌'
+      });
+    }
+
     // 获取用户信息
     const user = await prisma.user.findUnique({
       where: { id: decoded.id }
@@ -50,24 +71,18 @@ exports.authenticate = async (req, res, next) => {
     req.authClaims = decoded;
     next();
   } catch (error) {
-    if (error.name === 'JsonWebTokenError') {
+    const kind = classifyAuthError(error);
+    if (kind === 'jwt') {
       return res.status(401).json({
         status: 'fail',
-        message: '无效的认证令牌'
+        message: error.name === 'TokenExpiredError' ? '认证令牌已过期' : '无效的认证令牌'
       });
     }
-    if (error.name === 'TokenExpiredError') {
-      return res.status(401).json({
-        status: 'fail',
-        message: '认证令牌已过期'
-      });
+    logAuthError(logger, error, req, token);
+    if (kind === 'db_unavailable') {
+      return sendDatabaseUnavailable(res, '数据库暂时不可用，请稍后重试');
     }
-    console.error('认证中间件错误:', error);
-    res.status(500).json({
-      status: 'error',
-      message: '服务器错误',
-      error: process.env.NODE_ENV === 'development' ? error.message : undefined
-    });
+    return next(error);
   }
 };
 
