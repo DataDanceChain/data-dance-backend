@@ -11,7 +11,7 @@ dotenv.config();
 const partnerSso = assertPartnerConfig();
 console.log(
   partnerSso.enabled
-    ? `Partner SSO enabled [${partnerSso.environment}] client=${partnerSso.clientId} redirectUris=${partnerSso.redirectUriCount} statusFields=${partnerSso.statusFields.join(',') || '(none)'} verifiedSession=${partnerSso.requireVerifiedSession} rotationOpen=${partnerSso.rotationOpen}`
+    ? `Partner SSO enabled [${partnerSso.environment}] client=${partnerSso.clientId} redirectUris=${partnerSso.redirectUriCount} statusFields=${partnerSso.statusFields.join(',') || '(none)'} verifiedSession=${partnerSso.requireVerifiedSession} autoApprove=${partnerSso.autoApprove} rotationOpen=${partnerSso.rotationOpen}`
     : 'Partner SSO disabled',
 );
 // Kill switch, boot half: with the partner flow OFF, revoke every outstanding partner token so a

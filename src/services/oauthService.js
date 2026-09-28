@@ -12,6 +12,7 @@ const {
   parseBasicAuth,
   partnerResourceUrl,
   readPartnerConfig,
+  autoApproveFor,
 } = require('../constants/partnerClient');
 const { isCEndSubject } = require('./dataLicenceConsent');
 
@@ -64,6 +65,29 @@ class ConsentInitiatorError extends Error {
     this.clientName = clientName || null;
     this.clientId = clientId || null;
   }
+}
+
+/**
+ * An auto-approved consent (`auto: true`) whose client or entry type SSO_TGE_AUTO_APPROVE does
+ * not allow. Nothing is consumed and nothing is redirected: the Wallet falls back to showing the
+ * ordinary Allow / Deny page, and the request is still decidable by hand.
+ */
+class AutoApproveNotAllowedError extends Error {
+  constructor(entry) {
+    super('Automatic approval is not enabled for this sign-in.');
+    this.name = 'AutoApproveNotAllowedError';
+    this.code = 'AUTO_APPROVE_NOT_ALLOWED';
+    this.statusCode = 403;
+    this.entry = entry || null; // 'app' | 'web'
+  }
+}
+
+/**
+ * Which consent entry a decision came through, from the credential it carries: the App
+ * hand-off's consent-only SSO session is `app`, an ordinary DataDance user JWT is `web`.
+ */
+function consentEntry(ctx) {
+  return ctx && ctx.kind === 'sso_ticket' ? 'app' : 'web';
 }
 
 // ---------------------------------------------------------------------------
@@ -510,6 +534,9 @@ async function getConsentRequest(id) {
     scopeItems: scopeItems(row.scope, partner),
     resource: row.resource,
     expiresAt: row.expiresAt,
+    // Only a hint for the Wallet (post the Allow without a tap). Never a decision: the code is
+    // minted by the credentialed POST /api/oauth/consent, which re-checks the switch itself.
+    autoApprove: autoApproveFor(partner ? row.clientId : null),
   };
 }
 
@@ -518,9 +545,15 @@ async function getConsentRequest(id) {
  *              initiatorNonce?: string }
  *   `claims` are the verified DDC JWT claims (`ver` >= 2 marks a Web3Auth-verified login);
  *   `clientId` is the client an SSO ticket session is bound to (Phase 3);
- *   `initiatorNonce` is the `__Host-ddc_authz` cookie of the deciding browser (item 1).
+ *   `initiatorNonce` is the `__Host-ddc_authz` cookie of the deciding browser (item 1);
+ *   `auto: true` marks an Allow the Wallet posted without a tap (SSO_TGE_AUTO_APPROVE). It only
+ *   adds a gate in front of the manual Allow path — which then runs unchanged — and one log line.
  */
 async function decideConsent(user, requestId, allow, ctx = {}) {
+  const auto = Boolean(ctx && ctx.auto === true);
+  if (auto && allow !== true) {
+    throw new OAuthError(400, 'invalid_request', 'auto requires allow=true.');
+  }
   // A missing/malformed id is the caller's error (400), never a Prisma validation error (500).
   if (typeof requestId !== 'string' || !requestId.trim() || requestId.length > 128) {
     throw new OAuthError(400, 'invalid_request', 'requestId is required.');
@@ -538,6 +571,12 @@ async function decideConsent(user, requestId, allow, ctx = {}) {
   // decision on someone else's request.
   if (principal === 'sso_ticket' && ctx.clientId && ctx.clientId !== row.clientId) {
     throw new OAuthError(403, 'access_denied', 'This session is bound to a different client.');
+  }
+  // Auto-approval gate: the configured TGE client only, and only for an entry type the switch
+  // allows. Checked before anything is consumed, so a refusal leaves the request decidable by hand.
+  const entry = consentEntry(ctx);
+  if (auto && !(partner && autoApproveFor(row.clientId)[entry])) {
+    throw new AutoApproveNotAllowedError(entry);
   }
 
   // Every terminal answer consumes the request atomically: one authorization request is ONE
@@ -610,6 +649,15 @@ async function decideConsent(user, requestId, allow, ctx = {}) {
   });
   if (!decided || decided.count !== 1) {
     throw new OAuthError(400, 'invalid_request', 'This authorization request has expired.');
+  }
+  if (auto) {
+    logger.info('oauth.consent_auto_approved', {
+      clientId: row.clientId,
+      entry,
+      scopes: row.scope,
+      requestId: row.id,
+      userId: user.id,
+    });
   }
   return appendQuery(row.redirectUri, { code, state: row.state, iss: issuer });
 }
@@ -882,6 +930,7 @@ async function userInfoFromBearer(token) {
 module.exports = {
   OAuthError,
   ConsentInitiatorError,
+  AutoApproveNotAllowedError,
   AUTHZ_COOKIE_NAME,
   readInitiatorNonce,
   publicRegistrationEnabled,

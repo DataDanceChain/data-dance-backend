@@ -161,6 +161,32 @@ const STATUS_FIELD_CATALOG = Object.freeze({
 });
 const DEFAULT_STATUS_FIELDS = Object.freeze([]);
 
+/**
+ * SSO_TGE_AUTO_APPROVE — which consent entries may skip the Allow tap for the TGE client.
+ *   off (default; also unset and any value not listed here) → every consent is a manual tap.
+ *   app      → a consent carried by the App hand-off session (`ddc_sso_…`) may auto-approve.
+ *   app,web  → so may a consent from an ordinary DataDance web login (user JWT).
+ * "Auto" only means the Wallet posts the Allow on the user's behalf: the server still runs the
+ * full manual-allow path (initiator cookie, single-use consume, PKCE, verified session,
+ * redirect_uri). Never applies to any other client.
+ */
+const AUTO_APPROVE_OFF = Object.freeze({ app: false, web: false });
+
+function parseAutoApprove(value) {
+  const entries = [...new Set(csv(String(value || '').toLowerCase()))].sort();
+  const key = entries.join(',');
+  if (key === 'app') return { app: true, web: false };
+  if (key === 'app,web') return { app: true, web: true };
+  return { ...AUTO_APPROVE_OFF };
+}
+
+/** The canonical switch value, for the boot summary. */
+function autoApproveLabel(flags) {
+  if (flags && flags.app && flags.web) return 'app,web';
+  if (flags && flags.app) return 'app';
+  return 'off';
+}
+
 function csv(value) {
   return String(value || '')
     .split(',')
@@ -207,7 +233,21 @@ function readPartnerConfig(env = process.env) {
     initiateLoginUri: String(env.SSO_TGE_INITIATE_LOGIN_URI || '').trim(),
     statusFields: env.SSO_TGE_STATUS_FIELDS === undefined ? [...DEFAULT_STATUS_FIELDS] : csv(env.SSO_TGE_STATUS_FIELDS),
     requireVerifiedSession: flag(env.SSO_REQUIRE_VERIFIED_SESSION),
+    autoApprove: parseAutoApprove(env.SSO_TGE_AUTO_APPROVE),
   };
+}
+
+/**
+ * The auto-approve flags for one client id: the parsed switch when `clientId` is the configured
+ * TGE partner client, all false for anything else (MCP clients, an unconfigured deployment).
+ * Read on every call, like the rest of this module.
+ */
+function autoApproveFor(clientId, env = process.env) {
+  const cfg = readPartnerConfig(env);
+  if (!cfg.clientId || clientId === undefined || clientId === null || String(clientId) !== cfg.clientId) {
+    return { ...AUTO_APPROVE_OFF };
+  }
+  return { ...cfg.autoApprove };
 }
 
 /**
@@ -426,6 +466,7 @@ function assertPartnerConfig(env = process.env) {
     redirectUriCount: cfg.redirectUris.length,
     statusFields: [...cfg.statusFields],
     requireVerifiedSession: cfg.requireVerifiedSession,
+    autoApprove: autoApproveLabel(cfg.autoApprove),
     rotationOpen: Boolean(cfg.previousSecretHash && cfg.rotationUntil && Date.now() < cfg.rotationUntil.getTime()),
   };
 }
@@ -568,6 +609,8 @@ module.exports = {
   STATUS_FIELD_CATALOG,
   DEFAULT_STATUS_FIELDS,
   readPartnerConfig,
+  parseAutoApprove,
+  autoApproveFor,
   partnerResourceUrl,
   getPartnerClient,
   isPartnerClient,
