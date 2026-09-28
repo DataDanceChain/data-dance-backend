@@ -157,6 +157,27 @@ npm run prisma:migrate
 npm run dev
 ```
 
+### 演示数据：B 端订单 / 发票 / 付款
+
+`scripts/seedCommerceDemo.js` 只依赖已迁移的数据库，可以在空库上直接运行，顺序是：
+
+```bash
+# 1. 迁移（首次或有新迁移时）
+npx prisma migrate deploy
+
+# 2. 写入演示数据；可重复执行，每次先删掉上一轮 [demo-seed] 数据再重建
+npm run seed:commerce-demo
+```
+
+脚本会按邮箱查找并在缺失时创建它需要的 4 个组织账号（买家 `test-buyer@datadance.io`，
+卖家 `official@datadance.io`、`merchant-asia-electronics@datadance.io`、
+`merchant-north-america-electronics@datadance.io`）。三个演示账号的名称 / 描述都标注为演示账号，
+`official@datadance.io` 则与 `importDataPackAsDataNFT.js` 创建的平台账号保持一致。
+本轮新建的账号共用一个随机生成的密码，只在脚本结尾打印一次、不落盘；
+设置 `COMMERCE_DEMO_PASSWORD=...` 可改用固定密码。已存在的账号原样复用，密码不变。
+它不依赖 `seed:all` 或数据包导入脚本；若先跑过 `createMerchantsAndDataNFTs.js`，
+同名商家会被复用（见 `docs/MERCHANT_ACCOUNTS.md`）。
+
 ## 🛡 金融级加固：合作方 SSO（Partner SSO boot assertions）
 
 TGE 页面这条链路上可能有很大金额，所以协议之外的"部署形态"也必须被程序本身卡死。以下三件事是
