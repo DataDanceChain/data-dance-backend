@@ -1,14 +1,27 @@
 const jwt = require('jsonwebtoken');
 const { PrismaClient } = require('@prisma/client');
+const { createLogger } = require('../utils/logger');
+const {
+  classifyAuthError,
+  logAuthError,
+  sendDatabaseUnavailable,
+} = require('./authErrors');
 const prisma = new PrismaClient();
+const logger = createLogger('authMiddleware');
+
+const UNAUTHORIZED_MESSAGE = 'Unauthorized access. Please login again.';
 
 /**
  * 验证用户是否已登录
+ *
+ * 401 only for a missing/malformed header, a token the JWT library rejects, or a
+ * token whose user no longer exists. A database failure during the user lookup
+ * is 503 + Retry-After (the client keeps its token); anything else goes to the
+ * app's error handler (500). See ./authErrors.js.
  */
 const protect = async (req, res, next) => {
+  let token;
   try {
-    let token;
-
     // 从请求头中获取 token
     if (req.headers.authorization && req.headers.authorization.startsWith('Bearer')) {
       token = req.headers.authorization.split(' ')[1];
@@ -23,6 +36,15 @@ const protect = async (req, res, next) => {
 
     // 验证 token
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
+
+    // A token without a user id (e.g. an ops token signed with the same secret)
+    // is an auth failure, not a query to run.
+    if (!decoded || typeof decoded.id !== 'string' || !decoded.id) {
+      return res.status(401).json({
+        status: 'fail',
+        message: UNAUTHORIZED_MESSAGE
+      });
+    }
 
     // 检查用户是否存在
     const currentUser = await prisma.user.findUnique({
@@ -49,10 +71,18 @@ const protect = async (req, res, next) => {
     req.authClaims = decoded;
     next();
   } catch (error) {
-    return res.status(401).json({
-      status: 'fail',
-      message: 'Unauthorized access. Please login again.'
-    });
+    const kind = classifyAuthError(error);
+    if (kind === 'jwt') {
+      return res.status(401).json({
+        status: 'fail',
+        message: UNAUTHORIZED_MESSAGE
+      });
+    }
+    logAuthError(logger, error, req, token);
+    if (kind === 'db_unavailable') {
+      return sendDatabaseUnavailable(res, 'Service temporarily unavailable. Please try again shortly.');
+    }
+    return next(error);
   }
 };
 

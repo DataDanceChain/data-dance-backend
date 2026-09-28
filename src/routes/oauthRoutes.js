@@ -8,6 +8,7 @@ const { verifySsoSession, looksLikeSsoSession } = require('./ssoRoutes');
 const {
   OAuthError,
   ConsentInitiatorError,
+  AutoApproveNotAllowedError,
   readInitiatorNonce,
   metadataDocuments,
   registerClient,
@@ -51,9 +52,24 @@ function sendInitiatorMismatch(res, error) {
   });
 }
 
+/**
+ * `auto: true` for a client / entry type SSO_TGE_AUTO_APPROVE does not allow. Not an OAuth error
+ * either: nothing was consumed, and the Wallet simply shows the manual Allow / Deny page.
+ */
+function sendAutoApproveNotAllowed(res, error) {
+  res.set('Cache-Control', 'no-store');
+  return res.status(403).json({
+    status: 'fail',
+    code: error.code,
+    message: 'Automatic approval is not enabled for this sign-in. Choose Allow or Deny.',
+    data: { entry: error.entry },
+  });
+}
+
 /** OAuthError → its status/code; anything else → 500 server_error with NO internal detail. */
 function sendOAuthError(res, error) {
   if (error instanceof ConsentInitiatorError) return sendInitiatorMismatch(res, error);
+  if (error instanceof AutoApproveNotAllowedError) return sendAutoApproveNotAllowed(res, error);
   const known = error instanceof OAuthError;
   if (!known) logUnexpected(error);
   const status = known ? error.statusCode : 500;
@@ -333,6 +349,17 @@ function parseAllow(value) {
   return false;
 }
 
+/**
+ * The optional `auto` flag (SSO_TGE_AUTO_APPROVE). Absent / false → a manual decision, exactly
+ * as before. true (or the form-encoded "true") → an automatic Allow. Anything else is malformed:
+ * a flag that widens what a request may do is never guessed at. Returns true | false | null.
+ */
+function parseAuto(value) {
+  if (value === undefined || value === null || value === false || value === 'false') return false;
+  if (value === true || value === 'true') return true;
+  return null;
+}
+
 // The limiter runs AFTER the principal is known, so its `userOrIp` key is the user: one person's
 // decisions never throttle everyone else behind the same NAT (event Wi-Fi, carrier CGNAT). Before
 // the mount-order fix this was only true by accident (an earlier router's `protect` set req.user).
@@ -342,12 +369,22 @@ router.post('/api/oauth/consent', consentPrincipal(protect), lim('consent'), asy
     if (allow === null) {
       throw new OAuthError(400, 'invalid_request', 'allow must be true or false.');
     }
+    const auto = parseAuto(req.body?.auto);
+    if (auto === null) {
+      throw new OAuthError(400, 'invalid_request', 'auto must be true or false.');
+    }
+    if (auto && allow !== true) {
+      throw new OAuthError(400, 'invalid_request', 'auto requires allow=true.');
+    }
     // req.authClaims is set by `protect` (P0 verified-login claims); an SSO session carries no
     // claims of its own — the verified-login check happened when the ticket was minted.
     const initiatorNonce = readInitiatorNonce(req);
     const ctx = req.ssoSession
       ? { kind: 'sso_ticket', clientId: req.ssoSession.clientId, initiatorNonce }
       : { kind: 'user_jwt', claims: req.authClaims, initiatorNonce };
+    // Only an automatic Allow carries the flag, so a manual decision reaches decideConsent
+    // with exactly the context it always had.
+    if (auto) ctx.auto = true;
     const redirectTo = await decideConsent(req.user, req.body?.requestId, allow, ctx);
     res.set('Cache-Control', 'no-store');
     return res.json({ status: 'success', data: { redirectTo } });

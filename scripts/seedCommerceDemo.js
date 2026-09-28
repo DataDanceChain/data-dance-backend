@@ -1,19 +1,59 @@
 /**
  * Demo seed for B-end Orders / Invoices / Payments.
+ *
+ * Needs only a migrated database (`npx prisma migrate deploy`). The four organization
+ * accounts it trades between (one buyer, three sellers) are created when missing, so it
+ * runs on an empty database; existing accounts are reused untouched (looked up by email).
  * Safe to re-run: deletes previous rows tagged [demo-seed], then inserts a fresh set.
  *
  *   docker compose exec ddc-backend-api node scripts/seedCommerceDemo.js
+ *   COMMERCE_DEMO_PASSWORD=... node scripts/seedCommerceDemo.js   # fixed password for created accounts
+ *
+ * Accounts created by this run get one generated password (or COMMERCE_DEMO_PASSWORD), printed
+ * once at the end and not stored anywhere else. Accounts that already exist keep their password.
  */
 
 require('dotenv').config();
+const crypto = require('crypto');
+const bcrypt = require('bcryptjs');
 const prisma = require('../src/utils/prisma');
 const { nextNumber } = require('../src/services/commerceService');
+const { generateReferralCode } = require('../src/utils/referralUtils');
 
 const SEED_TAG = '[demo-seed]';
 const BUYER_EMAIL = 'test-buyer@datadance.io';
 const SELLER_OFFICIAL = 'official@datadance.io';
 const SELLER_ASIA = 'merchant-asia-electronics@datadance.io';
 const SELLER_NA = 'merchant-north-america-electronics@datadance.io';
+
+const DEMO_LOGO = '/assets/logos/merchant-default.jpg';
+const DEMO_DESCRIPTION = `${SEED_TAG} Demo organization account created by scripts/seedCommerceDemo.js. Not a real company.`;
+
+// Organization accounts the deals below are written between. `official` mirrors the row
+// scripts/importDataPackAsDataNFT.js creates, so whichever script runs first yields the same account.
+const DEMO_ACCOUNTS = {
+  buyer: {
+    email: BUYER_EMAIL,
+    name: 'Northwind AI Research (Demo Buyer)',
+    description: DEMO_DESCRIPTION,
+  },
+  official: {
+    email: SELLER_OFFICIAL,
+    name: 'DataDance Official',
+    description: 'DataDance is a leading platform for data assetization and Web3 marketing, empowering businesses and individuals to unlock the value of their data through blockchain technology.',
+    logo: '/assets/logos/datadance-logo.jpg',
+  },
+  asia: {
+    email: SELLER_ASIA,
+    name: 'Asia Electronics Merchant (Demo)',
+    description: DEMO_DESCRIPTION,
+  },
+  northAmerica: {
+    email: SELLER_NA,
+    name: 'North America Electronics Merchant (Demo)',
+    description: DEMO_DESCRIPTION,
+  },
+};
 
 function daysAgo(days, hours = 10) {
   const date = new Date();
@@ -50,11 +90,62 @@ async function upsertEntity(user, data) {
   });
 }
 
-async function requireUser(email) {
-  const user = await prisma.user.findUnique({ where: { email } });
-  if (!user) {
-    throw new Error(`Missing organization user: ${email}`);
+function isOrganizationAccount(user) {
+  return Boolean(user && (user.isOrganization || user.userType === 'organization'));
+}
+
+/** The password for accounts created by this run: COMMERCE_DEMO_PASSWORD, else a random one. */
+function demoPassword() {
+  const fromEnv = process.env.COMMERCE_DEMO_PASSWORD;
+  if (fromEnv) return { value: fromEnv, source: 'COMMERCE_DEMO_PASSWORD' };
+  return { value: `demo-${crypto.randomBytes(9).toString('base64url')}`, source: 'generated' };
+}
+
+/** Give the account the USER role the other seeds assign, when the roles table has been seeded. */
+async function linkUserRole(userId) {
+  const role = await prisma.role.findFirst({ where: { name: 'USER' }, select: { id: true } });
+  if (!role) return false;
+  await prisma.userRole.upsert({
+    where: { userId_roleId: { userId, roleId: role.id } },
+    update: {},
+    create: { userId, roleId: role.id },
+  });
+  return true;
+}
+
+/**
+ * Find the organization account for `account.email`, creating it when missing.
+ * Idempotent: keyed on the unique email, `update: {}` so an existing row (its password
+ * included) is never modified. Refuses an existing account that is not an organization
+ * rather than silently trading through a personal account.
+ */
+async function ensureOrganization(account, passwordHash, created) {
+  const existing = await prisma.user.findUnique({ where: { email: account.email } });
+  if (existing) {
+    if (!isOrganizationAccount(existing)) {
+      throw new Error(`${account.email} exists but is not an organization account; the demo seed will not reuse it`);
+    }
+    return existing;
   }
+  const user = await prisma.user.upsert({
+    where: { email: account.email },
+    update: {},
+    create: {
+      email: account.email,
+      name: account.name,
+      description: account.description,
+      password: passwordHash,
+      authType: 'traditional',
+      userType: 'organization',
+      isOrganization: true,
+      logo: account.logo || DEMO_LOGO,
+      avatar: account.logo || DEMO_LOGO,
+      referralCode: generateReferralCode(),
+      profile: { create: { language: 'en' } },
+    },
+  });
+  await linkUserRole(user.id);
+  created.push(account.email);
   return user;
 }
 
@@ -317,12 +408,13 @@ async function seedTopUp(buyer, payee, amount, status, days) {
 }
 
 async function main() {
-  const [buyer, official, asia, northAmerica] = await Promise.all([
-    requireUser(BUYER_EMAIL),
-    requireUser(SELLER_OFFICIAL),
-    requireUser(SELLER_ASIA),
-    requireUser(SELLER_NA),
-  ]);
+  const password = demoPassword();
+  const passwordHash = await bcrypt.hash(password.value, 10);
+  const created = [];
+  const buyer = await ensureOrganization(DEMO_ACCOUNTS.buyer, passwordHash, created);
+  const official = await ensureOrganization(DEMO_ACCOUNTS.official, passwordHash, created);
+  const asia = await ensureOrganization(DEMO_ACCOUNTS.asia, passwordHash, created);
+  const northAmerica = await ensureOrganization(DEMO_ACCOUNTS.northAmerica, passwordHash, created);
 
   const [buyerEntity, officialEntity, asiaEntity, naEntity] = await Promise.all([
     upsertEntity(buyer, {
@@ -639,17 +731,27 @@ async function main() {
   await seedTopUp(buyer, official, 20000, 'confirmed', 25);
   await seedTopUp(buyer, official, 5000, 'pending', 1);
 
-  const [orders, invoices, payments] = await Promise.all([
+  const accountEmails = Object.values(DEMO_ACCOUNTS).map((account) => account.email);
+  const [accounts, entities, orders, invoices, payments] = await Promise.all([
+    prisma.user.count({ where: { email: { in: accountEmails } } }),
+    prisma.legalEntity.count({ where: { user: { email: { in: accountEmails } } } }),
     prisma.purchaseOrder.count({ where: { notes: { contains: SEED_TAG } } }),
     prisma.invoice.count({ where: { order: { notes: { contains: SEED_TAG } } } }),
     prisma.payment.count({ where: { notes: { contains: SEED_TAG } } }),
   ]);
 
   console.log('Commerce demo seed complete');
-  console.log(`  Buyer login: ${BUYER_EMAIL} / Buyer@123`);
+  console.log(`  Organization accounts: ${accounts} (${created.length} created this run)`);
+  for (const email of accountEmails) {
+    console.log(`    ${email}  ${created.includes(email) ? 'created' : 'existing, password unchanged'}`);
+  }
+  console.log(`  Legal entities: ${entities}`);
   console.log(`  Orders: ${orders}`);
   console.log(`  Invoices: ${invoices}`);
   console.log(`  Payments: ${payments}`);
+  if (created.length) {
+    console.log(`  Password for the ${created.length} account(s) created this run (${password.source}, shown once, not stored): ${password.value}`);
+  }
 }
 
 main()
