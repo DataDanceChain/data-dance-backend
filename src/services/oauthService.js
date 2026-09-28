@@ -15,6 +15,7 @@ const {
   autoApproveFor,
 } = require('../constants/partnerClient');
 const { isCEndSubject } = require('./dataLicenceConsent');
+const { isValidReferralCodeFormat } = require('../utils/referralUtils');
 
 const { createLogger } = require('../utils/logger');
 
@@ -478,6 +479,18 @@ async function startAuthorization(req, query, res) {
       throw new OAuthError(400, 'invalid_target', partner ? 'resource must match the partner API.' : 'resource must match the MCP endpoint.');
     }
     const scope = partner ? parsePartnerScope(query.scope) : normalizeScope(query.scope);
+    // The TGE registration link carries the inviter's code so the Wallet login page can prefill
+    // it; format only, no lookup (no code enumeration through /oauth/authorize), partner client
+    // only, and NEVER applied automatically — binding still only happens through the normal
+    // login/registration path the user performs.
+    let referralCode = null;
+    if (partner && query.referral_code !== undefined && query.referral_code !== null && String(query.referral_code) !== '') {
+      const rawReferralCode = String(query.referral_code);
+      if (!isValidReferralCodeFormat(rawReferralCode)) {
+        throw new OAuthError(400, 'invalid_request', 'referral_code is not a valid referral code format.');
+      }
+      referralCode = rawReferralCode.trim().replace(/\s+/g, '');
+    }
     // Bind BEFORE the row is written, so a row never exists without the hash of the cookie that
     // was actually set on this response.
     const initiatorNonce = bindInitiator(req, res);
@@ -490,6 +503,7 @@ async function startAuthorization(req, query, res) {
         codeChallengeMethod: 'S256',
         resource: expected,
         scope,
+        referralCode,
         expiresAt: new Date(Date.now() + (client.requestTtlMs || REQUEST_TTL_MS)),
         initiatorHash: initiatorNonce ? hashInitiator(initiatorNonce) : null,
         initiatorBoundAt: initiatorNonce ? new Date() : null,
@@ -533,6 +547,9 @@ async function getConsentRequest(id) {
     scope: row.scope,
     scopeItems: scopeItems(row.scope, partner),
     resource: row.resource,
+    // Prefill only: the Wallet login/registration page may show this, but binding it to the
+    // account only ever happens through the normal login/registration path the user performs.
+    referralCode: row.referralCode || null,
     expiresAt: row.expiresAt,
     // Only a hint for the Wallet (post the Allow without a tap). Never a decision: the code is
     // minted by the credentialed POST /api/oauth/consent, which re-checks the switch itself.

@@ -263,6 +263,61 @@ describe('startAuthorization', () => {
     const ttl = row.expiresAt.getTime() - before;
     assert.ok(ttl >= 15 * 60 * 1000 - 50 && ttl <= 15 * 60 * 1000 + 2000, `ttl ${ttl}`);
   });
+
+  describe('referral_code (partner client only, format-only, prefill)', () => {
+    it('is absent by default (no referral_code sent)', async () => {
+      await startAuthorization(req, partnerQuery());
+      assert.equal(prisma.oAuthAuthorization.rows[0].referralCode, null);
+    });
+
+    it('accepts a well-formed 6-character display code and stores it verbatim', async () => {
+      await startAuthorization(req, partnerQuery({ referral_code: 'AB23CD' }));
+      assert.equal(prisma.oAuthAuthorization.rows[0].referralCode, 'AB23CD');
+    });
+
+    it('accepts a well-formed display code lowercase, and the legacy DD-######## form', async () => {
+      await startAuthorization(req, partnerQuery({ referral_code: 'ab23cd' }));
+      assert.equal(prisma.oAuthAuthorization.rows[0].referralCode, 'ab23cd');
+      prisma.reset();
+      prisma.user.rows.push({ ...user }, { ...orgUser });
+      await startAuthorization(req, partnerQuery({ referral_code: 'DD-a1b2c3d4' }));
+      assert.equal(prisma.oAuthAuthorization.rows[0].referralCode, 'DD-a1b2c3d4');
+    });
+
+    it('trims surrounding/internal whitespace before storing', async () => {
+      await startAuthorization(req, partnerQuery({ referral_code: '  AB 23 CD  ' }));
+      assert.equal(prisma.oAuthAuthorization.rows[0].referralCode, 'AB23CD');
+    });
+
+    it('rejects a malformed referral_code with invalid_request (redirectable) and stores no row', async () => {
+      for (const bad of ['AB', 'AB23CD!', 'DD1234567', 'not-a-code', '0O1IL2', 'x'.repeat(40)]) {
+        await rejects(startAuthorization(req, partnerQuery({ referral_code: bad })), { error: 'invalid_request', redirectable: true });
+      }
+      assert.equal(prisma.oAuthAuthorization.rows.length, 0);
+    });
+
+    it('never looks the code up (no user lookup) at authorize time — only a format check', async () => {
+      const lookupBefore = prisma.user.rows.length;
+      await startAuthorization(req, partnerQuery({ referral_code: 'ZZ99ZZ' }));
+      // No user was created, deleted or queried by identity as a side effect of an unknown code.
+      assert.equal(prisma.user.rows.length, lookupBefore);
+      assert.equal(prisma.oAuthAuthorization.rows[0].referralCode, 'ZZ99ZZ');
+    });
+
+    it('is ignored for MCP (non-partner) clients: no format check, never stored', async () => {
+      await seedMcpClient();
+      const url = await startAuthorization(req, {
+        response_type: 'code',
+        client_id: 'ddc_oauth_mcp1',
+        redirect_uri: 'https://claude.ai/api/mcp/auth_callback',
+        code_challenge: pkce().challenge,
+        code_challenge_method: 'S256',
+        referral_code: 'not-even-close-to-valid',
+      });
+      assert.ok(url);
+      assert.equal(prisma.oAuthAuthorization.rows[0].referralCode, null);
+    });
+  });
 });
 
 describe('getConsentRequest', () => {
@@ -286,6 +341,16 @@ describe('getConsentRequest', () => {
     assert.equal(data.kind, 'assistant');
     assert.equal(data.clientName, 'Claude');
   });
+
+  it('round-trips referralCode for the Wallet to prefill, and reports null when none was sent', async () => {
+    const url = await startAuthorization(req, partnerQuery({ referral_code: 'AB23CD' }));
+    const data = await getConsentRequest(new URL(url).searchParams.get('request'));
+    assert.equal(data.referralCode, 'AB23CD');
+
+    const url2 = await startAuthorization(req, partnerQuery());
+    const data2 = await getConsentRequest(new URL(url2).searchParams.get('request'));
+    assert.equal(data2.referralCode, null);
+  });
 });
 
 describe('decideConsent', () => {
@@ -293,6 +358,14 @@ describe('decideConsent', () => {
     const url = await startAuthorization(req, partnerQuery());
     return new URL(url).searchParams.get('request');
   }
+
+  it('never applies a stored referralCode automatically: consent creates no Referral row', async () => {
+    const url = await startAuthorization(req, partnerQuery({ referral_code: 'AB23CD' }));
+    const id = new URL(url).searchParams.get('request');
+    assert.equal(prisma.oAuthAuthorization.rows.find((r) => r.id === id).referralCode, 'AB23CD');
+    await decideConsent(user, id, true, { kind: 'user_jwt' });
+    assert.equal(prisma.referral.rows.length, 0);
+  });
 
   it('deny → access_denied with state and iss, request consumed', async () => {
     const id = await fresh();

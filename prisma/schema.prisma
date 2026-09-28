@@ -975,6 +975,12 @@ model OAuthAuthorization {
   initiatorBoundAt    DateTime?
   /// How many consent approvals arrived with a missing/wrong initiator cookie. Telemetry only.
   initiatorMismatchCount Int    @default(0)
+  /// The inviter's code carried in from the TGE registration link (partner client only,
+  /// GET /oauth/authorize?referral_code=...), format-checked at authorize time and never looked
+  /// up there. Returned as `referralCode` by GET /api/oauth/requests/:id so the Wallet login page
+  /// can prefill it; it is NOT applied automatically — binding still only happens through the
+  /// normal login/registration path the user performs.
+  referralCode        String?
   user                User?     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([clientId])
