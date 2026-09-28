@@ -23,8 +23,6 @@ const {
 
 const router = express.Router();
 const logger = createLogger('oauthRoutes');
-// Decision 30 A: a consent carrying tge:referral_bind is never auto-approved (see decideConsent).
-const { withManualConsentHint } = require('../constants/partnerClient');
 
 // Limiters are defined on the hardening branch; until it is merged they are pass-through.
 const passthrough = (req, res, next) => next();
@@ -317,7 +315,7 @@ router.get('/api/oauth/requests/:id', consentPrincipal(bearerMustVerify), async 
       });
     }
     res.set('Cache-Control', 'no-store');
-    return res.json({ status: 'success', data: withManualConsentHint(data) });
+    return res.json({ status: 'success', data });
   } catch (error) {
     return sendOAuthError(res, error);
   }

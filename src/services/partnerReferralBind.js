@@ -15,8 +15,9 @@
  * `tge:referral` read scope.
  */
 const prisma = require('../utils/prisma');
-const { useReferralCode } = require('./referralService');
+const { useReferralCode, findReferralCycle } = require('./referralService');
 const { findUserByReferralCode } = require('../utils/referralUtils');
+const { normaliseCode } = require('./referralBindConfirm');
 
 /** Codes are six characters today and legacy ones longer; anything past this is not a code. */
 const MAX_CODE_LENGTH = 64;
@@ -80,4 +81,58 @@ async function bindReferralForPartner(userId, code) {
   }
 }
 
-module.exports = { bindReferralForPartner, parseBindCode, codePrefix, MAX_CODE_LENGTH };
+/**
+ * The code a confirmation is bound to: the stored display code of the user who owns `code` (so the
+ * typed code, its lower-case form, a legacy code and the display code /check returned all confirm
+ * the same bind), or the normalised input when nobody owns it. One read; writes nothing.
+ * @returns {Promise<{ canonical: string, owner: { id: string, referralCode: string|null }|null }>}
+ */
+async function resolveBindCode(code) {
+  const owner = await findUserByReferralCode(code, { id: true, referralCode: true });
+  const canonical = normaliseCode(owner && owner.referralCode ? owner.referralCode : code);
+  return { canonical, owner: owner || null };
+}
+
+/**
+ * Step one of the two-step bind (POST /partner/tge/referral/bind/check): answers what the bind
+ * WOULD answer, in the same order and with the same error set, without writing anything (the
+ * route runs it under the read-only guard). The cycle walk here is advisory — the bind repeats it
+ * under the global late-bind lock, which is what actually decides.
+ * @returns {Promise<{ status: number, body: object|null, outcome: string, canonical: string|null, already?: boolean }>}
+ *   outcome ∈ valid | already | already_referred | invalid_code | self_referral | referral_cycle;
+ *   body is null on success (the route adds the confirmation token).
+ */
+async function checkReferralForPartner(userId, code) {
+  const [existing, { canonical, owner }] = await Promise.all([
+    prisma.referral.findUnique({ where: { inviteeId: userId }, select: { inviterId: true } }),
+    resolveBindCode(code),
+  ]);
+  if (existing) {
+    // The code of the inviter the user already has is still "valid": the bind would answer
+    // already:true, so a partner retrying after a lost response completes normally.
+    if (owner && existing.inviterId === owner.id) {
+      return { status: 200, body: null, outcome: 'already', canonical, already: true };
+    }
+    const r = refused(409, 'already_referred', 'This user already has an inviter, and an inviter is never changed.', 'already_referred');
+    return { ...r, canonical: null };
+  }
+  if (!owner) return { ...refused(404, 'invalid_code', 'No DataDance user has this invite code.', 'invalid_code'), canonical: null };
+  if (owner.id === userId) {
+    return { ...refused(400, 'self_referral', 'A user cannot use their own invite code.', 'self_referral'), canonical: null };
+  }
+  const walk = await findReferralCycle(userId, owner.id, prisma);
+  if (walk.cycle) {
+    const r = refused(409, 'referral_cycle', 'This invite code belongs to someone the user invited, directly or further down.', 'referral_cycle');
+    return { ...r, canonical: null };
+  }
+  return { status: 200, body: null, outcome: 'valid', canonical };
+}
+
+module.exports = {
+  bindReferralForPartner,
+  checkReferralForPartner,
+  resolveBindCode,
+  parseBindCode,
+  codePrefix,
+  MAX_CODE_LENGTH,
+};

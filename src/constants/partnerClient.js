@@ -39,8 +39,10 @@ const PARTNER_SCOPES = Object.freeze([
   'tge:referral_network',
   // Sloan, 2026-09-28 (decision 30 A): the ONE write scope. POST /partner/tge/referral/bind binds
   // an invite code as the signed-in user's inviter (TGE: no inviter, no subscription). Never part
-  // of PARTNER_DEFAULT_SCOPE, never auto-approved; the consent page lists it as `referral_bind`.
-  // Also switched per environment (SSO_TGE_REFERRAL_BIND, default off → the route is 404
+  // of PARTNER_DEFAULT_SCOPE; the consent page lists it as `referral_bind`. Item 35 (same day): it
+  // may be auto-approved like the read scopes (SSO_TGE_AUTO_APPROVE) — the confirmation moved to
+  // the bind itself: the partner's own confirm dialog, enforced by /referral/bind/check's
+  // confirm_token. Switched per environment (SSO_TGE_REFERRAL_BIND, default off → the route is 404
   // not_available and /oauth/authorize answers invalid_scope; see availablePartnerScopes).
   'tge:referral_bind',
 ]);
@@ -579,28 +581,6 @@ function availablePartnerScopes(env = process.env) {
   return PARTNER_SCOPES.filter((item) => item !== 'tge:referral_bind' || referralBindEnabled(env));
 }
 
-/**
- * Scopes that must be approved by a tap on the DataDance consent screen, never by an automatic
- * Allow: `tge:referral_bind` sets the user's inviter, and decision 29 A makes that permanent.
- */
-const PARTNER_MANUAL_CONSENT_SCOPES = Object.freeze(['tge:referral_bind']);
-
-function requiresManualConsent(scope) {
-  const granted = String(scope || '').split(/\s+/).filter(Boolean);
-  return granted.some((item) => PARTNER_MANUAL_CONSENT_SCOPES.includes(item));
-}
-
-/**
- * The consent summary the Wallet reads (GET /api/oauth/requests/:id), with any auto-approve hint
- * (`autoApprove`, SSO_TGE_AUTO_APPROVE) turned off when the request carries a manual-consent scope,
- * so the Wallet shows Allow / Deny instead of posting an Allow that decideConsent would refuse.
- * A summary without the hint (no auto-approve on this deployment) is returned unchanged.
- */
-function withManualConsentHint(summary) {
-  if (!summary || !summary.autoApprove || !requiresManualConsent(summary.scope)) return summary;
-  return { ...summary, autoApprove: { app: false, web: false } };
-}
-
 module.exports = {
   PARTNER_KIND,
   PARTNER_REALM,
@@ -633,7 +613,4 @@ module.exports = {
   assertFinancialGradeConfig,
   referralBindEnabled,
   availablePartnerScopes,
-  PARTNER_MANUAL_CONSENT_SCOPES,
-  requiresManualConsent,
-  withManualConsentHint,
 };

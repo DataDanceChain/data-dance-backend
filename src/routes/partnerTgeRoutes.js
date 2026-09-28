@@ -1,7 +1,8 @@
 /**
  * Read-only partner (TGE) resource: `/partner/tge/me`, `/partner/tge/status` and
- * `/partner/tge/referral-network` — plus ONE deliberate write, `POST /partner/tge/referral/bind`
- * (decision 30 A), which is the only route here outside the read-only guard.
+ * `/partner/tge/referral-network`, `POST /partner/tge/referral/bind/check` (a read: checks a code) —
+ * plus ONE deliberate write, `POST /partner/tge/referral/bind` (decision 30 A, two-step since item
+ * 35), which is the only route here outside the read-only guard.
  *
  * Auth: `Authorization: Bearer ddc_tge_…` only (never a query string). The token must have
  * been issued to the static partner client for THIS audience (`${PUBLIC_BASE_URL}/partner/tge`)
@@ -25,7 +26,14 @@ const {
   referralBindEnabled,
 } = require('../constants/partnerClient');
 const { isReferralRewardsFeaturesDisabled } = require('../constants/referralRewardsFeature');
-const { bindReferralForPartner, parseBindCode, codePrefix } = require('../services/partnerReferralBind');
+const {
+  bindReferralForPartner,
+  checkReferralForPartner,
+  resolveBindCode,
+  parseBindCode,
+  codePrefix,
+} = require('../services/partnerReferralBind');
+const { issueConfirmToken, verifyConfirmToken } = require('../services/referralBindConfirm');
 const { findUserByPartnerToken } = require('../services/mcpTokenService');
 const { hasActiveConsent } = require('../services/dataLicenceConsent');
 const { isDisplayReferralCode, getInviterId, countDirectInvitees } = require('../utils/referralUtils');
@@ -310,15 +318,30 @@ router.get('/referral-network', requirePartnerToken, readOnlyRequest, networkSer
 });
 
 /**
- * POST /partner/tge/referral/bind  { code } — decision 30 A (Sloan, 2026-09-28).
+ * The invite-code bind — decision 30 A (Sloan, 2026-09-28), made two-step by item 35 (same day):
  *
- * THE ONE PARTNER WRITE, and deliberately mounted WITHOUT `readOnlyRequest`. TGE will not let a user
- * without an inviter subscribe, so it must be able to bind the code the user typed there; making
- * the user leave TGE for the Wallet to do it would lose most of them. Everything else on this
- * router stays process-enforced read-only: the guard is opened per route, not router-wide, and
- * test/unit/partnerReferralBind.test.js fails if any other route is ever mounted without it.
+ *   "Inside the App the extra DDC Continue page is odd and redundant. The bind scope may be
+ *    auto-approved; the partner must show its own second confirmation before binding, and our
+ *    backend enforces a programmatic second confirmation."
  *
- * What keeps this write narrow:
+ *   1. POST /partner/tge/referral/bind/check  { code }
+ *        → 200 { valid: true, code: <normalised display code>, confirm_token, expires_in: 120 }
+ *          (+ already: true when the code is the inviter the user already has). Writes nothing:
+ *          it runs under the read-only guard like every read here.
+ *   2. The partner shows ITS OWN confirmation ("确认使用邀请码 DDC-XXXXXX？绑定后不能更改") and, on the
+ *      user's tap, sends
+ *      POST /partner/tge/referral/bind  { code, confirm_token }
+ *        → 200 { bound: true, inviter_sub } (or already: true). No token → 428
+ *          confirmation_required; a token that is not /check's answer for this client, this user
+ *          and this code, is expired (120 s) or is younger than 1 s → 400 invalid_confirmation.
+ *
+ * The bind is THE ONE PARTNER WRITE, and deliberately mounted WITHOUT `readOnlyRequest`. TGE will
+ * not let a user without an inviter subscribe, so it must be able to bind the code the user typed
+ * there. Everything else on this router stays process-enforced read-only: the guard is opened per
+ * route, not router-wide, and test/unit/partnerReferralBind.test.js fails if any other route is
+ * ever mounted without it.
+ *
+ * What keeps the write narrow (both steps share every gate):
  *   - it acts only for the token's own user (`sub`); a `sub` / `user_id` in the query or body is
  *     refused, as everywhere on this router;
  *   - it needs its own scope, `tge:referral_bind` (never default-granted), and the environment
@@ -326,8 +349,11 @@ router.get('/referral-network', requirePartnerToken, readOnlyRequest, networkSer
  *   - it runs the same service as POST /api/referrals/use-code (late-bind lock + cycle check,
  *     decision 11 B; reward timing unchanged), and never replaces an existing inviter (29 A);
  *   - the referral kill switch (DISABLE_REFERRAL_REWARDS_FEATURES) refuses it like /api/referrals;
- *   - 10 attempts a minute per access token on top of the partner limiter, and one audit line per
- *     attempt (`partner.referral_bound` / `partner.referral_bind_refused`), never the full code.
+ *   - 10 attempts a minute per access token, /check and /bind counted TOGETHER (one limiter), on
+ *     top of the partner limiter — /check answers what the bind would, so it gets no extra budget;
+ *   - one audit line per attempt of either step, never the full code or the confirmation token:
+ *     `partner.referral_bind_checked` / `partner.referral_bind_check_refused` and
+ *     `partner.referral_bound` / `partner.referral_bind_refused`.
  */
 function referralBindServed(req, res, next) {
   if (!referralBindEnabled()) {
@@ -344,53 +370,118 @@ function referralFeaturesEnabled(req, res, next) {
   return next();
 }
 
-/** Audit trail for the write. Replaceable for tests, like accessLog. No token, no full code. */
+/** Audit trail for both steps. Replaceable for tests, like accessLog. No token, no full code. */
+const BIND_OK_EVENTS = new Set(['partner.referral_bound', 'partner.referral_bind_checked']);
 const bindLog = {
-  write: (event, entry) => (event === 'partner.referral_bound' ? logger.info(event, entry) : logger.warn(event, entry)),
+  write: (event, entry) => (BIND_OK_EVENTS.has(event) ? logger.info(event, entry) : logger.warn(event, entry)),
 };
 
-function recordBind(req, outcome, code, inviterSub = null) {
+function recordBindStep(req, step, outcome, code, extra = {}) {
   const { client, user, token } = req.partner;
-  bindLog.write(outcome === 'bound' || outcome === 'already' ? 'partner.referral_bound' : 'partner.referral_bind_refused', {
+  const ok = step === 'check' ? outcome === 'valid' || outcome === 'already' : outcome === 'bound' || outcome === 'already';
+  const event = step === 'check'
+    ? (ok ? 'partner.referral_bind_checked' : 'partner.referral_bind_check_refused')
+    : (ok ? 'partner.referral_bound' : 'partner.referral_bind_refused');
+  bindLog.write(event, {
     reqId: req.reqId || null,
     clientId: client.clientId,
     userId: user.id,
     tokenId: token.id || null,
     outcome,
     codePrefix: codePrefix(code),
-    ...(inviterSub ? { inviterSub } : {}),
+    ...extra,
   });
 }
 
-router.post(
-  '/referral/bind',
+/** The body checks both steps share. Returns the code, or null after answering 400. */
+function readBindBody(req, res, step) {
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+  if (body.sub !== undefined || body.user_id !== undefined) {
+    recordBindStep(req, step, 'invalid_request', null);
+    sendError(req, res, 400, 'invalid_request', 'The subject is taken from the token; sub/user_id are not accepted.');
+    return null;
+  }
+  const code = parseBindCode(body);
+  if (!code) {
+    recordBindStep(req, step, 'invalid_request', null);
+    sendError(req, res, 400, 'invalid_request', 'code is required: a non-empty invite code string.');
+    return null;
+  }
+  return code;
+}
+
+const bindGates = [
   requirePartnerToken,
   referralBindServed,
   requireScope('tge:referral_bind'),
   referralFeaturesEnabled,
   lim('partnerReferralBind'),
-  async (req, res, next) => {
-    res.set('Cache-Control', 'no-store');
-    const body = req.body && typeof req.body === 'object' ? req.body : {};
-    if (body.sub !== undefined || body.user_id !== undefined) {
-      recordBind(req, 'invalid_request', null);
-      return sendError(req, res, 400, 'invalid_request', 'The subject is taken from the token; sub/user_id are not accepted.');
-    }
-    const code = parseBindCode(body);
-    if (!code) {
-      recordBind(req, 'invalid_request', null);
-      return sendError(req, res, 400, 'invalid_request', 'code is required: a non-empty invite code string.');
-    }
-    try {
-      const result = await bindReferralForPartner(req.partner.user.id, code);
-      recordBind(req, result.outcome, code, result.inviterSub);
+];
+
+router.post('/referral/bind/check', ...bindGates, readOnlyRequest, async (req, res, next) => {
+  res.set('Cache-Control', 'no-store');
+  const code = readBindBody(req, res, 'check');
+  if (!code) return undefined;
+  try {
+    const result = await checkReferralForPartner(req.partner.user.id, code);
+    if (result.status !== 200) {
+      recordBindStep(req, 'check', result.outcome, code);
       return res.status(result.status).json(result.body);
-    } catch (error) {
-      recordBind(req, 'error', code);
-      return next(error);
     }
+    const { token, expiresIn } = issueConfirmToken({
+      clientId: req.partner.client.clientId,
+      userId: req.partner.user.id,
+      code: result.canonical,
+    });
+    recordBindStep(req, 'check', result.outcome, code);
+    return res.status(200).json({
+      valid: true,
+      code: result.canonical,
+      confirm_token: token,
+      expires_in: expiresIn,
+      ...(result.already ? { already: true } : {}),
+    });
+  } catch (error) {
+    recordBindStep(req, 'check', 'error', code);
+    return next(error);
   }
-);
+});
+
+const CONFIRMATION_REFUSAL = {
+  expired: 'The confirmation has expired; check the code again.',
+  too_early: 'The confirmation is less than a second old; the bind must follow the user\'s own confirmation.',
+};
+
+router.post('/referral/bind', ...bindGates, async (req, res, next) => {
+  res.set('Cache-Control', 'no-store');
+  const code = readBindBody(req, res, 'bind');
+  if (!code) return undefined;
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+  const confirmToken = body.confirm_token;
+  if (confirmToken === undefined || confirmToken === null || confirmToken === '') {
+    recordBindStep(req, 'bind', 'confirmation_required', code);
+    return sendError(req, res, 428, 'confirmation_required', 'Call /partner/tge/referral/bind/check first, confirm with the user, then send its confirm_token.');
+  }
+  try {
+    const { canonical } = await resolveBindCode(code);
+    const verdict = verifyConfirmToken(confirmToken, {
+      clientId: req.partner.client.clientId,
+      userId: req.partner.user.id,
+      code: canonical,
+    });
+    if (!verdict.ok) {
+      recordBindStep(req, 'bind', 'invalid_confirmation', code, { reason: verdict.reason });
+      return sendError(req, res, 400, 'invalid_confirmation',
+        CONFIRMATION_REFUSAL[verdict.reason] || 'confirm_token was not issued by /check for this user, client and code.');
+    }
+    const result = await bindReferralForPartner(req.partner.user.id, code);
+    recordBindStep(req, 'bind', result.outcome, code, result.inviterSub ? { inviterSub: result.inviterSub } : {});
+    return res.status(result.status).json(result.body);
+  } catch (error) {
+    recordBindStep(req, 'bind', 'error', code);
+    return next(error);
+  }
+});
 
 router.use((req, res) => sendError(req, res, 404, 'invalid_request', 'Unknown partner endpoint.'));
 

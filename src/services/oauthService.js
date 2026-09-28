@@ -16,8 +16,8 @@ const {
 const { isCEndSubject } = require('./dataLicenceConsent');
 
 const { createLogger } = require('../utils/logger');
-// The write scope's gates (decision 30 A); kept on their own line, apart from the main import.
-const { availablePartnerScopes, referralBindEnabled, requiresManualConsent } = require('../constants/partnerClient');
+// The write scope's gate (decision 30 A); kept on their own line, apart from the main import.
+const { availablePartnerScopes, referralBindEnabled } = require('../constants/partnerClient');
 
 const logger = createLogger('oauthService');
 
@@ -566,18 +566,13 @@ async function decideConsent(user, requestId, allow, ctx = {}) {
   // would leave a fixated request alive for the attacker.
   if (!allow) return finish({ error: 'access_denied' });
 
-  // tge:referral_bind (decision 30 A) sets the user's inviter for good (29 A). Two extra rules for
-  // an Allow that carries it:
-  //   - an automatic Allow (`ctx.auto`, SSO_TGE_AUTO_APPROVE) is refused with 403
-  //     consent_required before anything is consumed, so the request stays decidable and the
-  //     Wallet falls back to its Allow / Deny page: the user must tap Allow themselves;
-  //   - the switch was turned off after /oauth/authorize → the request ends as invalid_scope
-  //     (consumed, back to the partner), never a token for a write that is not being served.
-  if (partner && requiresManualConsent(row.scope)) {
-    if (ctx && ctx.auto === true) {
-      throw new OAuthError(403, 'consent_required', 'This request includes a permission that must be approved by hand.');
-    }
-    if (!referralBindEnabled()) return finish({ error: 'invalid_scope' });
+  // tge:referral_bind (decision 30 A) is approved like any other scope, by hand or automatically
+  // (item 35: the confirmation is the partner's own dialog plus the bind's confirm_token, not this
+  // consent). One rule stays: the switch was turned off after /oauth/authorize → the request ends
+  // as invalid_scope (consumed, back to the partner) on ANY Allow, never a token for a write that
+  // is not being served.
+  if (partner && String(row.scope || '').split(/\s+/).includes('tge:referral_bind') && !referralBindEnabled()) {
+    return finish({ error: 'invalid_scope' });
   }
 
   // The approval must come back from the browser that STARTED this authorization, or the code
