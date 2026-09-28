@@ -3,6 +3,7 @@ const { generateToken } = require('../utils/jwtUtils');
 const { createLogger } = require('../utils/logger');
 const referralService = require('../services/referralService');
 const { generateUniqueReferralCode, validateReferralCode } = require('../utils/referralUtils');
+const { normalizeReferralCodeInput, withDisplayReferralCode } = require('../utils/referralCodeFormat');
 const {
   MOTHERS_DAY_2026_SLUG,
   SUMMER_TRAVEL_2026_SLUG,
@@ -36,7 +37,7 @@ const reply = (status, body) => new HttpReply(status, body);
 
 function sanitizeUser(user) {
   const { password, privateKey, ...safeUser } = user;
-  return safeUser;
+  return withDisplayReferralCode(safeUser);
 }
 
 async function resolveCampaign(req) {
@@ -476,7 +477,7 @@ exports.web3authLogin = async (req, res) => {
   const mode = getVerifyMode();
   try {
     const referralCodeRaw = req.body.referralCode;
-    const referralCode = referralCodeRaw ? String(referralCodeRaw).trim() : null;
+    const referralCode = normalizeReferralCodeInput(referralCodeRaw);
     const idToken = typeof req.body.idToken === 'string' ? req.body.idToken.trim() : '';
     const campaignSlug = await resolveCampaign(req);
 
@@ -655,7 +656,7 @@ exports.updateWallet = async (req, res) => {
       code: 'WALLET_BOUND',
       message: 'Wallet address successfully bound to account',
       data: {
-        user: userWithoutSensitive
+        user: withDisplayReferralCode(userWithoutSensitive)
       }
     });
   } catch (error) {

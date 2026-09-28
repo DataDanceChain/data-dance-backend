@@ -27,6 +27,7 @@ const {
 
 const logger = createLogger('referralService');
 const { ensureDisplayReferralCode, findUserByReferralCode } = require('../utils/referralUtils');
+const { formatReferralCodeForDisplay, normalizeReferralCodeInput } = require('../utils/referralCodeFormat');
 
 /** Standard (non-campaign) direct referral — immediate inviter bonus and upline distribution base */
 const DIRECT_REFERRAL_BONUS_POINTS = 150;
@@ -476,10 +477,10 @@ async function getReferralStatus(userId) {
     inviterInfo: asInvitee && asInvitee.inviter ? {
       id: asInvitee.inviter.id,
       name: asInvitee.inviter.name,
-      code: asInvitee.inviter.referralCode,
+      code: formatReferralCodeForDisplay(asInvitee.inviter.referralCode),
       inviteTime: asInvitee.createdAt
     } : null,
-    ownReferralCode,
+    ownReferralCode: formatReferralCodeForDisplay(ownReferralCode),
     invitedUsers: asInviter.map(ref => ({
       id: ref.inviteeId,
       name: ref.invitee?.name || 'Unknown',
@@ -548,7 +549,7 @@ async function getSummerTravel2026Stats(userId) {
   return {
     slug: SUMMER_TRAVEL_2026_SLUG,
     isActive: Boolean(stayRules?.isActive),
-    ownReferralCode: user?.referralCode ?? '',
+    ownReferralCode: formatReferralCodeForDisplay(user?.referralCode ?? ''),
     canInvite,
     summerOrderCount,
     summerOrderBonusPoints: bonusPoints,
@@ -592,12 +593,14 @@ async function useReferralCode(userId, code, referralCampaignRaw = null) {
     error.data = {
       inviterId: existingReferral.inviterId,
       inviterName: existingReferral.inviter?.name,
-      code: existingReferral.code,
+      code: formatReferralCodeForDisplay(existingReferral.code),
       createdAt: existingReferral.createdAt
     };
     throw error;
   }
 
+  // Stored (and passed on) without the display prefix: "DDC-ABC123" is recorded as "ABC123".
+  code = normalizeReferralCodeInput(code);
   const inviter = await findUserByReferralCode(code, { id: true, name: true, referralCode: true });
 
   if (!inviter) {
@@ -639,7 +642,7 @@ async function useReferralCode(userId, code, referralCampaignRaw = null) {
       inviterId: inviter.id,
       inviterName: inviter.name,
       inviteeId: userId,
-      code: code,
+      code: formatReferralCodeForDisplay(code),
       createdAt: referralData.createdAt,
     };
   } catch (error) {

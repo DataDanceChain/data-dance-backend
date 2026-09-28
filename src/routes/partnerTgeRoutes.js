@@ -24,6 +24,7 @@ const {
 const { findUserByPartnerToken } = require('../services/mcpTokenService');
 const { hasActiveConsent } = require('../services/dataLicenceConsent');
 const { isDisplayReferralCode, getInviterId, countDirectInvitees } = require('../utils/referralUtils');
+const { formatReferralCodeForDisplay } = require('../utils/referralCodeFormat');
 const { createLogger } = require('../utils/logger');
 const prisma = require('../utils/prisma');
 const { installReadOnlyGuard, runReadOnly } = require('../utils/prismaReadOnly');
@@ -222,7 +223,8 @@ async function referralSummary(user) {
   // only if the user already has one in display form; a legacy code reads as `null`, exactly as
   // the contract's "a display code could not be resolved". Allocation belongs to the Wallet,
   // where the user is present and the write has a reason.
-  const code = isDisplayReferralCode(user.referralCode) ? user.referralCode : null;
+  // Shown as "DDC-XXXXXX" (decision 36); the stored code has no prefix.
+  const code = isDisplayReferralCode(user.referralCode) ? formatReferralCodeForDisplay(user.referralCode) : null;
   const [inviterSub, directInvitees] = await Promise.all([getInviterId(user.id), countDirectInvitees(user.id)]);
   return { code, inviter_sub: inviterSub, direct_invitees: directInvitees };
 }
