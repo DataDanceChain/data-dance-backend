@@ -52,6 +52,7 @@ Object.assign(process.env, {
 delete process.env.SSO_REQUIRE_VERIFIED_SESSION;
 delete process.env.SSO_TICKET_TTL_SEC;
 delete process.env.SSO_SESSION_TTL_SEC;
+delete process.env.SSO_APP_SESSION_TTL_SEC;
 
 const ssoRoutes = require('../../src/routes/ssoRoutes');
 const oauthRoutes = require('../../src/routes/oauthRoutes');
@@ -320,7 +321,8 @@ describe('POST /api/sso/ticket/exchange', () => {
     assert.equal(res.headers['cache-control'], 'no-store');
     const data = res.body.data;
     assert.match(data.session_token, /^ddc_sso_/);
-    assert.equal(data.expires_in, 300);
+    // Decision 37: the App entry's session lasts as long as the in-App page, 12 h by default.
+    assert.equal(data.expires_in, 43200);
     assert.deepEqual(data.client, {
       client_id: 'tge-test',
       name: 'DDC TGE',
@@ -335,7 +337,7 @@ describe('POST /api/sso/ticket/exchange', () => {
     assert.equal(claims.sub, cUser.id);
     assert.equal(claims.cid, 'tge-test');
     assert.equal(claims.jti, prisma.store.ssoTicket[0].id);
-    assert.equal(claims.exp - claims.iat, 300);
+    assert.equal(claims.exp - claims.iat, 43200);
   });
 
   it('is signed with the dedicated secret, never with JWT_SECRET', () => {
@@ -439,16 +441,18 @@ describe('consent with an SSO session', () => {
 
   it('refuses a session bound to another client, on both consent endpoints, with no code', async () => {
     const requestId = await authorizeRequestId();
+    // Even validly signed, a session for anything but the partner client is not a live session.
     const { token } = signSsoSession({ userId: cUser.id, clientId: 'mcp-demo', jti: 'ticket-x' });
 
     const summary = await request(app)
       .get(`/api/oauth/requests/${requestId}`)
       .set('Authorization', `Bearer ${token}`);
     assert.equal(summary.status, 401);
-    assert.equal(summary.body.code, 'UNAUTHORIZED');
+    assert.equal(summary.body.code, 'SSO_SESSION_EXPIRED');
 
     const consent = await consentCall(token).send({ requestId, allow: true });
-    assert.equal(consent.status, 403, consent.text);
+    assert.equal(consent.status, 401, consent.text);
+    assert.equal(consent.body.code, 'SSO_SESSION_EXPIRED');
     assert.equal(consent.body.data, undefined);
     const row = prisma.store.oAuthAuthorization.find((r) => r.id === requestId);
     assert.equal(row.codeHash, undefined);
@@ -620,20 +624,23 @@ describe('scripts/cleanupSso', () => {
     const old = new Date(now.getTime() - 48 * 60 * 60 * 1000);
     const live = new Date(now.getTime() + 60 * 1000);
 
+    const sessionOver = new Date(now.getTime() - 13 * 60 * 60 * 1000);
     await prisma.ssoTicket.create({ data: { id: 't-live', ticketHash: 'a', userId: cUser.id, clientId: 'tge-test', expiresAt: live, consumedAt: null } });
-    await prisma.ssoTicket.create({ data: { id: 't-used', ticketHash: 'b', userId: cUser.id, clientId: 'tge-test', expiresAt: live, consumedAt: past } });
+    await prisma.ssoTicket.create({ data: { id: 't-used', ticketHash: 'b', userId: cUser.id, clientId: 'tge-test', expiresAt: sessionOver, consumedAt: sessionOver } });
     await prisma.ssoTicket.create({ data: { id: 't-expired', ticketHash: 'c', userId: cUser.id, clientId: 'tge-test', expiresAt: past, consumedAt: null } });
+    // Redeemed 5 minutes ago: its App session may still be live for hours, so the row stays.
+    await prisma.ssoTicket.create({ data: { id: 't-session', ticketHash: 'd', userId: cUser.id, clientId: 'tge-test', expiresAt: past, consumedAt: past } });
     await prisma.oAuthAuthorization.create({ data: { id: 'a-abandoned', clientId: 'tge-test', consumedAt: null, createdAt: old } });
     await prisma.oAuthAuthorization.create({ data: { id: 'a-fresh', clientId: 'tge-test', consumedAt: null, createdAt: now } });
     await prisma.oAuthAuthorization.create({ data: { id: 'a-used', clientId: 'tge-test', consumedAt: past, createdAt: old } });
 
     const dry = await cleanupSso({ dryRun: true, now });
     assert.deepEqual({ tickets: dry.tickets, authorizations: dry.authorizations }, { tickets: 2, authorizations: 1 });
-    assert.equal(prisma.store.ssoTicket.length, 3, 'a dry run deletes nothing');
+    assert.equal(prisma.store.ssoTicket.length, 4, 'a dry run deletes nothing');
 
     const done = await cleanupSso({ now });
     assert.deepEqual({ tickets: done.tickets, authorizations: done.authorizations }, { tickets: 2, authorizations: 1 });
-    assert.deepEqual(prisma.store.ssoTicket.map((row) => row.id), ['t-live']);
+    assert.deepEqual(prisma.store.ssoTicket.map((row) => row.id), ['t-live', 't-session']);
     assert.deepEqual(prisma.store.oAuthAuthorization.map((row) => row.id), ['a-fresh', 'a-used']);
   });
 });
@@ -651,5 +658,172 @@ describe('logging', () => {
     const serialized = JSON.stringify(out);
     assert.equal(serialized.includes(ticket), false);
     assert.equal(serialized.includes(sessionToken), false);
+  });
+});
+
+/**
+ * Decision 37: the consent-only session the App ticket exchange creates lives as long as the
+ * in-App partner page (max 12 h), can answer more than one consent (the partner re-authorises
+ * after its 5-minute access token expires), and stays scoped to the partner client, consent
+ * only, and the kill switch.
+ */
+describe('App page session (decision 37)', () => {
+  const { sessionTtlSec, MAX_SESSION_TTL_SEC } = ssoRoutes;
+
+  function withAppTtl(value, fn) {
+    const saved = process.env.SSO_APP_SESSION_TTL_SEC;
+    if (value === undefined) delete process.env.SSO_APP_SESSION_TTL_SEC;
+    else process.env.SSO_APP_SESSION_TTL_SEC = value;
+    return Promise.resolve()
+      .then(fn)
+      .finally(() => {
+        if (saved === undefined) delete process.env.SSO_APP_SESSION_TTL_SEC;
+        else process.env.SSO_APP_SESSION_TTL_SEC = saved;
+      });
+  }
+
+  /** The row the exchange consumed, so a test can sign a session issued at another time. */
+  async function redeemedTicketId() {
+    await handoff();
+    return prisma.store.ssoTicket[prisma.store.ssoTicket.length - 1].id;
+  }
+
+  async function approve(session) {
+    const requestId = await authorizeRequestId();
+    const summary = await request(app).get(`/api/oauth/requests/${requestId}`).set('Authorization', `Bearer ${session}`);
+    const consent = await consentCall(session).send({ requestId, allow: true });
+    return { requestId, summary, consent };
+  }
+
+  it('TTL: 12 h when unset or not a number, clamped to 300..43200, and the ticket stays 60 s', async () => {
+    const cases = [
+      [undefined, 43200],
+      ['', 43200],
+      ['twelve hours', 43200],
+      ['3600', 3600],
+      ['300', 300],
+      ['299', 300],
+      ['0', 300],
+      ['-5', 300],
+      ['43200', 43200],
+      ['86400', 43200],
+    ];
+    for (const [value, expected] of cases) {
+      await withAppTtl(value, () => assert.equal(sessionTtlSec(), expected, `SSO_APP_SESSION_TTL_SEC=${value}`));
+    }
+    assert.equal(MAX_SESSION_TTL_SEC, 43200);
+
+    await withAppTtl('3600', async () => {
+      const minted = await appTicket(userJwt());
+      assert.equal(minted.body.data.expires_in, 60, 'the one-time ticket is unchanged');
+      const redeemed = await exchange(minted.body.data.ticket);
+      assert.equal(redeemed.body.data.expires_in, 3600);
+      const claims = jwt.decode(redeemed.body.data.session_token.replace(/^ddc_sso_/, ''));
+      assert.equal(claims.exp - claims.iat, 3600);
+    });
+    await withAppTtl('999999', async () => {
+      assert.equal((await handoff()).body.data.expires_in, 43200);
+    });
+  });
+
+  it('one session answers a second consent (re-authorisation after the partner token expires)', async () => {
+    const session = (await handoff()).body.data.session_token;
+
+    const first = await approve(session);
+    assert.equal(first.summary.status, 200, first.summary.text);
+    assert.equal(first.consent.status, 200, first.consent.text);
+    assert.match(new URL(first.consent.body.data.redirectTo).searchParams.get('code'), /^ddc_code_/);
+
+    const second = await approve(session);
+    assert.equal(second.summary.status, 200, second.summary.text);
+    assert.equal(second.consent.status, 200, second.consent.text);
+    assert.match(new URL(second.consent.body.data.redirectTo).searchParams.get('code'), /^ddc_code_/);
+    assert.notEqual(first.requestId, second.requestId);
+    assert.equal(prisma.store.oAuthAuthorization.find((r) => r.id === second.requestId).userId, cUser.id);
+  });
+
+  it('is still usable 11 h after the exchange and refused after 12 h', async () => {
+    const jti = await redeemedTicketId();
+    const hour = 60 * 60 * 1000;
+    const late = signSsoSession({ userId: cUser.id, clientId: 'tge-test', jti }, { now: Date.now() - 11 * hour }).token;
+    const over = signSsoSession({ userId: cUser.id, clientId: 'tge-test', jti }, { now: Date.now() - 12 * hour - 1000 }).token;
+
+    assert.equal((await approve(late)).consent.status, 200);
+    const refused = (await approve(over)).consent;
+    assert.equal(refused.status, 401, refused.text);
+    assert.equal(refused.body.code, 'SSO_SESSION_EXPIRED');
+  });
+
+  it('a live partner session is still refused for another client\'s request, with no code', async () => {
+    const session = (await handoff()).body.data.session_token;
+    await prisma.oAuthClient.create({
+      data: { clientId: 'mcp-demo', clientName: 'Demo assistant', redirectUris: ['https://mcp.example.com/cb'], tokenEndpointAuthMethod: 'none' },
+    });
+    await prisma.oAuthAuthorization.create({
+      data: {
+        id: 'req-mcp',
+        clientId: 'mcp-demo',
+        redirectUri: 'https://mcp.example.com/cb',
+        state: 'mcp-state',
+        scope: 'mcp',
+        resource: `${ISSUER}/mcp`,
+        expiresAt: new Date(Date.now() + 10 * 60 * 1000),
+        consumedAt: null,
+        codeHash: null,
+      },
+    });
+
+    const summary = await request(app).get('/api/oauth/requests/req-mcp').set('Authorization', `Bearer ${session}`);
+    assert.equal(summary.status, 401, summary.text);
+    assert.equal(summary.body.code, 'UNAUTHORIZED');
+
+    const consent = await consentCall(session).send({ requestId: 'req-mcp', allow: true });
+    assert.equal(consent.status, 403, consent.text);
+    const row = prisma.store.oAuthAuthorization.find((r) => r.id === 'req-mcp');
+    assert.equal(row.codeHash, null);
+    assert.equal(row.consumedAt, null);
+  });
+
+  it('stays consent-only for its whole life', async () => {
+    const session = (await handoff()).body.data.session_token;
+    assert.equal((await approve(session)).consent.status, 200);
+    assert.equal((await request(app).get('/partner/tge/me').set('Authorization', `Bearer ${session}`)).status, 401);
+    assert.equal((await request(app).get('/api/profile').set('Authorization', `Bearer ${session}`)).status, 401);
+    assert.equal((await appTicket(session)).status, 401);
+  });
+
+  it('kill switch, running half: SSO_TGE_ENABLED=false refuses the live session on both consent endpoints', async () => {
+    const session = (await handoff()).body.data.session_token;
+    const requestId = await authorizeRequestId();
+    process.env.SSO_TGE_ENABLED = 'false';
+
+    const summary = await request(app).get(`/api/oauth/requests/${requestId}`).set('Authorization', `Bearer ${session}`);
+    const consent = await consentCall(session).send({ requestId, allow: true });
+    for (const res of [summary, consent]) {
+      assert.equal(res.status, 401, res.text);
+      assert.equal(res.body.code, 'SSO_SESSION_EXPIRED');
+    }
+    assert.equal(prisma.store.oAuthAuthorization.find((r) => r.id === requestId).codeHash, undefined);
+  });
+
+  it('kill switch, boot half: a boot with the switch off revokes it, so re-enabling cannot revive it', async () => {
+    const { applyPartnerKillSwitch } = require('../../src/services/partnerKillSwitch');
+    const session = (await handoff()).body.data.session_token;
+    assert.equal((await approve(session)).consent.status, 200);
+
+    const out = await applyPartnerKillSwitch({ enabled: false }, { retries: 0 });
+    assert.equal(out.ssoSessions, 1);
+    assert.equal(prisma.store.ssoTicket.length, 0);
+
+    // Switched back on: the old session is dead; a fresh hand-off works again.
+    const refused = (await approve(session)).consent;
+    assert.equal(refused.status, 401, refused.text);
+    assert.equal(refused.body.code, 'SSO_SESSION_EXPIRED');
+    const fresh = (await handoff()).body.data.session_token;
+    assert.equal((await approve(fresh)).consent.status, 200);
+  });
+
+  it('cleanupSso keeps a redeemed ticket for the longest session', () => {
+    assert.equal(require('../../scripts/cleanupSso').SESSION_RETENTION_SEC, MAX_SESSION_TTL_SEC);
   });
 });

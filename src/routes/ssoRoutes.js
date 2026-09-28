@@ -17,6 +17,14 @@
  *     Only `GET /api/oauth/requests/:id` and `POST /api/oauth/consent` accept it, and only
  *     for the client it is bound to.
  *
+ * Decision 37: the session lives as long as the in-App partner page (SSO_APP_SESSION_TTL_SEC,
+ * default and ceiling 12 h, floor 300 s) and is NOT single-use, so the page can consent again
+ * after the partner's 5-minute access token expires without a new ticket. Because it now
+ * outlives a restart, it is also tied to its ticket row (`jti`): the session is accepted only
+ * while that consumed row still exists and the partner client is enabled, and a boot with the
+ * kill switch off deletes every ticket row (partnerKillSwitch), so a later re-enable cannot
+ * revive a session issued before it.
+ *
  * Nothing here logs a ticket or a session token; only their ids.
  */
 const express = require('express');
@@ -46,7 +54,10 @@ const TICKET_BYTES = 32;
 const SSO_SESSION_PREFIX = 'ddc_sso_';
 const SSO_SESSION_AUDIENCE = 'ddc-sso';
 const DEFAULT_TICKET_TTL_SEC = 60;
-const DEFAULT_SESSION_TTL_SEC = 300;
+// Decision 37: the App entry's consent-only session lasts as long as the in-App page.
+const DEFAULT_SESSION_TTL_SEC = 12 * 60 * 60;
+const MIN_SESSION_TTL_SEC = 300;
+const MAX_SESSION_TTL_SEC = 12 * 60 * 60;
 
 function positiveInt(value, fallback) {
   const parsed = Number.parseInt(String(value ?? '').trim(), 10);
@@ -58,8 +69,14 @@ function ticketTtlSec() {
   return positiveInt(process.env.SSO_TICKET_TTL_SEC, DEFAULT_TICKET_TTL_SEC);
 }
 
+/**
+ * SSO_APP_SESSION_TTL_SEC, clamped to 300..43200. Unset or not a number → the 12 h default;
+ * out of range → the nearest bound, so a typo can never mint a session longer than 12 h.
+ */
 function sessionTtlSec() {
-  return positiveInt(process.env.SSO_SESSION_TTL_SEC, DEFAULT_SESSION_TTL_SEC);
+  const parsed = Number.parseInt(String(process.env.SSO_APP_SESSION_TTL_SEC ?? '').trim(), 10);
+  if (!Number.isFinite(parsed)) return DEFAULT_SESSION_TTL_SEC;
+  return Math.min(MAX_SESSION_TTL_SEC, Math.max(MIN_SESSION_TTL_SEC, parsed));
 }
 
 function sessionSecret() {
@@ -160,6 +177,25 @@ function verifySsoSession(token) {
   } catch {
     return null;
   }
+}
+
+/**
+ * Why a VERIFIED session must still be refused, or null when it is live. Checked on every use,
+ * because the session lives for hours:
+ *   - its client must still be the enabled partner client with an App hand-off target (the kill
+ *     switch, and the same test the exchange applies);
+ *   - its ticket row (`jti`) must still exist, consumed, for the same user and client. The boot
+ *     half of the kill switch deletes those rows, which revokes every outstanding session.
+ */
+async function ssoSessionRefusal(claims, req) {
+  const client = getPartnerClient(claims.clientId, req);
+  if (!client || !client.enabled || !client.initiateLoginUri) return 'client_disabled';
+  if (typeof claims.jti !== 'string' || !claims.jti) return 'ticket_missing';
+  const row = await prisma.ssoTicket.findUnique({ where: { id: claims.jti } });
+  if (!row || !row.consumedAt || row.userId !== claims.userId || row.clientId !== claims.clientId) {
+    return 'ticket_missing';
+  }
+  return null;
 }
 
 /**
@@ -290,8 +326,12 @@ module.exports = router;
 module.exports.signSsoSession = signSsoSession;
 module.exports.verifySsoSession = verifySsoSession;
 module.exports.looksLikeSsoSession = looksLikeSsoSession;
+module.exports.ssoSessionRefusal = ssoSessionRefusal;
+module.exports.sessionTtlSec = sessionTtlSec;
 module.exports.subjectEmailMasked = subjectEmailMasked;
 module.exports.SSO_SESSION_PREFIX = SSO_SESSION_PREFIX;
 module.exports.SSO_SESSION_AUDIENCE = SSO_SESSION_AUDIENCE;
 module.exports.DEFAULT_TICKET_TTL_SEC = DEFAULT_TICKET_TTL_SEC;
 module.exports.DEFAULT_SESSION_TTL_SEC = DEFAULT_SESSION_TTL_SEC;
+module.exports.MIN_SESSION_TTL_SEC = MIN_SESSION_TTL_SEC;
+module.exports.MAX_SESSION_TTL_SEC = MAX_SESSION_TTL_SEC;

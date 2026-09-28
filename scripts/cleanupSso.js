@@ -5,7 +5,9 @@
  * tables from growing forever.
  *
  * Deletes:
- *   - SsoTicket rows that are consumed or past expiry (TTL 60 s, so "past expiry" is immediate)
+ *   - SsoTicket rows never redeemed and past expiry (TTL 60 s, so "past expiry" is immediate)
+ *   - SsoTicket rows redeemed longer ago than the longest App SSO session (12 h). A redeemed row
+ *     is what keeps its session alive (ssoRoutes.ssoSessionRefusal), so it must outlive it.
  *   - OAuthAuthorization rows never consumed and older than a day (abandoned consent requests;
  *     their own TTL is 10 min, so a day is a wide safety margin)
  *
@@ -15,6 +17,10 @@
  * Cron: hourly is plenty.
  */
 const prisma = require('../src/utils/prisma');
+
+// = ssoRoutes.MAX_SESSION_TTL_SEC (asserted equal in test/unit/ssoHandoff.test.js). Copied so this
+// script does not load the Express routes and their middleware.
+const SESSION_RETENTION_SEC = 12 * 60 * 60;
 
 function parseArgs(argv) {
   const dryRun = argv.includes('--dry-run') || argv.includes('-n');
@@ -26,8 +32,9 @@ function parseArgs(argv) {
 async function cleanupSso({ dryRun = false, hours = 24, now = new Date() } = {}) {
   const cutoff = new Date(now.getTime() - hours * 60 * 60 * 1000);
 
-  const consumedTickets = { consumedAt: { not: null } };
-  const expiredTickets = { expiresAt: { lt: now } };
+  const sessionCutoff = new Date(now.getTime() - SESSION_RETENTION_SEC * 1000);
+  const consumedTickets = { consumedAt: { not: null, lt: sessionCutoff } };
+  const expiredTickets = { consumedAt: null, expiresAt: { lt: now } };
   const staleRequests = { consumedAt: null, createdAt: { lt: cutoff } };
 
   if (dryRun) {
@@ -36,7 +43,7 @@ async function cleanupSso({ dryRun = false, hours = 24, now = new Date() } = {})
       prisma.ssoTicket.findMany({ where: expiredTickets }),
       prisma.oAuthAuthorization.findMany({ where: staleRequests }),
     ]);
-    // A consumed ticket is usually expired too; report the union, not the sum.
+    // The two sets are disjoint now (consumed vs not); the union keeps the count honest anyway.
     const ticketIds = new Set([...consumed, ...expired].map((row) => row.id));
     return { dryRun: true, tickets: ticketIds.size, authorizations: requests.length, cutoff };
   }
@@ -72,4 +79,4 @@ if (require.main === module) {
     });
 }
 
-module.exports = { cleanupSso, parseArgs };
+module.exports = { cleanupSso, parseArgs, SESSION_RETENTION_SEC };
