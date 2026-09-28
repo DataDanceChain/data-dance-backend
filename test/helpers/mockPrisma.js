@@ -132,10 +132,20 @@ function createMockPrisma() {
       if (typeof arg === 'function') return arg(prisma);
       return Promise.all(arg);
     },
+    /**
+     * Raw statements have no in-memory meaning; the only one the unit-tested paths issue is the
+     * late-bind advisory lock (referralService.createLateBindReferral). Recorded, not run.
+     */
+    rawStatements: [],
+    async $executeRaw(strings, ...values) {
+      prisma.rawStatements.push({ sql: Array.isArray(strings) ? strings.join('?') : String(strings), values });
+      return 0;
+    },
     reset() {
       Object.keys(store).forEach((key) => {
         store[key].length = 0;
       });
+      prisma.rawStatements.length = 0;
     },
   };
   return prisma;

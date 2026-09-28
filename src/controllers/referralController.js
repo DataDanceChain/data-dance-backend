@@ -46,6 +46,14 @@ exports.useReferralCode = async (req, res) => {
       });
     }
     
+    if (error.code === 'REFERRAL_CYCLE') {
+      return res.status(409).json({
+        status: 'fail',
+        code: error.code,
+        message: error.message
+      });
+    }
+
     if (error.code === 'INVALID_CODE') {
       return res.status(404).json({
         status: 'fail',
