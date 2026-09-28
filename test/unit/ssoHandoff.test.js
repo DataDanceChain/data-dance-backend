@@ -159,7 +159,13 @@ async function handoff(user = cUser) {
 }
 
 const savedEnv = {};
-const TOGGLES = ['SSO_TGE_ENABLED', 'SSO_REQUIRE_VERIFIED_SESSION', 'SSO_TICKET_TTL_SEC', 'SSO_SESSION_TTL_SEC'];
+const TOGGLES = [
+  'SSO_TGE_ENABLED',
+  'SSO_REQUIRE_VERIFIED_SESSION',
+  'SSO_TICKET_TTL_SEC',
+  'SSO_SESSION_TTL_SEC',
+  'SSO_TGE_APP_PRESENTATION',
+];
 
 beforeEach(async () => {
   prisma.reset();
@@ -248,6 +254,52 @@ describe('POST /api/sso/app-ticket', () => {
     assert.equal(row.clientId, 'tge-test');
     assert.equal(row.consumedAt ?? null, null, 'a fresh ticket is unconsumed');
     assert.ok(row.expiresAt.getTime() - Date.now() <= 60 * 1000);
+  });
+
+  it('client_name and partner_hosts describe the partner, not the DDC app/API', async () => {
+    const res = await appTicket(userJwt());
+    assert.equal(res.status, 200, res.text);
+    assert.equal(res.body.data.client_name, 'DDC TGE');
+    assert.deepEqual(res.body.data.partner_hosts, ['tge.example.com']);
+  });
+
+  describe('presentation (remote kill switch back to the system browser)', () => {
+    it('unset gives webview', async () => {
+      delete process.env.SSO_TGE_APP_PRESENTATION;
+      const res = await appTicket(userJwt());
+      assert.equal(res.body.data.presentation, 'webview');
+    });
+
+    it('"webview" gives webview', async () => {
+      process.env.SSO_TGE_APP_PRESENTATION = 'webview';
+      const res = await appTicket(userJwt());
+      assert.equal(res.body.data.presentation, 'webview');
+    });
+
+    it('"browser" and " BROWSER " both give browser', async () => {
+      process.env.SSO_TGE_APP_PRESENTATION = 'browser';
+      assert.equal((await appTicket(userJwt())).body.data.presentation, 'browser');
+
+      process.env.SSO_TGE_APP_PRESENTATION = ' BROWSER ';
+      assert.equal((await appTicket(userJwt())).body.data.presentation, 'browser');
+    });
+
+    it('an unrecognized value fails safe to browser', async () => {
+      process.env.SSO_TGE_APP_PRESENTATION = 'nonsense';
+      const res = await appTicket(userJwt());
+      assert.equal(res.body.data.presentation, 'browser');
+    });
+
+    it('with "browser", a ticket row is still minted and continue_url is unchanged', async () => {
+      process.env.SSO_TGE_APP_PRESENTATION = 'browser';
+      const res = await appTicket(userJwt());
+      assert.equal(res.status, 200, res.text);
+      assert.equal(res.body.data.presentation, 'browser');
+      assert.match(res.body.data.ticket, /^tk_[A-Za-z0-9_-]{43}$/);
+      const url = new URL(res.body.data.continue_url);
+      assert.equal(`${url.origin}${url.pathname}`, `${APP_URL}/sso/continue`);
+      assert.equal(prisma.store.ssoTicket.length, 1);
+    });
   });
 
   it('rate limits at 5 per user per minute with 429 RATE_LIMITED', async () => {

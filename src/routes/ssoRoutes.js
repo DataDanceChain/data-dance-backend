@@ -66,6 +66,44 @@ function sessionSecret() {
   return String(process.env.SSO_SESSION_SECRET || '').trim();
 }
 
+let unrecognizedPresentationWarned = false;
+
+/**
+ * How the App should show the partner hand-off. Read on every call so a redeploy-free env
+ * change (the remote kill switch) takes effect immediately. Any value other than 'webview'
+ * (including empty/unset) fails safe: unset defaults to 'webview', anything unrecognized falls
+ * back to 'browser', the one value guaranteed to always work.
+ */
+function appPresentation() {
+  const value = String(process.env.SSO_TGE_APP_PRESENTATION ?? '').trim().toLowerCase();
+  if (value === '' || value === 'webview') return 'webview';
+  if (value !== 'browser' && !unrecognizedPresentationWarned) {
+    unrecognizedPresentationWarned = true;
+    logger.warn('sso.app_presentation_unrecognized', { value });
+  }
+  return 'browser';
+}
+
+/** `URL.host` for each https URL; unparsable or non-https entries are skipped. Order kept, deduped. */
+function httpsHosts(urls) {
+  const hosts = [];
+  const seen = new Set();
+  for (const raw of urls || []) {
+    let parsed;
+    try {
+      parsed = new URL(raw);
+    } catch {
+      continue;
+    }
+    if (parsed.protocol !== 'https:') continue;
+    const host = parsed.host.toLowerCase();
+    if (seen.has(host)) continue;
+    seen.add(host);
+    hosts.push(host);
+  }
+  return hosts;
+}
+
 /** `{ status:'fail', code, message }` — the existing DataDance API error envelope. */
 function fail(res, status, code, message) {
   res.set('Cache-Control', 'no-store');
@@ -174,6 +212,13 @@ router.post('/app-ticket', protect, lim('ssoTicket'), async (req, res, next) => 
         expires_in: expiresIn,
         // Fragment, never query: the static host that serves /sso/continue never sees it.
         continue_url: `${appPublicUrl()}/sso/continue#ticket=${encodeURIComponent(ticket)}`,
+        // Additive fields for the App's in-App PartnerWebView (§ in-app partner page). A
+        // 'browser' value is the remote kill switch back to the system browser sheet; the
+        // ticket above is minted exactly the same either way.
+        presentation: appPresentation(),
+        client_name: client.clientName,
+        // Only the partner's own hosts; the App adds its own app/API hosts itself.
+        partner_hosts: httpsHosts([client.initiateLoginUri, ...client.redirectUris]),
       },
     });
   } catch (error) {
