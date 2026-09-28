@@ -1,4 +1,5 @@
 const { PrismaClient } = require('@prisma/client');
+const { rewardEligibleUploadWhere } = require('../src/utils/firstValidUpload');
 const p = new PrismaClient();
 
 (async () => {
@@ -49,11 +50,11 @@ const p = new PrismaClient();
   }
 
   const organicRows = await p.crawlerData.count({
-    where: { NOT: { metadata: { path: ['importSource'], equals: 'data-pack' } } },
+    where: rewardEligibleUploadWhere(),
   });
   const organicUsers = await p.crawlerData.groupBy({
     by: ['userId'],
-    where: { NOT: { metadata: { path: ['importSource'], equals: 'data-pack' } } },
+    where: rewardEligibleUploadWhere(),
   });
 
   const byCrawlerSource = await p.$queryRaw`
