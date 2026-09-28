@@ -45,7 +45,7 @@ describe('partner kill switch revokes outstanding partner tokens', () => {
 
   it('a boot with the switch OFF revokes them', async () => {
     const out = await applyPartnerKillSwitch({ enabled: false }, { retries: 0 });
-    assert.deepEqual(out, { revoked: 2 });
+    assert.deepEqual(out, { revoked: 2, ssoSessions: 0 });
     assert.equal(prisma.mcpToken.rows.filter((r) => r.source === PARTNER_SOURCE).length, 0);
   });
 
@@ -65,7 +65,7 @@ describe('partner kill switch revokes outstanding partner tokens', () => {
     };
     try {
       const ok = await applyPartnerKillSwitch({ enabled: false }, { retries: 3, delayMs: 1 });
-      assert.deepEqual(ok, { revoked: 2 });
+      assert.deepEqual(ok, { revoked: 2, ssoSessions: 0 });
       calls = -100;
       const failed = await applyPartnerKillSwitch({ enabled: false }, { retries: 1, delayMs: 1 });
       assert.equal(failed.revoked, 0);

@@ -4,7 +4,7 @@ const { protect } = require('../middlewares/authMiddleware');
 const { rateLimiters } = require('../middlewares/rateLimitMiddleware');
 const { createLogger } = require('../utils/logger');
 const { PARTNER_REALM, getPartnerClient, verifyClientSecret } = require('../constants/partnerClient');
-const { verifySsoSession, looksLikeSsoSession } = require('./ssoRoutes');
+const { verifySsoSession, looksLikeSsoSession, ssoSessionRefusal } = require('./ssoRoutes');
 const {
   OAuthError,
   ConsentInitiatorError,
@@ -151,8 +151,11 @@ function bearerMustVerify(req, res, next) {
  * flow uses — falls through to `fallback` unchanged.
  *
  * A session that does not verify (wrong secret, expired, unknown subject) is 401
- * `SSO_SESSION_EXPIRED`; which client it may answer for is decided further down, by
- * `decideConsent` for a decision and by the handler for the request summary.
+ * `SSO_SESSION_EXPIRED`, and so is one that verifies but was revoked (kill switch, ticket row
+ * gone, not the partner client — see ssoSessionRefusal). The session is NOT single-use: it may
+ * answer any number of consent requests during its life. Which request's client it may answer
+ * for is decided further down, by `decideConsent` for a decision and by the handler for the
+ * request summary.
  */
 function consentPrincipal(fallback) {
   return async (req, res, next) => {
@@ -161,6 +164,11 @@ function consentPrincipal(fallback) {
     const claims = verifySsoSession(token);
     if (!claims) return ssoSessionExpired(res);
     try {
+      const refusal = await ssoSessionRefusal(claims, req);
+      if (refusal) {
+        logger.warn('sso.session_rejected', { reason: refusal, ticketId: claims.jti, clientId: claims.clientId });
+        return ssoSessionExpired(res);
+      }
       const user = await prisma.user.findUnique({ where: { id: claims.userId } });
       if (!user) return ssoSessionExpired(res);
       req.user = user;

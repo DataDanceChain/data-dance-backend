@@ -82,6 +82,11 @@ function pendingRequest(id) {
   };
 }
 
+function redeemedTicket(id) {
+  const past = new Date(Date.now() - 60 * 1000);
+  return { id, ticketHash: `hash-${id}`, userId: user.id, clientId: 'tge-test', expiresAt: past, consumedAt: past };
+}
+
 describe('src/app mount order', () => {
   before(() => {
     assert.equal(typeof app, 'function', 'src/app must export the express application');
@@ -92,6 +97,8 @@ describe('src/app mount order', () => {
     prisma._reset?.();
     prisma.user.rows.splice(0, prisma.user.rows.length, { ...user });
     prisma.oAuthAuthorization.rows.splice(0, prisma.oAuthAuthorization.rows.length, pendingRequest('req-mount-1'));
+    // An SSO session is live only while its redeemed ticket row exists (decision 37).
+    prisma.ssoTicket.rows.splice(0, prisma.ssoTicket.rows.length, ...['j-1', 'j-2', 'j-3', 'j-4'].map(redeemedTicket));
   });
 
   it('an unauthenticated POST /api/sso/ticket/exchange reaches its handler (400 TICKET_INVALID, not 401)', async () => {
