@@ -147,11 +147,12 @@ describe('native login with DDC_AUTH_ENABLED on', () => {
       assert.equal(res.status, 404, `${path} → ${res.status}`);
       assert.equal(res.body.code, 'METHOD_DISABLED');
     }
+    // The BE4 handlers answer (an empty body is a malformed token), not a stub or a 404.
     const google = await request(server).post('/api/auth/native/google').send({});
-    assert.equal(google.status, 501);
-    assert.equal(google.body.code, 'NOT_IMPLEMENTED');
+    assert.equal(google.status, 401);
+    assert.equal(google.body.code, 'IDP_TOKEN_INVALID');
     const nonce = await request(server).post('/api/auth/native/nonce').send({ purpose: 'google' });
-    assert.equal(nonce.status, 501);
+    assert.equal(nonce.status, 200, JSON.stringify(nonce.body));
     assert.equal(nonce.headers['x-ratelimit-limit'], '30', 'nativeIdp limiter runs');
   });
 
