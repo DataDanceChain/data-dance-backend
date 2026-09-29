@@ -62,22 +62,30 @@ function getPKCE(state) {
 
 /**
  * Exchange OAuth2 code for access and refresh tokens
+ * @param {string} code
+ * @param {string} codeVerifier
+ * @param {string} [redirectUri] the redirect_uri of the authorization request. Defaults to
+ *   X_OAUTH_CALLBACK_URL (the existing "bind X account" flow, unchanged); native login passes
+ *   DDC_AUTH_X_CALLBACK_URL.
+ * @param {{timeout?: number, apiBase?: string}} [options] request timeout (ms; none by default) and
+ *   API base (X_API_URL by default)
  */
-async function exchangeCodeForToken(code, codeVerifier) {
-  const tokenUrl = `${process.env.X_API_URL}/oauth2/token`;
+async function exchangeCodeForToken(code, codeVerifier, redirectUri = process.env.X_OAUTH_CALLBACK_URL, options = {}) {
+  const { timeout, apiBase } = options || {};
+  const tokenUrl = `${apiBase || process.env.X_API_URL}/oauth2/token`;
   const authHeader = Buffer.from(`${process.env.X_CLIENT_ID}:${process.env.X_CLIENT_SECRET}`).toString('base64');
   const payload = querystring.stringify({
     grant_type: 'authorization_code',
     client_id: process.env.X_CLIENT_ID,
     client_secret: process.env.X_CLIENT_SECRET,
-    redirect_uri: process.env.X_OAUTH_CALLBACK_URL,
+    redirect_uri: redirectUri,
     code,
     code_verifier: codeVerifier
   });
 
   logger.info('Exchanging code for token', {
     tokenUrl,
-    redirectUri: process.env.X_OAUTH_CALLBACK_URL,
+    redirectUri,
     hasCode: Boolean(code),
     hasCodeVerifier: Boolean(codeVerifier)
   });
@@ -87,7 +95,8 @@ async function exchangeCodeForToken(code, codeVerifier) {
     headers: {
       'Content-Type': 'application/x-www-form-urlencoded',
       Authorization: `Basic ${authHeader}`
-    }
+    },
+    ...(timeout ? { timeout } : {})
   });
     logger.info('Successfully exchanged code for token');
     return resp.data;
@@ -103,12 +112,18 @@ async function exchangeCodeForToken(code, codeVerifier) {
 }
 
 /**
- * Fetch X user info using OAuth2 access token
+ * Fetch X user info using OAuth2 access token (GET /2/users/me, scope users.read)
+ * @param {string} accessToken
+ * @param {{timeout?: number, apiBase?: string, userFields?: string}} [options] request timeout
+ *   (ms; none by default), API base (X_API_URL by default) and the `user.fields` to request
  */
-async function getOAuth2UserInfo(accessToken) {
-  const url = `${process.env.X_API_URL}/users/me`;
+async function getOAuth2UserInfo(accessToken, options = {}) {
+  const { timeout, apiBase, userFields } = options || {};
+  const url = `${apiBase || process.env.X_API_URL}/users/me`;
   const resp = await axios.get(url, {
-    headers: { Authorization: `Bearer ${accessToken}` }
+    headers: { Authorization: `Bearer ${accessToken}` },
+    ...(userFields ? { params: { 'user.fields': userFields } } : {}),
+    ...(timeout ? { timeout } : {})
   });
   return resp.data.data; // { id, name, username }
 }
@@ -185,6 +200,36 @@ function generateAuthUrl(state, codeChallenge, redirectUri) {
   return authUrl.toString();
 }
 
+/**
+ * Native login (design §3.5): X's documented OAuth 2.0 authorization endpoint. The existing
+ * binding flow keeps generateAuthUrl (X_API_URL-based) unchanged.
+ */
+const X_LOGIN_AUTHORIZE_URL = 'https://x.com/i/oauth2/authorize';
+/** Native login's API base when X_API_URL is unset (token endpoint and /users/me live under it). */
+const X_DEFAULT_API_URL = 'https://api.x.com/2';
+/** Native login asks only to read the profile: no offline.access, so X issues no refresh token. */
+const X_LOGIN_SCOPE = 'tweet.read users.read';
+
+function loginApiBase() {
+  return String(process.env.X_API_URL || '').trim().replace(/\/+$/, '') || X_DEFAULT_API_URL;
+}
+
+/**
+ * Authorization URL for native X login (confidential client, PKCE S256). The redirect URI is our
+ * API callback (DDC_AUTH_X_CALLBACK_URL); a custom scheme is never sent to X (F6).
+ */
+function buildLoginAuthorizeUrl({ clientId = process.env.X_CLIENT_ID, redirectUri, state, codeChallenge, scope = X_LOGIN_SCOPE }) {
+  const authUrl = new URL(X_LOGIN_AUTHORIZE_URL);
+  authUrl.searchParams.append('response_type', 'code');
+  authUrl.searchParams.append('client_id', clientId);
+  authUrl.searchParams.append('redirect_uri', redirectUri);
+  authUrl.searchParams.append('scope', scope);
+  authUrl.searchParams.append('state', state);
+  authUrl.searchParams.append('code_challenge', codeChallenge);
+  authUrl.searchParams.append('code_challenge_method', 'S256');
+  return authUrl.toString();
+}
+
 module.exports = {
   getPostDetails,
   verifyUserEngagement,
@@ -194,5 +239,11 @@ module.exports = {
   // Exchange OAuth2 code for tokens
   exchangeCodeForToken,
   // Fetch authenticated user info via OAuth2 token
-  getOAuth2UserInfo
+  getOAuth2UserInfo,
+  // Native login (src/services/nativeAuth/idpX.js)
+  X_LOGIN_AUTHORIZE_URL,
+  X_DEFAULT_API_URL,
+  X_LOGIN_SCOPE,
+  loginApiBase,
+  buildLoginAuthorizeUrl
 };
