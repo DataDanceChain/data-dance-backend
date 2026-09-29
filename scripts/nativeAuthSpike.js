@@ -16,6 +16,8 @@
  * Dry run (no network, no extra dependencies): prints the decoded token and the lookup the live run
  * would make. `--sample-jwt` prints one token for the throwaway subject
  * 00000000-0000-4000-8000-000000000000 (the only subject it will mint a printable token for).
+ * `--sub` takes only that subject or "random": the spike never mints for, derives or prints a real
+ * user's subject (design §6 F11).
  *
  * Live run (needs owner steps O1 = the "DataDance Native Devnet" client id and O3 = the connection
  * ddc-jwt-devnet reading the published JWKS):
@@ -39,7 +41,7 @@ const fs = require('fs');
 const path = require('path');
 const { createRequire } = require('module');
 
-const { checkJwks, publicJwk, rfc7638Thumbprint } = require('./nativeAuthJwksCheck');
+const { checkJwksText, publicJwk, rfc7638Thumbprint } = require('./nativeAuthJwksCheck');
 const { unsafeKeyLocation } = require('./nativeAuthKeygen');
 
 const DEVNET_DEFAULTS = Object.freeze({
@@ -55,7 +57,8 @@ const STALE_IAT_SEC = 70;
 const NETWORK_TIMEOUT_MS = 20_000;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const JWT_SHAPED_RE = /eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]*/g;
-const HEX64_RE = /\b(0x)?[0-9a-fA-F]{64}\b/g;
+// Any long hex run (a 32-byte key is 64 digits; nodes may add or drop leading zeros or a 0x).
+const LONG_HEX_RE = /(0x)?[0-9a-fA-F]{60,}/g;
 
 function b64urlJson(value) {
   return Buffer.from(JSON.stringify(value)).toString('base64url');
@@ -118,7 +121,7 @@ function claimProblems({ header, payload }, { kid, iss, aud, nowSec }) {
 function sanitize(message) {
   return String(message || '')
     .replace(JWT_SHAPED_RE, '<jwt>')
-    .replace(HEX64_RE, '<hex64>')
+    .replace(LONG_HEX_RE, '<hex>')
     .slice(0, 300);
 }
 
@@ -140,14 +143,26 @@ function loadSigningKey(file) {
   return { privateKey, publicJwk: pub, kid: pub.kid, path: resolved };
 }
 
+/** The JWKS keygen wrote next to a key file: <env>-signing-key[-N].jwk.json -> <env>-jwks.json. */
+function defaultJwksPath(keyPath) {
+  const match = /^(.+?)-signing-key(?:[._-][A-Za-z0-9._-]*)?\.jwk\.json$/.exec(path.basename(keyPath));
+  return path.join(path.dirname(keyPath), `${match ? match[1] : 'devnet'}-jwks.json`);
+}
+
 /**
- * Checks the JWKS next to the key (or --jwks): it must contain the key and pass the publish check,
- * pinned to DDC_AUTH_JWKS_PINNED when that is set, else to the keys the file itself lists (then only
- * the structural rules apply).
+ * Checks the JWKS next to the key (or --jwks): it must contain the key and pass the publish check
+ * (raw-text rules included), pinned to DDC_AUTH_JWKS_PINNED when that is set, else to the keys the
+ * file itself lists (then only the structural rules apply).
  */
 function checkPublishedJwks(jwksPath, kid, env = process.env) {
   if (!jwksPath || !fs.existsSync(jwksPath)) return { checked: false };
-  const doc = JSON.parse(fs.readFileSync(jwksPath, 'utf8'));
+  const text = fs.readFileSync(jwksPath, 'utf8');
+  let doc;
+  try {
+    doc = JSON.parse(text);
+  } catch {
+    return { checked: true, ok: false, errors: ['JWKS is not valid JSON'] };
+  }
   const listed = [];
   for (const key of Array.isArray(doc.keys) ? doc.keys : []) {
     try {
@@ -158,7 +173,7 @@ function checkPublishedJwks(jwksPath, kid, env = process.env) {
   }
   if (!listed.includes(kid)) return { checked: true, ok: false, errors: ['the signing key is not in this JWKS'] };
   const envPinned = (env.DDC_AUTH_JWKS_PINNED || '').split(',').map((item) => item.trim()).filter(Boolean);
-  const result = checkJwks(doc, { pinned: envPinned.length ? envPinned : listed });
+  const result = checkJwksText(text, { pinned: envPinned.length ? envPinned : listed });
   return { checked: true, ok: result.ok, errors: result.errors };
 }
 
@@ -192,9 +207,16 @@ function loadTorusDeps(depsDir) {
   }
 }
 
+/** Address of a secp256k1 key given as hex. Errors never carry the input (ethers echoes it). */
 function addressFromPrivKeyHex(privHex) {
   const { computeAddress } = require('ethers');
-  return computeAddress(`0x${privHex.padStart(64, '0')}`);
+  const hex = String(privHex).replace(/^0x/i, '');
+  if (!/^[0-9a-fA-F]{1,64}$/.test(hex)) throw new Error('nodes returned a key that is not 32-byte hex');
+  try {
+    return computeAddress(`0x${hex.padStart(64, '0')}`);
+  } catch {
+    throw new Error('nodes returned a key that is not a valid secp256k1 scalar');
+  }
 }
 
 function sameAddress(a, b) {
@@ -332,7 +354,7 @@ function parseArgs(argv, env = process.env) {
     else throw new Error(`unknown argument ${arg}`);
   }
   if (args.sub === 'random') args.sub = crypto.randomUUID();
-  if (!UUID_RE.test(args.sub)) throw new Error('--sub must be a UUID (or "random")');
+  else if (args.sub !== THROWAWAY_SUB) throw new Error(`--sub takes only the throwaway subject ${THROWAWAY_SUB} or "random"`);
   if (args.sampleJwt && args.sub !== THROWAWAY_SUB) throw new Error(`--sample-jwt only mints for the throwaway subject ${THROWAWAY_SUB}`);
   if (args.sampleJwt && args.live) throw new Error('--sample-jwt and --live are separate runs');
   return args;
@@ -354,7 +376,7 @@ async function main(argv = process.argv.slice(2), { out = process.stdout, err = 
   const minted = mintJwt({ privateKey: signing.privateKey, kid: signing.kid, iss: args.iss, aud: args.aud, sub: args.sub, nowSec });
   const decoded = verifyJwt(minted.token, signing.publicJwk);
   const problems = claimProblems(decoded, { kid: signing.kid, iss: args.iss, aud: args.aud, nowSec });
-  const jwksPath = args.jwks || path.join(path.dirname(signing.path), 'devnet-jwks.json');
+  const jwksPath = args.jwks || defaultJwksPath(signing.path);
   const jwks = checkPublishedJwks(jwksPath, signing.kid);
 
   if (args.sampleJwt) {
@@ -404,6 +426,8 @@ module.exports = {
   sanitize,
   loadSigningKey,
   checkPublishedJwks,
+  defaultJwksPath,
+  addressFromPrivKeyHex,
   loadTorusDeps,
   runLive,
   parseArgs,

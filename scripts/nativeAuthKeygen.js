@@ -22,7 +22,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 
-const { checkJwks, publicJwk, rfc7638Thumbprint } = require('./nativeAuthJwksCheck');
+const { checkJwks, publicJwk, rawTextErrors, rfc7638Thumbprint } = require('./nativeAuthJwksCheck');
 
 const ALLOWED_ENVS = Object.freeze(['devnet', 'test']);
 const MODULUS_BITS = 2048;
@@ -125,12 +125,19 @@ function writePublicFileAtomic(file, doc) {
   fs.renameSync(tmp, file);
 }
 
+/** Creates out-dir as 0700, or accepts an existing one only when it is already 0700 and ours. */
 function ensurePrivateDir(dir) {
+  const existed = fs.existsSync(dir);
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   const stat = fs.lstatSync(dir);
   if (!stat.isDirectory()) throw new Error('out-dir is not a directory');
   if (typeof process.getuid === 'function' && stat.uid !== process.getuid()) throw new Error('out-dir is owned by another user');
-  if ((stat.mode & 0o777) !== 0o700) fs.chmodSync(dir, 0o700);
+  if ((stat.mode & 0o777) !== 0o700) {
+    if (existed) {
+      throw new Error(`out-dir has mode ${(stat.mode & 0o777).toString(8)}; run chmod 700 on it first (its other files may have been exposed)`);
+    }
+    fs.chmodSync(dir, 0o700);
+  }
 }
 
 /**
@@ -154,7 +161,10 @@ function generate({ env, outDir, name, rotate = false }) {
   let existingKeys = [];
   if (rotate) {
     if (!fs.existsSync(jwksPath)) throw new Error(`--rotate needs an existing ${path.basename(jwksPath)}`);
-    const existing = JSON.parse(fs.readFileSync(jwksPath, 'utf8'));
+    const existingText = fs.readFileSync(jwksPath, 'utf8');
+    const existing = JSON.parse(existingText);
+    const rawErrors = rawTextErrors(existingText);
+    if (rawErrors.length) throw new Error(`existing ${path.basename(jwksPath)} fails the publish check: ${rawErrors.join('; ')}`);
     existingKeys = Array.isArray(existing.keys) ? existing.keys : [];
   } else if (fs.existsSync(jwksPath)) {
     throw new Error(`${path.basename(jwksPath)} already exists; pass --rotate to add a next key to it`);
@@ -169,8 +179,14 @@ function generate({ env, outDir, name, rotate = false }) {
   ensurePrivateDir(dir);
   writePrivateFile(privatePath, pair.privateJwk);
   pair.privateJwk = null;
-  selfTest(privatePath, pair.publicJwk);
-  writePublicFileAtomic(jwksPath, jwks);
+  try {
+    selfTest(privatePath, pair.publicJwk);
+    writePublicFileAtomic(jwksPath, jwks);
+  } catch (err) {
+    // The private file was created by this run (O_EXCL); do not leave it behind without its JWKS.
+    fs.rmSync(privatePath, { force: true });
+    throw err;
+  }
   return { kid: pair.publicJwk.kid, privatePath, jwksPath, pinned };
 }
 
