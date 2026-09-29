@@ -26,8 +26,8 @@ const spike = require('../../scripts/nativeAuthSpike');
 const ROOT = path.join(__dirname, '../..');
 const PRIVATE_MEMBERS = ['d', 'p', 'q', 'dp', 'dq', 'qi'];
 
-function rsaJwk(bits = 2048) {
-  const { privateKey } = crypto.generateKeyPairSync('rsa', { modulusLength: bits });
+function rsaJwk(bits = 2048, publicExponent = 0x10001) {
+  const { privateKey } = crypto.generateKeyPairSync('rsa', { modulusLength: bits, publicExponent });
   return privateKey.export({ format: 'jwk' });
 }
 
@@ -99,10 +99,27 @@ describe('checkJwks — the publish rules', () => {
     }
   });
 
-  it('refuses the wrong alg, use, kty or exponent', () => {
-    for (const bad of [{ alg: 'RS512' }, { alg: 'none' }, { use: 'enc' }, { kty: 'EC' }, { e: 'Aw' }, { alg: 256 }]) {
-      assert.equal(check.checkJwks({ keys: [{ ...pub, ...bad }] }, { pinned }).ok, false, JSON.stringify(bad));
+  it('refuses the wrong alg, use, kty or exponent, each by its own rule', () => {
+    // alg and use are not hashed into the thumbprint, so the kid and pin stay valid and only the rule fires.
+    for (const [bad, rule] of [
+      [{ alg: 'RS512' }, /alg is not RS256/],
+      [{ alg: 'none' }, /alg is not RS256/],
+      [{ alg: 256 }, /alg is not RS256/],
+      [{ use: 'enc' }, /use is not sig/],
+    ]) {
+      const result = check.checkJwks({ keys: [{ ...pub, ...bad }] }, { pinned });
+      assert.equal(result.ok, false, JSON.stringify(bad));
+      assert.match(result.errors.join(' '), rule, JSON.stringify(bad));
+      assert.doesNotMatch(result.errors.join(' '), /kid does not equal|is not pinned/, JSON.stringify(bad));
     }
+    // kty takes the key out of RSA altogether: no thumbprint, and the kty rule says why.
+    assert.match(check.checkJwks({ keys: [{ ...pub, kty: 'EC' }] }, { pinned }).errors.join(' '), /kty is not RSA/);
+    // e = 3 with a kid that IS its thumbprint and is pinned: only the exponent rule can refuse it.
+    const e3 = check.publicJwk(rsaJwk(2048, 3));
+    assert.equal(e3.e, 'Aw');
+    const result = check.checkJwks({ keys: [e3] }, { pinned: [e3.kid] });
+    assert.equal(result.ok, false);
+    assert.deepEqual(result.errors, [`keys[0] e is not AQAB (65537)`]);
   });
 
   it('refuses a kid that is not the thumbprint, even when the key itself is pinned', () => {
@@ -161,6 +178,101 @@ describe('checkJwks — the publish rules', () => {
   });
 });
 
+describe('checkJwksText — rules on the published bytes, not just the parsed object', () => {
+  const pinned = [pub.kid];
+  const fullPrivate = () => JSON.stringify({ ...priv, kid: pub.kid, alg: 'RS256', use: 'sig' });
+  const assertNoPrivateValues = (text) => {
+    for (const member of PRIVATE_MEMBERS) assert.ok(!text.includes(priv[member]), `value of ${member} leaked`);
+  };
+
+  it('refuses a repeated top-level "keys" that hides a full private JWK behind a clean one', () => {
+    const text = `{"keys":[${fullPrivate()}],"keys":[${JSON.stringify(pub)}]}`;
+    // The parsed object alone is clean — this is exactly what JSON.parse lets through.
+    assert.equal(check.checkJwks(JSON.parse(text), { pinned }).ok, true);
+    assert.ok(text.includes(priv.d));
+    const result = check.checkJwksText(text, { pinned });
+    assert.equal(result.ok, false);
+    assert.match(result.errors.join(' '), /top level repeats member keys/);
+    assert.match(result.errors.join(' '), /keys\[0\] has PRIVATE member\(s\) in the raw text: d/);
+    assertNoPrivateValues(JSON.stringify(result));
+    assertNoPrivateValues(check.formatResult({ ...result, sha256: 'ab' }, 'x').join('\n'));
+  });
+
+  it('refuses a member repeated inside one key (two n, two kid)', () => {
+    const one = JSON.stringify({ keys: [pub] });
+    const twoN = one.replace('"n":', `"n":"${priv.d}","n":`);
+    const twoKid = one.replace('"kid":', '"kid":"auth-key-1","kid":');
+    for (const [text, member] of [[twoN, 'n'], [twoKid, 'kid']]) {
+      assert.equal(check.checkJwks(JSON.parse(text), { pinned }).ok, true, 'parsed object alone passes');
+      const result = check.checkJwksText(text, { pinned });
+      assert.equal(result.ok, false, member);
+      assert.deepEqual(result.errors, [`keys[0] repeats member ${member} (JSON.parse would hide the earlier copy, which is still published)`]);
+    }
+    assertNoPrivateValues(JSON.stringify(check.checkJwksText(twoN, { pinned })));
+  });
+
+  it('decodes escaped member names, so "\\u0064" counts as d', () => {
+    const text = JSON.stringify({ keys: [pub] }).replace('"kty":', `"\\u0064":"${priv.d}","kty":`);
+    assert.ok(text.includes('\\u0064'));
+    const result = check.checkJwksText(text, { pinned });
+    assert.equal(result.ok, false);
+    assert.match(result.errors.join(' '), /PRIVATE member\(s\) in the raw text: d/);
+    assertNoPrivateValues(JSON.stringify(result));
+  });
+
+  it('keeps a raw-text backstop for a private member name pattern the scan does not attribute', () => {
+    // The member name is x"d, not d, but the bytes contain "d": — refused anyway.
+    const text = JSON.stringify({ keys: [pub] }).replace('"kty":', '"x\\"d":1,"kty":');
+    assert.deepEqual(check.rawTextErrors(text), ['raw text contains a private member name (d, p, q, dp, dq, qi, oth or k)']);
+    assert.equal(check.checkJwksText(text, { pinned }).ok, false);
+  });
+
+  it('accepts a clean file however it is formatted, and reports invalid JSON as before', () => {
+    for (const text of [JSON.stringify(good()), JSON.stringify(good(), null, 2), `\n ${JSON.stringify(good(), null, '\t')} \n`]) {
+      assert.equal(check.checkJwksText(text, { pinned }).ok, true);
+    }
+    assert.deepEqual(check.checkJwksText('{"keys":', { pinned }).errors, ['body is not valid JSON']);
+  });
+
+  it('never prints a member name that could be a value', () => {
+    const text = JSON.stringify({ keys: [{ ...pub, [priv.d.slice(0, 40)]: 1 }] });
+    assertNoPrivateValues(JSON.stringify(check.checkJwksText(text, { pinned })));
+    assert.ok(!JSON.stringify(check.checkJwksText(text, { pinned })).includes(priv.d.slice(0, 40)));
+  });
+
+  it('the CLI (text and --json) exits 1 on the repeated-member file and never shows d', () => {
+    const dir = tempDir();
+    try {
+      const file = path.join(dir, 'dup.json');
+      fs.writeFileSync(file, `{"keys":[${fullPrivate()}],"keys":[${JSON.stringify(pub)}]}`);
+      for (const extra of [[], ['--json']]) {
+        const res = spawnSync(process.execPath, [path.join(ROOT, 'scripts/nativeAuthJwksCheck.js'), file, `--pinned=${pub.kid}`, ...extra], { encoding: 'utf8', env: { PATH: process.env.PATH } });
+        assert.equal(res.status, 1, extra.join(' '));
+        assert.match(res.stdout + res.stderr, /repeats member keys/);
+        assertNoPrivateValues(res.stdout + res.stderr);
+      }
+    } finally {
+      rmrf(dir);
+    }
+  });
+
+  it('watch catches the repeated-member file too', async () => {
+    const lines = [];
+    const text = `{"keys":[${fullPrivate()}],"keys":[${JSON.stringify(pub)}]}`;
+    const last = await check.watchJwks({
+      source: 'https://example.invalid/jwks.json',
+      pinned,
+      maxRuns: 1,
+      fetchImpl: async () => ({ status: 200, text: async () => text }),
+      sleep: async () => {},
+      report: (line, isProblem) => lines.push({ line, isProblem }),
+    });
+    assert.equal(last.ok, false);
+    assert.ok(lines.some((l) => l.isProblem && /repeats member keys/.test(l.line)));
+    assertNoPrivateValues(lines.map((l) => l.line).join('\n'));
+  });
+});
+
 describe('checkSource and watch over HTTP', () => {
   let server;
   let base;
@@ -171,6 +283,12 @@ describe('checkSource and watch over HTTP', () => {
     server = http.createServer((req, res) => {
       if (req.url === '/redirect') {
         res.writeHead(302, { location: '/jwks.json' });
+        return res.end();
+      }
+      if (req.url === '/chunked') {
+        // No content-length: the cap must be enforced while reading, not after.
+        res.writeHead(200, { 'content-type': 'application/json' });
+        for (let i = 0; i < 70; i += 1) res.write('x'.repeat(1024));
         return res.end();
       }
       res.writeHead(status, { 'content-type': 'application/json' });
@@ -199,6 +317,7 @@ describe('checkSource and watch over HTTP', () => {
     assert.deepEqual((await check.checkSource(`${base}/jwks.json`, { pinned: [pub.kid] })).errors, ['body is not valid JSON']);
     body = JSON.stringify({ keys: [pub], pad: 'x'.repeat(70 * 1024) });
     assert.match((await check.checkSource(`${base}/jwks.json`, { pinned: [pub.kid] })).fetchError, /larger than/);
+    assert.match((await check.checkSource(`${base}/chunked`, { pinned: [pub.kid] })).fetchError, /larger than/);
     body = JSON.stringify(good());
     assert.ok((await check.checkSource(`${base}/redirect`, { pinned: [pub.kid] })).fetchError);
   });
@@ -292,6 +411,22 @@ describe('nativeAuthKeygen', () => {
     }
   });
 
+  it('--rotate refuses an existing JWKS that hides a repeated member', () => {
+    const dir = tempDir();
+    try {
+      const first = keygen.generate({ env: 'devnet', outDir: dir });
+      const text = fs.readFileSync(first.jwksPath, 'utf8');
+      fs.writeFileSync(first.jwksPath, text.replace('"keys":', `"keys":[${JSON.stringify(other)}],"keys":`));
+      assert.throws(
+        () => keygen.generate({ env: 'devnet', outDir: dir, name: 'devnet-signing-key-2', rotate: true }),
+        /repeats member keys/,
+      );
+      assert.equal(fs.existsSync(path.join(dir, 'devnet-signing-key-2.jwk.json')), false);
+    } finally {
+      rmrf(dir);
+    }
+  });
+
   it('--rotate appends a next key and pins both', () => {
     const dir = tempDir();
     try {
@@ -318,6 +453,13 @@ describe('nativeAuthKeygen', () => {
       assert.equal(fs.existsSync(path.join(ROOT, 'test', 'no-such-dir-be0')), false);
       assert.ok(keygen.insideCloudSync('/Users/someone/Library/CloudStorage/GoogleDrive-x/My Drive/keys'));
       assert.equal(keygen.insideGitWorkTree(dir), null);
+      // An existing out-dir that others could read is refused, not silently tightened.
+      const loose = path.join(dir, 'loose');
+      fs.mkdirSync(loose, { mode: 0o755 });
+      fs.chmodSync(loose, 0o755);
+      assert.throws(() => keygen.generate({ env: 'devnet', outDir: loose }), /mode 755; run chmod 700/);
+      assert.equal(fs.statSync(loose).mode & 0o777, 0o755);
+      assert.deepEqual(fs.readdirSync(loose), []);
     } finally {
       rmrf(dir);
     }
@@ -381,6 +523,28 @@ describe('nativeAuthSpike', () => {
     assert.doesNotMatch(out, /eyJ[A-Za-z0-9_-]+\.eyJ/);
     const stored = JSON.parse(fs.readFileSync(keyFile, 'utf8'));
     for (const member of PRIVATE_MEMBERS) assert.ok(!out.includes(stored[member]));
+  });
+
+  it('--sub takes only the throwaway subject or random, in every mode', () => {
+    for (const extra of [[], ['--live'], ['--sample-jwt']]) {
+      assert.throws(() => spike.parseArgs([...extra, `--sub=${crypto.randomUUID()}`], {}), /throwaway/, extra.join(' '));
+    }
+    assert.equal(spike.parseArgs(['--live'], {}).sub, spike.THROWAWAY_SUB);
+    const random = spike.parseArgs(['--live', '--sub=random'], {}).sub;
+    assert.match(random, /^[0-9a-f-]{36}$/);
+    assert.notEqual(random, spike.THROWAWAY_SUB);
+  });
+
+  it('checks the JWKS next to the key with the raw-text rules, whatever the env prefix', () => {
+    assert.equal(spike.defaultJwksPath('/k/test-signing-key.jwk.json'), '/k/test-jwks.json');
+    assert.equal(spike.defaultJwksPath('/k/devnet-signing-key-2.jwk.json'), '/k/devnet-jwks.json');
+    const jwksPath = path.join(dir, 'dup-jwks.json');
+    const pubHere = signing.publicJwk;
+    fs.writeFileSync(jwksPath, `{"keys":[${JSON.stringify({ ...pubHere, d: 'c2VjcmV0' })}],"keys":[${JSON.stringify(pubHere)}]}`);
+    const result = spike.checkPublishedJwks(jwksPath, signing.kid, {});
+    assert.equal(result.ok, false);
+    assert.match(result.errors.join(' '), /repeats member keys/);
+    assert.ok(!result.errors.join(' ').includes('c2VjcmV0'));
   });
 
   it('--sample-jwt prints one token, only for the throwaway subject', async () => {
@@ -447,8 +611,33 @@ describe('nativeAuthSpike', () => {
       assert.ok(result.steps.filter((s) => s.name.startsWith('refused:')).every((s) => !s.pass));
     });
 
-    it('scrubs tokens from node error messages', () => {
+    it('scrubs tokens and key-length hex from node error messages', () => {
       assert.equal(spike.sanitize('Duplicate token found eyJhbGciOi.eyJpc3MiOi.c2ln'), 'Duplicate token found <jwt>');
+      for (const len of [62, 64, 66, 130]) {
+        const hex = 'ab'.repeat(len / 2);
+        assert.equal(spike.sanitize(`invalid private key 0x${hex}`), 'invalid private key <hex>', `${len}`);
+      }
+      assert.equal(spike.sanitize(`address ${ADDR_A}`), `address ${ADDR_A}`);
+    });
+
+    it('a malformed key from the nodes fails without echoing it', async () => {
+      for (const bad of ['ab'.repeat(33), '00'.repeat(32), 'zz'.repeat(32)]) {
+        try {
+          spike.addressFromPrivKeyHex(bad);
+          assert.fail(`accepted ${bad.length}`);
+        } catch (err) {
+          assert.ok(!err.message.includes(bad), err.message);
+        }
+      }
+      const deps = fakeDeps();
+      const original = deps.Torus.prototype.retrieveShares;
+      deps.Torus.prototype.retrieveShares = async function (...args) {
+        const res = await original.apply(this, args);
+        return { ...res, finalKeyData: { privKey: 'cd'.repeat(33) } };
+      };
+      const result = await spike.runLive({ ...base(), deps });
+      assert.equal(result.pass, false);
+      assert.ok(!JSON.stringify(result).includes('cd'.repeat(33)));
     });
 
     it('refuses mainnet and a missing client id', async () => {
