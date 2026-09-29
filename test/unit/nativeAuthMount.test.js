@@ -37,6 +37,7 @@ for (const name of Object.keys(process.env)) if (name.startsWith('DDC_AUTH_')) d
 const app = require('../../src/app');
 const { assertNativeAuthConfig } = require('../../src/services/nativeAuth/config');
 const { resetSignerCache } = require('../../src/services/nativeAuth/signer');
+const { resetJwksCache } = require('../../src/services/nativeAuth/issuer');
 const { clearRateLimitStore } = require('../../src/middlewares/rateLimitMiddleware');
 
 let server;
@@ -59,6 +60,7 @@ afterEach(() => {
     delete saved[k];
   }
   resetSignerCache();
+  resetJwksCache();
   clearRateLimitStore();
 });
 

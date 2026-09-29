@@ -105,16 +105,44 @@ function buildPublicJwks(cfg = readNativeAuthConfig()) {
 
 let lastJwksProblem = '';
 
+// The published set (or the refusal) is cached per configuration for JWKS_RECHECK_MS, so a public,
+// unauthenticated path does not stat/read/parse the key files on every request (the signer itself
+// is cached on success only). The window is short so a rotated DDC_AUTH_JWKS_EXTRA_FILE is picked
+// up well within the published max-age.
+const JWKS_RECHECK_MS = 60 * 1000;
+let jwksCache = null;
+
+function jwksCacheKey(cfg) {
+  return [cfg.enabled, cfg.env, cfg.signer, cfg.signingKeyFile, cfg.kmsKeyId, cfg.jwksExtraFile, cfg.jwksPinned.join(',')].join('\u0000');
+}
+
+/** buildPublicJwks through the cache: { jwks } or { problem }. */
+function cachedPublicJwks(cfg, now = Date.now()) {
+  const key = jwksCacheKey(cfg);
+  if (jwksCache && jwksCache.key === key && now - jwksCache.at < JWKS_RECHECK_MS) return jwksCache.result;
+  let result;
+  try {
+    result = { jwks: buildPublicJwks(cfg) };
+  } catch (err) {
+    result = { problem: err.publicMessage || err.message };
+  }
+  jwksCache = { key, at: now, result };
+  return result;
+}
+
+/** Tests only: forget the cached key set. */
+function resetJwksCache() {
+  jwksCache = null;
+  lastJwksProblem = '';
+}
+
 /**
  * Express handler for GET /.well-known/ddc-auth/jwks.json. No key configured, or a configured key
  * refused → next() (the refusal is logged once per distinct reason, without key material).
  */
 function jwksHandler(req, res, next) {
-  let jwks;
-  try {
-    jwks = buildPublicJwks(readNativeAuthConfig());
-  } catch (err) {
-    const problem = err.publicMessage || err.message;
+  const { jwks, problem } = cachedPublicJwks(readNativeAuthConfig());
+  if (problem) {
     if (problem !== lastJwksProblem) {
       lastJwksProblem = problem;
       logger.error('native_auth.jwks_refused', { problem });
@@ -131,6 +159,9 @@ module.exports = {
   IAT_BACKDATE_SEC,
   mintW3aJwt,
   issueW3aToken,
+  JWKS_RECHECK_MS,
   buildPublicJwks,
+  cachedPublicJwks,
+  resetJwksCache,
   jwksHandler,
 };

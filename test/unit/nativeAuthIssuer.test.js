@@ -5,6 +5,7 @@
  * token.
  */
 const { describe, it, beforeEach, afterEach } = require('node:test');
+const fs = require('fs');
 const assert = require('node:assert/strict');
 const crypto = require('crypto');
 const express = require('express');
@@ -46,7 +47,21 @@ function captureLogs() {
   return { lines, stop: () => config.logger.remove(transport) };
 }
 
-beforeEach(() => resetSignerCache());
+beforeEach(() => {
+  resetSignerCache();
+  issuer.resetJwksCache();
+});
+
+/** Pretend `thumbprint` is a leaked key for one call (the committed key's private half is not ours to use). */
+function withLeakedThumbprint(thumbprint, fn) {
+  const set = config.leakedKeys().thumbprints;
+  set.add(thumbprint);
+  try {
+    return fn();
+  } finally {
+    set.delete(thumbprint);
+  }
+}
 
 describe('mintW3aJwt', () => {
   it('mints RS256 with kid = RFC 7638 thumbprint and exactly the contract claims', async () => {
@@ -92,6 +107,27 @@ describe('mintW3aJwt', () => {
     await assert.rejects(issuer.mintW3aJwt({ subject: SUBJECT, cfg: cfgFor({ DDC_AUTH_ENABLED: 'false' }) }), /disabled/);
     await assert.rejects(issuer.mintW3aJwt({ subject: '', cfg: cfgFor() }), /w3aSubject is required/);
     await assert.rejects(issuer.mintW3aJwt({ subject: SUBJECT, cfg: cfgFor({ DDC_AUTH_JWKS_PINNED: next.thumbprint }) }), /not listed in DDC_AUTH_JWKS_PINNED/);
+  });
+
+  it('refuses the leaked key by thumbprint at mint, even when pinned and the boot check was bypassed', async () => {
+    await withLeakedThumbprint(key.thumbprint, () =>
+      assert.rejects(issuer.mintW3aJwt({ subject: SUBJECT, cfg: cfgFor() }), /publicly leaked key auth-key-1/));
+    // and by the auth-key-1 kid inside the file
+    const byKid = makeKeyFile({ kid: 'auth-key-1' });
+    await assert.rejects(issuer.mintW3aJwt({ subject: SUBJECT, cfg: config.readNativeAuthConfig(localEnv(byKid)) }), /leaked key auth-key-1/);
+  });
+
+  it('refuses at mint a key file that is group/other readable, lacks alg, or whose public half does not match', async () => {
+    const loose = makeKeyFile({ mode: 0o640 });
+    await assert.rejects(issuer.mintW3aJwt({ subject: SUBJECT, cfg: config.readNativeAuthConfig(localEnv(loose)) }), /owner only/);
+    const noAlg = makeKeyFile({ alg: null });
+    await assert.rejects(issuer.mintW3aJwt({ subject: SUBJECT, cfg: config.readNativeAuthConfig(localEnv(noAlg)) }), /alg must be RS256/);
+    const donor = makeKeyFile();
+    const swapped = makeKeyFile({ extra: { n: donor.publicJwk.n } });
+    await assert.rejects(
+      issuer.mintW3aJwt({ subject: SUBJECT, cfg: config.readNativeAuthConfig(localEnv(swapped, { DDC_AUTH_JWKS_PINNED: donor.thumbprint })) }),
+      /cannot be loaded|do not match the private key/,
+    );
   });
 
   it('issueW3aToken logs loginRef, kid, jti, exp, count — never sub, never the token', async () => {
@@ -167,6 +203,29 @@ describe('published JWKS', () => {
   it('never publishes the leaked auth-key-1, even if pinned', () => {
     const leaked = makeKeyFile({ kid: 'auth-key-1' });
     assert.throws(() => issuer.buildPublicJwks(config.readNativeAuthConfig(localEnv(leaked))), /leaked key auth-key-1/);
+    withLeakedThumbprint(key.thumbprint, () =>
+      assert.throws(() => issuer.buildPublicJwks(cfgFor()), /leaked key auth-key-1/));
+    const extraFile = makeJwksFile([next.publicJwk]);
+    withLeakedThumbprint(next.thumbprint, () =>
+      assert.throws(() => issuer.buildPublicJwks(cfgFor({ DDC_AUTH_JWKS_EXTRA_FILE: extraFile, DDC_AUTH_JWKS_PINNED: `${key.thumbprint},${next.thumbprint}` })), /leaked key auth-key-1/));
+  });
+
+  it('publishes a file key only with DDC_AUTH_ENV=local|test, whatever the master switch says', () => {
+    for (const env of [undefined, '', 'prod', 'staging']) {
+      for (const enabled of ['true', 'false', undefined]) {
+        assert.throws(
+          () => issuer.buildPublicJwks(cfgFor({ DDC_AUTH_ENV: env, DDC_AUTH_ENABLED: enabled })),
+          /published only with DDC_AUTH_ENV=local\|test/,
+          `env=${env} enabled=${enabled}`,
+        );
+      }
+    }
+    assert.equal(issuer.buildPublicJwks(cfgFor({ DDC_AUTH_ENV: 'test', DDC_AUTH_ENABLED: 'false' })).keys.length, 1);
+  });
+
+  it('refuses a group/other-readable key file at JWKS time too', () => {
+    const loose = makeKeyFile({ mode: 0o644 });
+    assert.throws(() => issuer.buildPublicJwks(config.readNativeAuthConfig(localEnv(loose))), /owner only/);
   });
 
   describe('GET /.well-known/ddc-auth/jwks.json handler', () => {
@@ -227,6 +286,25 @@ describe('published JWKS', () => {
       } finally {
         capture.stop();
       }
+    });
+
+    it('caches the published set and the refusal per configuration, re-checking after JWKS_RECHECK_MS', () => {
+      const cfg = cfgFor();
+      const t0 = 1_000_000;
+      const first = issuer.cachedPublicJwks(cfg, t0);
+      assert.deepEqual(first.jwks.keys.map((k) => k.kid), [key.thumbprint]);
+      // Within the window the cached answer stands even if the file changes (no re-read per request).
+      const loose = makeKeyFile();
+      const looseCfg = config.readNativeAuthConfig(localEnv(loose));
+      assert.ok(issuer.cachedPublicJwks(looseCfg, t0).jwks);
+      fs.chmodSync(loose.file, 0o644);
+      assert.ok(issuer.cachedPublicJwks(looseCfg, t0 + 1000).jwks, 'served from the cache');
+      resetSignerCache();
+      const later = issuer.cachedPublicJwks(looseCfg, t0 + issuer.JWKS_RECHECK_MS + 1000);
+      assert.match(later.problem, /owner only/);
+      assert.equal(issuer.cachedPublicJwks(looseCfg, t0 + issuer.JWKS_RECHECK_MS + 2000), later, 'refusal cached');
+      // A different configuration is never answered from another's cache entry.
+      assert.deepEqual(issuer.cachedPublicJwks(cfg, t0 + issuer.JWKS_RECHECK_MS + 2000).jwks.keys.map((k) => k.kid), [key.thumbprint]);
     });
 
     it('does not publish a file key when DDC_AUTH_ENV is not local|test', async () => {
