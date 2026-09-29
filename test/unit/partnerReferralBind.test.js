@@ -57,8 +57,10 @@ delete process.env.DISABLE_REFERRAL_REWARDS_FEATURES;
 // The code lookup is a raw case-insensitive query on the real client; answer it from the mock rows.
 // Patched on the module object BEFORE the app loads, so referralService picks it up.
 const referralUtils = require('../../src/utils/referralUtils');
-// Like the real lookup: case, spaces and hyphens do not matter, and a legacy code finds its owner.
-const lookupKey = (value) => String(value || '').replace(/[\s-]+/g, '').toLowerCase();
+// Like the real lookup: case, spaces and hyphens do not matter, a "DDC-" display prefix is dropped
+// (decision 36), and a legacy code finds its owner.
+const { normalizeReferralCodeInput } = require('../../src/utils/referralCodeFormat');
+const lookupKey = (value) => String(normalizeReferralCodeInput(value) || '').replace(/[\s-]+/g, '').toLowerCase();
 referralUtils.findUserByReferralCode = async (code) => {
   const wanted = lookupKey(code);
   const u = wanted
@@ -654,6 +656,33 @@ describe('step two: the bind requires /check\'s confirm_token', () => {
     const again = await check(token, { code: CODES.alice });
     advance(1000);
     const replay = await bindRaw(token, { code: 'DDALICE234', confirm_token: again.body.confirm_token });
+    assert.deepEqual(replay.body, { bound: true, inviter_sub: 'alice', already: true });
+  });
+
+  it('decision 36: /check answers the DDC- display form; the prefixed or bare code confirms the bind', async () => {
+    // The fixture codes use letters outside the display alphabet (I, L, O), so they are shown as
+    // they are; give alice a real 6-character display code.
+    const alice = prisma.user.rows.find((u) => u.id === 'alice');
+    alice.referralCode = 'AB23CD';
+    const { token } = await mintToken(FULL);
+    const log = captureBindLog();
+    let checked;
+    try {
+      checked = await check(token, { code: ' ddc-ab23cd ' });
+    } finally {
+      log.restore();
+    }
+    assert.equal(checked.status, 200, checked.text);
+    assert.equal(checked.body.code, 'DDC-AB23CD');
+    assert.equal(log.entries[0].codePrefix, 'AB…', 'the log keeps a prefix of the normalised code, not "DD…"');
+    advance(1000);
+    const res = await bindRaw(token, { code: 'AB23CD', confirm_token: checked.body.confirm_token });
+    assert.deepEqual(res.body, { bound: true, inviter_sub: 'alice' });
+    assert.equal(prisma.referral.rows.find((r) => r.inviteeId === ME).code, 'AB23CD', 'the prefix is never stored');
+    const again = await check(token, { code: 'AB23CD' });
+    assert.equal(again.body.code, 'DDC-AB23CD');
+    advance(1000);
+    const replay = await bindRaw(token, { code: again.body.code, confirm_token: again.body.confirm_token });
     assert.deepEqual(replay.body, { bound: true, inviter_sub: 'alice', already: true });
   });
 
