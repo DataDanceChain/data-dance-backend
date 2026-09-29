@@ -188,6 +188,29 @@ describe('BE9 scripts on Postgres', () => {
     }
   });
 
+  it('a row --apply skips as stale is superseded by the next plan, then applied', async () => {
+    const u = await mkUser({ walletAddress: Wallet.createRandom().address, web3authVerifier: LEGACY_EMAIL, web3authVerifierId: `${RUN}-st@example.com` });
+    const target = { network: 'sapphire_devnet', connection: `${RUN}-ddc-jwt-devnet-s` };
+    const one = scoped({ user: () => ({ id: u.id }), walletAddressHistory: () => ({ userId: u.id }) });
+    const lookup = fakeLookup();
+    assert.deepEqual((await migration.planMigration({ target, clientId: 'cid', write: true, db: one, lookup, limit: 1000 })).outcomes, { planned_legacy: 1 });
+    const binding = await prisma.nativeWalletBinding.findUnique({ where: { userId: u.id } });
+    const changed = Wallet.createRandom().address;
+    await prisma.user.update({ where: { id: u.id }, data: { walletAddress: changed } });
+    assert.deepEqual((await migration.applyMigration({ target, db: one, cfg, write: true })).outcomes, { skipped_stale: 1 });
+
+    const replan = await migration.planMigration({ target, clientId: 'cid', write: true, db: one, lookup: async () => assert.fail('reuses the binding'), limit: 1000 });
+    assert.deepEqual([replan.superseded, replan.outcomes], [1, { planned_repaired: 1 }]);
+    const rows = await prisma.walletAddressHistory.findMany({ where: { userId: u.id, newVerifier: target.connection } });
+    assert.deepEqual(rows.map((r) => [r.status, r.oldAddress, r.newAddress, r.newSubjectRef]), [['planned', changed, binding.address, binding.id]]);
+    const { csv } = await migration.exportRows({ target, db: one });
+    assert.equal(csv, `userId,oldAddress,newAddress,chainStatus\n${u.id},${changed},${binding.address},pending\n`);
+
+    assert.deepEqual((await migration.applyMigration({ target, db: one, cfg, write: true })).outcomes, { applied_legacy_identity_backfilled: 1 });
+    const after = await prisma.user.findUnique({ where: { id: u.id } });
+    assert.deepEqual([after.walletAddress, after.web3authVerifier], [binding.address, target.connection]);
+  });
+
   it('cleanup --native deletes by the fixed retention', async () => {
     const now = new Date();
     const old = new Date(now.getTime() - 25 * 60 * 60 * 1000);

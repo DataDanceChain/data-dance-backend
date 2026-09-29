@@ -305,6 +305,12 @@ describe('scripts/nativeAuthWalletMigration', () => {
     // The override never relaxes the mainnet rule itself.
     assert.throws(() => migration.assertTarget({ network: 'sapphire_mainnet', connection: 'ddc-jwt-devnet' }, prodCfg, { allowNonProd: true }), /devnet/);
     assert.equal(migration.isProduction(cfg, 'test'), false);
+    // A DDC_AUTH_ENV that config does not know (e.g. 'production') fails safe as production.
+    const typo = readNativeAuthConfig({ DDC_AUTH_ENV: 'production' });
+    assert.equal(migration.isProduction(typo, ''), true);
+    assert.throws(() => migration.assertTarget(devnet, typo, { nodeEnv: '' }), /production/);
+    assert.equal(migration.isProduction(readNativeAuthConfig({ DDC_AUTH_ENV: 'local' }), ''), false);
+    assert.equal(migration.isProduction(readNativeAuthConfig({ DDC_AUTH_ENV: 'test' }), ''), false);
     assert.equal(migration.parseArgs(['--apply', '--allow-non-prod-target']).allowNonProd, true);
     assert.equal(migration.parseArgs(['--apply']).allowNonProd, false);
   });
@@ -496,10 +502,138 @@ describe('scripts/nativeAuthWalletMigration', () => {
     assert.equal(prisma.store.walletAddressHistory.find((r) => r.userId === s.legacy.id).status, 'planned');
 
     const verifierChanged = seedAccounts();
-    await migration.planMigration({ target: MAINNET, clientId: 'c', write: true, db: prisma, lookup: fakeLookup().lookup });
+    const replan = await migration.planMigration({ target: MAINNET, clientId: 'c', write: true, db: prisma, lookup: fakeLookup().lookup });
+    assert.equal(replan.superseded, 1, 'the first stale row is superseded by this plan');
     verifierChanged.legacy.web3authVerifier = LEGACY_GOOGLE;
     const again = await migration.applyMigration({ target: MAINNET, db: prisma, cfg, write: true });
-    assert.equal(again.outcomes.skipped_stale, 2);
+    assert.equal(again.outcomes.skipped_stale, 1);
+    assert.equal(prisma.store.walletAddressHistory.find((r) => r.userId === verifierChanged.legacy.id).status, 'planned');
+    assert.equal(prisma.store.walletAddressHistory.find((r) => r.userId === s.legacy.id).status, 'applied');
+  });
+
+  it('a legacy row skipped as stale (wallet changed) is superseded by the next plan and then applied', async () => {
+    const s = seedAccounts();
+    const nodes = fakeLookup();
+    await migration.planMigration({ target: MAINNET, clientId: 'c', write: true, db: prisma, lookup: nodes.lookup });
+    const binding = prisma.store.nativeWalletBinding.find((b) => b.userId === s.legacy.id);
+    const oldRowId = prisma.store.walletAddressHistory.find((r) => r.userId === s.legacy.id).id;
+    const changed = addr();
+    s.legacy.walletAddress = changed;
+    const skipped = await migration.applyMigration({ target: MAINNET, db: prisma, cfg, write: true });
+    assert.deepEqual(skipped.outcomes, { skipped_stale: 1, applied_native: 1, applied_external: 1 });
+
+    // A dry run shows the re-plan and changes nothing.
+    const before = JSON.stringify(prisma.store);
+    const dry = await migration.planMigration({ target: MAINNET, db: prisma, lookup: async () => assert.fail('no lookup in a dry run') });
+    assert.equal(dry.superseded, 1);
+    assert.equal(dry.classes.binding_repair, 1);
+    assert.equal(JSON.stringify(prisma.store), before);
+
+    const callsBefore = nodes.calls.length;
+    const replan = await migration.planMigration({ target: MAINNET, clientId: 'c', write: true, db: prisma, lookup: nodes.lookup });
+    assert.equal(replan.superseded, 1);
+    assert.deepEqual(replan.outcomes, { planned_repaired: 1 });
+    assert.equal(nodes.calls.length, callsBefore, 'the planned-only binding is reused, no new key assignment');
+    const rows = prisma.store.walletAddressHistory.filter((r) => r.userId === s.legacy.id);
+    assert.equal(rows.length, 1, 'the superseded row is gone');
+    assert.notEqual(rows[0].id, oldRowId);
+    assert.deepEqual(
+      [rows[0].status, rows[0].oldAddress, rows[0].oldVerifier, rows[0].oldVerifierId, rows[0].newAddress, rows[0].newSubjectRef],
+      ['planned', changed, LEGACY_EMAIL, 'leg@example.com', binding.address, binding.id],
+    );
+    const { csv } = await migration.exportRows({ target: MAINNET, db: prisma });
+    const lines = csv.split('\n').filter((l) => l.startsWith(`${s.legacy.id},`));
+    assert.deepEqual(lines, [`${s.legacy.id},${changed},${binding.address},pending`], 'the export lists only the current plan');
+
+    const applied = await migration.applyMigration({ target: MAINNET, db: prisma, cfg, write: true });
+    assert.deepEqual(applied.outcomes, { applied_legacy_identity_backfilled: 1 });
+    const legacy = prisma.store.user.find((u) => u.id === s.legacy.id);
+    assert.deepEqual([legacy.walletAddress, legacy.web3authVerifier, legacy.web3authVerifierId], [binding.address, 'ddc-jwt-mainnet', s.legacy.id]);
+    const settled = await migration.planMigration({ target: MAINNET, clientId: 'c', write: true, db: prisma, lookup: nodes.lookup });
+    assert.deepEqual([settled.superseded, settled.outcomes], [0, {}], 'an applied row is never superseded');
+  });
+
+  it('a legacy row skipped as stale (pair changed, same wallet) is re-planned with the current pair', async () => {
+    const s = seedAccounts();
+    await migration.planMigration({ target: MAINNET, clientId: 'c', write: true, db: prisma, lookup: fakeLookup().lookup });
+    s.legacy.web3authVerifier = LEGACY_GOOGLE;
+    s.legacy.web3authVerifierId = 'relinked@gmail.com';
+    assert.equal((await migration.applyMigration({ target: MAINNET, db: prisma, cfg, write: true })).outcomes.skipped_stale, 1);
+    const replan = await migration.planMigration({ target: MAINNET, clientId: 'c', write: true, db: prisma, lookup: async () => assert.fail('reuses the binding') });
+    assert.deepEqual([replan.superseded, replan.outcomes], [1, { planned_repaired: 1 }]);
+    const row = prisma.store.walletAddressHistory.find((r) => r.userId === s.legacy.id);
+    assert.deepEqual([row.oldVerifier, row.oldVerifierId], [LEGACY_GOOGLE, 'relinked@gmail.com']);
+    const applied = await migration.applyMigration({ target: MAINNET, db: prisma, cfg, write: true });
+    assert.deepEqual(applied.outcomes, { applied_legacy_identity_backfilled: 1 });
+    assert.ok(prisma.store.authIdentity.some((r) => r.provider === 'web3auth_legacy' && r.subject === `${LEGACY_GOOGLE}|relinked@gmail.com`));
+  });
+
+  it('an external row skipped as stale is superseded by a fresh external row', async () => {
+    const s = seedAccounts();
+    await migration.planMigration({ target: MAINNET, clientId: 'c', write: true, db: prisma, lookup: fakeLookup().lookup });
+    const other = addr();
+    s.external.walletAddress = other; // switched to another external wallet
+    assert.equal((await migration.applyMigration({ target: MAINNET, db: prisma, cfg, write: true })).outcomes.skipped_stale, 1);
+    const replan = await migration.planMigration({ target: MAINNET, clientId: 'c', write: true, db: prisma, lookup: fakeLookup().lookup });
+    assert.deepEqual([replan.superseded, replan.outcomes], [1, { planned_external: 1 }]);
+    const rows = prisma.store.walletAddressHistory.filter((r) => r.userId === s.external.id);
+    assert.deepEqual(rows.map((r) => [r.status, r.oldAddress, r.newAddress, r.chainStatus]), [['planned', other, other, 'not_needed']]);
+    assert.deepEqual((await migration.applyMigration({ target: MAINNET, db: prisma, cfg, write: true })).outcomes, { applied_external: 1 });
+    assert.equal(prisma.store.user.find((u) => u.id === s.external.id).walletAddress, other);
+  });
+
+  it('a planned legacy account that moved to an external wallet is re-planned as external, never onto the binding', async () => {
+    const s = seedAccounts();
+    await migration.planMigration({ target: MAINNET, clientId: 'c', write: true, db: prisma, lookup: fakeLookup().lookup });
+    const external = addr();
+    Object.assign(s.legacy, { walletAddress: external, web3authVerifier: 'external-wallet', web3authVerifierId: 'wallet' });
+    const replan = await migration.planMigration({ target: MAINNET, clientId: 'c', write: true, db: prisma, lookup: fakeLookup().lookup });
+    assert.deepEqual([replan.superseded, replan.outcomes], [1, { planned_external: 1 }]);
+    const applied = await migration.applyMigration({ target: MAINNET, db: prisma, cfg, write: true });
+    assert.deepEqual(applied.outcomes, { applied_external: 2, applied_native: 1 }, 'the moved account and the seeded external one');
+    const after = prisma.store.user.find((u) => u.id === s.legacy.id);
+    assert.deepEqual([after.walletAddress, after.web3authVerifier], [external, 'external-wallet']);
+    assert.equal(prisma.store.authIdentity.some((r) => r.userId === s.legacy.id), false);
+  });
+
+  it('a planned row whose binding is gone is superseded and the account is planned afresh', async () => {
+    const s = seedAccounts();
+    const nodes = fakeLookup();
+    await migration.planMigration({ target: MAINNET, clientId: 'c', write: true, db: prisma, lookup: nodes.lookup });
+    const gone = prisma.store.nativeWalletBinding.findIndex((b) => b.userId === s.legacy.id);
+    prisma.store.nativeWalletBinding.splice(gone, 1);
+    assert.equal((await migration.applyMigration({ target: MAINNET, db: prisma, cfg })).outcomes.skipped_binding_missing, 1);
+    const replan = await migration.planMigration({ target: MAINNET, clientId: 'c', write: true, db: prisma, lookup: nodes.lookup });
+    assert.deepEqual([replan.superseded, replan.outcomes], [1, { planned_legacy: 1 }]);
+    const binding = prisma.store.nativeWalletBinding.find((b) => b.userId === s.legacy.id);
+    const rows = prisma.store.walletAddressHistory.filter((r) => r.userId === s.legacy.id);
+    assert.deepEqual(rows.map((r) => r.newSubjectRef), [binding.id]);
+  });
+
+  it('a superseded row that a concurrent apply claimed first keeps counting', async () => {
+    const s = seedAccounts();
+    await migration.planMigration({ target: MAINNET, clientId: 'c', write: true, db: prisma, lookup: fakeLookup().lookup });
+    s.legacy.walletAddress = addr();
+    const realDeleteMany = prisma.walletAddressHistory.deleteMany;
+    prisma.walletAddressHistory.deleteMany = async () => ({ count: 0 });
+    try {
+      const replan = await migration.planMigration({ target: MAINNET, clientId: 'c', write: true, db: prisma, lookup: async () => assert.fail('nothing to plan') });
+      assert.deepEqual([replan.superseded, replan.classes.already_planned, replan.outcomes], [0, 3, {}]);
+    } finally {
+      prisma.walletAddressHistory.deleteMany = realDeleteMany;
+    }
+    assert.equal(prisma.store.walletAddressHistory.length, 3);
+  });
+
+  it('classify never moves a non-legacy pair onto a binding that is not its wallet', () => {
+    const b = { id: 'b', userId: 'u', connection: MAINNET.connection, network: MAINNET.network, address: addr() };
+    const base = { id: 'u', walletAddress: addr() };
+    const kind = (u) => migration.classify({ user: { ...base, ...u }, binding: b, rows: [], target: MAINNET });
+    assert.equal(kind({ web3authVerifier: LEGACY_EMAIL, web3authVerifierId: 'a@b.c' }), 'binding_repair');
+    assert.equal(kind({ web3authVerifier: 'external-wallet', web3authVerifierId: 'w' }), 'external');
+    assert.equal(kind({ web3authVerifier: 'ddc-jwt-devnet', web3authVerifierId: 'u' }), 'native_binding_not_live');
+    assert.equal(kind({}), 'unpaired');
+    assert.equal(migration.classify({ user: { ...base, web3authVerifier: LEGACY_EMAIL, web3authVerifierId: 'a' }, binding: { ...b, connection: 'ddc-jwt-other' }, rows: [], target: MAINNET }), 'planned_elsewhere');
   });
 
   it('--apply writes nothing when another run claimed the row first', async () => {
