@@ -16,6 +16,13 @@
  *                 address and chainStatus 'not_needed';
  *               already planned / already on the target → nothing (reruns resume where a run
  *                 stopped; a failed lookup is simply retried by the next run).
+ *             A still-'planned' row of this target that --apply would skip (the account's
+ *             wallet, pair or binding changed since that plan) is superseded: --plan --write
+ *             deletes that never-applied row first and plans the account again as it is now
+ *             (a legacy account keeps its planned-only target binding and gets a fresh row with
+ *             its current wallet and pair, 'binding_repair'; an external account gets a fresh
+ *             external row). Counted as `superseded`; re-run --export afterwards, because the
+ *             chain team's list changes with it.
  *             Without --write nothing is looked up or written: the run only classifies and
  *             counts (a lookup may assign a key on the nodes, so even that waits for --write).
  *   --export <file.csv|->
@@ -30,15 +37,18 @@
  *             pair qualifies for is backfilled in the same transaction (see
  *             nativeAuthBackfillIdentities.js); the row becomes status 'applied'. A row whose
  *             account changed since the plan (wallet, pair or binding differ) is skipped and
- *             counted as stale; re-plan it. Without --write every row is only checked.
+ *             counted as stale (or binding_missing); the next --plan --write supersedes it and
+ *             plans the account again, then --export and --apply --write as usual. Without
+ *             --write every row is only checked.
  *
  * Usage:
  *   node scripts/nativeAuthWalletMigration.js --plan  --network sapphire_mainnet --connection ddc-jwt-mainnet [--client-id=<id>] [--write] [--concurrency=4] [--limit=N]
  *   node scripts/nativeAuthWalletMigration.js --export migration.csv --network sapphire_mainnet --connection ddc-jwt-mainnet [--force]
  *   node scripts/nativeAuthWalletMigration.js --apply --network sapphire_mainnet --connection ddc-jwt-mainnet [--write] [--batch-size=100] [--limit=N]
  * --client-id defaults to DDC_AUTH_W3A_CLIENT_ID (the client id of the TARGET native project).
- * On production (DDC_AUTH_ENV=prod or NODE_ENV=production) every mode refuses a target that is not
- * sapphire_mainnet or whose connection names devnet/test, unless --allow-non-prod-target is given.
+ * On production (DDC_AUTH_ENV=prod, an unrecognised DDC_AUTH_ENV, or NODE_ENV=production) every
+ * mode refuses a target that is not sapphire_mainnet or whose connection names devnet/test, unless
+ * --allow-non-prod-target is given.
  * Do not run two --plan --write runs for one target at the same time.
  *
  * Between --plan and --apply a planned legacy account already has its target binding while it
@@ -58,7 +68,7 @@
 const crypto = require('crypto');
 const fs = require('fs');
 const { getAddress } = require('ethers');
-const { readNativeAuthConfig, W3A_NETWORKS, NON_PROD_CONNECTION_IDS } = require('../src/services/nativeAuth/config');
+const { readNativeAuthConfig, W3A_NETWORKS, NON_PROD_CONNECTION_IDS, AUTH_ENVS } = require('../src/services/nativeAuth/config');
 const backfill = require('./nativeAuthBackfillIdentities');
 
 const REASON = 'network_migration';
@@ -106,9 +116,13 @@ function byId(a, b) {
   return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
 }
 
-/** True when this process runs against production: DDC_AUTH_ENV=prod or NODE_ENV=production. */
+/**
+ * True when this process may run against production: DDC_AUTH_ENV=prod, a DDC_AUTH_ENV that is set
+ * but not one of AUTH_ENVS (config refuses it; e.g. 'production' — fail safe), or NODE_ENV=production.
+ */
 function isProduction(cfg, nodeEnv) {
-  return Boolean((cfg && cfg.env === 'prod') || String(nodeEnv || '').toLowerCase() === 'production');
+  const env = cfg && cfg.env;
+  return Boolean(env === 'prod' || (env && !AUTH_ENVS.includes(env)) || String(nodeEnv || '').toLowerCase() === 'production');
 }
 
 /**
@@ -128,7 +142,7 @@ function assertTarget({ network, connection }, cfg, { allowNonProd = false, node
   }
   if (isProduction(cfg, nodeEnv) && !allowNonProd
     && (network !== 'sapphire_mainnet' || NON_PROD_CONNECTION_IDS.includes(connection) || NON_PROD_CONNECTION_PATTERN.test(connection))) {
-    throw new Error('production (DDC_AUTH_ENV=prod or NODE_ENV=production) accepts only a sapphire_mainnet, non-devnet target; --allow-non-prod-target overrides');
+    throw new Error('production (DDC_AUTH_ENV=prod or unrecognised, or NODE_ENV=production) accepts only a sapphire_mainnet, non-devnet target; --allow-non-prod-target overrides');
   }
 }
 
@@ -145,27 +159,47 @@ function targetRowsWhere({ network, connection }) {
  * What --plan does for one account with a wallet (reads nothing but its arguments):
  *   'organization' | 'unpaired'             skipped (not migrated)
  *   'native_without_binding'                a native connection's pair but no binding (skipped)
+ *   'native_binding_not_live'               a native connection's pair whose binding is not its wallet (skipped)
  *   'already_planned'                       a row for this target exists
  *   'current'                               the live binding is already on the target
- *   'planned_elsewhere'                     a planned-only binding for another target exists (skipped)
- *   'binding_repair'                        a planned-only binding on the target without its row (row re-created)
+ *   'planned_elsewhere'                     a legacy pair with a planned-only binding for another target (skipped)
+ *   'binding_repair'                        a legacy pair with a planned-only binding on the target and no row (row re-created)
  *   'legacy' | 'native' | 'external'        to plan
+ * `rows` are the rows of this target that still count, i.e. without superseded ones.
  */
 function classify({ user, binding, rows, target }) {
   if (isOrganization(user)) return 'organization';
   if (rows.length) return 'already_planned';
-  if (binding) {
-    const live = sameAddress(user.walletAddress, binding.address);
-    const onTarget = binding.connection === target.connection && binding.network === target.network;
-    if (live) return onTarget ? 'current' : 'native';
-    return onTarget ? 'binding_repair' : 'planned_elsewhere';
+  if (binding && sameAddress(user.walletAddress, binding.address)) {
+    return binding.connection === target.connection && binding.network === target.network ? 'current' : 'native';
   }
+  // An external wallet keeps its address whatever binding a plan left behind (only a legacy pair
+  // may be moved onto a planned-only binding).
   if (user.web3authVerifier === EXTERNAL_WALLET_VERIFIER) return 'external';
   if (!user.web3authVerifier || !user.web3authVerifierId) return 'unpaired';
-  // A native connection's pair without its binding is not a legacy wallet (and the legacy login
-  // path refuses these names); leave it to a person.
-  if (user.web3authVerifier === target.connection || NATIVE_CONNECTION_NAME.test(user.web3authVerifier)) return 'native_without_binding';
+  // A native connection's pair without its (live) binding is not a legacy wallet (and the legacy
+  // login path refuses these names); leave it to a person.
+  if (user.web3authVerifier === target.connection || NATIVE_CONNECTION_NAME.test(user.web3authVerifier)) {
+    return binding ? 'native_binding_not_live' : 'native_without_binding';
+  }
+  if (binding) return binding.connection === target.connection && binding.network === target.network ? 'binding_repair' : 'planned_elsewhere';
   return 'legacy';
+}
+
+/**
+ * True for a still-'planned' row of this target that --apply would skip as stale or
+ * binding_missing against the account as it is now (judgeRow): the plan it records is out of date
+ * and --plan replaces it. `binding` is the account's binding (at most one per account) or null.
+ */
+function isSuperseded({ row, user, binding, target }) {
+  if (row.status !== 'planned') return false;
+  try {
+    judgeRow({ row, user, binding, target });
+    return false;
+  } catch (err) {
+    if (err instanceof Skip) return true;
+    throw err;
+  }
 }
 
 async function lookupAddress({ lookup, subject, target, clientId }) {
@@ -281,7 +315,7 @@ async function pool(items, limit, worker) {
 async function planMigration({ target, clientId, write = false, db = defaultDb(), lookup, batchSize = DEFAULT_BATCH, concurrency = DEFAULT_CONCURRENCY, limit = Infinity, log = () => {} }) {
   if (write && !clientId) throw new Error('--plan --write needs the target client id (--client-id or DDC_AUTH_W3A_CLIENT_ID)');
   const doLookup = lookup || require('../src/services/nativeAuth/w3aLookup').lookupWalletAddress;
-  const summary = { mode: write ? 'write' : 'dry-run', target: { ...target }, scanned: 0, classes: {}, outcomes: {} };
+  const summary = { mode: write ? 'write' : 'dry-run', target: { ...target }, scanned: 0, superseded: 0, classes: {}, outcomes: {} };
   let cursor = null;
   let budget = limit;
   while (budget > 0) {
@@ -300,7 +334,19 @@ async function planMigration({ target, clientId, write = false, db = defaultDb()
     for (const user of users) {
       summary.scanned += 1;
       const binding = bindings.find((b) => b.userId === user.id) || null;
-      const kind = classify({ user, binding, rows: rows.filter((r) => r.userId === user.id), target });
+      const current = [];
+      for (const row of rows.filter((r) => r.userId === user.id)) {
+        if (!isSuperseded({ row, user, binding, target })) {
+          current.push(row);
+          continue;
+        }
+        // Never applied (the guard on status); a concurrent apply that claimed it first wins and
+        // the row keeps counting. A dry run only counts what it would supersede.
+        const removed = write ? (await db.walletAddressHistory.deleteMany({ where: { id: row.id, status: 'planned' } })).count === 1 : true;
+        if (removed) summary.superseded += 1;
+        else current.push(row);
+      }
+      const kind = classify({ user, binding, rows: current, target });
       bump(summary.classes, kind);
       if (['legacy', 'native', 'external', 'binding_repair'].includes(kind) && budget > 0) {
         budget -= 1;
@@ -365,12 +411,11 @@ class Skip extends Error {
 }
 
 /**
- * Checks one planned row against the account as it is now. Returns { kind, user, binding } or
- * throws Skip(reason). `db` may be a transaction client.
+ * Judges one planned row against the account and the binding the row names as they are now (reads
+ * nothing). Returns { kind, user, binding } or throws Skip('stale' | 'binding_missing'). --apply
+ * skips such a row; --plan supersedes it (isSuperseded).
  */
-async function checkRow({ row, target, db }) {
-  const user = await db.user.findUnique({ where: { id: row.userId } });
-  if (!user) throw new Skip('user_gone');
+function judgeRow({ row, user, binding: found, target }) {
   if (!sameAddress(user.walletAddress, row.oldAddress)) {
     // A crash between the commit and the report, or a concurrent apply, leaves the row planned
     // only if the transaction rolled back; an account already on the new address is stale here.
@@ -380,7 +425,7 @@ async function checkRow({ row, target, db }) {
     if (user.web3authVerifier !== EXTERNAL_WALLET_VERIFIER) throw new Skip('stale');
     return { kind: 'external', user, binding: null };
   }
-  const binding = await db.nativeWalletBinding.findUnique({ where: { id: row.newSubjectRef } });
+  const binding = found && found.id === row.newSubjectRef ? found : null;
   if (!binding || binding.userId !== user.id) throw new Skip('binding_missing');
   const bindingOnTarget = binding.connection === target.connection && binding.network === target.network;
   if (bindingOnTarget && sameAddress(binding.address, row.newAddress)) {
@@ -392,6 +437,17 @@ async function checkRow({ row, target, db }) {
     return { kind: 'native', user, binding };
   }
   throw new Skip('stale');
+}
+
+/**
+ * Checks one planned row against the account as it is now. Returns { kind, user, binding } or
+ * throws Skip(reason). `db` may be a transaction client.
+ */
+async function checkRow({ row, target, db }) {
+  const user = await db.user.findUnique({ where: { id: row.userId } });
+  if (!user) throw new Skip('user_gone');
+  const binding = row.newVerifier === EXTERNAL_WALLET_VERIFIER ? null : await db.nativeWalletBinding.findUnique({ where: { id: row.newSubjectRef } });
+  return judgeRow({ row, user, binding, target });
 }
 
 async function assertWalletFree(db, address, userId) {
@@ -553,6 +609,7 @@ function printSummary(summary) {
     const entries = Object.entries(obj || {});
     if (entries.length) console.log(`${label}: ${entries.map(([k, v]) => `${k}=${v}`).join(', ')}`);
   };
+  if (summary.superseded) console.log(`superseded planned rows: ${summary.superseded}${summary.mode === 'write' ? ' (deleted; re-run --export)' : ' (would be deleted)'}`);
   line('accounts', summary.classes);
   line('outcomes', summary.outcomes);
   if (summary.mode !== 'write') console.log('dry run: nothing looked up or written; add --write');
@@ -608,6 +665,7 @@ module.exports = {
   assertTarget,
   isProduction,
   classify,
+  isSuperseded,
   planMigration,
   exportRows,
   writeExport,
