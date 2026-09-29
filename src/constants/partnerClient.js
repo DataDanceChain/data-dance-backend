@@ -492,6 +492,31 @@ function httpsUrlProblem(name, value) {
   return '';
 }
 
+const LOOPBACK_HOSTS = ['localhost', '127.0.0.1', '[::1]'];
+
+/** True when `value` is an absolute URL whose host is a loopback name or address. */
+function loopbackUrl(value) {
+  try {
+    return LOOPBACK_HOSTS.includes(new URL(String(value || '').trim()).hostname);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The one shape in which the partner flow runs next to native login WITHOUT the native production
+ * rules: DDC_AUTH_ENV=local and both public origins (the issuer and the consent origin) on a
+ * loopback host. That is the local stack (design §7.5 / §8 step 2: native on with
+ * DDC_AUTH_ENV=local, partner flow authorize → consent → /login → TGE on localhost). A real
+ * deployment cannot serve its partners from localhost, so everywhere else the rules still apply
+ * whatever DDC_AUTH_ENV says; NODE_ENV is deliberately not consulted (the local stack runs with
+ * NODE_ENV=production). Rule 6 (no sapphire_mainnet with local) still holds through
+ * assertNativeAuthConfig.
+ */
+function localNativeStack(env, nativeCfg) {
+  return nativeCfg.env === 'local' && loopbackUrl(env.PUBLIC_BASE_URL) && loopbackUrl(env.APP_PUBLIC_URL);
+}
+
 /**
  * The money-path assertions (item 8). `SSO_TGE_ENABLED=true` is the switch that puts DataDance
  * identities in front of a partner page that may move real money; from that moment the
@@ -511,6 +536,9 @@ function httpsUrlProblem(name, value) {
  *   - SSO_SESSION_SECRET ≠ JWT_SECRET — that difference is what keeps the consent-only session
  *                                      out of every other authenticated endpoint.
  *   - PUBLIC_BASE_URL / APP_PUBLIC_URL, both https — the issuer and the consent origin.
+ *   - with DDC_AUTH_ENABLED=true as well: the native-login production rules (design §3.1 rule 5,
+ *     src/services/nativeAuth/config.js productionProblems) — unless this is the loopback-only
+ *     local stack (localNativeStack below).
  *
  * Throws with every problem listed at once; returns a summary with no secret values.
  * Called from src/server.js next to assertPartnerConfig().
@@ -579,6 +607,20 @@ function assertFinancialGradeConfig(env = process.env) {
     const problem = httpsUrlProblem(name, value);
     if (problem) problems.push(problem);
   }
+  // Native login on the money path: a deployment serving the partner flow IS production, so the
+  // native production rules (mainnet, KMS signer, no extra JWKS file, no devnet/test connection,
+  // rebind refuse, no dev echo, Turnstile enforce, https app return, a real allowlist) apply
+  // whatever DDC_AUTH_ENV says — except on the loopback-only local stack (localNativeStack).
+  // Required lazily: nothing is loaded while DDC_AUTH_ENABLED is off.
+  let nativeAuth = null;
+  if (flag(env.DDC_AUTH_ENABLED)) {
+    const native = require('../services/nativeAuth/config');
+    const nativeCfg = native.readNativeAuthConfig(env);
+    if (!localNativeStack(env, nativeCfg)) {
+      problems.push(...native.productionProblems(nativeCfg).map((problem) => `native login: ${problem}`));
+    }
+    nativeAuth = native.summarize(nativeCfg);
+  }
 
   if (problems.length) {
     throw new Error(
@@ -597,6 +639,8 @@ function assertFinancialGradeConfig(env = process.env) {
     appPublicUrl: String(env.APP_PUBLIC_URL).trim(),
     sessionSecretSeparate: true,
     publicRegistration: String(env.OAUTH_PUBLIC_REGISTRATION_ENABLED ?? 'true').trim().toLowerCase() !== 'false',
+    // Present only when DDC_AUTH_ENABLED=true, so the summary is unchanged while it is off.
+    ...(nativeAuth ? { nativeAuth } : {}),
   };
 }
 

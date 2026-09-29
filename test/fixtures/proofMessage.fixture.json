@@ -1,0 +1,136 @@
+{
+  "description": "EIP-4361 wallet proof message shared by data-dance-backend src/services/nativeAuth/proofMessage.js and data-dance-frontend src/services/nativeLogin/proofMessage.ts. Keep this file byte-identical in both repos. cases: buildProofMessage(walletProof, address) must equal message exactly (lines joined by \\n, no trailing newline, address EIP-55 checksummed). invalid: buildProofMessage must throw.",
+  "version": 1,
+  "cases": [
+    {
+      "name": "production shape, lower-case address in",
+      "walletProof": {
+        "domain": "app.datadance.ai",
+        "uri": "https://app.datadance.ai",
+        "chainId": 44508,
+        "statement": "Confirm your DataDance wallet for this sign-in.",
+        "nonce": "9f86d081884c7d659a2feaa0c55ad015",
+        "issuedAt": "2026-09-30T09:00:00.000Z",
+        "expirationTime": "2026-09-30T09:10:00.000Z",
+        "requestId": "3a7bd3e2360a3d29"
+      },
+      "address": "0x52908400098527886e0f7030069857d2e4169ee7",
+      "message": "app.datadance.ai wants you to sign in with your Ethereum account:\n0x52908400098527886E0F7030069857D2E4169EE7\n\nConfirm your DataDance wallet for this sign-in.\n\nURI: https://app.datadance.ai\nVersion: 1\nChain ID: 44508\nNonce: 9f86d081884c7d659a2feaa0c55ad015\nIssued At: 2026-09-30T09:00:00.000Z\nExpiration Time: 2026-09-30T09:10:00.000Z\nRequest ID: 3a7bd3e2360a3d29"
+    },
+    {
+      "name": "local stack domain with port; address whose EIP-55 form is all lower-case",
+      "walletProof": {
+        "domain": "localhost:20444",
+        "uri": "https://localhost:20444",
+        "chainId": 44508,
+        "statement": "Confirm your DataDance wallet for this sign-in.",
+        "nonce": "a3f1c2d4e5b6a7980112233445566778",
+        "issuedAt": "2026-09-30T09:00:00.000Z",
+        "expirationTime": "2026-09-30T09:10:00.000Z",
+        "requestId": "00ff00ff00ff00ff"
+      },
+      "address": "0xde709f2102306220921060314715629080e2fb77",
+      "message": "localhost:20444 wants you to sign in with your Ethereum account:\n0xde709f2102306220921060314715629080e2fb77\n\nConfirm your DataDance wallet for this sign-in.\n\nURI: https://localhost:20444\nVersion: 1\nChain ID: 44508\nNonce: a3f1c2d4e5b6a7980112233445566778\nIssued At: 2026-09-30T09:00:00.000Z\nExpiration Time: 2026-09-30T09:10:00.000Z\nRequest ID: 00ff00ff00ff00ff"
+    },
+    {
+      "name": "step-up challenge without request id; all upper-case address in",
+      "walletProof": {
+        "domain": "app.datadance.ai",
+        "uri": "https://app.datadance.ai",
+        "chainId": 44508,
+        "statement": "Confirm linking a new sign-in method to your DataDance account.",
+        "nonce": "0badc0de0badc0de0badc0de0badc0de",
+        "issuedAt": "2026-09-30T09:00:00.000Z",
+        "expirationTime": "2026-09-30T09:10:00.000Z"
+      },
+      "address": "0x8617E340B3D01FA5F11F306F4090FD50E238070D",
+      "message": "app.datadance.ai wants you to sign in with your Ethereum account:\n0x8617E340B3D01FA5F11F306F4090FD50E238070D\n\nConfirm linking a new sign-in method to your DataDance account.\n\nURI: https://app.datadance.ai\nVersion: 1\nChain ID: 44508\nNonce: 0badc0de0badc0de0badc0de0badc0de\nIssued At: 2026-09-30T09:00:00.000Z\nExpiration Time: 2026-09-30T09:10:00.000Z"
+    }
+  ],
+  "invalid": [
+    {
+      "name": "statement with a line break",
+      "walletProof": {
+        "domain": "app.datadance.ai",
+        "uri": "https://app.datadance.ai",
+        "chainId": 44508,
+        "statement": "line one\nline two",
+        "nonce": "9f86d081884c7d659a2feaa0c55ad015",
+        "issuedAt": "2026-09-30T09:00:00.000Z",
+        "expirationTime": "2026-09-30T09:10:00.000Z",
+        "requestId": "3a7bd3e2360a3d29"
+      },
+      "address": "0x52908400098527886e0f7030069857d2e4169ee7"
+    },
+    {
+      "name": "domain with a scheme",
+      "walletProof": {
+        "domain": "https://app.datadance.ai",
+        "uri": "https://app.datadance.ai",
+        "chainId": 44508,
+        "statement": "Confirm your DataDance wallet for this sign-in.",
+        "nonce": "9f86d081884c7d659a2feaa0c55ad015",
+        "issuedAt": "2026-09-30T09:00:00.000Z",
+        "expirationTime": "2026-09-30T09:10:00.000Z",
+        "requestId": "3a7bd3e2360a3d29"
+      },
+      "address": "0x52908400098527886e0f7030069857d2e4169ee7"
+    },
+    {
+      "name": "nonce too short",
+      "walletProof": {
+        "domain": "app.datadance.ai",
+        "uri": "https://app.datadance.ai",
+        "chainId": 44508,
+        "statement": "Confirm your DataDance wallet for this sign-in.",
+        "nonce": "abc123",
+        "issuedAt": "2026-09-30T09:00:00.000Z",
+        "expirationTime": "2026-09-30T09:10:00.000Z",
+        "requestId": "3a7bd3e2360a3d29"
+      },
+      "address": "0x52908400098527886e0f7030069857d2e4169ee7"
+    },
+    {
+      "name": "chain id as a string",
+      "walletProof": {
+        "domain": "app.datadance.ai",
+        "uri": "https://app.datadance.ai",
+        "chainId": "44508",
+        "statement": "Confirm your DataDance wallet for this sign-in.",
+        "nonce": "9f86d081884c7d659a2feaa0c55ad015",
+        "issuedAt": "2026-09-30T09:00:00.000Z",
+        "expirationTime": "2026-09-30T09:10:00.000Z",
+        "requestId": "3a7bd3e2360a3d29"
+      },
+      "address": "0x52908400098527886e0f7030069857d2e4169ee7"
+    },
+    {
+      "name": "issuedAt not RFC 3339",
+      "walletProof": {
+        "domain": "app.datadance.ai",
+        "uri": "https://app.datadance.ai",
+        "chainId": 44508,
+        "statement": "Confirm your DataDance wallet for this sign-in.",
+        "nonce": "9f86d081884c7d659a2feaa0c55ad015",
+        "issuedAt": "30/09/2026 09:00",
+        "expirationTime": "2026-09-30T09:10:00.000Z",
+        "requestId": "3a7bd3e2360a3d29"
+      },
+      "address": "0x52908400098527886e0f7030069857d2e4169ee7"
+    },
+    {
+      "name": "address not 20 bytes",
+      "walletProof": {
+        "domain": "app.datadance.ai",
+        "uri": "https://app.datadance.ai",
+        "chainId": 44508,
+        "statement": "Confirm your DataDance wallet for this sign-in.",
+        "nonce": "9f86d081884c7d659a2feaa0c55ad015",
+        "issuedAt": "2026-09-30T09:00:00.000Z",
+        "expirationTime": "2026-09-30T09:10:00.000Z",
+        "requestId": "3a7bd3e2360a3d29"
+      },
+      "address": "0x1234"
+    }
+  ]
+}

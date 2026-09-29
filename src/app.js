@@ -41,6 +41,8 @@ const lifeContextRoutes = require('./routes/lifeContextRoutes');
 const mcpRoutes = require('./routes/mcpRoutes');
 const oauthRoutes = require('./routes/oauthRoutes');
 const ssoRoutes = require('./routes/ssoRoutes');
+const nativeAuthRoutes = require('./routes/nativeAuthRoutes');
+const { jwksHandler: nativeAuthJwks } = require('./services/nativeAuth/issuer');
 
 const app = express();
 
@@ -178,6 +180,12 @@ app.use('/data-pack', express.static(path.join(__dirname, '../public/data-pack')
 // else. test/unit/appMountOrder.test.js loads this file to keep it that way.
 app.use('/api/sso', ssoRoutes);
 app.use('/', oauthRoutes);
+// Native login (DDC_AUTH_ENABLED, default off), mounted early for the same reason: it is public
+// and must be answered before any `/api` router that protects everything it sees. It only claims
+// /api/auth/native/* (404 NATIVE_AUTH_DISABLED while off) and the JWKS path, which falls through
+// untouched unless an issuer key is configured. test/unit/nativeAuthMount.test.js covers both.
+app.use('/api/auth/native', nativeAuthRoutes);
+app.get('/.well-known/ddc-auth/jwks.json', nativeAuthJwks);
 app.use('/api/ops', opsAdminRoutes);
 app.use('/api/campaigns', campaignRoutes);
 app.use('/api/auth', authRoutes);

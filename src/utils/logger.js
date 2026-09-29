@@ -24,14 +24,28 @@ const SENSITIVE_QUERY_KEYS = [
   'code_verifier',
   'password',
   'otp',
+  // Native login (contract §3.7, F3/F17): login-attempt secrets, X hand-offs and PKCE verifiers,
+  // IdP nonces and tokens, wallet signatures, Turnstile tokens.
+  'loginId',
+  'loginSecret',
+  'handoff',
+  'verifier',
+  'nonce',
+  'credential',
+  'identityToken',
+  'signature',
+  'stepUpSignature',
+  'turnstileToken',
 ];
 
 // Meta-object keys masked in addition to the query keys above.
-const SENSITIVE_META_KEYS = [...SENSITIVE_QUERY_KEYS, 'authorization', 'Authorization'];
+// w3aSubject / loginSecretHash (native login, F11): never logged by design; masked here as well so
+// a stray row dump does not put the wallet subject or a secret's hash in the logs.
+const SENSITIVE_META_KEYS = [...SENSITIVE_QUERY_KEYS, 'authorization', 'Authorization', 'w3aSubject', 'loginSecretHash'];
 
 // Keys whose value is never partially shown (a 6-digit OTP with 4 digits kept
 // is not masked; a password prefix is a password hint).
-const FULLY_HIDDEN_KEYS = ['password', 'otp'];
+const FULLY_HIDDEN_KEYS = ['password', 'otp', 'loginSecret'];
 
 const sensitiveMetaSet = new Set(SENSITIVE_META_KEYS.map((key) => key.toLowerCase()));
 const fullyHiddenSet = new Set(FULLY_HIDDEN_KEYS.map((key) => key.toLowerCase()));
@@ -54,6 +68,10 @@ const maskedValuePattern = /^(?:\[redacted\]|.{0,4}\u2026\(len=\d+\))$/;
 const queryValuePattern = new RegExp(`([?&])(${SENSITIVE_QUERY_KEYS.join('|')})=([^&#\\s]*)`, 'gi');
 // `Bearer <credential>`, `Basic <credential>`, `SsoSession <credential>`: keep the scheme.
 const authSchemePattern = /^([A-Za-z][A-Za-z0-9_-]*)\s+(\S.*)$/;
+// A JWT/JWS anywhere in free text (a library error quoting a token, a pasted id token): base64url
+// header starting `eyJ` (`{"`), a payload and an optional signature. Masked like any secret.
+// Not `\b`: a token glued to a word (`Bearer_eyJ…`, `x_eyJ…`) must be masked too.
+const jwtShapedPattern = /(?<![A-Za-z0-9])eyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]*/g;
 
 function isSensitiveMetaKey(key) {
   return sensitiveMetaSet.has(String(key).toLowerCase());
@@ -117,10 +135,13 @@ function redactUrl(url) {
 
 /**
  * Redact a free-form string (message, referer, stack): embedded query strings
- * with a sensitive key are masked; other strings pass through.
+ * with a sensitive key are masked, and so is any JWT-shaped token; other
+ * strings pass through.
  */
 function redactString(value) {
-  return redactUrl(value);
+  const out = redactUrl(value);
+  if (typeof out !== 'string' || out.indexOf('eyJ') === -1) return out;
+  return out.replace(jwtShapedPattern, (token) => maskSecret(token));
 }
 
 function isWalkable(value) {
@@ -144,6 +165,14 @@ function looksLikeErrorCode(value) {
   return typeof value === 'string' && errorCodePattern.test(value);
 }
 
+// `verifier` in a meta object is usually a Web3Auth connection name the legacy login logs
+// (`web3auth-google-sapphire-devnet`, `external-wallet`), not an X PKCE verifier (43+ random
+// base64url characters). Lower-case hyphenated names stay readable; everything else is masked.
+const connectionNamePattern = /^[a-z0-9]+(?:-[a-z0-9]+)+$/;
+function looksLikeConnectionName(value) {
+  return typeof value === 'string' && value.length <= 96 && connectionNamePattern.test(value);
+}
+
 /**
  * Redact one value given the key it is stored under.
  */
@@ -154,6 +183,7 @@ function redactValue(key, value, depth = 0, seen = new WeakSet()) {
   if (lowerKey === 'walletaddress') return maskWalletAddress(value);
   if (lowerKey === 'authorization') return maskCredential(value);
   if (lowerKey === 'code' && looksLikeErrorCode(value)) return value;
+  if (lowerKey === 'verifier' && looksLikeConnectionName(value)) return value;
   if (isSensitiveMetaKey(lowerKey)) {
     if (isWalkable(value)) return redactObject(value, depth + 1, seen);
     return maskSecret(value, { full: fullyHiddenSet.has(lowerKey) });

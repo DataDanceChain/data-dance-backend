@@ -1,6 +1,7 @@
 const app = require('./app');
 const dotenv = require('dotenv');
 const { assertPartnerConfig, assertFinancialGradeConfig } = require('./constants/partnerClient');
+const { assertNativeAuthConfig, summaryLine: nativeAuthSummaryLine } = require('./services/nativeAuth/config');
 const { applyPartnerKillSwitch } = require('./services/partnerKillSwitch');
 
 // 加载环境变量
@@ -33,9 +34,16 @@ if (moneyPath.enforced) {
       `legacyFallback=${moneyPath.legacyFallback} allowedVerifiers=${moneyPath.allowedVerifierCount} ` +
       `jwksPinMode=${moneyPath.jwksPinMode} jwksPins=${moneyPath.jwksPinCount} ` +
       `sessionSecretSeparate=${moneyPath.sessionSecretSeparate} issuer=${moneyPath.publicBaseUrl} ` +
-      `consentOrigin=${moneyPath.appPublicUrl} publicClientRegistration=${moneyPath.publicRegistration ? 'open' : 'closed'}`,
+      `consentOrigin=${moneyPath.appPublicUrl} publicClientRegistration=${moneyPath.publicRegistration ? 'open' : 'closed'}` +
+      (moneyPath.nativeAuth ? ` ${nativeAuthSummaryLine(moneyPath.nativeAuth)}` : ''),
   );
 }
+
+// Native login (DDC as the Web3Auth custom-JWT issuer). Off by default and then silent: nothing is
+// read and nothing is printed. On: refuse to start while any rule of the design's boot list fails
+// (every problem listed at once); the summary carries the public key thumbprint, never a secret.
+const nativeAuth = assertNativeAuthConfig();
+if (nativeAuth.enabled) console.log(`Native login enabled: ${nativeAuthSummaryLine(nativeAuth)}`);
 
 const PORT = process.env.PORT || 3000;
 
