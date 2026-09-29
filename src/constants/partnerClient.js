@@ -511,6 +511,8 @@ function httpsUrlProblem(name, value) {
  *   - SSO_SESSION_SECRET ≠ JWT_SECRET — that difference is what keeps the consent-only session
  *                                      out of every other authenticated endpoint.
  *   - PUBLIC_BASE_URL / APP_PUBLIC_URL, both https — the issuer and the consent origin.
+ *   - with DDC_AUTH_ENABLED=true as well: the native-login production rules (design §3.1 rule 5,
+ *     src/services/nativeAuth/config.js productionProblems) — whatever DDC_AUTH_ENV says.
  *
  * Throws with every problem listed at once; returns a summary with no secret values.
  * Called from src/server.js next to assertPartnerConfig().
@@ -579,6 +581,17 @@ function assertFinancialGradeConfig(env = process.env) {
     const problem = httpsUrlProblem(name, value);
     if (problem) problems.push(problem);
   }
+  // Native login on the money path: a deployment serving the partner flow IS production, so the
+  // native production rules (mainnet, KMS signer, no extra JWKS file, no devnet/test connection,
+  // rebind refuse, no dev echo, Turnstile enforce, https app return, a real allowlist) apply
+  // whatever DDC_AUTH_ENV says. Required lazily: nothing is loaded while DDC_AUTH_ENABLED is off.
+  let nativeAuth = null;
+  if (flag(env.DDC_AUTH_ENABLED)) {
+    const native = require('../services/nativeAuth/config');
+    const nativeCfg = native.readNativeAuthConfig(env);
+    problems.push(...native.productionProblems(nativeCfg).map((problem) => `native login: ${problem}`));
+    nativeAuth = native.summarize(nativeCfg);
+  }
 
   if (problems.length) {
     throw new Error(
@@ -597,6 +610,8 @@ function assertFinancialGradeConfig(env = process.env) {
     appPublicUrl: String(env.APP_PUBLIC_URL).trim(),
     sessionSecretSeparate: true,
     publicRegistration: String(env.OAUTH_PUBLIC_REGISTRATION_ENABLED ?? 'true').trim().toLowerCase() !== 'false',
+    // Present only when DDC_AUTH_ENABLED=true, so the summary is unchanged while it is off.
+    ...(nativeAuth ? { nativeAuth } : {}),
   };
 }
 
