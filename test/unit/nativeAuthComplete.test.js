@@ -385,6 +385,7 @@ describe('POST /complete: a new account', () => {
     assert.equal(first.res.body.data.user.xid, '42');
     assert.equal(first.res.body.data.user.email, 'x|42', 'placeholder e-mail');
     assert.equal(first.res.body.data.user.xUsername, 'handle42');
+    assert.equal(first.res.body.data.user.name, 'handle42', 'display name from the X handle');
     prisma.reset();
     addUser({ xid: '43' });
     const second = await signIn(x('43'));
@@ -741,5 +742,19 @@ describe('through the real router (flag on)', () => {
     } finally {
       process.env.DDC_AUTH_ENABLED = saved;
     }
+  });
+});
+
+describe('loadAttempt for other packages (BE7 link)', () => {
+  it("verifies a link attempt's secret only with intent 'link'", async () => {
+    const user = addUser();
+    const link = await identify(google('ada@gmail.com'), { intent: 'link', bearerUser: user });
+    const row = await complete.loadAttempt({ loginId: link.loginId, loginSecret: link.loginSecret, intent: 'link', db: prisma, cfg: cfg() });
+    assert.equal(row.userId, user.id);
+    await assert.rejects(complete.loadAttempt({ loginId: link.loginId, loginSecret: link.loginSecret, db: prisma, cfg: cfg() }), (err) => err.code === 'LOGIN_EXPIRED');
+    await assert.rejects(
+      complete.loadAttempt({ loginId: link.loginId, loginSecret: crypto.randomBytes(32).toString('base64url'), intent: 'link', db: prisma, cfg: cfg() }),
+      (err) => err.code === 'LOGIN_EXPIRED',
+    );
   });
 });

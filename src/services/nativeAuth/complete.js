@@ -70,8 +70,9 @@ function constantTimeEqualHex(a, b) {
 /**
  * Load the attempt `loginId` and check `loginSecret` against its HMAC. Any mismatch — unknown id,
  * malformed input, wrong secret, wrong intent, expired, not in `state` — is LOGIN_EXPIRED.
+ * `intent: 'link'` is for POST /identities/link (BE7); /token and /complete accept only 'login'.
  */
-async function loadAttempt({ loginId, loginSecret, state = 'identified', db, cfg, now }) {
+async function loadAttempt({ loginId, loginSecret, state = 'identified', intent = 'login', db = defaultDb(), cfg = readNativeAuthConfig(), now = new Date() }) {
   if (typeof loginId !== 'string' || !UUID_PATTERN.test(loginId)) throw expired();
   if (typeof loginSecret !== 'string' || !LOGIN_SECRET_PATTERN.test(loginSecret)) throw expired();
   const attempt = await db.authLoginAttempt.findUnique({ where: { id: loginId } });
@@ -79,9 +80,9 @@ async function loadAttempt({ loginId, loginSecret, state = 'identified', db, cfg
   const presented = loginSecretHash(loginSecret, cfg);
   if (!attempt) throw expired();
   if (!constantTimeEqualHex(presented, attempt.loginSecretHash)) throw expired();
-  if (attempt.intent !== 'login' || attempt.state !== state) throw expired();
+  if (attempt.intent !== intent || attempt.state !== state) throw expired();
   if (!(attempt.expiresAt instanceof Date) || attempt.expiresAt.getTime() <= now.getTime()) throw expired();
-  if (!attempt.w3aSubject || !attempt.walletProof) throw expired();
+  if (intent === 'login' && (!attempt.w3aSubject || !attempt.walletProof)) throw expired();
   return attempt;
 }
 
@@ -262,6 +263,7 @@ async function newAccountEmail({ identity, grade, resolution, userId, db }) {
 function displayName(identity, email) {
   if (identity.profile && identity.profile.name) return identity.profile.name;
   if (email && email.includes('@') && !email.includes('|')) return email.split('@')[0];
+  if (identity.profile && identity.profile.xUsername) return identity.profile.xUsername;
   return 'User';
 }
 
@@ -515,5 +517,6 @@ module.exports = {
   MAX_W3A_TOKENS,
   reissueToken,
   completeLogin,
-  _internals: { loadAttempt, recoverProofSigner, walletRule, newAccountEmail, profileLanguage, legacyNetwork },
+  loadAttempt,
+  _internals: { recoverProofSigner, walletRule, newAccountEmail, profileLanguage, legacyNetwork },
 };
