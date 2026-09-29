@@ -159,7 +159,9 @@ describe('native login with DDC_AUTH_ENABLED on', () => {
     setEnv(localEnv(key));
     for (const path of ['/api/auth/native/token', '/api/auth/native/complete']) {
       const res = await request(server).post(path).send({});
-      assert.equal(res.status, 501, `${path} → ${res.status} ${JSON.stringify(res.body)}`);
+      // The BE6 handler answers (LOGIN_EXPIRED for an empty body), not a protecting router's 401.
+      assert.equal(res.status, 400, `${path} → ${res.status} ${JSON.stringify(res.body)}`);
+      assert.equal(res.body.code, 'LOGIN_EXPIRED');
     }
   });
 
