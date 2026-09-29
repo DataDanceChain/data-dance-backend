@@ -81,6 +81,9 @@ model User {
   campaignRaffleWins       CampaignRaffleWin[]
   ssoTickets               SsoTicket[]
   disbursementItems        DisbursementItem[]
+  authIdentities           AuthIdentity[]
+  nativeWalletBinding      NativeWalletBinding?
+  authLoginAttempts        AuthLoginAttempt[]
 
   @@unique([web3authVerifier, web3authVerifierId])
 }
@@ -981,6 +984,13 @@ model OAuthAuthorization {
   /// can prefill it; it is NOT applied automatically — binding still only happens through the
   /// normal login/registration path the user performs.
   referralCode        String?
+  /// Optional partner hint from GET /oauth/authorize?login_method=... (email|google|apple|x|wallet;
+  /// anything else is ignored at authorize time). Returned by the public consent-request fetch for a
+  /// live, unconsumed request; the Wallet login page reads it only from there, never from its URL.
+  loginMethod         String?
+  /// Optional `login_hint` (today's email-only rule), stored and returned the same way. Never
+  /// used to send an e-mail on the user's behalf.
+  loginHint           String?
   user                User?     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([clientId])
@@ -1113,4 +1123,136 @@ model CampaignEvent {
   campaign   Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
 
   @@index([campaignId, createdAt])
+}
+
+// ---------------------------------------------------------------------------------------------
+// Native login (DDC as the Web3Auth custom-JWT issuer). Migration 20260930090000_native_auth_identity.
+// Every table is written only by src/services/nativeAuth/*; with DDC_AUTH_ENABLED=false (the
+// default) nothing reads or writes them.
+// ---------------------------------------------------------------------------------------------
+
+/// One upstream sign-in method proven by DDC itself (our e-mail OTP, Google, Apple, X), or a
+/// `web3auth_legacy` pair written by a rebind / the mainnet migration. `emailLinkGrade` decides
+/// whether `email` may ever be used to link another identity to this user: only `strong` rows are
+/// link targets ('strong' | 'weak' | 'none').
+model AuthIdentity {
+  id             String    @id @default(uuid())
+  userId         String
+  provider       String
+  subject        String
+  email          String?
+  emailLinkGrade String    @default("none")
+  isPrivateRelay Boolean   @default(false)
+  linkedVia      String
+  createdAt      DateTime  @default(now())
+  lastLoginAt    DateTime?
+  user           User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, subject])
+  @@index([userId])
+  @@index([email])
+}
+
+/// The wallet the native Web3Auth connection derives for a user. `subject` is the opaque random
+/// w3aSubject put in the DDC JWT's `sub`: never the user id, never selected outside
+/// src/services/nativeAuth/*, never returned by an API or written to a log.
+model NativeWalletBinding {
+  id         String   @id @default(uuid())
+  userId     String   @unique
+  connection String
+  network    String
+  subject    String   @unique
+  address    String
+  boundAt    DateTime @default(now())
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([connection, subject])
+}
+
+/// One login attempt between identify and /complete (`id` is the loginId). The loginSecret is
+/// stored only as an HMAC. `w3aSubject` and `walletProof` are NULL for `intent: 'link'`
+/// attempts, which never mint a Web3Auth JWT.
+model AuthLoginAttempt {
+  id              String    @id @default(uuid())
+  loginSecretHash String
+  intent          String
+  method          String
+  provider        String
+  subject         String
+  email           String?
+  emailLinkGrade  String    @default("none")
+  isPrivateRelay  Boolean   @default(false)
+  profile         Json?
+  resolution      String
+  userId          String?
+  pendingUserId   String?
+  w3aSubject      String?
+  walletProof     Json?
+  w3aTokenCount   Int       @default(0)
+  lastJti         String?
+  state           String    @default("identified")
+  ipHash          String?
+  expiresAt       DateTime
+  completedAt     DateTime?
+  createdAt       DateTime  @default(now())
+  user            User?     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([provider, subject, state])
+  @@index([expiresAt])
+}
+
+/// One e-mail OTP challenge. Only HMAC(stateKey('otp'), challengeId + ':' + code) is stored.
+/// Challenges are independent: a new one never supersedes another requester's.
+model AuthEmailChallenge {
+  id         String    @id @default(uuid())
+  email      String
+  codeHash   String
+  attempts   Int       @default(0)
+  locale     String
+  ipHash     String?
+  expiresAt  DateTime
+  consumedAt DateTime?
+  lockedAt   DateTime?
+  createdAt  DateTime  @default(now())
+
+  @@index([email, createdAt])
+}
+
+/// Short-lived single-use server state: IdP nonces, X OAuth state, X hand-offs, step-up
+/// challenges ('idp_nonce' | 'x_oauth' | 'x_handoff' | 'step_up'). `valueHash` is an HMAC of the
+/// client-held value; the value itself is never stored.
+model AuthFlowState {
+  id         String    @id @default(uuid())
+  kind       String
+  valueHash  String?   @unique
+  data       Json
+  expiresAt  DateTime
+  consumedAt DateTime?
+  createdAt  DateTime  @default(now())
+
+  @@index([expiresAt])
+}
+
+/// Audit of every wallet-address change caused by native login (local lazy rebind) or the
+/// mainnet migration. Kept when the user row is deleted (no foreign key), because it is the
+/// chain team's record of which assets moved where.
+model WalletAddressHistory {
+  id            String    @id @default(uuid())
+  userId        String
+  oldAddress    String
+  oldVerifier   String?
+  oldVerifierId String?
+  oldNetwork    String
+  newAddress    String
+  newVerifier   String
+  newSubjectRef String
+  newNetwork    String
+  reason        String
+  status        String
+  chainStatus   String
+  chainRef      String?
+  createdAt     DateTime  @default(now())
+  appliedAt     DateTime?
+
+  @@index([userId])
 }
