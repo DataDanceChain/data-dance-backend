@@ -52,6 +52,23 @@ describe('native login redaction', () => {
     assert.equal(redactString(redactString(JWT)), redactString(JWT), 'idempotent');
   });
 
+  it('masks a JWT glued to a word (no word boundary before eyJ)', () => {
+    for (const prefix of ['Bearer_', 'x_', 'token-', 'id=']) {
+      const out = redactString(`${prefix}${JWT} end`);
+      assert.ok(!out.includes(JWT.split('.')[1]), `${prefix}: ${out}`);
+    }
+    // eyJ in the middle of an alphanumeric run is not the start of a token (keeps ordinary text).
+    assert.equal(redactString('abceyJhbGciOiJSUz.eyJzdWIiOiIw'), 'abceyJhbGciOiJSUz.eyJzdWIiOiIw');
+  });
+
+  it('masks w3aSubject and loginSecretHash in meta objects (F11 defence in depth)', () => {
+    const subject = '3f2c9a4e-8b1d-4c7a-9e21-6a0b5d4c3e2f';
+    const out = redactObject({ w3aSubject: subject, row: { loginSecretHash: LONG, W3ASUBJECT: subject } });
+    assert.ok(!JSON.stringify(out).includes(subject));
+    assert.ok(!JSON.stringify(out).includes(LONG));
+    assert.ok(SENSITIVE_META_KEYS.includes('w3aSubject') && SENSITIVE_META_KEYS.includes('loginSecretHash'));
+  });
+
   it('keeps Web3Auth connection names under `verifier` readable, masks PKCE verifiers', () => {
     assert.equal(redactObject({ verifier: 'web3auth-google-sapphire-devnet' }).verifier, 'web3auth-google-sapphire-devnet');
     assert.equal(redactObject({ verifier: 'external-wallet' }).verifier, 'external-wallet');

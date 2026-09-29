@@ -39,7 +39,9 @@ const SENSITIVE_QUERY_KEYS = [
 ];
 
 // Meta-object keys masked in addition to the query keys above.
-const SENSITIVE_META_KEYS = [...SENSITIVE_QUERY_KEYS, 'authorization', 'Authorization'];
+// w3aSubject / loginSecretHash (native login, F11): never logged by design; masked here as well so
+// a stray row dump does not put the wallet subject or a secret's hash in the logs.
+const SENSITIVE_META_KEYS = [...SENSITIVE_QUERY_KEYS, 'authorization', 'Authorization', 'w3aSubject', 'loginSecretHash'];
 
 // Keys whose value is never partially shown (a 6-digit OTP with 4 digits kept
 // is not masked; a password prefix is a password hint).
@@ -68,7 +70,8 @@ const queryValuePattern = new RegExp(`([?&])(${SENSITIVE_QUERY_KEYS.join('|')})=
 const authSchemePattern = /^([A-Za-z][A-Za-z0-9_-]*)\s+(\S.*)$/;
 // A JWT/JWS anywhere in free text (a library error quoting a token, a pasted id token): base64url
 // header starting `eyJ` (`{"`), a payload and an optional signature. Masked like any secret.
-const jwtShapedPattern = /\beyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]*/g;
+// Not `\b`: a token glued to a word (`Bearer_eyJ…`, `x_eyJ…`) must be masked too.
+const jwtShapedPattern = /(?<![A-Za-z0-9])eyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]*/g;
 
 function isSensitiveMetaKey(key) {
   return sensitiveMetaSet.has(String(key).toLowerCase());
