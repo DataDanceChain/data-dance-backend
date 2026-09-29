@@ -111,7 +111,12 @@ beforeEach(() => {
 // Fixtures
 // ---------------------------------------------------------------------------------------------
 let seq = 0;
-async function makeUser({ wallet = Wallet.createRandom(), email, password = null, web3authVerifier = 'ddc-jwt-devnet', web3authVerifierId } = {}) {
+/**
+ * A user; with a wallet, by default a native account (native connection pair + a
+ * NativeWalletBinding for the wallet, as complete.js writes them). `binding: false` leaves the
+ * binding out; `chainId` is what the session-only wallet endpoints write.
+ */
+async function makeUser({ wallet = Wallet.createRandom(), email, password = null, web3authVerifier = 'ddc-jwt-devnet', web3authVerifierId, binding = true, chainId = null } = {}) {
   seq += 1;
   const id = `00000000-0000-4000-8000-${String(seq).padStart(12, '0')}`;
   const user = await prisma.user.create({
@@ -120,6 +125,7 @@ async function makeUser({ wallet = Wallet.createRandom(), email, password = null
       email: email || `email|${id}`,
       name: `User ${seq}`,
       walletAddress: wallet ? wallet.address : null,
+      chainId,
       authType: wallet ? 'web3auth' : 'traditional',
       userType: 'regular',
       password,
@@ -128,7 +134,19 @@ async function makeUser({ wallet = Wallet.createRandom(), email, password = null
       disabledAt: null,
     },
   });
+  if (wallet && binding && web3authVerifier === cfg().connectionId) {
+    await prisma.nativeWalletBinding.create({
+      data: { userId: id, connection: cfg().connectionId, network: cfg().network, subject: `w3a-${id}`, address: wallet.address },
+    });
+  }
   return { user, wallet };
+}
+
+/** What PUT /api/users/wallet does on an account without a wallet: no signature, a chainId. */
+function setWalletWithoutProof(userId, address, chainId = 1) {
+  const row = prisma.user.rows.find((r) => r.id === userId);
+  row.walletAddress = address;
+  row.chainId = chainId;
 }
 
 async function addIdentity(userId, { provider = 'email', subject, email, grade, linkedVia = 'created', createdAt } = {}) {
@@ -402,15 +420,25 @@ describe('POST /identities/challenge + /identities/link (wallet step-up)', () =>
     assert.equal(prisma.authIdentity.rows.filter((r) => r.provider === 'x').length, 1);
   });
 
-  it('a wallet changed since the challenge → STEP_UP_INVALID', async () => {
+  it('a wallet changed since the challenge → STEP_UP_INVALID (the old wallet and the new one alike)', async () => {
     const { user, wallet } = await makeUser();
     const identified = await linkAttempt(user, x('999'));
     const ch = await challenge(user, { action: 'link', loginId: identified.loginId });
     const sig = await sign(wallet, ch.body.data.stepUp);
+    // A proven rebind to another wallet (binding and column both move).
     const next = Wallet.createRandom();
     prisma.user.rows.find((r) => r.id === user.id).walletAddress = next.address;
-    const res = await request(server).post('/identities/link').set(as(user)).send({ loginId: identified.loginId, loginSecret: identified.loginSecret, stepUpSignature: sig });
+    prisma.nativeWalletBinding.rows.find((r) => r.userId === user.id).address = next.address;
+    const send = (stepUpSignature) =>
+      request(server).post('/identities/link').set(as(user)).send({ loginId: identified.loginId, loginSecret: identified.loginSecret, stepUpSignature });
+    let res = await send(sig);
     assert.equal(res.body.code, 'STEP_UP_INVALID');
+    // The NEW wallet signing the challenge issued for the old one: only the issued-address check stops it.
+    res = await send(await sign(next, ch.body.data.stepUp));
+    assert.equal(res.status, 401);
+    assert.equal(res.body.code, 'STEP_UP_INVALID');
+    assert.equal(res.body.data.reason, 'challenge');
+    assert.equal(prisma.authIdentity.rows.length, 0);
   });
 
   it('another user’s link attempt, a wrong secret, an expired attempt → LOGIN_EXPIRED', async () => {
@@ -452,6 +480,8 @@ describe('POST /identities/challenge + /identities/link (wallet step-up)', () =>
     assert.equal(res.status, 409);
     assert.equal(res.body.code, 'IDENTITY_ALREADY_LINKED');
     assert.equal(prisma.authIdentity.rows.filter((r) => r.subject === '3003').length, 1);
+    // Refused by the pre-check, before the step-up: the challenge is not spent.
+    assert.equal(prisma.authFlowState.rows.find((r) => r.kind === 'step_up').consumedAt, null);
   });
 
   it('a unique-constraint race at insert → IDENTITY_ALREADY_LINKED and the attempt is put back', async () => {
@@ -671,6 +701,151 @@ describe('step-up for an account without a wallet', () => {
     res = await request(server).delete(`/identities/${extra.id}`).set(as(user)).send({ stepUpLoginId: proof.loginId, stepUpLoginSecret: proof.loginSecret });
     assert.equal(res.status, 204, JSON.stringify(res.body));
     assert.equal(prisma.authIdentity.rows.length, 1);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// F2: only a wallet a login proved is a step-up
+// ---------------------------------------------------------------------------------------------
+describe('F2: an unproven User.walletAddress is not a step-up', () => {
+  it('a session that writes its own wallet on a wallet-less account cannot link or unlink with it', async () => {
+    // A password account with a strong e-mail identity and an X identity (the victim's).
+    const { user } = await makeUser({ wallet: null, email: 'victim@example.com', password: 'hash' });
+    const victimEmail = await addIdentity(user.id, { provider: 'email', subject: 'victim@example.com' });
+    await addIdentity(user.id, { provider: 'x', subject: 'v-1' });
+    // A stolen session sets the column to the attacker's wallet (PUT /api/users/wallet).
+    const attacker = Wallet.createRandom();
+    setWalletWithoutProof(user.id, attacker.address);
+
+    const identified = await linkAttempt(user, google('attacker@gmail.com'));
+    const ch = await challenge(user, { action: 'link', loginId: identified.loginId });
+    assert.equal(ch.status, 200, JSON.stringify(ch.body));
+    assert.deepEqual(ch.body.data, { stepUp: null, mode: 'identify' });
+    assert.equal(prisma.authFlowState.rows.filter((r) => r.kind === 'step_up').length, 0, 'no wallet challenge is issued');
+
+    // A signature by the attacker's wallet over a well-formed proof is not accepted.
+    const forged = {
+      domain: cfg().proofDomain, uri: cfg().proofUri, chainId: 44508, statement: 'Add Google.', nonce: 'a'.repeat(32),
+      issuedAt: new Date().toISOString(), expirationTime: new Date(Date.now() + 60000).toISOString(), requestId: config.loginRef(identified.loginId, cfg()),
+    };
+    const stepUpSignature = await sign(attacker, forged);
+    let res = await request(server).post('/identities/link').set(as(user)).send({ loginId: identified.loginId, loginSecret: identified.loginSecret, stepUpSignature });
+    assert.equal(res.status, 401);
+    assert.equal(res.body.code, 'STEP_UP_REQUIRED');
+    assert.equal(res.body.data.mode, 'identify');
+    assert.equal(prisma.authIdentity.rows.some((r) => r.provider === 'google'), false);
+
+    const un = await challenge(user, { action: 'unlink', identityId: victimEmail.id });
+    assert.deepEqual(un.body.data, { stepUp: null, mode: 'identify' });
+    res = await request(server).delete(`/identities/${victimEmail.id}`).set(as(user)).send({ stepUpSignature });
+    assert.equal(res.body.code, 'STEP_UP_REQUIRED');
+    assert.ok(prisma.authIdentity.rows.some((r) => r.id === victimEmail.id), 'the victim’s method stays');
+
+    // Without a chainId (any other unproven write) it is the same.
+    prisma.user.rows.find((r) => r.id === user.id).chainId = null;
+    assert.equal((await challenge(user, { action: 'link', loginId: identified.loginId })).body.data.mode, 'identify');
+  });
+
+  it('which wallets count: a matching native binding, an external-wallet pair of that address, a legacy login pair', async () => {
+    const mode = async (made) => {
+      const identified = await linkAttempt(made.user, x(`m-${made.user.id}`));
+      const ch = await challenge(made.user, { action: 'link', loginId: identified.loginId });
+      assert.equal(ch.status, 200, JSON.stringify(ch.body));
+      return ch.body.data.mode;
+    };
+    const w = () => Wallet.createRandom();
+
+    assert.equal(await mode(await makeUser()), 'wallet', 'native: binding of this address');
+    assert.equal(await mode(await makeUser({ binding: false })), 'identify', 'native pair without a binding');
+    const moved = await makeUser();
+    prisma.nativeWalletBinding.rows.find((r) => r.userId === moved.user.id).address = w().address;
+    assert.equal(await mode(moved), 'identify', 'a binding for another address');
+
+    const ext = w();
+    assert.equal(await mode(await makeUser({ wallet: ext, web3authVerifier: identities.EXTERNAL_WALLET_VERIFIER, web3authVerifierId: ext.address.toLowerCase() })), 'wallet');
+    assert.equal(await mode(await makeUser({ web3authVerifier: identities.EXTERNAL_WALLET_VERIFIER, web3authVerifierId: w().address.toLowerCase() })), 'identify', 'external-wallet pair of another address');
+
+    assert.equal(await mode(await makeUser({ web3authVerifier: LEGACY_EMAIL, web3authVerifierId: 'l1@example.com' })), 'wallet', 'legacy login pair');
+    assert.equal(await mode(await makeUser({ web3authVerifier: LEGACY_EMAIL, web3authVerifierId: 'l2@example.com', chainId: 1 })), 'identify', 'legacy pair whose wallet a session endpoint wrote');
+
+    // A binding is authoritative even with a legacy pair on the row.
+    const rebound = await makeUser({ web3authVerifier: LEGACY_EMAIL, web3authVerifierId: 'l3@example.com' });
+    await prisma.nativeWalletBinding.create({ data: { userId: rebound.user.id, connection: cfg().connectionId, network: cfg().network, subject: 'w3a-l3', address: w().address } });
+    assert.equal(await mode(rebound), 'identify');
+  });
+
+  it('the external-wallet verifier name mirrors the legacy service', () => {
+    // Read from the source: loading that module runs its Web3Auth boot assertion.
+    const source = fs.readFileSync(path.join(__dirname, '../../src/services/web3authIdentity.js'), 'utf8');
+    const match = source.match(/^const EXTERNAL_WALLET_VERIFIER = '([^']+)';$/m);
+    assert.ok(match);
+    assert.equal(identities.EXTERNAL_WALLET_VERIFIER, match[1]);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// The identify step-up belongs to this account, for a method of this account
+// ---------------------------------------------------------------------------------------------
+describe('identify step-up: whose attempt, whose method', () => {
+  async function walletless(address) {
+    const made = await makeUser({ wallet: null, email: address, password: 'hash' });
+    const own = await addIdentity(made.user.id, { provider: 'email', subject: address });
+    const target = await linkAttempt(made.user, x(`t-${made.user.id}`));
+    const send = (extra) => request(server).post('/identities/link').set(as(made.user)).send({ loginId: target.loginId, loginSecret: target.loginSecret, ...extra });
+    return { ...made, own, target, send };
+  }
+
+  it('another account’s link attempt is never this account’s proof (its own method, or ours)', async () => {
+    const a = await walletless('ia@example.com');
+    const b = await walletless('ib@example.com');
+    // B re-identifies B's own method: a valid proof for B, not for A.
+    const bOwn = await linkAttempt(b.user, email('ib@example.com'));
+    let res = await a.send({ stepUpLoginId: bOwn.loginId, stepUpLoginSecret: bOwn.loginSecret });
+    assert.equal(res.body.code, 'STEP_UP_INVALID');
+    assert.equal(res.body.data.reason, 'identify');
+    // B proves A's method (the attempt's owner is B): still not A's proof.
+    const bOfA = await linkAttempt(b.user, email('ia@example.com'));
+    res = await a.send({ stepUpLoginId: bOfA.loginId, stepUpLoginSecret: bOfA.loginSecret });
+    assert.equal(res.body.code, 'STEP_UP_INVALID');
+    assert.equal(res.body.data.reason, 'identify');
+    assert.equal(prisma.authIdentity.rows.some((r) => r.subject === `t-${a.user.id}`), false);
+    // …and neither proof was spent.
+    for (const id of [bOwn.loginId, bOfA.loginId]) assert.equal(prisma.authLoginAttempt.rows.find((r) => r.id === id).state, 'identified');
+  });
+
+  it('this account’s attempt of a method linked to ANOTHER account is not a proof', async () => {
+    const a = await walletless('ic@example.com');
+    const b = await walletless('id@example.com');
+    const aOfB = await linkAttempt(a.user, email('id@example.com'));
+    assert.equal(prisma.authLoginAttempt.rows.find((r) => r.id === aOfB.loginId).userId, a.user.id);
+    const res = await a.send({ stepUpLoginId: aOfB.loginId, stepUpLoginSecret: aOfB.loginSecret });
+    assert.equal(res.body.code, 'STEP_UP_INVALID');
+    assert.equal(res.body.data.reason, 'identify');
+    assert.ok(b.own);
+  });
+
+  it('only our OTP for the account’s own real address skips the proof', async () => {
+    // Another address than User.email.
+    const { user } = await makeUser({ wallet: null, email: 'mine@example.com', password: 'hash' });
+    await addIdentity(user.id, { provider: 'x', subject: 'o-1' });
+    const other = await linkAttempt(user, email('not-mine@example.com'));
+    let ch = await challenge(user, { action: 'link', loginId: other.loginId });
+    assert.deepEqual(ch.body.data, { stepUp: null, mode: 'identify' });
+    let res = await request(server).post('/identities/link').set(as(user)).send({ loginId: other.loginId, loginSecret: other.loginSecret });
+    assert.equal(res.status, 401);
+    assert.equal(res.body.code, 'STEP_UP_REQUIRED');
+    assert.equal(res.body.data.mode, 'identify');
+
+    // A placeholder User.email never counts, even if an attempt carries the same string.
+    const ph = await makeUser({ wallet: null, password: 'hash' });
+    const placeholder = ph.user.email;
+    assert.match(placeholder, /^email\|/);
+    const same = await linkAttempt(ph.user, { provider: 'email', subject: placeholder, email: placeholder, emailVerified: true });
+    ch = await challenge(ph.user, { action: 'link', loginId: same.loginId });
+    assert.deepEqual(ch.body.data, { stepUp: null, mode: 'identify' });
+    res = await request(server).post('/identities/link').set(as(ph.user)).send({ loginId: same.loginId, loginSecret: same.loginSecret });
+    assert.equal(res.body.code, 'STEP_UP_REQUIRED');
+    assert.equal(prisma.authIdentity.rows.some((r) => r.userId === ph.user.id), false);
   });
 });
 
