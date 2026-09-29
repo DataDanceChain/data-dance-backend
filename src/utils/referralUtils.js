@@ -38,16 +38,16 @@ const LEGACY_CODE_PATTERN = /^DD[A-Z0-9]{8}$/i;
 /**
  * Format-only check: does `raw` look like a referral code this app could ever issue, WITHOUT
  * looking anything up? Accepts exactly what `referralCodeLookupValues` below would search for —
- * the 6-character display code or the legacy "DD########" code, case-insensitive, tolerant of
- * surrounding/internal whitespace and (for the legacy form) a hyphen after "DD" — and nothing
- * else. Used where a caller must reject a malformed code before any database access (e.g.
+ * the 6-character display code (bare or with the "DDC-" display prefix) or the legacy
+ * "DD########" code, case-insensitive, tolerant of surrounding/internal whitespace and (for the
+ * legacy form) a hyphen after "DD" — and nothing else. Used where a caller must reject a malformed code before any database access (e.g.
  * /oauth/authorize's optional referral_code, which must not become a code-enumeration oracle).
  */
 function isValidReferralCodeFormat(raw) {
   if (typeof raw !== 'string') return false;
   const compact = raw.trim().replace(/\s+/g, '');
   if (!compact || compact.length > 32) return false;
-  if (isDisplayReferralCode(compact.toUpperCase())) return true;
+  if (bareDisplayReferralCode(compact)) return true; // AB23CD, ab23cd, DDC-AB23CD, ddc ab23cd
   return LEGACY_CODE_PATTERN.test(compact.replace(/-/g, ''));
 }
 
