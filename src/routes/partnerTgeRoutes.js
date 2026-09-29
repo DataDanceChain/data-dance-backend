@@ -37,7 +37,7 @@ const { issueConfirmToken, verifyConfirmToken } = require('../services/referralB
 const { findUserByPartnerToken } = require('../services/mcpTokenService');
 const { hasActiveConsent } = require('../services/dataLicenceConsent');
 const { isDisplayReferralCode, getInviterId, countDirectInvitees } = require('../utils/referralUtils');
-const { formatReferralCodeForDisplay } = require('../utils/referralCodeFormat');
+const { formatReferralCodeForDisplay, normalizeReferralCodeInput } = require('../utils/referralCodeFormat');
 const { createLogger } = require('../utils/logger');
 const prisma = require('../utils/prisma');
 const { installReadOnlyGuard, runReadOnly } = require('../utils/prismaReadOnly');
@@ -372,7 +372,10 @@ function referralFeaturesEnabled(req, res, next) {
   return next();
 }
 
-/** Audit trail for both steps. Replaceable for tests, like accessLog. No token, no full code. */
+/**
+ * Audit trail for both steps. Replaceable for tests, like accessLog. No token, no full code: only
+ * the first characters of the normalised code, so "DDC-AB23CD" logs "AB…" rather than "DD…".
+ */
 const BIND_OK_EVENTS = new Set(['partner.referral_bound', 'partner.referral_bind_checked']);
 const bindLog = {
   write: (event, entry) => (BIND_OK_EVENTS.has(event) ? logger.info(event, entry) : logger.warn(event, entry)),
@@ -390,7 +393,7 @@ function recordBindStep(req, step, outcome, code, extra = {}) {
     userId: user.id,
     tokenId: token.id || null,
     outcome,
-    codePrefix: codePrefix(code),
+    codePrefix: codePrefix(normalizeReferralCodeInput(code)),
     ...extra,
   });
 }
@@ -430,6 +433,8 @@ router.post('/referral/bind/check', ...bindGates, readOnlyRequest, async (req, r
       recordBindStep(req, 'check', result.outcome, code);
       return res.status(result.status).json(result.body);
     }
+    // The token binds the bare stored code, so /bind confirms with the typed, bare or "DDC-" form
+    // alike; only the response shows the display form every other endpoint returns (decision 36).
     const { token, expiresIn } = issueConfirmToken({
       clientId: req.partner.client.clientId,
       userId: req.partner.user.id,
@@ -438,7 +443,7 @@ router.post('/referral/bind/check', ...bindGates, readOnlyRequest, async (req, r
     recordBindStep(req, 'check', result.outcome, code);
     return res.status(200).json({
       valid: true,
-      code: result.canonical,
+      code: formatReferralCodeForDisplay(result.canonical),
       confirm_token: token,
       expires_in: expiresIn,
       ...(result.already ? { already: true } : {}),
