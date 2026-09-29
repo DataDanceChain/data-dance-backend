@@ -58,6 +58,7 @@ const {
   findUserByReferralCode,
   withDisplayReferralCode,
   validateReferralCode,
+  isValidReferralCodeFormat,
 } = require('../../src/utils/referralUtils');
 const referralService = require('../../src/services/referralService');
 const userController = require('../../src/controllers/userController');
@@ -194,6 +195,15 @@ describe('format / normalise helpers', () => {
       assert.ok(values.includes('AB23CD'), `${input} → ${values}`);
     }
     assert.ok(referralCodeLookupValues('DD-12345678').includes('DD12345678'), 'legacy lookup unchanged');
+  });
+
+  it('isValidReferralCodeFormat accepts the display code with or without the DDC- prefix', () => {
+    for (const input of ['AB23CD', 'ab23cd', 'DDC-AB23CD', 'ddc-ab23cd', 'DDCAB23CD', ' ddc ab23cd ', 'DD12345678', 'DD-a1b2c3d4', 'DDC1234567']) {
+      assert.equal(isValidReferralCodeFormat(input), true, input);
+    }
+    for (const input of ['', 'AB', 'DDC-', 'DDC-AB23C', 'DDC-AB23CD12', 'DDC-0O1IL2', 'DD1234567', 'not-a-code', 'x'.repeat(40), null, 42]) {
+      assert.equal(isValidReferralCodeFormat(input), false, String(input));
+    }
   });
 
   it('withDisplayReferralCode formats only the referralCode field and copes with null', () => {

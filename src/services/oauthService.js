@@ -16,6 +16,7 @@ const {
 } = require('../constants/partnerClient');
 const { isCEndSubject } = require('./dataLicenceConsent');
 const { isValidReferralCodeFormat } = require('../utils/referralUtils');
+const { normalizeReferralCodeInput, formatReferralCodeForDisplay } = require('../utils/referralCodeFormat');
 
 const { createLogger } = require('../utils/logger');
 // The write scope's gate (decision 30 A); kept on their own line, apart from the main import.
@@ -497,7 +498,8 @@ async function startAuthorization(req, query, res) {
       if (!isValidReferralCodeFormat(rawReferralCode)) {
         throw new OAuthError(400, 'invalid_request', 'referral_code is not a valid referral code format.');
       }
-      referralCode = rawReferralCode.trim().replace(/\s+/g, '');
+      // Store only the bare code ("DDC-ab23cd" → "AB23CD"); legacy codes are kept as sent.
+      referralCode = normalizeReferralCodeInput(rawReferralCode.trim().replace(/\s+/g, ''));
     }
     // Bind BEFORE the row is written, so a row never exists without the hash of the cookie that
     // was actually set on this response.
@@ -557,7 +559,7 @@ async function getConsentRequest(id) {
     resource: row.resource,
     // Prefill only: the Wallet login/registration page may show this, but binding it to the
     // account only ever happens through the normal login/registration path the user performs.
-    referralCode: row.referralCode || null,
+    referralCode: formatReferralCodeForDisplay(row.referralCode || null),
     expiresAt: row.expiresAt,
     // Only a hint for the Wallet (post the Allow without a tap). Never a decision: the code is
     // minted by the credentialed POST /api/oauth/consent, which re-checks the switch itself.
