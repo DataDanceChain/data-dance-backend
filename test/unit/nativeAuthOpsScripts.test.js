@@ -156,6 +156,26 @@ describe('scripts/nativeAuthBackfillIdentities', () => {
     assert.equal(backfill.identityForPair('external-wallet', '0xabc', lists), null);
   });
 
+  it('normalises e-mail pairs exactly as the OTP path does (IDN domain, trailing dot)', () => {
+    const { normalizeEmail } = require('../../src/services/nativeAuth/emailGuard');
+    const idn = backfill.identityForPair(LEGACY_EMAIL, ' Ann@Bücher.Example. ', lists);
+    assert.equal(idn.identity.subject, 'ann@xn--bcher-kva.example');
+    assert.equal(idn.identity.subject, normalizeEmail(' Ann@Bücher.Example. '));
+    assert.equal(idn.identity.email, idn.identity.subject);
+    assert.equal(idn.legacyId, 'ann@bücher.example.', 'the pair keeps its own spelling for the ambiguity check');
+    assert.equal(backfill.identityForPair(LEGACY_GOOGLE, 'Bob@Gmail.com.', lists).identity.subject, 'bob@gmail.com');
+    // An address the OTP path refuses can never be signed in natively: not backfilled.
+    assert.deepEqual(backfill.identityForPair(LEGACY_EMAIL, 'a b@example.com', lists), { skip: 'malformed_pair' });
+    assert.deepEqual(backfill.identityForPair(LEGACY_EMAIL, 'ann@localhost', lists), { skip: 'malformed_pair' });
+  });
+
+  it('the ambiguity check also matches another legacy pair spelled like the original (IDN)', async () => {
+    const a = user({ web3authVerifier: LEGACY_EMAIL, web3authVerifierId: 'zoe@bücher.example' });
+    user({ web3authVerifier: LEGACY_EMAIL, web3authVerifierId: 'ZOE@Bücher.example' });
+    const plan = await backfill.planUserIdentity({ user: a, lists, db: prisma });
+    assert.deepEqual(plan, { status: 'skip', reason: 'ambiguous' });
+  });
+
   it('dry run writes nothing; --write creates; a rerun finds everything present', async () => {
     const a = user({ web3authVerifier: LEGACY_EMAIL, web3authVerifierId: 'ann@example.com' });
     const b = user({ web3authVerifier: LEGACY_X, web3authVerifierId: 'twitter|777' });
@@ -271,7 +291,22 @@ describe('scripts/nativeAuthWalletMigration', () => {
     assert.throws(() => migration.assertTarget({ network: 'sapphire_devnet', connection: LEGACY_EMAIL }, cfg), /legacy verifier/);
     assert.throws(() => migration.assertTarget({ network: 'sapphire_devnet', connection: 'external-wallet' }, cfg), /external-wallet/);
     assert.doesNotThrow(() => migration.assertTarget(MAINNET, cfg));
-    assert.doesNotThrow(() => migration.assertTarget({ network: 'sapphire_devnet', connection: 'ddc-jwt-devnet-2' }, cfg));
+    assert.doesNotThrow(() => migration.assertTarget({ network: 'sapphire_devnet', connection: 'ddc-jwt-devnet-2' }, cfg, { nodeEnv: 'development' }));
+  });
+
+  it('on production refuses any non-mainnet or devnet/test target unless explicitly overridden', () => {
+    const prodCfg = readNativeAuthConfig({ DDC_AUTH_ENV: 'prod', DDC_AUTH_LEGACY_EMAIL_VERIFIERS: LEGACY_EMAIL });
+    const devnet = { network: 'sapphire_devnet', connection: 'ddc-jwt-devnet' };
+    assert.throws(() => migration.assertTarget(devnet, prodCfg, { nodeEnv: 'development' }), /production .* --allow-non-prod-target/);
+    assert.throws(() => migration.assertTarget({ network: 'sapphire_devnet', connection: 'ddc-jwt-other' }, prodCfg, { nodeEnv: '' }), /production/);
+    assert.throws(() => migration.assertTarget(devnet, cfg, { nodeEnv: 'production' }), /production/, 'NODE_ENV=production counts too');
+    assert.doesNotThrow(() => migration.assertTarget(MAINNET, prodCfg, { nodeEnv: 'production' }));
+    assert.doesNotThrow(() => migration.assertTarget(devnet, prodCfg, { allowNonProd: true, nodeEnv: 'production' }));
+    // The override never relaxes the mainnet rule itself.
+    assert.throws(() => migration.assertTarget({ network: 'sapphire_mainnet', connection: 'ddc-jwt-devnet' }, prodCfg, { allowNonProd: true }), /devnet/);
+    assert.equal(migration.isProduction(cfg, 'test'), false);
+    assert.equal(migration.parseArgs(['--apply', '--allow-non-prod-target']).allowNonProd, true);
+    assert.equal(migration.parseArgs(['--apply']).allowNonProd, false);
   });
 
   it('parses exactly one mode; dry run unless --write; --export is read-only', () => {
@@ -448,6 +483,43 @@ describe('scripts/nativeAuthWalletMigration', () => {
     assert.equal(prisma.store.nativeWalletBinding.find((b) => b.id === 'b-native').connection, 'ddc-jwt-devnet');
   });
 
+  it('--apply skips a legacy account whose pair changed since the plan (same wallet)', async () => {
+    const s = seedAccounts();
+    await migration.planMigration({ target: MAINNET, clientId: 'c', write: true, db: prisma, lookup: fakeLookup().lookup });
+    const wallet = s.legacy.walletAddress;
+    s.legacy.web3authVerifierId = 'someone-else@example.com'; // re-linked after the plan, wallet unchanged
+    const summary = await migration.applyMigration({ target: MAINNET, db: prisma, cfg, write: true });
+    assert.deepEqual(summary.outcomes, { skipped_stale: 1, applied_native: 1, applied_external: 1 });
+    const legacy = prisma.store.user.find((u) => u.id === s.legacy.id);
+    assert.deepEqual([legacy.walletAddress, legacy.web3authVerifier], [wallet, LEGACY_EMAIL]);
+    assert.equal(prisma.store.authIdentity.some((r) => r.userId === s.legacy.id), false, 'nothing backfilled for a stale row');
+    assert.equal(prisma.store.walletAddressHistory.find((r) => r.userId === s.legacy.id).status, 'planned');
+
+    const verifierChanged = seedAccounts();
+    await migration.planMigration({ target: MAINNET, clientId: 'c', write: true, db: prisma, lookup: fakeLookup().lookup });
+    verifierChanged.legacy.web3authVerifier = LEGACY_GOOGLE;
+    const again = await migration.applyMigration({ target: MAINNET, db: prisma, cfg, write: true });
+    assert.equal(again.outcomes.skipped_stale, 2);
+  });
+
+  it('--apply writes nothing when another run claimed the row first', async () => {
+    const s = seedAccounts();
+    await migration.planMigration({ target: MAINNET, clientId: 'c', write: true, db: prisma, lookup: fakeLookup().lookup });
+    const oldWallet = s.legacy.walletAddress;
+    const realUpdateMany = prisma.walletAddressHistory.updateMany;
+    // A concurrent apply won the claim between this run's check and its claim.
+    prisma.walletAddressHistory.updateMany = async () => ({ count: 0 });
+    try {
+      const summary = await migration.applyMigration({ target: MAINNET, db: prisma, cfg, write: true });
+      assert.deepEqual(summary.outcomes, { skipped_already_applied: 3 });
+    } finally {
+      prisma.walletAddressHistory.updateMany = realUpdateMany;
+    }
+    assert.equal(prisma.store.user.find((u) => u.id === s.legacy.id).walletAddress, oldWallet);
+    assert.equal(prisma.store.authIdentity.length, 0);
+    assert.equal(prisma.store.nativeWalletBinding.find((b) => b.id === 'b-native').connection, 'ddc-jwt-devnet');
+  });
+
   it('--apply for a legacy account without a linkable pair says so (an orphan)', async () => {
     const apple = user({ walletAddress: addr(), web3authVerifier: LEGACY_APPLE, web3authVerifierId: 'apple-sub' });
     await migration.planMigration({ target: MAINNET, clientId: 'c', write: true, db: prisma, lookup: fakeLookup().lookup });
@@ -518,6 +590,25 @@ describe('scripts/nativeAuthOrphanReport', () => {
     assert.deepEqual(report.flags, { x_without_legacy_pair: 1, apple_relay_email: 2 });
     assert.equal(JSON.stringify(report).includes('@'), false, 'counts only');
     assert.equal(JSON.stringify(prisma.store), before, 'read-only');
+  });
+
+  it('counts a linkable pair the backfill would skip as an orphan (backfill_blocked)', async () => {
+    // Two legacy pairs for one address: the backfill skips both as ambiguous.
+    user({ web3authVerifier: LEGACY_EMAIL, web3authVerifierId: 'twin@gmail.com' });
+    user({ web3authVerifier: LEGACY_GOOGLE, web3authVerifierId: 'twin@gmail.com' });
+    // Another account holds a strong identity for this address.
+    const holder = user({});
+    prisma.store.authIdentity.push({ id: 'h1', userId: holder.id, provider: 'google', subject: 'g-9', email: 'held@example.com', emailLinkGrade: 'strong', linkedVia: 'created' });
+    const blocked = user({ web3authVerifier: LEGACY_EMAIL, web3authVerifierId: 'held@example.com' });
+    const fine = user({ web3authVerifier: LEGACY_EMAIL, web3authVerifierId: 'fine@example.com' });
+    const listed = [];
+    const report = await orphans.orphanReport({ db: prisma, cfg, onOrphan: (id, reason) => listed.push([id, reason]) });
+    assert.equal(report.orphans.backfill_blocked, 3);
+    assert.deepEqual(report.backfillBlocked, { ambiguous: 2, strong_email_owned_elsewhere: 1 });
+    assert.equal(report.statuses.needs_backfill, 1);
+    assert.ok(listed.some(([id, reason]) => id === blocked.id && reason === 'backfill_blocked'));
+    assert.equal(listed.some(([id]) => id === fine.id), false);
+    assert.equal(JSON.stringify(report).includes('@'), false, 'counts only');
   });
 
   it('warns when no legacy verifier is configured', async () => {

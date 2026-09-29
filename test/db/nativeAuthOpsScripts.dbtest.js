@@ -159,6 +159,35 @@ describe('BE9 scripts on Postgres', () => {
     assert.ok(xUser.id);
   });
 
+  it('three concurrent --apply --write runs apply each planned row exactly once', async () => {
+    const mine = [];
+    for (let i = 0; i < 6; i += 1) {
+      mine.push(await mkUser({ walletAddress: Wallet.createRandom().address, web3authVerifier: LEGACY_EMAIL, web3authVerifierId: `${RUN}-c${i}@example.com` }));
+    }
+    const ids = mine.map((u) => u.id);
+    const target = { network: 'sapphire_devnet', connection: `${RUN}-ddc-jwt-devnet-c` };
+    const these = scoped({ user: () => ({ id: { in: ids } }), walletAddressHistory: () => ({ userId: { in: ids } }) });
+    const planned = await migration.planMigration({ target, clientId: 'cid', write: true, db: these, lookup: fakeLookup(), limit: 1000 });
+    assert.deepEqual(planned.outcomes, { planned_legacy: 6 });
+
+    const runs = await Promise.all([1, 2, 3].map((n) => migration.applyMigration({ target, db: these, cfg, write: true, batchSize: n })));
+    const total = {};
+    for (const run of runs) for (const [k, v] of Object.entries(run.outcomes)) total[k] = (total[k] || 0) + v;
+    const applied = Object.entries(total).filter(([k]) => k.startsWith('applied_')).reduce((a, [, v]) => a + v, 0);
+    assert.equal(applied, 6, JSON.stringify(total));
+    for (const key of Object.keys(total)) assert.match(key, /^(applied_legacy_identity_backfilled|skipped_(already_applied|stale))$/, JSON.stringify(total));
+
+    for (const u of mine) {
+      const now = await prisma.user.findUnique({ where: { id: u.id } });
+      const binding = await prisma.nativeWalletBinding.findUnique({ where: { userId: u.id } });
+      assert.deepEqual([now.walletAddress, now.web3authVerifier], [binding.address, target.connection]);
+      const identities = await prisma.authIdentity.findMany({ where: { userId: u.id } });
+      assert.deepEqual(identities.map((r) => r.provider).sort(), ['email', 'web3auth_legacy'], 'one of each, never duplicated');
+      const rows = await prisma.walletAddressHistory.findMany({ where: { userId: u.id, newVerifier: target.connection } });
+      assert.deepEqual(rows.map((r) => r.status), ['applied']);
+    }
+  });
+
   it('cleanup --native deletes by the fixed retention', async () => {
     const now = new Date();
     const old = new Date(now.getTime() - 25 * 60 * 60 * 1000);
