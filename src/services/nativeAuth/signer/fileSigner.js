@@ -4,7 +4,7 @@
  * by scripts/nativeAuthKeygen.js on the Mac that runs the local stack.
  *
  * The file must live outside every git work tree, be readable by its owner only (0400 or 0600),
- * hold an RSA key of at least 2048 bits, and carry alg RS256 if it names one. The published kid
+ * hold an RSA key of at least 2048 bits, and name alg RS256 (scripts/nativeAuthKeygen.js writes it). The published kid
  * is the key's RFC 7638 thumbprint; a `kid` inside the file is ignored, except that the leaked
  * `auth-key-1` is refused by config.keyProblem at boot and by the JWKS route.
  *
@@ -49,7 +49,7 @@ function loadSigningKey(file) {
   }
   if (!jwk || typeof jwk !== 'object' || Array.isArray(jwk)) throw keyError('the file is not a JSON Web Key');
   if (jwk.kty !== 'RSA') throw keyError('the key must be an RSA key (RS256)');
-  if (jwk.alg !== undefined && jwk.alg !== 'RS256') throw keyError('the key alg must be RS256');
+  if (jwk.alg !== 'RS256') throw keyError('the key alg must be RS256 (the file must name it: "alg": "RS256")');
   if (typeof jwk.d !== 'string') throw keyError('the file holds no private key');
   let privateKey;
   try {

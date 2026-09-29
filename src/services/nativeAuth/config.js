@@ -344,8 +344,9 @@ function absoluteUrlProblem(name, value, { httpsOnly = false, allowLoopbackHttp 
 
 /**
  * Rule 5: what a production deployment must hold. Applied when DDC_AUTH_ENV=prod, and by
- * assertFinancialGradeConfig whenever SSO_TGE_ENABLED and DDC_AUTH_ENABLED are both on, whatever
- * DDC_AUTH_ENV says (the money path is production by definition).
+ * assertFinancialGradeConfig whenever SSO_TGE_ENABLED and DDC_AUTH_ENABLED are both on (the money
+ * path is production by definition), whatever DDC_AUTH_ENV says — except on the loopback-only
+ * local stack (DDC_AUTH_ENV=local with PUBLIC_BASE_URL and APP_PUBLIC_URL on localhost).
  */
 function productionProblems(cfg) {
   const problems = [];

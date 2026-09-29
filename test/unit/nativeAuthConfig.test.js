@@ -227,6 +227,8 @@ describe('native auth boot rule 2: the signing key', () => {
   it('refuses a non-RS256, too-small, public-only or inconsistent key, without echoing key material', () => {
     const es = makeKeyFile({ alg: 'PS256' });
     assertRefused(localEnv(es), /alg must be RS256/);
+    const noAlg = makeKeyFile({ alg: null });
+    assertRefused(localEnv(noAlg), /alg must be RS256/);
     const small = makeKeyFile({ bits: 1024 });
     assertRefused(localEnv(small), /at least 2048 bits/);
     const pub = makeKeyFile({ extra: { d: undefined } });
@@ -322,6 +324,18 @@ describe('native auth boot rules 5 and 6: production and mainnet', () => {
     assert.deepEqual(config.productionProblems(readNativeAuthConfig(prodBase())), []);
   });
 
+  it('the boot gate applies the production rules when DDC_AUTH_ENV=prod', () => {
+    for (const [overrides, re] of [
+      [{ DDC_AUTH_W3A_CONNECTION_ID: 'ddc-jwt-devnet' }, /"ddc-jwt-devnet" is a non-production connection/],
+      [{ DDC_AUTH_W3A_NETWORK: 'sapphire_devnet' }, /production requires DDC_AUTH_W3A_NETWORK=sapphire_mainnet/],
+      [{ DDC_AUTH_REBIND_POLICY: 'lazy' }, /DDC_AUTH_REBIND_POLICY=lazy is refused in production/],
+      [{ DDC_AUTH_NEW_ACCOUNTS: 'allowlist', DDC_AUTH_ALLOWLIST: '' }, /non-empty DDC_AUTH_ALLOWLIST in production/],
+    ]) {
+      assertRefused(prodBase(overrides), re);
+      assert.ok(!problemsFor(localEnv(key, overrides)).some((p) => re.test(p)), `${re} applied outside prod`);
+    }
+  });
+
   it('a prod configuration still cannot boot in v1 (no KMS signer yet)', () => {
     assertRefused(prodBase(), /kms is not available in v1/);
   });
@@ -359,16 +373,48 @@ describe('assertFinancialGradeConfig: native login on the money path', () => {
     assert.equal('nativeAuth' in result, false);
   });
 
-  it('applies the production rules to native login whatever DDC_AUTH_ENV says', () => {
-    assert.throws(
-      () => assertFinancialGradeConfig({ ...moneyPathEnv, ...localEnv(key), JWT_SECRET: 'jwt-secret', SSO_SESSION_SECRET: 'sso-secret' }),
-      (err) => {
-        assert.match(err.message, /native login: production requires DDC_AUTH_W3A_NETWORK=sapphire_mainnet/);
-        assert.match(err.message, /native login: production requires DDC_AUTH_SIGNER=kms/);
-        assert.match(err.message, /native login: DDC_AUTH_W3A_CONNECTION_ID "ddc-jwt-devnet" is a non-production connection/);
-        return true;
-      },
-    );
+  const nativeOnMoneyPath = (overrides = {}) => ({ ...moneyPathEnv, ...localEnv(key), JWT_SECRET: 'jwt-secret', SSO_SESSION_SECRET: 'sso-secret', ...overrides });
+  const refusedAsProduction = (env) => assert.throws(() => assertFinancialGradeConfig(env), (err) => {
+    assert.match(err.message, /native login: production requires DDC_AUTH_W3A_NETWORK=sapphire_mainnet/);
+    assert.match(err.message, /native login: production requires DDC_AUTH_SIGNER=kms/);
+    assert.match(err.message, /native login: DDC_AUTH_W3A_CONNECTION_ID "ddc-jwt-devnet" is a non-production connection/);
+    return true;
+  });
+  // The local stack as it runs today (docker inspect ddclocal-api): NODE_ENV=production,
+  // SSO_ENVIRONMENT=test, both public origins on localhost.
+  const localStack = { SSO_ENVIRONMENT: 'test', PUBLIC_BASE_URL: 'https://localhost:20443', APP_PUBLIC_URL: 'https://localhost:20444' };
+
+  it('applies the production rules to native login with DDC_AUTH_ENV=local on public origins', () => {
+    refusedAsProduction(nativeOnMoneyPath());
+  });
+
+  it('applies them on public origins whatever DDC_AUTH_ENV says (unset, test, prod)', () => {
+    for (const env of [undefined, 'test', 'prod']) refusedAsProduction(nativeOnMoneyPath({ DDC_AUTH_ENV: env }));
+  });
+
+  it('lets the loopback-only local stack run native login next to the partner flow (DDC_AUTH_ENV=local)', () => {
+    for (const hosts of [
+      localStack,
+      { PUBLIC_BASE_URL: 'https://127.0.0.1:20443', APP_PUBLIC_URL: 'https://[::1]:20444' },
+    ]) {
+      const env = nativeOnMoneyPath(hosts);
+      assert.equal(env.NODE_ENV, 'production', 'NODE_ENV=production does not force the production rules');
+      const result = assertFinancialGradeConfig(env);
+      assert.equal(result.enforced, true);
+      assert.equal(result.nativeAuth.enabled, true);
+      assert.match(config.summaryLine(result.nativeAuth), /^nativeAuth=on env=local /);
+      // The native boot gate itself still accepts it, and still refuses a laptop key on mainnet (rule 6).
+      assert.equal(assertNativeAuthConfig(env).enabled, true);
+      assertRefused({ ...env, DDC_AUTH_W3A_NETWORK: 'sapphire_mainnet' }, /DDC_AUTH_ENV=local must not use DDC_AUTH_W3A_NETWORK=sapphire_mainnet/);
+    }
+  });
+
+  it('keeps the production rules on loopback origins unless DDC_AUTH_ENV=local, and when only one origin is loopback', () => {
+    for (const env of [undefined, 'test', 'prod']) refusedAsProduction(nativeOnMoneyPath({ ...localStack, DDC_AUTH_ENV: env }));
+    refusedAsProduction(nativeOnMoneyPath({ ...localStack, APP_PUBLIC_URL: 'https://app.datadance.ai' }));
+    refusedAsProduction(nativeOnMoneyPath({ ...localStack, PUBLIC_BASE_URL: 'https://api.datadance.ai' }));
+    // Hosts that merely contain a loopback name are not loopback.
+    refusedAsProduction(nativeOnMoneyPath({ PUBLIC_BASE_URL: 'https://localhost.datadance.ai', APP_PUBLIC_URL: 'https://127.0.0.1.nip.io' }));
   });
 
   it('adds the native summary when the native production rules hold', () => {
