@@ -10,7 +10,9 @@
  *     e-mail-passwordless pair, a legacy Google pair on @gmail.com (rule 3b), a legacy X pair
  *     'twitter|<id>' (rule 2). These are counted as `needs_backfill`: they resolve today, but the
  *     mainnet --apply moves the pair, so they keep resolving only through the identity
- *     nativeAuthBackfillIdentities.js creates; or
+ *     nativeAuthBackfillIdentities.js creates. Each such account is checked with the backfill's
+ *     own rules (planUserIdentity, reads only); one the backfill would skip is an orphan
+ *     ('backfill_blocked', with the backfill's reason counted in `backfillBlocked`); or
  *   - it signs in with an external wallet (unchanged path, D16) — counted as `external_wallet`.
  * Everything else with a Web3Auth history is an ORPHAN, by the first reason that applies:
  *   legacy_apple              a legacy Apple pair (verifier name contains "apple")
@@ -19,6 +21,9 @@
  *   x_without_legacy_pair     User.xid set, but no legacy X pair (xid is never trusted, F12)
  *   apple_relay_email         the account's e-mail is an Apple private-relay address
  *   web3auth_unpaired         authType 'web3auth' with no pair at all
+ *   backfill_blocked          a linkable current pair the backfill would skip (ambiguous evidence,
+ *                             the identity or a strong identity with the e-mail held by another
+ *                             account): after --apply nothing finds it natively
  *   backfill_missing          a linkable old pair survives only as a web3auth_legacy identity
  *                             (already migrated) and the native identity was never backfilled
  *   legacy_unknown_verifier   any other Web3Auth verifier (not in DDC_AUTH_LEGACY_*)
@@ -51,6 +56,7 @@ const ORPHAN_REASONS = Object.freeze([
   'x_without_legacy_pair',
   'apple_relay_email',
   'web3auth_unpaired',
+  'backfill_blocked',
   'backfill_missing',
   'legacy_unknown_verifier',
   'native_without_identity',
@@ -140,6 +146,7 @@ async function orphanReport({ db = defaultDb(), cfg = readNativeAuthConfig(), ba
     orphans: Object.fromEntries(ORPHAN_REASONS.map((reason) => [reason, 0])),
     orphanTotal: 0,
     flags: { x_without_legacy_pair: 0, apple_relay_email: 0 },
+    backfillBlocked: {},
   };
   if (!backfill.allLegacyVerifiers(lists).length) {
     report.warning = 'DDC_AUTH_LEGACY_{EMAIL,GOOGLE,X}_VERIFIERS are all empty: every legacy pair counts as legacy_unknown_verifier';
@@ -158,6 +165,15 @@ async function orphanReport({ db = defaultDb(), cfg = readNativeAuthConfig(), ba
     for (const user of users) {
       report.scanned += 1;
       const result = classifyAccount(user, identities.filter((row) => row.userId === user.id), lists);
+      if (result.status === 'needs_backfill') {
+        // Would the backfill actually give it an identity? (reads only)
+        const plan = await backfill.planUserIdentity({ user, lists, db });
+        if (plan.status === 'skip') {
+          result.status = 'orphan';
+          result.reason = 'backfill_blocked';
+          report.backfillBlocked[plan.reason] = (report.backfillBlocked[plan.reason] || 0) + 1;
+        }
+      }
       report.statuses[result.status] = (report.statuses[result.status] || 0) + 1;
       if (!['organization', 'disabled'].includes(result.status)) {
         for (const [flag, on] of Object.entries(result.flags)) if (on) report.flags[flag] += 1;
@@ -200,6 +216,8 @@ function printReport(report) {
   console.log(`orphans after the cut: ${report.orphanTotal}`);
   for (const [reason, count] of Object.entries(report.orphans)) if (count) console.log(`  ${reason}: ${count}`);
   console.log(`flags: ${Object.entries(report.flags).map(([k, v]) => `${k}=${v}`).join(', ')}`);
+  const blocked = Object.entries(report.backfillBlocked || {});
+  if (blocked.length) console.log(`backfill_blocked by reason: ${blocked.map(([k, v]) => `${k}=${v}`).join(', ')}`);
   if (report.statuses.needs_backfill) console.log('needs_backfill accounts resolve today; run nativeAuthBackfillIdentities.js --write before the mainnet --apply');
 }
 
