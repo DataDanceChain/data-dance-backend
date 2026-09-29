@@ -17,9 +17,13 @@
     "seed:all": "node scripts/createAwards.js && node scripts/createBadges.js && node scripts/createCultureWeb3Event.js && node scripts/createGCCEvent.js && node scripts/createHashGlobalUser.js && node scripts/createOffGridEvent.js && node scripts/createRPCParty.js && node scripts/seedTestUserData.js"
   },
   "dependencies": {
+    "@babel/runtime": "7.29.7",
     "@ddcmarket/sdk": "^0.2.1",
     "@paralleldrive/cuid2": "^2.2.2",
     "@prisma/client": "5.0.0",
+    "@toruslabs/constants": "14.2.0",
+    "@toruslabs/fnd-base": "14.2.0",
+    "@toruslabs/torus.js": "15.1.1",
     "apn": "^2.2.0",
     "axios": "^1.9.0",
     "bcryptjs": "^2.4.3",

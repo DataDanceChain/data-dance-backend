@@ -561,11 +561,37 @@ function emailVerifiedFrom(payload, cfg) {
 }
 
 /**
+ * The native-login custom JWT connections (DDC as issuer, design §2.4). Their tokens are minted
+ * only inside a native login attempt and their `verifierId` is the opaque w3aSubject, so the
+ * legacy path must never accept one as an identity source — in ANY mode, even with an empty
+ * WEB3AUTH_ALLOWED_VERIFIERS outside `enforce` (F13.1, §3.11). The configured
+ * DDC_AUTH_W3A_CONNECTION_ID is read per call; the well-known names are refused even when it is
+ * unset. No legacy login uses these names, so nothing changes for today's users.
+ */
+const NATIVE_CONNECTION_IDS = Object.freeze([
+  'ddc-jwt-devnet',
+  'ddc-jwt-test',
+  'ddc-jwt-mainnet',
+  'datadance-jwt-devnet',
+  'datadance-jwt-test',
+  'datadance-jwt-mainnet',
+]);
+
+function isNativeConnection(verifier, env = process.env) {
+  const name = String(verifier || '');
+  if (!name) return false;
+  const configured = String(env.DDC_AUTH_W3A_CONNECTION_ID || '').trim();
+  return NATIVE_CONNECTION_IDS.includes(name) || (Boolean(configured) && name === configured);
+}
+
+/**
  * Is this verifier one of the login connections DataDance actually uses?
  * An EMPTY list means "not configured", which is only reachable outside `enforce` (the boot
- * assertion refuses an empty list under `enforce`); it then allows everything, as before.
+ * assertion refuses an empty list under `enforce`); it then allows everything, as before —
+ * except a native-login connection, which is never allowed here.
  */
 function isVerifierAllowed(cfg, verifier) {
+  if (isNativeConnection(verifier)) return false;
   return !cfg.allowedVerifiers.length || cfg.allowedVerifiers.includes(String(verifier || ''));
 }
 
@@ -582,7 +608,8 @@ function isVerifierAllowed(cfg, verifier) {
 function assertVerifierAllowed(cfg, identity) {
   if (isVerifierAllowed(cfg, identity.verifier)) return;
   const meta = { verifier: identity.verifier, kind: identity.kind, mode: cfg.mode, allowedCount: cfg.allowedVerifiers.length };
-  if (cfg.mode === 'enforce') {
+  // The native connection is refused in every mode (see isNativeConnection).
+  if (cfg.mode === 'enforce' || isNativeConnection(identity.verifier)) {
     logger.warn('idtoken_verifier_not_allowed', { ...meta, outcome: 'refused' });
     throw fail('IDTOKEN_VERIFIER_NOT_ALLOWED', 'This login method is not accepted by DataDance', {
       verifier: identity.verifier,
@@ -740,9 +767,35 @@ function defaultName(identity, accountEmail) {
   return accountEmail && accountEmail.includes('@') ? accountEmail.split('@')[0] : 'User';
 }
 
+/** AuthIdentity.provider of an old Web3Auth pair (written by native login, design §3.11). */
+const LEGACY_IDENTITY_PROVIDER = 'web3auth_legacy';
+
+function legacyIdentitySubject(identity) {
+  return `${identity.verifier}|${identity.verifierId}`;
+}
+
+/** Native login (DDC_AUTH_ENABLED) is on; read per call, like the native router. */
+function nativeAuthOn(env = process.env) {
+  return String(env.DDC_AUTH_ENABLED || '').trim().toLowerCase() === 'true';
+}
+
+/**
+ * A legacy login of a user whose wallet a native lazy rebind moved (local testing only): the
+ * session is issued as always, and the event is logged so the second address is visible.
+ */
+async function noteRebound(db, user, identity) {
+  const row = await db.authIdentity.findUnique({
+    where: { provider_subject: { provider: LEGACY_IDENTITY_PROVIDER, subject: legacyIdentitySubject(identity) } },
+  });
+  if (row && row.userId === user.id) {
+    logger.warn('legacy_login_wallet_rebound', { userId: user.id, verifier: identity.verifier, via: 'pair' });
+  }
+}
+
 /**
  * Map a verified identity to a DDC user (plan §2.1):
  *   1. hit by (web3authVerifier, web3authVerifierId) → login
+ *   1b. (native login on only) an AuthIdentity('web3auth_legacy', '<verifier>|<verifierId>') → login
  *   2. lazy backfill of a legacy `web3auth` row, via updateMany(... web3authVerifier: null)
  *      requiring count === 1, on exactly two routes:
  *        - the token PROVES the wallet the row already holds (cryptographic), or
@@ -770,7 +823,23 @@ async function resolveUser(identity, options = {}) {
   const linked = await db.user.findUnique({ where: { web3authVerifier_web3authVerifierId: pair } });
   if (linked) {
     guardAccount(linked);
+    if (nativeAuthOn()) await noteRebound(db, linked, identity);
     return { user: linked, action: 'login' };
+  }
+
+  // 1b. An old pair recorded as an AuthIdentity(provider 'web3auth_legacy') by a native lazy
+  //     rebind or the mainnet migration (design §3.11). Only with native login on: until such
+  //     rows are written it is inert, and with the switch off this path is exactly as before.
+  if (nativeAuthOn()) {
+    const legacyRow = await db.authIdentity.findUnique({
+      where: { provider_subject: { provider: LEGACY_IDENTITY_PROVIDER, subject: legacyIdentitySubject(identity) } },
+    });
+    const owner = legacyRow ? await db.user.findUnique({ where: { id: legacyRow.userId } }) : null;
+    if (owner) {
+      guardAccount(owner);
+      logger.warn('legacy_login_wallet_rebound', { userId: owner.id, verifier: identity.verifier, via: 'legacy_identity' });
+      return { user: owner, action: 'login' };
+    }
   }
 
   // 2. Lazy backfill candidate — only facts the verified token asserts (e-mail / verifierId / proven wallet)
@@ -907,6 +976,8 @@ module.exports = {
   getAllowLegacyFallback,
   Web3AuthIdentityError,
   EXTERNAL_WALLET_VERIFIER,
+  NATIVE_CONNECTION_IDS,
+  isNativeConnection,
   _internals: {
     DEFAULTS,
     HTTP_STATUS,
