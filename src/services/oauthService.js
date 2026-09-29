@@ -19,6 +19,8 @@ const { isValidReferralCodeFormat } = require('../utils/referralUtils');
 const { normalizeReferralCodeInput, formatReferralCodeForDisplay } = require('../utils/referralCodeFormat');
 
 const { createLogger } = require('../utils/logger');
+// Native login master switch (DDC_AUTH_ENABLED, default off). Reads one env variable, loads nothing.
+const { nativeAuthEnabled } = require('./nativeAuth/config');
 // The write scope's gate (decision 30 A); kept on their own line, apart from the main import.
 const { availablePartnerScopes, referralBindEnabled } = require('../constants/partnerClient');
 
@@ -437,6 +439,26 @@ function plausibleLoginHint(value) {
   return hint.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(hint) ? hint : '';
 }
 
+// Partner login-method hint (native login §3.10). Closed set; `wallet` is the web external-wallet
+// sheet. A hint only chooses which sign-in the Wallet login page offers first: it never sends an
+// e-mail, never skips consent, the initiator binding or any account check.
+const PARTNER_LOGIN_METHODS = Object.freeze(['email', 'google', 'apple', 'x', 'wallet']);
+
+/**
+ * `login_method` as sent → a value of PARTNER_LOGIN_METHODS, or null. Absent/empty → null quietly;
+ * anything else (unknown value, wrong case, repeated parameter) → null and one log line that never
+ * carries the raw value (it is caller-controlled).
+ */
+function partnerLoginMethod(value, clientId) {
+  if (value === undefined || value === null || value === '') return null;
+  if (typeof value === 'string' && PARTNER_LOGIN_METHODS.includes(value)) return value;
+  logger.info('oauth.authorize_login_method_ignored', {
+    clientId,
+    reason: typeof value === 'string' ? 'unknown_value' : 'not_a_string',
+  });
+  return null;
+}
+
 /**
  * Validation order (contract /oauth/authorize):
  *  1. client_id unknown/disabled, redirect_uri not an exact match → throws non-redirectable (400 page).
@@ -501,6 +523,15 @@ async function startAuthorization(req, query, res) {
       // Store only the bare code ("DDC-ab23cd" → "AB23CD"); legacy codes are kept as sent.
       referralCode = normalizeReferralCodeInput(rawReferralCode.trim().replace(/\s+/g, ''));
     }
+    // Native login partner hint (§3.10): partner client only and only while DDC_AUTH_ENABLED is
+    // on; with the switch off neither parameter is read here and the row is written exactly as
+    // before. Never an error: an unusable value is dropped, the authorization goes on.
+    const hints = partner && nativeAuthEnabled()
+      ? {
+        loginMethod: partnerLoginMethod(query.login_method, client.clientId),
+        loginHint: plausibleLoginHint(query.login_hint) || null,
+      }
+      : {};
     // Bind BEFORE the row is written, so a row never exists without the hash of the cookie that
     // was actually set on this response.
     const initiatorNonce = bindInitiator(req, res);
@@ -518,6 +549,7 @@ async function startAuthorization(req, query, res) {
         initiatorHash: initiatorNonce ? hashInitiator(initiatorNonce) : null,
         initiatorBoundAt: initiatorNonce ? new Date() : null,
         initiatorMismatchCount: 0,
+        ...hints,
       },
     });
   } catch (error) {
@@ -564,6 +596,15 @@ async function getConsentRequest(id) {
     // Only a hint for the Wallet (post the Allow without a tap). Never a decision: the code is
     // minted by the credentialed POST /api/oauth/consent, which re-checks the switch itself.
     autoApprove: autoApproveFor(partner ? row.clientId : null),
+    // Native login partner hint (§3.10), present only while DDC_AUTH_ENABLED is on (off: this
+    // body is unchanged). The Wallet login page reads it from here and never from its own URL
+    // (F7); it is null once the request has been decided (a live code, no longer a login slot).
+    ...(partner && nativeAuthEnabled()
+      ? {
+        loginMethod: row.codeHash ? null : row.loginMethod || null,
+        loginHint: row.codeHash ? null : row.loginHint || null,
+      }
+      : {}),
   };
 }
 
@@ -975,6 +1016,7 @@ module.exports = {
   registerClient,
   startAuthorization,
   getConsentRequest,
+  PARTNER_LOGIN_METHODS,
   decideConsent,
   exchangeAuthorizationCode,
   exchangeRefreshToken,

@@ -74,6 +74,7 @@ GET {issuer}/oauth/authorize
   &code_challenge=<BASE64URL(SHA256(code_verifier))>
   &code_challenge_method=S256
   [&login_hint=user%40example.com]
+  [&login_method=email|google|apple|x|wallet]
 ```
 
 Same tab only: the consent page frame-busts, so never use an iframe or popup.
@@ -102,6 +103,47 @@ Validation order and what the browser sees:
 An unknown scope is `invalid_scope` (redirected per §4.2). `state` is mandatory, 22–512
 characters (at least 128 bits as base64url; a shorter one is `invalid_request`, redirected per
 §4.2). `login_hint` only pre-fills the DataDance login form.
+
+### Optional sign-in hints (`login_method`, `login_hint`)
+
+Both are optional and purely cosmetic: they choose what the DataDance login page shows first to a
+user who is not signed in yet. They never decide anything.
+
+- **`login_method`** — one of `email`, `google`, `apple`, `x`, `wallet` (lower case, sent once).
+  Any other value — unknown, different case, repeated — is **ignored, never an error**: the
+  authorization continues as if it were absent. It takes effect only where DataDance's new sign-in
+  page is switched on (not yet in production; ask which environments have it). Elsewhere it is
+  accepted and ignored.
+- **`login_hint`** — an e-mail address, as before. Anything that is not a plausible e-mail
+  (≤ 254 characters) is dropped silently.
+
+What the page does with them:
+
+| `login_method` | Behaviour |
+|---|---|
+| `x` | X sign-in starts on its own, once per authorization request. |
+| `google` | The Google button is the only primary action and Google's own prompt is shown. |
+| `apple` | The Apple button is the only primary action; the user taps it. |
+| `email` | The address from `login_hint` is pre-filled; the user taps to receive a code. |
+| `wallet` | The external-wallet sheet opens (web only). |
+
+Every hinted screen keeps "More sign-in options", so the user can always pick another method.
+
+Guarantees:
+
+- **An e-mail is never sent automatically.** A one-time code is sent only after the user taps
+  Continue, whatever the partner passed.
+- **Hints never skip anything.** The consent page, the browser binding (§5), the account checks
+  (organization accounts, disabled accounts, verified login) and automatic approval behave exactly
+  as without them. A hint does not select, create or link an account; `login_hint` is not checked
+  against any account.
+- **Read from the server, not the URL.** DataDance stores both on the authorization request and
+  the login page reads them from there (`GET /api/oauth/requests/:id` returns `loginMethod` and
+  `loginHint` while the request is live and undecided). Hints edited into the consent URL later
+  have no effect. The consent URL itself is unchanged: it still carries `login_hint` exactly as
+  before and never `login_method`.
+- An invite `referral_code` passed together with an automatically started sign-in is shown to a
+  new user for confirmation; it is never applied silently.
 
 **`prompt=none`** — this build answers `302 … error=login_required` immediately (see §12).
 
@@ -469,7 +511,8 @@ somebody else's.)
 - **The code is re-checked against the account at the exchange.** An account disabled between the
   consent click and `POST /oauth/token` (up to 60 s) now yields `invalid_grant`, not a token. A
   partner backend needs no change: `invalid_grant` was already a possible answer there.
-- **Contract additions in this build** (the YAML needs them in the next revision): `POST
+- **Contract additions in this build** (the YAML needs them in the next revision): the optional
+  `login_method` authorize parameter (§4, ignored where the new sign-in page is off), `POST
   /api/oauth/consent` can answer `409 AUTHZ_INITIATOR_MISMATCH` (§5, Wallet-internal), and
   `email_masked` is gated on its declared `tge:identity` scope as well as on the freeze list —
   which changes nothing for a real caller, since `/me` already requires that scope.
