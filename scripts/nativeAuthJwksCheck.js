@@ -12,6 +12,9 @@
  *   - the thumbprint is in the pinned list (DDC_AUTH_JWKS_PINNED or --pinned) and never the committed
  *     legacy `auth-key-1` key from keys/jwks.json (its private half is public in this repo);
  *   - no key appears twice.
+ *   - the raw text repeats no member name in any object and names no private member anywhere: JSON.parse
+ *     keeps only the last copy of a repeated name, so the earlier copies (a whole private JWK, say)
+ *     would still be published while the parsed object looks clean.
  * With --exact, every pinned thumbprint must also be present (use after a rotation settles).
  *
  * Usage:
@@ -46,6 +49,14 @@ const MAX_JWKS_BYTES = 64 * 1024;
 const FETCH_TIMEOUT_MS = 10_000;
 const THUMBPRINT_RE = /^[A-Za-z0-9_-]{43}$/;
 const B64URL_RE = /^[A-Za-z0-9_-]+$/;
+// Backstop for the raw-text scan: a private member name written literally anywhere in the bytes.
+const RAW_PRIVATE_MEMBER_RE = /"(?:d|p|q|dp|dq|qi|oth|k)"\s*:/;
+const SAFE_NAME_RE = /^[A-Za-z0-9_$-]{1,24}$/;
+
+/** A member name for a message: short identifier-like names verbatim, anything else only by length. */
+function safeName(name) {
+  return SAFE_NAME_RE.test(name) ? name : `(a ${String(name).length}-character name)`;
+}
 
 function isPlainObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -117,7 +128,7 @@ function checkJwks(doc, { pinned, forbidden = forbiddenThumbprints(), exact = fa
     return { ok: false, errors: ['document is not a JSON object'], notes, keys };
   }
   const extraTop = Object.keys(doc).filter((member) => member !== 'keys');
-  if (extraTop.length) errors.push(`top level has members other than "keys": ${extraTop.join(', ')}`);
+  if (extraTop.length) errors.push(`top level has members other than "keys": ${extraTop.map(safeName).join(', ')}`);
   if (!Array.isArray(doc.keys)) {
     errors.push('"keys" is not an array');
     return { ok: false, errors, notes, keys };
@@ -136,7 +147,7 @@ function checkJwks(doc, { pinned, forbidden = forbiddenThumbprints(), exact = fa
     const privateHere = members.filter((member) => PRIVATE_MEMBERS.includes(member));
     if (privateHere.length) errors.push(`${at} has PRIVATE member(s): ${privateHere.join(', ')}`);
     const unexpected = members.filter((member) => !PUBLIC_MEMBERS.includes(member) && !PRIVATE_MEMBERS.includes(member));
-    if (unexpected.length) errors.push(`${at} has unexpected member(s): ${unexpected.join(', ')}`);
+    if (unexpected.length) errors.push(`${at} has unexpected member(s): ${unexpected.map(safeName).join(', ')}`);
     const missing = PUBLIC_MEMBERS.filter((member) => !(member in key));
     if (missing.length) errors.push(`${at} is missing member(s): ${missing.join(', ')}`);
     const nonString = PUBLIC_MEMBERS.filter((member) => member in key && typeof key[member] !== 'string');
@@ -183,8 +194,126 @@ function checkJwks(doc, { pinned, forbidden = forbiddenThumbprints(), exact = fa
   return { ok: errors.length === 0, errors, notes, keys };
 }
 
+/**
+ * Walks the raw text of a document that JSON.parse has accepted and lists every member name with the
+ * object it belongs to. Names are decoded with JSON.parse, so an escaped "\u0064" counts as "d".
+ * Returns [{ objectId, where, name }]; `where` is a display path such as "keys[0]" built from safe names.
+ */
+function rawMembers(text) {
+  const members = [];
+  const stack = [];
+  let nextObjectId = 0;
+  const childWhere = () => {
+    const top = stack[stack.length - 1];
+    if (!top) return 'top level';
+    const parent = top.where === 'top level' ? '' : top.where;
+    if (top.type === 'array') return `${parent}[${top.index}]`;
+    const name = safeName(top.name);
+    return parent ? `${parent}.${name}` : name;
+  };
+  let i = 0;
+  while (i < text.length) {
+    const ch = text[i];
+    if (ch === '"') {
+      let j = i + 1;
+      while (j < text.length && text[j] !== '"') j += text[j] === '\\' ? 2 : 1;
+      const top = stack[stack.length - 1];
+      if (top && top.type === 'object' && top.expectName) {
+        const name = JSON.parse(text.slice(i, j + 1));
+        members.push({ objectId: top.id, where: top.where, name });
+        top.name = name;
+        top.expectName = false;
+      }
+      i = j + 1;
+      continue;
+    }
+    if (ch === '{') {
+      stack.push({ type: 'object', id: nextObjectId, where: childWhere(), expectName: true, name: null });
+      nextObjectId += 1;
+    } else if (ch === '[') {
+      stack.push({ type: 'array', where: childWhere(), index: 0 });
+    } else if (ch === '}' || ch === ']') {
+      stack.pop();
+    } else if (ch === ',') {
+      const top = stack[stack.length - 1];
+      if (top && top.type === 'object') top.expectName = true;
+      else if (top) top.index += 1;
+    }
+    i += 1;
+  }
+  return members;
+}
+
+/**
+ * Rules the parsed object cannot show (design §6 F1): no member name repeated within one object, and
+ * no private member name anywhere in the bytes. `text` must already be valid JSON. Messages name
+ * members only, never values.
+ */
+function rawTextErrors(text) {
+  const errors = [];
+  const seen = new Map();
+  let privateSeen = false;
+  for (const { objectId, where, name } of rawMembers(text)) {
+    if (!seen.has(objectId)) seen.set(objectId, new Set());
+    const names = seen.get(objectId);
+    if (names.has(name)) {
+      errors.push(`${where} repeats member ${safeName(name)} (JSON.parse would hide the earlier copy, which is still published)`);
+    }
+    names.add(name);
+    if (PRIVATE_MEMBERS.includes(name)) {
+      privateSeen = true;
+      errors.push(`${where} has PRIVATE member(s) in the raw text: ${name}`);
+    }
+  }
+  if (!privateSeen && RAW_PRIVATE_MEMBER_RE.test(text)) errors.push('raw text contains a private member name (d, p, q, dp, dq, qi, oth or k)');
+  return errors;
+}
+
+/**
+ * Checks JWKS text as published: parses it, applies the raw-text rules, then the rules on the parsed
+ * object. Returns the checkJwks result shape; raw-text errors come first.
+ */
+function checkJwksText(text, { pinned, exact = false, forbidden } = {}) {
+  let doc;
+  try {
+    doc = JSON.parse(text);
+  } catch {
+    return { ok: false, errors: ['body is not valid JSON'], notes: [], keys: [] };
+  }
+  const raw = rawTextErrors(text);
+  const parsed = checkJwks(doc, { pinned, exact, forbidden });
+  const errors = [...raw, ...parsed.errors];
+  return { ...parsed, ok: errors.length === 0, errors };
+}
+
 function isLoopbackHost(hostname) {
   return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]' || hostname === '::1';
+}
+
+/** Reads a response body, giving up as soon as it passes MAX_JWKS_BYTES (declared or counted). */
+async function readCappedBody(res) {
+  const tooLarge = () => new Error(`body larger than ${MAX_JWKS_BYTES} bytes`);
+  const declared = res.headers && typeof res.headers.get === 'function' ? Number(res.headers.get('content-length')) : NaN;
+  if (Number.isFinite(declared) && declared > MAX_JWKS_BYTES) throw tooLarge();
+  if (res.body && typeof res.body.getReader === 'function') {
+    const reader = res.body.getReader();
+    const chunks = [];
+    let total = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > MAX_JWKS_BYTES) {
+        await reader.cancel().catch(() => {});
+        throw tooLarge();
+      }
+      chunks.push(Buffer.from(value));
+    }
+    return Buffer.concat(chunks).toString('utf8');
+  }
+  const text = await res.text();
+  if (Buffer.byteLength(text, 'utf8') > MAX_JWKS_BYTES) throw tooLarge();
+  return text;
 }
 
 /** Fetches a JWKS body. https only (http for loopback), no redirects, size-capped. */
@@ -207,9 +336,7 @@ async function fetchJwksText(url, { timeoutMs = FETCH_TIMEOUT_MS, fetchImpl = gl
       headers: { accept: 'application/json' },
     });
     if (res.status !== 200) throw new Error(`HTTP ${res.status}`);
-    const text = await res.text();
-    if (Buffer.byteLength(text, 'utf8') > MAX_JWKS_BYTES) throw new Error(`body larger than ${MAX_JWKS_BYTES} bytes`);
-    return text;
+    return await readCappedBody(res);
   } catch (err) {
     if (err && err.name === 'AbortError') throw new Error(`timed out after ${timeoutMs} ms`);
     throw new Error(`fetch failed: ${err && err.message ? err.message : String(err)}`);
@@ -234,13 +361,7 @@ async function checkSource(source, { pinned, exact = false, forbidden, ...loadOp
     return { ok: false, fetchError: err.message, errors: [], notes: [], keys: [], sha256: null };
   }
   const sha256 = crypto.createHash('sha256').update(text).digest('hex');
-  let doc;
-  try {
-    doc = JSON.parse(text);
-  } catch {
-    return { ok: false, errors: ['body is not valid JSON'], notes: [], keys: [], sha256 };
-  }
-  return { ...checkJwks(doc, { pinned, exact, forbidden }), sha256 };
+  return { ...checkJwksText(text, { pinned, exact, forbidden }), sha256 };
 }
 
 function formatResult(result, source) {
@@ -343,6 +464,8 @@ module.exports = {
   parsePinned,
   modulusBits,
   checkJwks,
+  rawTextErrors,
+  checkJwksText,
   fetchJwksText,
   checkSource,
   watchJwks,
