@@ -1,5 +1,6 @@
 const crypto = require('crypto');
 const { createLogger } = require('../utils/logger');
+const { ipPrefix, nativeAuthEnabled } = require('../services/nativeAuth/config');
 const logger = createLogger('rateLimitMiddleware');
 
 // In-process store: one Map for the single container we run today.
@@ -8,6 +9,36 @@ const logger = createLogger('rateLimitMiddleware');
 // each process would otherwise grant the full budget on its own.
 // See README "运行加固" / plan §8 D10.
 const rateLimitStore = new Map();
+
+/**
+ * A Map that keeps at most `maxKeys` entries, evicting the least recently used one (F10: an
+ * attacker rotating addresses must not grow the store without bound). Used only by the native
+ * login limiters; the legacy limiters keep the plain Map above, untouched.
+ */
+class BoundedStore extends Map {
+  constructor(maxKeys) {
+    super();
+    this.maxKeys = maxKeys;
+  }
+
+  get(key) {
+    if (!super.has(key)) return undefined;
+    const value = super.get(key);
+    super.delete(key);
+    super.set(key, value);
+    return value;
+  }
+
+  set(key, value) {
+    if (super.has(key)) super.delete(key);
+    super.set(key, value);
+    while (this.size > this.maxKeys) super.delete(this.keys().next().value);
+    return this;
+  }
+}
+
+const NATIVE_STORE_MAX_KEYS = 50000;
+const nativeRateLimitStore = new BoundedStore(NATIVE_STORE_MAX_KEYS);
 
 let limiterCounter = 0;
 
@@ -22,9 +53,13 @@ function isOAuthStylePath(req) {
  * - everything else: existing `{ status: 'error', message, retryAfter }`
  * `Retry-After` (seconds) is always set.
  */
-function sendRateLimited(req, res, { message, retryAfter, errorFormat, code }) {
+function sendRateLimited(req, res, { message, retryAfter, errorFormat, code, envelope }) {
   const seconds = Math.max(1, Math.ceil(retryAfter));
   res.setHeader('Retry-After', String(seconds));
+  // Native login contract (§2): { status, code: 'RATE_LIMITED', message, data: { retryAfterSec } }.
+  if (envelope === 'native') {
+    return res.status(429).json({ status: 'fail', code: code || 'RATE_LIMITED', message, data: { retryAfterSec: seconds } });
+  }
   const oauthStyle = errorFormat === 'oauth' || (errorFormat === 'auto' && isOAuthStylePath(req));
   if (oauthStyle) {
     return res.status(429).json({ error: 'slow_down', error_description: message });
@@ -46,6 +81,12 @@ function sendRateLimited(req, res, { message, retryAfter, errorFormat, code }) {
  * @param {'auto'|'oauth'|'default'} options.errorFormat - 429 body shape (auto: by path)
  * @param {string} options.code - Machine code added to the default 429 body (contract codes)
  * @param {Function} options.now - Clock (tests)
+ * @param {Map} options.store - Bucket store (default: the shared in-process Map)
+ * @param {'default'|'native'} options.envelope - 'native': the /api/auth/native 429 body
+ * @param {boolean} options.skipFailedRequests - Give the slot back when the response is >= 400
+ *   (count only successes)
+ * @param {Function} options.enabled - `() => boolean`, read per request; false = pass through
+ *   untouched (no counting, no headers)
  */
 function createRateLimiter(options = {}) {
   const {
@@ -58,9 +99,14 @@ function createRateLimiter(options = {}) {
     errorFormat = 'auto',
     code = '',
     now = Date.now,
+    store = rateLimitStore,
+    envelope = 'default',
+    skipFailedRequests = false,
+    enabled = null,
   } = options;
 
   return async (req, res, next) => {
+    if (enabled && !enabled(req)) return next();
     // `max` may be a function read per request, so an env-configured ceiling can be sized (and
     // tested) without rebuilding the limiter.
     const limit = typeof max === 'function' ? max(req) : max;
@@ -69,14 +115,14 @@ function createRateLimiter(options = {}) {
     const windowStart = current - windowMs;
 
     // Get or create client's request history
-    let clientData = rateLimitStore.get(key);
+    let clientData = store.get(key);
     if (!clientData) {
       clientData = {
         requests: [],
         blocked: false,
         blockUntil: 0
       };
-      rateLimitStore.set(key, clientData);
+      store.set(key, clientData);
     }
 
     // Check if client is currently blocked
@@ -88,7 +134,7 @@ function createRateLimiter(options = {}) {
         limit,
         retryAfter: Math.ceil(retryAfter)
       });
-      return sendRateLimited(req, res, { message, retryAfter, errorFormat, code });
+      return sendRateLimited(req, res, { message, retryAfter, errorFormat, code, envelope });
     }
 
     // Clean up old requests outside the current window
@@ -108,7 +154,7 @@ function createRateLimiter(options = {}) {
         limit,
         retryAfter: Math.ceil(retryAfter)
       });
-      return sendRateLimited(req, res, { message, retryAfter, errorFormat, code });
+      return sendRateLimited(req, res, { message, retryAfter, errorFormat, code, envelope });
     }
 
     // Count on ENTRY, always. Counting in res.end let N concurrent requests all pass the check
@@ -118,13 +164,14 @@ function createRateLimiter(options = {}) {
 
     // `skipSuccessfulRequests`: give the slot back once the response turns out to be a success,
     // so only failures accumulate — but only after it is known, never before.
-    if (skipSuccessfulRequests) {
+    // `skipFailedRequests` is the mirror image: only successes accumulate.
+    if (skipSuccessfulRequests || skipFailedRequests) {
       const originalEnd = res.end;
       let settled = false;
       res.end = function(...args) {
         if (!settled) {
           settled = true;
-          if (res.statusCode < 400) {
+          if (skipSuccessfulRequests ? res.statusCode < 400 : res.statusCode >= 400) {
             // `clientData.requests` is re-assigned by the window filter, so read it now.
             const index = clientData.requests.indexOf(current);
             if (index !== -1) clientData.requests.splice(index, 1);
@@ -158,7 +205,57 @@ const keyGenerators = {
     if (!match) return `ip:${req.ip || 'anonymous'}`;
     return `tok:${crypto.createHash('sha256').update(match[1]).digest('hex')}`;
   },
+  // Native login (F10): IPv6 clients share a bucket per /64 (one subscriber's allocation), with a
+  // wider /48 bucket on top; IPv4 (and IPv4-mapped IPv6) per address.
+  ip64: (req) => ipPrefix(req.ip, 64) || req.ip || 'anonymous',
+  ip48: (req) => ipPrefix(req.ip, 48) || req.ip || 'anonymous',
 };
+
+function isIpv6Client(req) {
+  const prefix = ipPrefix(req.ip, 64);
+  return Boolean(prefix && prefix.includes(':'));
+}
+
+/**
+ * A native-login limiter: `max` per window per /64 (IPv4: per address), plus — for IPv6 only — a
+ * /48 bucket at 4× `max`, both in the LRU-capped native store, 429 in the native envelope.
+ * `max` may be a function read per request.
+ */
+function createNativeLimiter({ name, windowMs, max, message }) {
+  const common = { windowMs, message, store: nativeRateLimitStore, envelope: 'native', code: 'RATE_LIMITED' };
+  const per64 = createRateLimiter({ ...common, name, max, keyGenerator: keyGenerators.ip64 });
+  const per48 = createRateLimiter({
+    ...common,
+    name: `${name}/48`,
+    max: (req) => 4 * (typeof max === 'function' ? max(req) : max),
+    keyGenerator: keyGenerators.ip48,
+  });
+  return (req, res, next) =>
+    per64(req, res, (err) => {
+      if (err) return next(err);
+      if (!isIpv6Client(req)) return next();
+      return per48(req, res, next);
+    });
+}
+
+/**
+ * E-mail OTP budget (BE3): crossing DDC_AUTH_OTP_SOFT_BUDGET for the day halves the per-IP
+ * e-mail-start limits until the service clears it again. Process-local, like the store.
+ */
+let nativeOtpTightened = false;
+function setNativeOtpTightened(value) {
+  nativeOtpTightened = Boolean(value);
+}
+function nativeOtpFactor() {
+  return nativeOtpTightened ? 0.5 : 1;
+}
+
+const DEFAULT_OTP_PER_IP_HOUR = 60;
+function nativeOtpPerIpHour(env = process.env) {
+  const raw = String(env.DDC_AUTH_OTP_PER_IP_HOUR ?? '').trim();
+  const parsed = /^\d+$/.test(raw) ? Number.parseInt(raw, 10) : 0;
+  return parsed > 0 ? parsed : DEFAULT_OTP_PER_IP_HOUR;
+}
 
 /** Per-client ceiling for authenticated confidential token requests; env, read per request. */
 const DEFAULT_TOKEN_CLIENT_MAX_PER_MIN = 3000;
@@ -348,6 +445,80 @@ const rateLimiters = {
     message: 'Too many ticket exchanges. Please wait a minute.',
     keyGenerator: keyGenerators.ip,
     code: 'RATE_LIMITED'
+  }),
+
+  // ---- Native login (/api/auth/native/*, §3.9). Unreachable while DDC_AUTH_ENABLED is off: the
+  // router answers 404 before any of these runs.
+
+  // POST /email/start — burst, per /64
+  nativeEmailStartBurst: createNativeLimiter({
+    name: 'nativeEmailStartBurst',
+    windowMs: 60 * 1000,
+    max: () => Math.max(1, Math.floor(5 * nativeOtpFactor())),
+    message: 'Too many code requests. Please wait a minute.'
+  }),
+
+  // POST /email/start — DDC_AUTH_OTP_PER_IP_HOUR per /64 per hour (halved past the soft budget)
+  nativeEmailStartHourly: createNativeLimiter({
+    name: 'nativeEmailStartHourly',
+    windowMs: 60 * 60 * 1000,
+    max: () => Math.max(1, Math.floor(nativeOtpPerIpHour() * nativeOtpFactor())),
+    message: 'Too many code requests from this network. Please try again later.'
+  }),
+
+  // POST /email/verify — 30 per 10 minutes per /64
+  nativeEmailVerify: createNativeLimiter({
+    name: 'nativeEmailVerify',
+    windowMs: 10 * 60 * 1000,
+    max: 30,
+    message: 'Too many code attempts. Please wait a few minutes.'
+  }),
+
+  // POST /nonce, /google, /apple, /x/exchange — 30 per minute per /64
+  nativeIdp: createNativeLimiter({
+    name: 'nativeIdp',
+    windowMs: 60 * 1000,
+    max: 30,
+    message: 'Too many sign-in attempts. Please wait a minute.'
+  }),
+
+  // GET /x/start — 20 per minute per /64
+  nativeXStart: createNativeLimiter({
+    name: 'nativeXStart',
+    windowMs: 60 * 1000,
+    max: 20,
+    message: 'Too many sign-in attempts. Please wait a minute.'
+  }),
+
+  // POST /token, /complete — 20 per minute per /64
+  nativeComplete: createNativeLimiter({
+    name: 'nativeComplete',
+    windowMs: 60 * 1000,
+    max: 20,
+    message: 'Too many sign-in attempts. Please wait a minute.'
+  }),
+
+  // /identities/* — 10 per minute per /64
+  nativeIdentities: createNativeLimiter({
+    name: 'nativeIdentities',
+    windowMs: 60 * 1000,
+    max: 10,
+    message: 'Too many account security requests. Please wait a minute.'
+  }),
+
+  // POST /api/auth/register — 5 SUCCESSFUL registrations per hour per /64 (F5), and only while
+  // DDC_AUTH_ENABLED=true: with the flag off it is a pass-through (no count, no headers), so
+  // today's register behaviour is byte-for-byte unchanged. Mounted by authRoutes (BE8).
+  registerSuccessIp: createRateLimiter({
+    name: 'registerSuccessIp',
+    windowMs: 60 * 60 * 1000,
+    max: 5,
+    message: 'Too many accounts created from this network. Please try again later.',
+    keyGenerator: keyGenerators.ip64,
+    store: nativeRateLimitStore,
+    skipFailedRequests: true,
+    enabled: () => nativeAuthEnabled(),
+    code: 'RATE_LIMITED'
   })
 };
 
@@ -366,6 +537,13 @@ function cleanupExpiredEntries() {
       cleaned++;
     }
   }
+  // Native buckets: the longest native window is one hour, same horizon.
+  for (const [key, data] of [...nativeRateLimitStore.entries()]) {
+    if (data.requests.length === 0 || data.requests[data.requests.length - 1] < now - 60 * 60 * 1000) {
+      nativeRateLimitStore.delete(key);
+      cleaned++;
+    }
+  }
 
   if (cleaned > 0) {
     logger.info(`Cleaned up ${cleaned} expired rate limit entries`);
@@ -375,6 +553,8 @@ function cleanupExpiredEntries() {
 /** Tests only: forget every bucket. */
 function clearRateLimitStore() {
   rateLimitStore.clear();
+  nativeRateLimitStore.clear();
+  nativeOtpTightened = false;
 }
 
 // Run cleanup every 30 minutes; unref so the timer never keeps a process alive on its own
@@ -382,9 +562,15 @@ setInterval(cleanupExpiredEntries, 30 * 60 * 1000).unref();
 
 module.exports = {
   createRateLimiter,
+  createNativeLimiter,
   rateLimiters,
   keyGenerators,
   clearRateLimitStore,
   tokenClientMaxPerMinute,
-  DEFAULT_TOKEN_CLIENT_MAX_PER_MIN
+  DEFAULT_TOKEN_CLIENT_MAX_PER_MIN,
+  BoundedStore,
+  NATIVE_STORE_MAX_KEYS,
+  nativeRateLimitStore,
+  setNativeOtpTightened,
+  nativeOtpPerIpHour
 };
