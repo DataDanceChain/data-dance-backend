@@ -19,12 +19,16 @@
  *   unlinks cannot remove the last two.
  *
  * Step-up (§3.8):
- *   - an account with a wallet signs an EIP-4361 message (proofMessage.buildProofMessage) with its
- *     CURRENT wallet over a server challenge naming the action and the target; the challenge is an
- *     AuthFlowState 'step_up' row (5 min, single use) keyed by HMAC(user, action, target), so it
- *     is found again without a client-held id and cannot serve another action or target. A stolen
- *     session cannot produce the signature: NODE mode never stores the key (F2);
- *   - an account without a wallet: a link attempt (intent 'link', same account, created in the
+ *   - an account with a PROVEN wallet signs an EIP-4361 message (proofMessage.buildProofMessage)
+ *     with its CURRENT wallet over a server challenge naming the action and the target; the
+ *     challenge is an AuthFlowState 'step_up' row (5 min, single use) keyed by HMAC(user, action,
+ *     target), so it is found again without a client-held id and cannot serve another action or
+ *     target. A stolen session cannot produce the signature: NODE mode never stores the key (F2).
+ *     User.walletAddress alone proves nothing: a session can write it on an account that has none
+ *     (PUT /api/users/wallet, POST /api/auth/update-wallet, /wallet/generate|import). The wallet
+ *     counts only when a login proved it (provenWallet below); otherwise the account is treated
+ *     exactly like an account without a wallet;
+ *   - an account without a (proven) wallet: a link attempt (intent 'link', same account, created in the
  *     last 10 minutes) of a method ALREADY linked to the account, sent as
  *     {stepUpLoginId, stepUpLoginSecret} and consumed here; or, for link only, nothing more when
  *     the method being linked is our e-mail OTP for the account's own User.email (that proves the
@@ -59,6 +63,11 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{
 const SIGNATURE_PATTERN = /^0x[0-9a-fA-F]{130}$/;
 
 const PROVIDER_LABELS = Object.freeze({ email: 'e-mail code', google: 'Google', apple: 'Apple', x: 'X' });
+
+// Mirror of web3authIdentity.EXTERNAL_WALLET_VERIFIER (asserted equal in
+// test/unit/nativeAuthIdentities.test.js); copied so this module does not load the legacy
+// Web3Auth verifier and its boot assertions.
+const EXTERNAL_WALLET_VERIFIER = 'external-wallet';
 
 function defaultDb() {
   return require('../../utils/prisma');
@@ -203,8 +212,34 @@ function linkProvesOwnEmail(user, attempt) {
   return Boolean(attempt && attempt.provider === 'email' && notify.isRealEmail(user.email) && lower(user.email) === lower(attempt.email));
 }
 
-function modeFor(user, action, attempt) {
-  if (user.walletAddress) return STEP_UP_MODES.wallet;
+/**
+ * The account's wallet if a LOGIN proved it, else null (F2). User.walletAddress is not enough on
+ * its own: the session-only wallet endpoints write it on any account that has none. Proven means:
+ *   - native accounts: the NativeWalletBinding of the account holds this address (written only
+ *     by complete.js after a verified wallet proof); a binding for another address proves nothing,
+ *     and a native-connection pair without a binding proves nothing;
+ *   - an external-wallet Web3Auth pair: its verifierId IS the lower-cased address the ID token
+ *     proved, so it must be this address;
+ *   - a legacy social Web3Auth pair: the address came in through a verified login, unless a
+ *     session endpoint wrote it — all of those also write User.chainId, which no login path
+ *     does, so a wallet with a chainId is not counted.
+ * Every other account (password rows, placeholders) uses the identify / own-e-mail step-up.
+ * Looked up at challenge time AND at verify time.
+ */
+async function provenWallet(user, db, cfg) {
+  const address = user && user.walletAddress;
+  if (typeof address !== 'string' || !address) return null;
+  const binding = await db.nativeWalletBinding.findUnique({ where: { userId: user.id } });
+  if (binding) return sameAddress(binding.address, address) ? address : null;
+  const verifier = user.web3authVerifier;
+  if (!verifier || !user.web3authVerifierId || verifier === cfg.connectionId) return null;
+  if (verifier === EXTERNAL_WALLET_VERIFIER) return sameAddress(user.web3authVerifierId, address) ? address : null;
+  if (user.chainId !== null && user.chainId !== undefined) return null;
+  return address;
+}
+
+async function modeFor({ user, action, attempt, db, cfg }) {
+  if (await provenWallet(user, db, cfg)) return STEP_UP_MODES.wallet;
   if (action === 'link' && linkProvesOwnEmail(user, attempt)) return STEP_UP_MODES.none;
   return STEP_UP_MODES.identify;
 }
@@ -244,7 +279,7 @@ async function createStepUpChallenge({ user, body = {}, db = defaultDb(), cfg = 
     requestId = identity.id;
   }
 
-  const mode = modeFor(user, action, attempt);
+  const mode = await modeFor({ user, action, attempt, db, cfg });
   if (mode !== STEP_UP_MODES.wallet) return { stepUp: null, mode };
 
   const expiresAt = new Date(now.getTime() + STEP_UP_TTL_SEC * 1000);
@@ -343,7 +378,7 @@ async function verifyIdentifyStepUp({ user, excludeAttemptId, body, db, cfg, now
 
 /** Verify (and consume) the step-up for `action` on `target`. Returns the mode used. */
 async function verifyStepUp({ user, action, target, body = {}, linkAttempt = null, db, cfg, now }) {
-  const mode = modeFor(user, action, linkAttempt);
+  const mode = await modeFor({ user, action, attempt: linkAttempt, db, cfg });
   if (mode === STEP_UP_MODES.wallet) return verifyWalletStepUp({ user, action, target, body, db, cfg, now });
   if (mode === STEP_UP_MODES.none) return mode;
   return verifyIdentifyStepUp({ user, excludeAttemptId: linkAttempt && linkAttempt.id, body, db, cfg, now });
@@ -485,5 +520,6 @@ module.exports = {
   createStepUpChallenge,
   linkIdentity,
   unlinkIdentity,
-  _internals: { stepUpValue, stepUpHash, stepUpStatement, otherMethodCount, identityLockKey, verifyStepUp },
+  EXTERNAL_WALLET_VERIFIER,
+  _internals: { stepUpValue, stepUpHash, stepUpStatement, otherMethodCount, identityLockKey, verifyStepUp, provenWallet },
 };
