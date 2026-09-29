@@ -175,7 +175,7 @@ describe('BE9 scripts on Postgres', () => {
     for (const run of runs) for (const [k, v] of Object.entries(run.outcomes)) total[k] = (total[k] || 0) + v;
     const applied = Object.entries(total).filter(([k]) => k.startsWith('applied_')).reduce((a, [, v]) => a + v, 0);
     assert.equal(applied, 6, JSON.stringify(total));
-    for (const key of Object.keys(total)) assert.match(key, /^(applied_legacy_identity_backfilled|skipped_(already_applied|stale))$/, JSON.stringify(total));
+    for (const key of Object.keys(total)) assert.match(key, /^(applied_legacy_identity_backfilled|skipped_(not_claimable|stale))$/, JSON.stringify(total));
 
     for (const u of mine) {
       const now = await prisma.user.findUnique({ where: { id: u.id } });
@@ -201,14 +201,65 @@ describe('BE9 scripts on Postgres', () => {
 
     const replan = await migration.planMigration({ target, clientId: 'cid', write: true, db: one, lookup: async () => assert.fail('reuses the binding'), limit: 1000 });
     assert.deepEqual([replan.superseded, replan.outcomes], [1, { planned_repaired: 1 }]);
-    const rows = await prisma.walletAddressHistory.findMany({ where: { userId: u.id, newVerifier: target.connection } });
-    assert.deepEqual(rows.map((r) => [r.status, r.oldAddress, r.newAddress, r.newSubjectRef]), [['planned', changed, binding.address, binding.id]]);
+    const rows = await prisma.walletAddressHistory.findMany({ where: { userId: u.id, newVerifier: target.connection }, orderBy: { createdAt: 'asc' } });
+    assert.deepEqual(rows.map((r) => [r.reason, r.status, r.oldAddress, r.newAddress, r.newSubjectRef]), [
+      [migration.SUPERSEDED_REASON, 'planned', u.walletAddress, binding.address, binding.id],
+      ['network_migration', 'planned', changed, binding.address, binding.id],
+    ], 'the stale plan is kept for audit (superseded), the current one counts');
     const { csv } = await migration.exportRows({ target, db: one });
     assert.equal(csv, `userId,oldAddress,newAddress,chainStatus\n${u.id},${changed},${binding.address},pending\n`);
 
     assert.deepEqual((await migration.applyMigration({ target, db: one, cfg, write: true })).outcomes, { applied_legacy_identity_backfilled: 1 });
     const after = await prisma.user.findUnique({ where: { id: u.id } });
     assert.deepEqual([after.walletAddress, after.web3authVerifier], [binding.address, target.connection]);
+  });
+
+  it('a stale row the chain team marked moved survives --plan --write untouched; apply names it', async () => {
+    const u = await mkUser({ walletAddress: Wallet.createRandom().address, web3authVerifier: LEGACY_EMAIL, web3authVerifierId: `${RUN}-mv@example.com` });
+    const target = { network: 'sapphire_devnet', connection: `${RUN}-ddc-jwt-devnet-m` };
+    const one = scoped({ user: () => ({ id: u.id }), walletAddressHistory: () => ({ userId: u.id }) });
+    await migration.planMigration({ target, clientId: 'cid', write: true, db: one, lookup: fakeLookup(), limit: 1000 });
+    const [row] = await prisma.walletAddressHistory.findMany({ where: { userId: u.id } });
+    const moved = await prisma.walletAddressHistory.update({ where: { id: row.id }, data: { chainStatus: 'moved', chainRef: '0xabc' } });
+    await prisma.user.update({ where: { id: u.id }, data: { walletAddress: Wallet.createRandom().address } });
+
+    for (let run = 0; run < 2; run += 1) {
+      const replan = await migration.planMigration({ target, clientId: 'cid', write: true, db: one, lookup: async () => assert.fail('no new plan'), limit: 1000 });
+      assert.deepEqual([replan.superseded, replan.classes, replan.outcomes], [0, { stale_chain_moved: 1 }, {}]);
+    }
+    assert.deepEqual(await prisma.walletAddressHistory.findMany({ where: { userId: u.id } }), [moved], 'never deleted or rewritten, no second row');
+    assert.deepEqual((await migration.applyMigration({ target, db: one, cfg, write: true })).outcomes, { skipped_stale_chain_moved: 1 });
+    assert.deepEqual(await prisma.walletAddressHistory.findMany({ where: { userId: u.id } }), [moved]);
+  });
+
+  it('the supersede UPDATE is guarded on the real schema: it cannot touch a moved or applied row', async () => {
+    const u = await mkUser({ walletAddress: Wallet.createRandom().address, web3authVerifier: LEGACY_EMAIL, web3authVerifierId: `${RUN}-gd@example.com` });
+    const target = { network: 'sapphire_devnet', connection: `${RUN}-ddc-jwt-devnet-g` };
+    const one = scoped({ user: () => ({ id: u.id }), walletAddressHistory: () => ({ userId: u.id }) });
+    await migration.planMigration({ target, clientId: 'cid', write: true, db: one, lookup: fakeLookup(), limit: 1000 });
+    const [row] = await prisma.walletAddressHistory.findMany({ where: { userId: u.id } });
+    await prisma.user.update({ where: { id: u.id }, data: { walletAddress: Wallet.createRandom().address } });
+    // The chain team records its move between the plan's read and its write.
+    const racing = new Proxy(one, {
+      get(t, model) {
+        if (model !== 'walletAddressHistory') return t[model];
+        const d = t[model];
+        return new Proxy(d, {
+          get(dd, method) {
+            if (method !== 'findMany') return dd[method];
+            return async (args) => {
+              const out = await dd.findMany(args);
+              await prisma.walletAddressHistory.update({ where: { id: row.id }, data: { chainStatus: 'moved', chainRef: '0x123' } });
+              return out;
+            };
+          },
+        });
+      },
+    });
+    const replan = await migration.planMigration({ target, clientId: 'cid', write: true, db: racing, lookup: async () => assert.fail('no new plan'), limit: 1000 });
+    assert.deepEqual([replan.superseded, replan.outcomes], [0, { supersede_lost: 1 }]);
+    const rows = await prisma.walletAddressHistory.findMany({ where: { userId: u.id } });
+    assert.deepEqual(rows.map((r) => [r.reason, r.status, r.chainStatus, r.chainRef]), [['network_migration', 'planned', 'moved', '0x123']]);
   });
 
   it('cleanup --native deletes by the fixed retention', async () => {
