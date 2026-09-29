@@ -275,13 +275,32 @@ describe('startAuthorization', () => {
       assert.equal(prisma.oAuthAuthorization.rows[0].referralCode, 'AB23CD');
     });
 
-    it('accepts a well-formed display code lowercase, and the legacy DD-######## form', async () => {
+    it('accepts a well-formed display code lowercase (stored bare upper case), and the legacy DD-######## form', async () => {
       await startAuthorization(req, partnerQuery({ referral_code: 'ab23cd' }));
-      assert.equal(prisma.oAuthAuthorization.rows[0].referralCode, 'ab23cd');
+      assert.equal(prisma.oAuthAuthorization.rows[0].referralCode, 'AB23CD');
       prisma.reset();
       prisma.user.rows.push({ ...user }, { ...orgUser });
       await startAuthorization(req, partnerQuery({ referral_code: 'DD-a1b2c3d4' }));
       assert.equal(prisma.oAuthAuthorization.rows[0].referralCode, 'DD-a1b2c3d4');
+    });
+
+    it('accepts the DDC- display form (any case, spacing) and stores only the bare code', async () => {
+      // Regression: invite links carry the code as users see it ("DDC-AB23CD"); main rejected
+      // that with 400 invalid_request because the format check only knew the bare code.
+      for (const shown of ['DDC-AB23CD', 'ddc-ab23cd', 'DDCAB23CD', ' ddc ab23cd ']) {
+        prisma.reset();
+        prisma.user.rows.push({ ...user }, { ...orgUser });
+        await startAuthorization(req, partnerQuery({ referral_code: shown }));
+        assert.equal(prisma.oAuthAuthorization.rows.length, 1, shown);
+        assert.equal(prisma.oAuthAuthorization.rows[0].referralCode, 'AB23CD', shown);
+      }
+    });
+
+    it('still rejects a DDC- prefix on something that is not a display code', async () => {
+      for (const bad of ['DDC-AB23C', 'DDC-AB23CD12', 'DDC-0O1IL2', 'DDC-']) {
+        await rejects(startAuthorization(req, partnerQuery({ referral_code: bad })), { error: 'invalid_request', redirectable: true });
+      }
+      assert.equal(prisma.oAuthAuthorization.rows.length, 0);
     });
 
     it('trims surrounding/internal whitespace before storing', async () => {
@@ -345,7 +364,15 @@ describe('getConsentRequest', () => {
   it('round-trips referralCode for the Wallet to prefill, and reports null when none was sent', async () => {
     const url = await startAuthorization(req, partnerQuery({ referral_code: 'AB23CD' }));
     const data = await getConsentRequest(new URL(url).searchParams.get('request'));
-    assert.equal(data.referralCode, 'AB23CD');
+    assert.equal(data.referralCode, 'DDC-AB23CD');
+
+    const urlShown = await startAuthorization(req, partnerQuery({ referral_code: 'ddc-ab23cd' }));
+    const dataShown = await getConsentRequest(new URL(urlShown).searchParams.get('request'));
+    assert.equal(dataShown.referralCode, 'DDC-AB23CD');
+
+    const urlLegacy = await startAuthorization(req, partnerQuery({ referral_code: 'DD-a1b2c3d4' }));
+    const dataLegacy = await getConsentRequest(new URL(urlLegacy).searchParams.get('request'));
+    assert.equal(dataLegacy.referralCode, 'DD-a1b2c3d4');
 
     const url2 = await startAuthorization(req, partnerQuery());
     const data2 = await getConsentRequest(new URL(url2).searchParams.get('request'));
