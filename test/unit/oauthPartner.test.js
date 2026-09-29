@@ -1,4 +1,4 @@
-const { describe, it, beforeEach } = require('node:test');
+const { describe, it, beforeEach, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('crypto');
 
@@ -947,5 +947,264 @@ describe('data licence field source', () => {
     assert.equal(await hasActiveConsent(user.id), true);
     prisma.dataLicenceConsent.rows[0].withdrawnAt = new Date();
     assert.equal(await hasActiveConsent(user.id), false);
+  });
+});
+
+/**
+ * Native login partner hint (design §3.10, F7): `login_method` / `login_hint` on the partner
+ * authorize request, stored on the row and returned by the consent-request fetch — only while
+ * DDC_AUTH_ENABLED is on. With the switch off, /oauth/authorize, the stored row and the consent
+ * request body are exactly what they were before. A hint never changes a consent decision.
+ */
+describe('partner login_method / login_hint (native login §3.10)', () => {
+  const { AutoApproveNotAllowedError, PARTNER_LOGIN_METHODS } = oauth;
+  const LEGACY_CONSENT_KEYS = ['autoApprove', 'clientId', 'clientName', 'expiresAt', 'id', 'kind', 'referralCode', 'resource', 'scope', 'scopeItems'];
+  const savedEnabled = process.env.DDC_AUTH_ENABLED;
+
+  function nativeOn() {
+    process.env.DDC_AUTH_ENABLED = 'true';
+  }
+
+  /** Everything the oauthService logger writes to stdout while `fn` runs. */
+  async function stdoutDuring(fn) {
+    const lines = [];
+    const original = process.stdout.write;
+    process.stdout.write = function (chunk, ...rest) {
+      lines.push(String(chunk));
+      return original.call(this, chunk, ...rest);
+    };
+    try {
+      await fn();
+    } finally {
+      process.stdout.write = original;
+    }
+    return lines.join('');
+  }
+
+  async function startPartner(overrides = {}, res) {
+    const url = await startAuthorization(req, partnerQuery(overrides), res);
+    const requestId = new URL(url).searchParams.get('request');
+    return { url, requestId, row: prisma.oAuthAuthorization.rows.find((r) => r.id === requestId) };
+  }
+
+  function mcpQuery(overrides = {}) {
+    return {
+      response_type: 'code',
+      client_id: 'ddc_oauth_mcp1',
+      redirect_uri: 'https://claude.ai/api/mcp/auth_callback',
+      code_challenge: pkce().challenge,
+      code_challenge_method: 'S256',
+      ...overrides,
+    };
+  }
+
+  beforeEach(() => {
+    delete process.env.DDC_AUTH_ENABLED;
+  });
+
+  afterEach(() => {
+    if (savedEnabled === undefined) delete process.env.DDC_AUTH_ENABLED;
+    else process.env.DDC_AUTH_ENABLED = savedEnabled;
+  });
+
+  it('the accepted set is exactly the design list', () => {
+    assert.deepEqual([...PARTNER_LOGIN_METHODS], ['email', 'google', 'apple', 'x', 'wallet']);
+    assert.ok(Object.isFrozen(PARTNER_LOGIN_METHODS));
+  });
+
+  describe('DDC_AUTH_ENABLED off (default): exactly today', () => {
+    it('neither parameter is stored, and the consent URL is today\'s (request + e-mail login_hint only)', async () => {
+      const { url, row } = await startPartner({ login_method: 'x', login_hint: 'sloan@example.com' });
+      assert.equal('loginMethod' in row, false, 'the row is written without the new columns');
+      assert.equal('loginHint' in row, false);
+      const params = [...new URL(url).searchParams.keys()].sort();
+      assert.deepEqual(params, ['login_hint', 'request']);
+      assert.equal(new URL(url).searchParams.get('login_hint'), 'sloan@example.com');
+    });
+
+    it('an unknown login_method is not even looked at (no error, no log)', async () => {
+      let url;
+      const out = await stdoutDuring(async () => {
+        ({ url } = await startPartner({ login_method: 'passkey' }));
+      });
+      assert.ok(url);
+      assert.doesNotMatch(out, /authorize_login_method_ignored/);
+    });
+
+    it('the consent-request body keeps exactly its previous keys', async () => {
+      const { requestId } = await startPartner({ login_method: 'google', login_hint: 'sloan@example.com' });
+      const data = await getConsentRequest(requestId);
+      assert.deepEqual(Object.keys(data).sort(), LEGACY_CONSENT_KEYS);
+    });
+
+    it('a row written while the switch was on reveals nothing once it is off', async () => {
+      nativeOn();
+      const { requestId } = await startPartner({ login_method: 'google', login_hint: 'sloan@example.com' });
+      delete process.env.DDC_AUTH_ENABLED;
+      const data = await getConsentRequest(requestId);
+      assert.deepEqual(Object.keys(data).sort(), LEGACY_CONSENT_KEYS);
+    });
+  });
+
+  describe('DDC_AUTH_ENABLED on', () => {
+    beforeEach(nativeOn);
+
+    it('stores and returns every accepted method', async () => {
+      for (const method of PARTNER_LOGIN_METHODS) {
+        const { requestId, row } = await startPartner({ login_method: method });
+        assert.equal(row.loginMethod, method);
+        assert.equal(row.loginHint, null);
+        const data = await getConsentRequest(requestId);
+        assert.equal(data.loginMethod, method);
+        assert.equal(data.loginHint, null);
+      }
+    });
+
+    it('returns both keys as null when the partner sent neither', async () => {
+      const { requestId, row } = await startPartner();
+      assert.equal(row.loginMethod, null);
+      assert.equal(row.loginHint, null);
+      const data = await getConsentRequest(requestId);
+      assert.deepEqual(Object.keys(data).sort(), [...LEGACY_CONSENT_KEYS, 'loginHint', 'loginMethod'].sort());
+      assert.equal(data.loginMethod, null);
+      assert.equal(data.loginHint, null);
+    });
+
+    it('ignores anything outside the set — wrong case, unknown, repeated, object — and still authorizes', async () => {
+      const bad = ['X', 'Google', ' email', 'passkey', 'sms', 'wallet,x', ['x', 'google'], ['x'], { x: '1' }, 'x'.repeat(300)];
+      for (const value of bad) {
+        let result;
+        const out = await stdoutDuring(async () => {
+          result = await startPartner({ login_method: value });
+        });
+        assert.equal(result.row.loginMethod, null, JSON.stringify(value));
+        assert.equal((await getConsentRequest(result.requestId)).loginMethod, null);
+        assert.match(out, /oauth\.authorize_login_method_ignored/, JSON.stringify(value));
+        if (typeof value === 'string' && value.length > 3) {
+          assert.equal(out.includes(value.trim()), false, 'the caller-controlled value is never logged');
+        }
+      }
+    });
+
+    it('an empty login_method is simply absent (no log)', async () => {
+      let result;
+      const out = await stdoutDuring(async () => {
+        result = await startPartner({ login_method: '' });
+      });
+      assert.equal(result.row.loginMethod, null);
+      assert.doesNotMatch(out, /authorize_login_method_ignored/);
+    });
+
+    it('login_hint keeps today\'s e-mail-only rule: stored and returned when plausible, dropped otherwise', async () => {
+      const ok = await startPartner({ login_method: 'email', login_hint: 'sloan@example.com' });
+      assert.equal(ok.row.loginHint, 'sloan@example.com');
+      assert.equal((await getConsentRequest(ok.requestId)).loginHint, 'sloan@example.com');
+
+      for (const value of ['<script>', 'not-an-email', `${'a'.repeat(250)}@example.com`, ['a@b.co', 'c@d.co']]) {
+        const dropped = await startPartner({ login_hint: value });
+        assert.equal(dropped.row.loginHint, null, JSON.stringify(value));
+        assert.equal(new URL(dropped.url).searchParams.has('login_hint'), false);
+      }
+    });
+
+    it('the consent URL is unchanged: login_method never appears in it', async () => {
+      const on = await startPartner({ login_method: 'x', login_hint: 'sloan@example.com' });
+      delete process.env.DDC_AUTH_ENABLED;
+      const off = await startPartner({ login_method: 'x', login_hint: 'sloan@example.com' });
+      const shape = (u) => {
+        const parsed = new URL(u);
+        return { base: parsed.origin + parsed.pathname, keys: [...parsed.searchParams.keys()].sort(), hint: parsed.searchParams.get('login_hint') };
+      };
+      assert.deepEqual(shape(on.url), shape(off.url));
+      assert.equal(new URL(on.url).searchParams.has('login_method'), false);
+    });
+
+    it('is ignored for MCP (non-partner) clients: nothing stored, nothing returned, nothing logged', async () => {
+      await seedMcpClient();
+      let url;
+      const out = await stdoutDuring(async () => {
+        url = await startAuthorization(req, mcpQuery({ login_method: 'passkey', login_hint: 'sloan@example.com' }));
+      });
+      const row = prisma.oAuthAuthorization.rows[0];
+      assert.equal('loginMethod' in row, false);
+      assert.equal('loginHint' in row, false);
+      assert.equal(new URL(url).searchParams.has('login_hint'), false, 'MCP never carried login_hint');
+      assert.doesNotMatch(out, /authorize_login_method_ignored/);
+      const data = await getConsentRequest(new URL(url).searchParams.get('request'));
+      assert.equal('loginMethod' in data, false);
+      assert.equal('loginHint' in data, false);
+
+      await startAuthorization(req, mcpQuery({ login_method: 'x' }));
+      assert.equal('loginMethod' in prisma.oAuthAuthorization.rows[1], false);
+    });
+
+    it('a request that fails validation stores nothing, hint or not', async () => {
+      await rejects(startAuthorization(req, partnerQuery({ login_method: 'x', state: '' })), { error: 'invalid_request', redirectable: true });
+      await rejects(startAuthorization(req, partnerQuery({ login_method: 'x', referral_code: 'bad!' })), { error: 'invalid_request', redirectable: true });
+      assert.equal(prisma.oAuthAuthorization.rows.length, 0);
+    });
+
+    it('is returned only for a live, undecided request: null once decided, 404 once consumed or expired', async () => {
+      const decided = await startPartner({ login_method: 'x', login_hint: 'sloan@example.com' });
+      await decideConsent(user, decided.requestId, true, { kind: 'user_jwt' });
+      const afterDecision = await getConsentRequest(decided.requestId);
+      assert.equal(afterDecision.loginMethod, null);
+      assert.equal(afterDecision.loginHint, null);
+
+      const denied = await startPartner({ login_method: 'google' });
+      await decideConsent(user, denied.requestId, false, { kind: 'user_jwt' });
+      await rejects(getConsentRequest(denied.requestId), { status: 404 });
+
+      const expired = await startPartner({ login_method: 'apple' });
+      expired.row.expiresAt = new Date(Date.now() - 1000);
+      await rejects(getConsentRequest(expired.requestId), { status: 404 });
+    });
+
+    describe('never trusted for a decision', () => {
+      it('does not relax the initiator binding: another browser still cannot approve', async () => {
+        for (const method of PARTNER_LOGIN_METHODS) {
+          const res = fakeRes();
+          const { requestId } = await startPartner({ login_method: method, login_hint: 'sloan@example.com' }, res);
+          await assert.rejects(
+            decideConsent(user, requestId, true, { kind: 'user_jwt', initiatorNonce: 'another-browser-nonce-000000000000000000000' }),
+            (e) => e instanceof ConsentInitiatorError,
+          );
+          await assert.rejects(decideConsent(user, requestId, true, { kind: 'user_jwt' }), (e) => e instanceof ConsentInitiatorError);
+          const row = prisma.oAuthAuthorization.rows.find((r) => r.id === requestId);
+          assert.equal(row.codeHash ?? null, null, `no code minted for ${method}`);
+          const to = new URL(await decideConsent(user, requestId, true, { kind: 'user_jwt', initiatorNonce: res.cookies[0].value }));
+          assert.match(to.searchParams.get('code'), /^ddc_code_/);
+        }
+      });
+
+      it('does not enable automatic approval', async () => {
+        const { requestId } = await startPartner({ login_method: 'x' });
+        assert.deepEqual((await getConsentRequest(requestId)).autoApprove, (await getConsentRequest((await startPartner()).requestId)).autoApprove);
+        await assert.rejects(decideConsent(user, requestId, true, { kind: 'user_jwt', auto: true }), (e) => e instanceof AutoApproveNotAllowedError);
+        assert.equal(prisma.oAuthAuthorization.rows.find((r) => r.id === requestId).consumedAt ?? null, null);
+      });
+
+      it('does not bypass SSO_REQUIRE_VERIFIED_SESSION or the organization rule', async () => {
+        process.env.SSO_REQUIRE_VERIFIED_SESSION = 'true';
+        try {
+          const a = await startPartner({ login_method: 'wallet' });
+          const to = new URL(await decideConsent(user, a.requestId, true, { kind: 'user_jwt', claims: { ver: 1 } }));
+          assert.equal(to.searchParams.get('error'), 'login_required');
+        } finally {
+          delete process.env.SSO_REQUIRE_VERIFIED_SESSION;
+        }
+        const b = await startPartner({ login_method: 'email', login_hint: 'org@example.com' });
+        const to = new URL(await decideConsent(orgUser, b.requestId, true, { kind: 'user_jwt' }));
+        assert.equal(to.searchParams.get('error'), 'access_denied');
+      });
+
+      it('a login_hint never selects or creates an account: consent writes only the deciding user', async () => {
+        const users = prisma.user.rows.length;
+        const { requestId } = await startPartner({ login_method: 'email', login_hint: 'org@example.com' });
+        await decideConsent(user, requestId, true, { kind: 'user_jwt' });
+        assert.equal(prisma.user.rows.length, users);
+        assert.equal(prisma.oAuthAuthorization.rows.find((r) => r.id === requestId).userId, user.id);
+      });
+    });
   });
 });
