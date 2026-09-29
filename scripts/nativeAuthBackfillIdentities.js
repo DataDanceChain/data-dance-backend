@@ -36,9 +36,9 @@
  * in the same transaction, as a safety net).
  */
 const { readNativeAuthConfig } = require('../src/services/nativeAuth/config');
+const { normalizeEmail } = require('../src/services/nativeAuth/emailGuard');
 
 const LEGACY_PROVIDER = 'web3auth_legacy';
-const EMAIL_PATTERN = /^[^\s@|]+@[^\s@|]+\.[^\s@|]+$/;
 const X_PAIR_PATTERN = /^twitter\|(\d{1,25})$/;
 const DEFAULT_BATCH = 500;
 
@@ -69,46 +69,54 @@ function allLegacyVerifiers(lists) {
 }
 
 /**
- * What a legacy pair qualifies for: { identity } or { skip: reason } or null (not a listed legacy
- * verifier). Pure; the list order (e-mail, Google, X) wins when a name is listed twice.
+ * What a legacy pair qualifies for: { identity, legacyId } or { skip: reason } or null (not a
+ * listed legacy verifier). Pure; the list order (e-mail, Google, X) wins when a name is listed
+ * twice. E-mail addresses are normalised exactly as the OTP path does (emailGuard.normalizeEmail:
+ * trim, lower-case, IDN domain → punycode, trailing dot dropped), so the backfilled identity is the
+ * one a native e-mail sign-in produces; an address that path would refuse is 'malformed_pair'.
+ * `legacyId` is the pair's own (trimmed, lower-cased) id, for matching other legacy pairs.
  */
 function identityForPair(verifier, verifierId, lists) {
   if (!verifier || typeof verifierId !== 'string') return null;
   if (lists.emailVerifiers.includes(verifier)) {
-    const email = lower(verifierId);
-    if (!EMAIL_PATTERN.test(email) || email.length > 254) return { skip: 'malformed_pair' };
-    return { identity: { provider: 'email', subject: email, email, emailLinkGrade: 'strong', linkedVia: 'backfill_legacy_email' } };
+    const email = normalizeEmail(verifierId);
+    if (!email) return { skip: 'malformed_pair' };
+    return { identity: { provider: 'email', subject: email, email, emailLinkGrade: 'strong', linkedVia: 'backfill_legacy_email' }, legacyId: lower(verifierId) };
   }
   if (lists.googleVerifiers.includes(verifier)) {
-    const email = lower(verifierId);
-    if (!EMAIL_PATTERN.test(email) || email.length > 254) return { skip: 'malformed_pair' };
+    const email = normalizeEmail(verifierId);
+    if (!email) return { skip: 'malformed_pair' };
     if (!email.endsWith('@gmail.com')) return { skip: 'google_not_gmail' };
-    return { identity: { provider: 'email', subject: email, email, emailLinkGrade: 'strong', linkedVia: 'backfill_legacy_google' } };
+    return { identity: { provider: 'email', subject: email, email, emailLinkGrade: 'strong', linkedVia: 'backfill_legacy_google' }, legacyId: lower(verifierId) };
   }
   if (lists.xVerifiers.includes(verifier)) {
     const match = X_PAIR_PATTERN.exec(verifierId.trim());
     if (!match) return { skip: 'malformed_pair' };
-    return { identity: { provider: 'x', subject: match[1], email: null, emailLinkGrade: 'none', linkedVia: 'backfill_legacy_x' } };
+    return { identity: { provider: 'x', subject: match[1], email: null, emailLinkGrade: 'none', linkedVia: 'backfill_legacy_x' }, legacyId: `twitter|${match[1]}` };
   }
   return null;
 }
 
-/** The legacy pairs that carry the same evidence as `identity` (for the ambiguity check). */
-function evidencePairs(identity, lists) {
+/**
+ * The legacy pairs that carry the same evidence as `identity` (for the ambiguity check): the
+ * normalised address and, when it differs (IDN, trailing dot), the pair's own spelling.
+ */
+function evidencePairs(identity, lists, legacyId) {
   if (identity.provider === 'x') {
     return lists.xVerifiers.map((verifier) => ({ verifier, verifierId: `twitter|${identity.subject}` }));
   }
   const verifiers = [...lists.emailVerifiers, ...(identity.subject.endsWith('@gmail.com') ? lists.googleVerifiers : [])];
-  return verifiers.map((verifier) => ({ verifier, verifierId: identity.subject }));
+  const ids = [...new Set([identity.subject, ...(legacyId ? [legacyId] : [])])];
+  return verifiers.flatMap((verifier) => ids.map((verifierId) => ({ verifier, verifierId })));
 }
 
 /**
  * Other accounts holding the same legacy evidence: by their current pair, or by an old pair the
  * mainnet migration (or a local lazy rebind) recorded as a 'web3auth_legacy' identity.
  */
-async function otherEvidenceHolders(identity, user, lists, db) {
+async function otherEvidenceHolders(identity, user, lists, db, legacyId) {
   const holders = new Set();
-  for (const { verifier, verifierId } of evidencePairs(identity, lists)) {
+  for (const { verifier, verifierId } of evidencePairs(identity, lists, legacyId)) {
     const rows = await db.user.findMany({
       where: { web3authVerifier: verifier, web3authVerifierId: { equals: verifierId, mode: 'insensitive' } },
     });
@@ -134,7 +142,7 @@ async function planUserIdentity({ user, lists, db }) {
   if (!pair) return { status: 'none' };
   if (pair.skip) return { status: 'skip', reason: pair.skip };
   if (isOrganization(user)) return { status: 'skip', reason: 'organization' };
-  const { identity } = pair;
+  const { identity, legacyId } = pair;
 
   const existing = await db.authIdentity.findUnique({
     where: { provider_subject: { provider: identity.provider, subject: identity.subject } },
@@ -148,7 +156,7 @@ async function planUserIdentity({ user, lists, db }) {
     const strong = await db.authIdentity.findMany({ where: { email: identity.email, emailLinkGrade: 'strong' } });
     if (strong.some((row) => row.userId !== user.id)) return { status: 'skip', reason: 'strong_email_owned_elsewhere' };
   }
-  const others = await otherEvidenceHolders(identity, user, lists, db);
+  const others = await otherEvidenceHolders(identity, user, lists, db, legacyId);
   if (others.size) return { status: 'skip', reason: 'ambiguous' };
   return { status: 'create', identity };
 }
