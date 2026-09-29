@@ -270,6 +270,11 @@ describe('scripts/nativeAuthBackfillIdentities', () => {
 
 // ---------------------------------------------------------------------------------------------
 describe('scripts/nativeAuthWalletMigration', () => {
+  const SUPERSEDED = 'network_migration_superseded';
+  const rowsOf = (userId) => prisma.store.walletAddressHistory.filter((r) => r.userId === userId);
+  /** The rows that still count for the target (a superseded row is kept for audit only). */
+  const liveRowsOf = (userId) => rowsOf(userId).filter((r) => r.reason === 'network_migration');
+
   function seedAccounts() {
     const legacy = user({ walletAddress: addr(), web3authVerifier: LEGACY_EMAIL, web3authVerifierId: 'leg@example.com', email: 'leg@example.com' });
     const devnetNative = user({ walletAddress: addr(), web3authVerifier: 'ddc-jwt-devnet' });
@@ -508,7 +513,8 @@ describe('scripts/nativeAuthWalletMigration', () => {
     const again = await migration.applyMigration({ target: MAINNET, db: prisma, cfg, write: true });
     assert.equal(again.outcomes.skipped_stale, 1);
     assert.equal(prisma.store.walletAddressHistory.find((r) => r.userId === verifierChanged.legacy.id).status, 'planned');
-    assert.equal(prisma.store.walletAddressHistory.find((r) => r.userId === s.legacy.id).status, 'applied');
+    assert.deepEqual(liveRowsOf(s.legacy.id).map((r) => r.status), ['applied']);
+    assert.deepEqual(rowsOf(s.legacy.id).filter((r) => r.reason === SUPERSEDED).map((r) => r.status), ['planned'], 'the stale plan is kept, superseded');
   });
 
   it('a legacy row skipped as stale (wallet changed) is superseded by the next plan and then applied', async () => {
@@ -534,9 +540,10 @@ describe('scripts/nativeAuthWalletMigration', () => {
     assert.equal(replan.superseded, 1);
     assert.deepEqual(replan.outcomes, { planned_repaired: 1 });
     assert.equal(nodes.calls.length, callsBefore, 'the planned-only binding is reused, no new key assignment');
-    const rows = prisma.store.walletAddressHistory.filter((r) => r.userId === s.legacy.id);
-    assert.equal(rows.length, 1, 'the superseded row is gone');
+    const rows = liveRowsOf(s.legacy.id);
+    assert.equal(rows.length, 1, 'one row still counts');
     assert.notEqual(rows[0].id, oldRowId);
+    assert.deepEqual(rowsOf(s.legacy.id).filter((r) => r.id === oldRowId).map((r) => [r.reason, r.status]), [[SUPERSEDED, 'planned']], 'the stale plan is kept for audit');
     assert.deepEqual(
       [rows[0].status, rows[0].oldAddress, rows[0].oldVerifier, rows[0].oldVerifierId, rows[0].newAddress, rows[0].newSubjectRef],
       ['planned', changed, LEGACY_EMAIL, 'leg@example.com', binding.address, binding.id],
@@ -561,7 +568,7 @@ describe('scripts/nativeAuthWalletMigration', () => {
     assert.equal((await migration.applyMigration({ target: MAINNET, db: prisma, cfg, write: true })).outcomes.skipped_stale, 1);
     const replan = await migration.planMigration({ target: MAINNET, clientId: 'c', write: true, db: prisma, lookup: async () => assert.fail('reuses the binding') });
     assert.deepEqual([replan.superseded, replan.outcomes], [1, { planned_repaired: 1 }]);
-    const row = prisma.store.walletAddressHistory.find((r) => r.userId === s.legacy.id);
+    const [row] = liveRowsOf(s.legacy.id);
     assert.deepEqual([row.oldVerifier, row.oldVerifierId], [LEGACY_GOOGLE, 'relinked@gmail.com']);
     const applied = await migration.applyMigration({ target: MAINNET, db: prisma, cfg, write: true });
     assert.deepEqual(applied.outcomes, { applied_legacy_identity_backfilled: 1 });
@@ -576,8 +583,9 @@ describe('scripts/nativeAuthWalletMigration', () => {
     assert.equal((await migration.applyMigration({ target: MAINNET, db: prisma, cfg, write: true })).outcomes.skipped_stale, 1);
     const replan = await migration.planMigration({ target: MAINNET, clientId: 'c', write: true, db: prisma, lookup: fakeLookup().lookup });
     assert.deepEqual([replan.superseded, replan.outcomes], [1, { planned_external: 1 }]);
-    const rows = prisma.store.walletAddressHistory.filter((r) => r.userId === s.external.id);
+    const rows = liveRowsOf(s.external.id);
     assert.deepEqual(rows.map((r) => [r.status, r.oldAddress, r.newAddress, r.chainStatus]), [['planned', other, other, 'not_needed']]);
+    assert.equal(rowsOf(s.external.id).filter((r) => r.reason === SUPERSEDED).length, 1);
     assert.deepEqual((await migration.applyMigration({ target: MAINNET, db: prisma, cfg, write: true })).outcomes, { applied_external: 1 });
     assert.equal(prisma.store.user.find((u) => u.id === s.external.id).walletAddress, other);
   });
@@ -606,23 +614,190 @@ describe('scripts/nativeAuthWalletMigration', () => {
     const replan = await migration.planMigration({ target: MAINNET, clientId: 'c', write: true, db: prisma, lookup: nodes.lookup });
     assert.deepEqual([replan.superseded, replan.outcomes], [1, { planned_legacy: 1 }]);
     const binding = prisma.store.nativeWalletBinding.find((b) => b.userId === s.legacy.id);
-    const rows = prisma.store.walletAddressHistory.filter((r) => r.userId === s.legacy.id);
-    assert.deepEqual(rows.map((r) => r.newSubjectRef), [binding.id]);
+    assert.deepEqual(liveRowsOf(s.legacy.id).map((r) => r.newSubjectRef), [binding.id]);
   });
 
   it('a superseded row that a concurrent apply claimed first keeps counting', async () => {
     const s = seedAccounts();
     await migration.planMigration({ target: MAINNET, clientId: 'c', write: true, db: prisma, lookup: fakeLookup().lookup });
     s.legacy.walletAddress = addr();
-    const realDeleteMany = prisma.walletAddressHistory.deleteMany;
-    prisma.walletAddressHistory.deleteMany = async () => ({ count: 0 });
+    const realFindMany = prisma.walletAddressHistory.findMany;
+    // The plan reads the row as planned; a concurrent apply claims it right after that read.
+    prisma.walletAddressHistory.findMany = async (args) => {
+      const out = await realFindMany(args);
+      for (const r of rowsOf(s.legacy.id)) Object.assign(r, { status: 'applied', appliedAt: new Date() });
+      return out;
+    };
     try {
       const replan = await migration.planMigration({ target: MAINNET, clientId: 'c', write: true, db: prisma, lookup: async () => assert.fail('nothing to plan') });
-      assert.deepEqual([replan.superseded, replan.classes.already_planned, replan.outcomes], [0, 3, {}]);
+      assert.deepEqual([replan.superseded, replan.classes.already_planned, replan.outcomes], [0, 3, { supersede_lost: 1 }]);
     } finally {
-      prisma.walletAddressHistory.deleteMany = realDeleteMany;
+      prisma.walletAddressHistory.findMany = realFindMany;
     }
     assert.equal(prisma.store.walletAddressHistory.length, 3);
+    assert.deepEqual(rowsOf(s.legacy.id).map((r) => [r.reason, r.status]), [['network_migration', 'applied']], 'the applied row is never superseded');
+  });
+
+  // --- Row state transitions (review2 blocking issue: the chain team's record must survive) ------
+  it('a stale row the chain team marked moved survives every re-plan untouched and blocks a second move', async () => {
+    const s = seedAccounts();
+    const nodes = fakeLookup();
+    await migration.planMigration({ target: MAINNET, clientId: 'c', write: true, db: prisma, lookup: nodes.lookup });
+    const row = rowsOf(s.legacy.id)[0];
+    Object.assign(row, { chainStatus: 'moved', chainRef: '0xabc' }); // the chain team moved old → new
+    const snapshot = { ...row };
+    s.legacy.walletAddress = addr(); // the account changed afterwards: the row is now stale
+
+    const dry = await migration.planMigration({ target: MAINNET, db: prisma, lookup: async () => assert.fail('no lookup in a dry run') });
+    assert.deepEqual([dry.superseded, dry.classes.stale_chain_moved], [0, 1]);
+    for (let run = 0; run < 2; run += 1) {
+      const replan = await migration.planMigration({ target: MAINNET, clientId: 'c', write: true, db: prisma, lookup: async () => assert.fail('no new plan for a moved row') });
+      assert.deepEqual([replan.superseded, replan.classes.stale_chain_moved, replan.outcomes], [0, 1, {}], `run ${run}`);
+    }
+    assert.deepEqual(rowsOf(s.legacy.id), [snapshot], 'the moved row is neither deleted nor rewritten, and no second row asks for another move');
+    const { csv } = await migration.exportRows({ target: MAINNET, db: prisma });
+    assert.deepEqual(csv.split('\n').filter((l) => l.startsWith(`${s.legacy.id},`)), [`${s.legacy.id},${snapshot.oldAddress},${snapshot.newAddress},moved`]);
+
+    const applied = await migration.applyMigration({ target: MAINNET, db: prisma, cfg, write: true });
+    assert.equal(applied.outcomes.skipped_stale_chain_moved, 1, 'apply names the case a person must reconcile');
+    assert.deepEqual(rowsOf(s.legacy.id), [snapshot]);
+  });
+
+  it('a stale row with a chainRef (chainStatus still pending) is also left for a person', async () => {
+    const s = seedAccounts();
+    await migration.planMigration({ target: MAINNET, clientId: 'c', write: true, db: prisma, lookup: fakeLookup().lookup });
+    const row = rowsOf(s.legacy.id)[0];
+    row.chainRef = '0xdef';
+    const snapshot = { ...row };
+    s.legacy.walletAddress = addr();
+    const replan = await migration.planMigration({ target: MAINNET, clientId: 'c', write: true, db: prisma, lookup: async () => assert.fail('no new plan') });
+    assert.deepEqual([replan.superseded, replan.classes.stale_chain_moved], [0, 1]);
+    assert.deepEqual(rowsOf(s.legacy.id), [snapshot]);
+  });
+
+  it('a row marked moved while the plan was running is not superseded (guarded write)', async () => {
+    const s = seedAccounts();
+    await migration.planMigration({ target: MAINNET, clientId: 'c', write: true, db: prisma, lookup: fakeLookup().lookup });
+    s.legacy.walletAddress = addr();
+    const realFindMany = prisma.walletAddressHistory.findMany;
+    // The plan reads the row as 'pending'; the chain team records its move right after that read.
+    prisma.walletAddressHistory.findMany = async (args) => {
+      const out = await realFindMany(args);
+      for (const r of rowsOf(s.legacy.id)) Object.assign(r, { chainStatus: 'moved', chainRef: '0x123' });
+      return out;
+    };
+    try {
+      const replan = await migration.planMigration({ target: MAINNET, clientId: 'c', write: true, db: prisma, lookup: async () => assert.fail('no new plan') });
+      assert.deepEqual([replan.superseded, replan.outcomes], [0, { supersede_lost: 1 }]);
+    } finally {
+      prisma.walletAddressHistory.findMany = realFindMany;
+    }
+    const rows = rowsOf(s.legacy.id);
+    assert.deepEqual(rows.map((r) => [r.reason, r.status, r.chainStatus, r.chainRef]), [['network_migration', 'planned', 'moved', '0x123']]);
+  });
+
+  it('a stale untouched row is superseded in place: kept for audit, out of export and apply, never touched again', async () => {
+    const s = seedAccounts();
+    await migration.planMigration({ target: MAINNET, clientId: 'c', write: true, db: prisma, lookup: fakeLookup().lookup });
+    const original = { ...rowsOf(s.legacy.id)[0] };
+    const changed = addr();
+    s.legacy.walletAddress = changed;
+    const replan = await migration.planMigration({ target: MAINNET, clientId: 'c', write: true, db: prisma, lookup: async () => assert.fail('reuses the binding') });
+    assert.deepEqual([replan.superseded, replan.outcomes], [1, { planned_repaired: 1 }]);
+    const rows = rowsOf(s.legacy.id);
+    assert.equal(rows.length, 2);
+    const old = rows.find((r) => r.id === original.id);
+    assert.deepEqual(old, { ...original, reason: SUPERSEDED }, 'only the reason changes: the audit keeps what was planned');
+    const fresh = rows.find((r) => r.id !== original.id);
+    assert.deepEqual([fresh.reason, fresh.status, fresh.oldAddress, fresh.newAddress], ['network_migration', 'planned', changed, original.newAddress]);
+
+    const { csv } = await migration.exportRows({ target: MAINNET, db: prisma });
+    assert.deepEqual(csv.split('\n').filter((l) => l.startsWith(`${s.legacy.id},`)), [`${s.legacy.id},${changed},${original.newAddress},pending`]);
+    const applied = await migration.applyMigration({ target: MAINNET, db: prisma, cfg, write: true });
+    assert.equal(applied.outcomes.applied_legacy_identity_backfilled, 1);
+    assert.deepEqual(rowsOf(s.legacy.id).find((r) => r.id === original.id), { ...original, reason: SUPERSEDED }, 'apply never touches a superseded row');
+
+    const again = await migration.planMigration({ target: MAINNET, clientId: 'c', write: true, db: prisma, lookup: async () => assert.fail('nothing to plan') });
+    assert.deepEqual([again.superseded, again.outcomes], [0, {}]);
+    assert.equal(rowsOf(s.legacy.id).length, 2);
+  });
+
+  it('a row that moved and is still current is applied normally and keeps the chain record', async () => {
+    const s = seedAccounts();
+    await migration.planMigration({ target: MAINNET, clientId: 'c', write: true, db: prisma, lookup: fakeLookup().lookup });
+    Object.assign(rowsOf(s.legacy.id)[0], { chainStatus: 'moved', chainRef: '0xabc' });
+    const replan = await migration.planMigration({ target: MAINNET, clientId: 'c', write: true, db: prisma, lookup: async () => assert.fail('nothing to plan') });
+    assert.deepEqual([replan.superseded, replan.classes.already_planned], [0, 3]);
+    const applied = await migration.applyMigration({ target: MAINNET, db: prisma, cfg, write: true });
+    assert.equal(applied.outcomes.applied_legacy_identity_backfilled, 1);
+    assert.deepEqual(rowsOf(s.legacy.id).map((r) => [r.status, r.chainStatus, r.chainRef]), [['applied', 'moved', '0xabc']]);
+  });
+
+  it('--apply never claims a row that a concurrent plan superseded after apply read it', async () => {
+    const s = seedAccounts();
+    await migration.planMigration({ target: MAINNET, clientId: 'c', write: true, db: prisma, lookup: fakeLookup().lookup });
+    const oldWallet = s.legacy.walletAddress;
+    const realFindMany = prisma.walletAddressHistory.findMany;
+    prisma.walletAddressHistory.findMany = async (args) => {
+      const out = await realFindMany(args);
+      for (const r of rowsOf(s.legacy.id)) r.reason = SUPERSEDED; // a --plan superseded it meanwhile
+      return out;
+    };
+    try {
+      const summary = await migration.applyMigration({ target: MAINNET, db: prisma, cfg, write: true });
+      assert.equal(summary.outcomes.skipped_not_claimable, 1);
+    } finally {
+      prisma.walletAddressHistory.findMany = realFindMany;
+    }
+    assert.equal(prisma.store.user.find((u) => u.id === s.legacy.id).walletAddress, oldWallet);
+    assert.deepEqual(rowsOf(s.legacy.id).map((r) => [r.reason, r.status]), [[SUPERSEDED, 'planned']]);
+  });
+
+  it('--limit bounds superseding too: a stale row outside the budget waits for the next run', async () => {
+    const a = user({ walletAddress: addr(), web3authVerifier: LEGACY_EMAIL, web3authVerifierId: 'a@example.com' });
+    const b = user({ walletAddress: addr(), web3authVerifier: LEGACY_EMAIL, web3authVerifierId: 'b@example.com' });
+    await migration.planMigration({ target: MAINNET, clientId: 'c', write: true, db: prisma, lookup: fakeLookup().lookup });
+    a.walletAddress = addr();
+    b.walletAddress = addr();
+    const first = await migration.planMigration({ target: MAINNET, clientId: 'c', write: true, db: prisma, lookup: fakeLookup().lookup, limit: 1 });
+    assert.deepEqual([first.superseded, first.outcomes, first.classes.stale_deferred], [1, { planned_repaired: 1 }, 1]);
+    assert.deepEqual(rowsOf(b.id).map((r) => r.reason), ['network_migration'], 'b keeps its row until it is re-planned');
+    const second = await migration.planMigration({ target: MAINNET, clientId: 'c', write: true, db: prisma, lookup: fakeLookup().lookup, limit: 1 });
+    assert.deepEqual([second.superseded, second.outcomes], [1, { planned_repaired: 1 }]);
+  });
+
+  it('rowVerdict: only a planned, stale row untouched by the chain team may be superseded', () => {
+    const u = { id: 'u', walletAddress: addr(), web3authVerifier: 'external-wallet', web3authVerifierId: 'w' };
+    const base = { id: 'r', userId: 'u', reason: 'network_migration', status: 'planned', oldAddress: u.walletAddress, newAddress: u.walletAddress, newVerifier: 'external-wallet', newSubjectRef: 'none', chainStatus: 'not_needed', chainRef: null };
+    const stale = { oldAddress: addr() };
+    const verdict = (row) => migration.rowVerdict({ row: { ...base, ...row }, user: u, binding: null, target: MAINNET });
+    assert.equal(verdict({}), 'keep', 'current');
+    assert.equal(verdict(stale), 'supersede');
+    assert.equal(verdict({ ...stale, chainStatus: 'pending' }), 'supersede');
+    assert.equal(verdict({ ...stale, chainStatus: 'moved' }), 'held');
+    assert.equal(verdict({ ...stale, chainStatus: 'pending', chainRef: '0x1' }), 'held');
+    assert.equal(verdict({ ...stale, chainStatus: 'something_new' }), 'held', 'an unknown chain status fails safe');
+    assert.equal(verdict({ ...stale, status: 'applied' }), 'keep', 'an applied row is final');
+    assert.equal(verdict({ ...stale, reason: SUPERSEDED }), 'keep', 'a superseded row is final');
+    assert.equal(migration.isSuperseded({ row: { ...base, ...stale }, user: u, binding: null, target: MAINNET }), true);
+    assert.deepEqual([migration.chainActed({ chainStatus: 'pending', chainRef: null }), migration.chainActed({ chainStatus: 'not_needed', chainRef: null })], [false, false]);
+  });
+
+  it('the summary says what was superseded and which moved rows need a person', () => {
+    const lines = [];
+    const realLog = console.log;
+    console.log = (text) => lines.push(text);
+    try {
+      migration.printSummary({ mode: 'write', target: MAINNET, scanned: 3, superseded: 1, classes: { stale_chain_moved: 1, stale_deferred: 1 }, outcomes: { planned_repaired: 1 } });
+      migration.printSummary({ mode: 'write', target: MAINNET, scanned: 1, outcomes: { skipped_stale_chain_moved: 2 } });
+    } finally {
+      console.log = realLog;
+    }
+    const text = lines.join('\n');
+    assert.match(text, /superseded planned rows: 1 \(kept with reason network_migration_superseded; re-run --export\)/);
+    assert.match(text, /ATTENTION: 1 stale row\(s\) the chain team already acted on/);
+    assert.match(text, /ATTENTION: 2 stale row\(s\)/);
+    assert.match(text, /1 stale row\(s\) beyond --limit wait for the next --plan/);
   });
 
   it('classify never moves a non-legacy pair onto a binding that is not its wallet', () => {
@@ -645,7 +820,7 @@ describe('scripts/nativeAuthWalletMigration', () => {
     prisma.walletAddressHistory.updateMany = async () => ({ count: 0 });
     try {
       const summary = await migration.applyMigration({ target: MAINNET, db: prisma, cfg, write: true });
-      assert.deepEqual(summary.outcomes, { skipped_already_applied: 3 });
+      assert.deepEqual(summary.outcomes, { skipped_not_claimable: 3 });
     } finally {
       prisma.walletAddressHistory.updateMany = realUpdateMany;
     }

@@ -17,11 +17,8 @@
  *               already planned / already on the target → nothing (reruns resume where a run
  *                 stopped; a failed lookup is simply retried by the next run).
  *             A still-'planned' row of this target that --apply would skip (the account's
- *             wallet, pair or binding changed since that plan) is superseded: --plan --write
- *             deletes that never-applied row first and plans the account again as it is now
- *             (a legacy account keeps its planned-only target binding and gets a fresh row with
- *             its current wallet and pair, 'binding_repair'; an external account gets a fresh
- *             external row). Counted as `superseded`; re-run --export afterwards, because the
+ *             wallet, pair or binding changed since that plan) is stale; see "Row states" below
+ *             for what --plan does with it. Re-run --export after any supersede, because the
  *             chain team's list changes with it.
  *             Without --write nothing is looked up or written: the run only classifies and
  *             counts (a lookup may assign a key on the nodes, so even that waits for --write).
@@ -38,8 +35,39 @@
  *             nativeAuthBackfillIdentities.js); the row becomes status 'applied'. A row whose
  *             account changed since the plan (wallet, pair or binding differ) is skipped and
  *             counted as stale (or binding_missing); the next --plan --write supersedes it and
- *             plans the account again, then --export and --apply --write as usual. Without
+ *             plans the account again, then --export and --apply --write as usual. A stale row the
+ *             chain team already acted on is counted as skipped_stale_chain_moved instead. Without
  *             --write every row is only checked.
+ *
+ * Row states (WalletAddressHistory rows of this target; a row is only ever changed by one guarded
+ * UPDATE whose WHERE repeats the state it leaves, so a rerun or a concurrent run changes nothing):
+ *   (none)                    → planned        --plan --write creates it (reason network_migration,
+ *                                              chainStatus 'pending', or 'not_needed' when the
+ *                                              address does not change).
+ *   planned, pending          → planned, moved  the CHAIN TEAM records its transfer (chainStatus
+ *                                              'moved', chainRef). This script never writes
+ *                                              chainStatus or chainRef.
+ *   planned, current          → applied        --apply --write (claim WHERE status 'planned' AND
+ *                                              reason network_migration; chain fields kept).
+ *   planned, stale, untouched → superseded     --plan --write, only when chainStatus is 'pending' or
+ *     by the chain team                        'not_needed' and chainRef is null (the same guard is
+ *                                              in the UPDATE). The row is KEPT with every field as
+ *                                              planned; only reason becomes
+ *                                              'network_migration_superseded', which takes it out of
+ *                                              this target (export, apply and later plans ignore it).
+ *                                              The account is then planned again as it is now in the
+ *                                              same run (a legacy account keeps its planned-only
+ *                                              target binding, 'binding_repair'; an external one gets
+ *                                              a fresh external row). Counted as `superseded`; a
+ *                                              guarded UPDATE that matches nothing (the chain team or
+ *                                              an apply got there first) is `supersede_lost`.
+ *   planned, stale, moved or  → (unchanged)    never superseded, rewritten or re-planned: counted as
+ *     with a chainRef                          stale_chain_moved (plan) / skipped_stale_chain_moved
+ *                                              (apply) and left to a person to reconcile, because a
+ *                                              new row would ask the chain team to move twice.
+ *   applied, superseded       → (final)        never changed again.
+ * --limit bounds superseding as well: a stale row of an account beyond the budget is kept as it is
+ * and counted as stale_deferred until a run reaches it.
  *
  * Usage:
  *   node scripts/nativeAuthWalletMigration.js --plan  --network sapphire_mainnet --connection ddc-jwt-mainnet [--client-id=<id>] [--write] [--concurrency=4] [--limit=N]
@@ -72,6 +100,10 @@ const { readNativeAuthConfig, W3A_NETWORKS, NON_PROD_CONNECTION_IDS, AUTH_ENVS }
 const backfill = require('./nativeAuthBackfillIdentities');
 
 const REASON = 'network_migration';
+/** A never-applied plan replaced by a newer one; kept as the audit of what was planned. */
+const SUPERSEDED_REASON = 'network_migration_superseded';
+/** The chain statuses of a row the chain team has not acted on (with chainRef null). */
+const CHAIN_UNTOUCHED = Object.freeze(['pending', 'not_needed']);
 const LEGACY_PROVIDER = 'web3auth_legacy';
 const EXTERNAL_WALLET_VERIFIER = 'external-wallet';
 const EXTERNAL_NETWORK = 'external';
@@ -166,6 +198,9 @@ function targetRowsWhere({ network, connection }) {
  *   'binding_repair'                        a legacy pair with a planned-only binding on the target and no row (row re-created)
  *   'legacy' | 'native' | 'external'        to plan
  * `rows` are the rows of this target that still count, i.e. without superseded ones.
+ * planMigration adds two classes before this is reached (rowVerdict):
+ *   'stale_chain_moved'                     a stale row the chain team acted on (kept; a person reconciles)
+ *   'stale_deferred'                        a stale row beyond the --limit budget (kept until a run reaches it)
  */
 function classify({ user, binding, rows, target }) {
   if (isOrganization(user)) return 'organization';
@@ -186,20 +221,45 @@ function classify({ user, binding, rows, target }) {
   return 'legacy';
 }
 
+/** True once the chain team has recorded anything on the row (a status past 'pending'/'not_needed', or a chainRef). */
+function chainActed(row) {
+  return !CHAIN_UNTOUCHED.includes(row.chainStatus) || (row.chainRef !== null && row.chainRef !== undefined);
+}
+
 /**
- * True for a still-'planned' row of this target that --apply would skip as stale or
- * binding_missing against the account as it is now (judgeRow): the plan it records is out of date
- * and --plan replaces it. `binding` is the account's binding (at most one per account) or null.
+ * What --plan may do with one row of this target (reads nothing but its arguments):
+ *   'keep'        applied, or planned and still what --apply would apply (judgeRow passes)
+ *   'held'        planned and stale, but the chain team acted on it: never changed by the script
+ *   'supersede'   planned, stale (--apply would skip it as stale / binding_missing) and untouched
+ *                 by the chain team: --plan replaces it
+ * `binding` is the account's binding (at most one per account) or null.
  */
-function isSuperseded({ row, user, binding, target }) {
-  if (row.status !== 'planned') return false;
+function rowVerdict({ row, user, binding, target }) {
+  if (row.status !== 'planned' || row.reason !== REASON) return 'keep';
   try {
     judgeRow({ row, user, binding, target });
-    return false;
+    return 'keep';
   } catch (err) {
-    if (err instanceof Skip) return true;
-    throw err;
+    if (!(err instanceof Skip)) throw err;
+    return chainActed(row) ? 'held' : 'supersede';
   }
+}
+
+function isSuperseded(args) {
+  return rowVerdict(args) === 'supersede';
+}
+
+/**
+ * The guarded UPDATE planned → superseded: it matches only while the row is still exactly the
+ * state rowVerdict judged (planned, this reason, untouched by the chain team). Returns true when
+ * this call made the transition.
+ */
+async function supersedeRow(db, row) {
+  const { count } = await db.walletAddressHistory.updateMany({
+    where: { id: row.id, reason: REASON, status: 'planned', chainStatus: { in: [...CHAIN_UNTOUCHED] }, chainRef: null },
+    data: { reason: SUPERSEDED_REASON },
+  });
+  return count === 1;
 }
 
 async function lookupAddress({ lookup, subject, target, clientId }) {
@@ -335,18 +395,30 @@ async function planMigration({ target, clientId, write = false, db = defaultDb()
       summary.scanned += 1;
       const binding = bindings.find((b) => b.userId === user.id) || null;
       const current = [];
+      let held = false;
+      let deferred = false;
       for (const row of rows.filter((r) => r.userId === user.id)) {
-        if (!isSuperseded({ row, user, binding, target })) {
+        const verdict = rowVerdict({ row, user, binding, target });
+        if (verdict !== 'supersede') {
+          held = held || verdict === 'held';
           current.push(row);
-          continue;
+        } else if (budget <= 0) {
+          // Outside this run's budget: superseding now would leave the account without a row until
+          // a later run re-plans it (and a --export in between would silently drop it).
+          deferred = true;
+          current.push(row);
+        } else if (!write) {
+          summary.superseded += 1; // a dry run only counts
+        } else if (await supersedeRow(db, row)) {
+          summary.superseded += 1;
+        } else {
+          // The chain team, an apply or another plan changed the row after it was read: it stays
+          // as it is now and keeps counting.
+          bump(summary.outcomes, 'supersede_lost');
+          current.push(row);
         }
-        // Never applied (the guard on status); a concurrent apply that claimed it first wins and
-        // the row keeps counting. A dry run only counts what it would supersede.
-        const removed = write ? (await db.walletAddressHistory.deleteMany({ where: { id: row.id, status: 'planned' } })).count === 1 : true;
-        if (removed) summary.superseded += 1;
-        else current.push(row);
       }
-      const kind = classify({ user, binding, rows: current, target });
+      const kind = held ? 'stale_chain_moved' : deferred ? 'stale_deferred' : classify({ user, binding, rows: current, target });
       bump(summary.classes, kind);
       if (['legacy', 'native', 'external', 'binding_repair'].includes(kind) && budget > 0) {
         budget -= 1;
@@ -413,7 +485,7 @@ class Skip extends Error {
 /**
  * Judges one planned row against the account and the binding the row names as they are now (reads
  * nothing). Returns { kind, user, binding } or throws Skip('stale' | 'binding_missing'). --apply
- * skips such a row; --plan supersedes it (isSuperseded).
+ * skips such a row; --plan supersedes it unless the chain team acted on it (rowVerdict).
  */
 function judgeRow({ row, user, binding: found, target }) {
   if (!sameAddress(user.walletAddress, row.oldAddress)) {
@@ -469,12 +541,13 @@ async function applyOne({ row, target, db, lists, now }) {
     const { kind, user, binding } = await checkRow({ row, target, db: tx });
     if (kind !== 'external' && !sameAddress(row.newAddress, user.walletAddress)) await assertWalletFree(tx, row.newAddress, user.id);
 
-    // Claim the row first: of two concurrent applies exactly one proceeds.
+    // Claim the row first: of two concurrent applies exactly one proceeds, and a row a concurrent
+    // --plan superseded (reason changed) is never applied. chainStatus / chainRef are kept.
     const claimed = await tx.walletAddressHistory.updateMany({
-      where: { id: row.id, status: 'planned' },
+      where: { id: row.id, reason: REASON, status: 'planned' },
       data: { status: 'applied', appliedAt: now },
     });
-    if (claimed.count !== 1) throw new Skip('already_applied');
+    if (claimed.count !== 1) throw new Skip('not_claimable');
     if (kind === 'external') return 'applied_external';
 
     if (kind === 'legacy') {
@@ -542,7 +615,11 @@ async function applyMigration({ target, write = false, db = defaultDb(), cfg = r
           bump(summary.outcomes, await applyOne({ row, target, db, lists, now }));
         }
       } catch (err) {
-        if (err instanceof Skip) bump(summary.outcomes, `skipped_${err.reason}`);
+        if (err instanceof Skip) {
+          // A stale row the chain team already acted on is not re-planned (rowVerdict 'held'): say so.
+          const chainMoved = (err.reason === 'stale' || err.reason === 'binding_missing') && chainActed(row);
+          bump(summary.outcomes, `skipped_${chainMoved ? 'stale_chain_moved' : err.reason}`);
+        }
         else if (isP2002(err)) bump(summary.outcomes, 'skipped_unique_conflict');
         else throw err;
       }
@@ -609,9 +686,17 @@ function printSummary(summary) {
     const entries = Object.entries(obj || {});
     if (entries.length) console.log(`${label}: ${entries.map(([k, v]) => `${k}=${v}`).join(', ')}`);
   };
-  if (summary.superseded) console.log(`superseded planned rows: ${summary.superseded}${summary.mode === 'write' ? ' (deleted; re-run --export)' : ' (would be deleted)'}`);
+  if (summary.superseded) {
+    console.log(`superseded planned rows: ${summary.superseded}${summary.mode === 'write' ? ` (kept with reason ${SUPERSEDED_REASON}; re-run --export)` : ' (would be superseded)'}`);
+  }
   line('accounts', summary.classes);
   line('outcomes', summary.outcomes);
+  const moved = (summary.classes && summary.classes.stale_chain_moved) || (summary.outcomes && summary.outcomes.skipped_stale_chain_moved);
+  if (moved) {
+    console.log(`ATTENTION: ${moved} stale row(s) the chain team already acted on (chainStatus moved or chainRef set) ` +
+      'are left untouched and not re-planned; a person must reconcile each account before its wallet can move');
+  }
+  if (summary.classes && summary.classes.stale_deferred) console.log(`${summary.classes.stale_deferred} stale row(s) beyond --limit wait for the next --plan`);
   if (summary.mode !== 'write') console.log('dry run: nothing looked up or written; add --write');
 }
 
@@ -661,16 +746,20 @@ if (require.main === module) {
 
 module.exports = {
   REASON,
+  SUPERSEDED_REASON,
   EXTERNAL_WALLET_VERIFIER,
   assertTarget,
   isProduction,
   classify,
+  chainActed,
+  rowVerdict,
   isSuperseded,
   planMigration,
   exportRows,
   writeExport,
   applyMigration,
   parseArgs,
+  printSummary,
   csvCell,
   legacyNetwork,
 };
