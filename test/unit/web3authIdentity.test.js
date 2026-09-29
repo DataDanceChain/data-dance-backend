@@ -826,3 +826,125 @@ describe('email_verified claim', () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// Coexistence with native login (design §3.11, F13.1): the native custom-JWT connection is never
+// an identity source here, whatever the mode and the allow-list; step 1b (web3auth_legacy
+// identities) runs only while native login is on.
+// ---------------------------------------------------------------------------
+
+describe('native login coexistence', () => {
+  function withEnv(vars, fn) {
+    const saved = {};
+    for (const [k, v] of Object.entries(vars)) {
+      saved[k] = process.env[k];
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    _internals.resetConfig();
+    const restore = () => {
+      for (const [k, v] of Object.entries(saved)) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+      _internals.resetConfig();
+    };
+    let out;
+    try {
+      out = fn();
+    } catch (err) {
+      restore();
+      throw err;
+    }
+    if (out && typeof out.then === 'function') return out.finally(restore);
+    restore();
+    return out;
+  }
+
+  const payloadFor = (verifier) => ({ aggregateVerifier: verifier, verifierId: 'c0ffee00-1111-4222-8333-444455556666', email: 'alice@example.com' });
+
+  it('an empty WEB3AUTH_ALLOWED_VERIFIERS outside enforce still accepts any other verifier (as before)', () => {
+    withEnv({ WEB3AUTH_VERIFY_MODE: 'log', WEB3AUTH_ALLOWED_VERIFIERS: undefined }, () => {
+      assert.equal(extractIdentity(payloadFor('some-connection-nobody-listed'), { kind: 'social' }).verifier, 'some-connection-nobody-listed');
+    });
+  });
+
+  it('…but never the native connection: refused in log mode with an empty list, and under enforce', () => {
+    for (const name of ['ddc-jwt-devnet', 'ddc-jwt-mainnet', 'ddc-jwt-test', 'datadance-jwt-devnet']) {
+      withEnv({ WEB3AUTH_VERIFY_MODE: 'log', WEB3AUTH_ALLOWED_VERIFIERS: undefined }, () => {
+        assert.throws(() => extractIdentity(payloadFor(name), { kind: 'social' }), (err) => err.code === 'IDTOKEN_VERIFIER_NOT_ALLOWED');
+      });
+    }
+    // Even if someone lists it (boot rule 4 of the native config refuses that too).
+    withEnv({ WEB3AUTH_VERIFY_MODE: 'enforce', WEB3AUTH_ALLOWED_VERIFIERS: 'ddc-jwt-devnet,torus' }, () => {
+      assert.throws(() => extractIdentity(payloadFor('ddc-jwt-devnet'), { kind: 'social' }), (err) => err.code === 'IDTOKEN_VERIFIER_NOT_ALLOWED');
+    });
+  });
+
+  it('refuses the configured DDC_AUTH_W3A_CONNECTION_ID by name, read per call', () => {
+    withEnv({ WEB3AUTH_VERIFY_MODE: 'log', WEB3AUTH_ALLOWED_VERIFIERS: undefined, DDC_AUTH_W3A_CONNECTION_ID: 'custom-native-conn' }, () => {
+      assert.throws(() => extractIdentity(payloadFor('custom-native-conn'), { kind: 'social' }), (err) => err.code === 'IDTOKEN_VERIFIER_NOT_ALLOWED');
+    });
+    withEnv({ WEB3AUTH_VERIFY_MODE: 'log', WEB3AUTH_ALLOWED_VERIFIERS: undefined, DDC_AUTH_W3A_CONNECTION_ID: undefined }, () => {
+      assert.equal(extractIdentity(payloadFor('custom-native-conn'), { kind: 'social' }).verifier, 'custom-native-conn');
+    });
+    assert.equal(identityService.isNativeConnection(''), false);
+  });
+
+  it('the native connection cannot backfill a legacy row by wallet either', async () => {
+    await withEnv({ WEB3AUTH_VERIFY_MODE: 'log', WEB3AUTH_ALLOWED_VERIFIERS: undefined }, async () => {
+      const WALLET = '0xAbC0000000000000000000000000000000000001';
+      const db = mockPrisma([{ id: 'legacy', email: 'someone@example.com', walletAddress: WALLET }]);
+      const identity = { ...IDENTITY, verifier: 'ddc-jwt-devnet', verifierId: 'c0ffee00', email: null };
+      assert.equal(await conflictReason(resolveUser(identity, { db, walletAddress: WALLET })), 'verifier_not_in_allowlist');
+    });
+  });
+
+  function withLegacyIdentities(db, rows) {
+    const calls = [];
+    db.authIdentity = {
+      async findUnique({ where }) {
+        calls.push(where);
+        const key = where.provider_subject;
+        return rows.find((r) => r.provider === key.provider && r.subject === key.subject) || null;
+      },
+    };
+    return calls;
+  }
+
+  it('step 1b is not consulted while DDC_AUTH_ENABLED is off (flags-off path unchanged)', async () => {
+    await withEnv({ DDC_AUTH_ENABLED: undefined }, async () => {
+      const db = mockPrisma([{ id: 'migrated', email: 'alice@example.com', web3authVerifier: 'ddc-jwt-mainnet', web3authVerifierId: 'migrated' }]);
+      const calls = withLegacyIdentities(db, [{ provider: 'web3auth_legacy', subject: `${IDENTITY.verifier}|${IDENTITY.verifierId}`, userId: 'migrated' }]);
+      await assert.rejects(resolveUser(IDENTITY, { db }), (err) => err.code === 'IDENTITY_CONFLICT');
+      assert.equal(calls.length, 0);
+    });
+  });
+
+  it('step 1b: with native login on, a web3auth_legacy identity resolves the old pair to its user', async () => {
+    await withEnv({ DDC_AUTH_ENABLED: 'true' }, async () => {
+      const db = mockPrisma([{ id: 'migrated', email: 'alice@example.com', web3authVerifier: 'ddc-jwt-mainnet', web3authVerifierId: 'migrated' }]);
+      withLegacyIdentities(db, [{ provider: 'web3auth_legacy', subject: `${IDENTITY.verifier}|${IDENTITY.verifierId}`, userId: 'migrated' }]);
+      const { user, action } = await resolveUser(IDENTITY, { db });
+      assert.equal(action, 'login');
+      assert.equal(user.id, 'migrated');
+      assert.equal(db._calls.filter(([op]) => op === 'updateMany' || op === 'create').length, 0);
+      const disabled = mockPrisma([{ id: 'migrated', email: 'alice@example.com', disabledAt: new Date(), web3authVerifier: 'ddc-jwt-mainnet', web3authVerifierId: 'migrated' }]);
+      withLegacyIdentities(disabled, [{ provider: 'web3auth_legacy', subject: `${IDENTITY.verifier}|${IDENTITY.verifierId}`, userId: 'migrated' }]);
+      await assert.rejects(resolveUser(IDENTITY, { db: disabled }), (err) => err.code === 'ACCOUNT_DISABLED');
+    });
+  });
+
+  it('with native login on and no legacy identity, resolution is exactly as before', async () => {
+    await withEnv({ DDC_AUTH_ENABLED: 'true' }, async () => {
+      const db = mockPrisma([{ id: 'linked', email: 'other@example.com', web3authVerifier: IDENTITY.verifier, web3authVerifierId: IDENTITY.verifierId }]);
+      const calls = withLegacyIdentities(db, []);
+      const { user } = await resolveUser(IDENTITY, { db });
+      assert.equal(user.id, 'linked');
+      assert.equal(calls.length, 1, 'one look for a rebind marker');
+      const fresh = mockPrisma([]);
+      withLegacyIdentities(fresh, []);
+      assert.equal((await resolveUser(IDENTITY, { db: fresh })).action, 'created');
+    });
+  });
+});
