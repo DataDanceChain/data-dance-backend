@@ -37,6 +37,8 @@
  *   node scripts/nativeAuthWalletMigration.js --export migration.csv --network sapphire_mainnet --connection ddc-jwt-mainnet [--force]
  *   node scripts/nativeAuthWalletMigration.js --apply --network sapphire_mainnet --connection ddc-jwt-mainnet [--write] [--batch-size=100] [--limit=N]
  * --client-id defaults to DDC_AUTH_W3A_CLIENT_ID (the client id of the TARGET native project).
+ * On production (DDC_AUTH_ENV=prod or NODE_ENV=production) every mode refuses a target that is not
+ * sapphire_mainnet or whose connection names devnet/test, unless --allow-non-prod-target is given.
  * Do not run two --plan --write runs for one target at the same time.
  *
  * Between --plan and --apply a planned legacy account already has its target binding while it
@@ -104,8 +106,18 @@ function byId(a, b) {
   return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
 }
 
-/** Throws a usage error unless (network, connection) is a legal migration target. */
-function assertTarget({ network, connection }, cfg) {
+/** True when this process runs against production: DDC_AUTH_ENV=prod or NODE_ENV=production. */
+function isProduction(cfg, nodeEnv) {
+  return Boolean((cfg && cfg.env === 'prod') || String(nodeEnv || '').toLowerCase() === 'production');
+}
+
+/**
+ * Throws a usage error unless (network, connection) is a legal migration target. On production
+ * (isProduction) only a sapphire_mainnet target with a non-devnet/test connection is accepted, so a
+ * mistyped target can never move production wallets to devnet addresses; `allowNonProd`
+ * (--allow-non-prod-target) is the explicit override for a deliberate rehearsal.
+ */
+function assertTarget({ network, connection }, cfg, { allowNonProd = false, nodeEnv = process.env.NODE_ENV } = {}) {
   if (!W3A_NETWORKS.includes(network)) throw new Error(`--network must be one of ${W3A_NETWORKS.join(', ')}`);
   if (!connection || !CONNECTION_PATTERN.test(connection)) throw new Error('--connection is required ([A-Za-z0-9._-], at most 128)');
   if (connection === EXTERNAL_WALLET_VERIFIER) throw new Error('--connection cannot be external-wallet');
@@ -113,6 +125,10 @@ function assertTarget({ network, connection }, cfg) {
   if (legacy.includes(connection)) throw new Error('--connection names a legacy verifier (DDC_AUTH_LEGACY_*)');
   if (network === 'sapphire_mainnet' && (NON_PROD_CONNECTION_IDS.includes(connection) || NON_PROD_CONNECTION_PATTERN.test(connection))) {
     throw new Error('a devnet/test connection cannot be a sapphire_mainnet target');
+  }
+  if (isProduction(cfg, nodeEnv) && !allowNonProd
+    && (network !== 'sapphire_mainnet' || NON_PROD_CONNECTION_IDS.includes(connection) || NON_PROD_CONNECTION_PATTERN.test(connection))) {
+    throw new Error('production (DDC_AUTH_ENV=prod or NODE_ENV=production) accepts only a sapphire_mainnet, non-devnet target; --allow-non-prod-target overrides');
   }
 }
 
@@ -486,7 +502,7 @@ async function applyMigration({ target, write = false, db = defaultDb(), cfg = r
 // ---------------------------------------------------------------------------------------------
 
 function parseArgs(argv) {
-  const out = { modes: [], write: false, force: false, json: false, help: false, batchSize: DEFAULT_BATCH, concurrency: DEFAULT_CONCURRENCY, limit: Infinity };
+  const out = { modes: [], write: false, force: false, json: false, help: false, allowNonProd: false, batchSize: DEFAULT_BATCH, concurrency: DEFAULT_CONCURRENCY, limit: Infinity };
   const takesValue = new Set(['--network', '--connection', '--client-id', '--export', '--batch-size', '--concurrency', '--limit']);
   const values = {};
   for (let i = 0; i < argv.length; i += 1) {
@@ -502,6 +518,7 @@ function parseArgs(argv) {
     else if (arg === '--apply') out.modes.push('apply');
     else if (arg === '--write') out.write = true;
     else if (arg === '--force') out.force = true;
+    else if (arg === '--allow-non-prod-target') out.allowNonProd = true;
     else if (arg === '--json') out.json = true;
     else if (arg === '--help' || arg === '-h') out.help = true;
     else throw new Error(`unknown argument ${JSON.stringify(arg).slice(0, 40)}`);
@@ -527,7 +544,8 @@ function parseArgs(argv) {
 const USAGE = `usage:
   node scripts/nativeAuthWalletMigration.js --plan  --network <n> --connection <c> [--client-id=<id>] [--write] [--concurrency=4] [--limit=N]
   node scripts/nativeAuthWalletMigration.js --export <file.csv|-> --network <n> --connection <c> [--force]
-  node scripts/nativeAuthWalletMigration.js --apply --network <n> --connection <c> [--write] [--batch-size=100] [--limit=N]`;
+  node scripts/nativeAuthWalletMigration.js --apply --network <n> --connection <c> [--write] [--batch-size=100] [--limit=N]
+  On production a non-mainnet or devnet/test target is refused unless --allow-non-prod-target.`;
 
 function printSummary(summary) {
   console.log(`[${summary.mode}] target ${summary.target.connection} on ${summary.target.network}; ${summary.scanned} scanned`);
@@ -548,7 +566,7 @@ async function main() {
   }
   const cfg = readNativeAuthConfig();
   const target = { network: args.network, connection: args.connection };
-  assertTarget(target, cfg);
+  assertTarget(target, cfg, { allowNonProd: args.allowNonProd });
   const log = args.json ? () => {} : (text) => console.error(text);
   const mode = args.modes[0];
   if (mode === 'export') {
@@ -588,6 +606,7 @@ module.exports = {
   REASON,
   EXTERNAL_WALLET_VERIFIER,
   assertTarget,
+  isProduction,
   classify,
   planMigration,
   exportRows,
