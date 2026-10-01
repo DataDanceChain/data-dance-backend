@@ -40,7 +40,7 @@ const KEY_HEX = crypto.randomBytes(32).toString('hex');
 const KEY = `0x${KEY_HEX}`;
 const ADDRESS = new realEthers.Wallet(KEY).address;
 
-const ENV_NAMES = ['CHAIN_SIGNER_PRIVATE_KEY', 'CHAIN_RPC_URL', 'CHAIN_ID', 'NODE_ENV'];
+const ENV_NAMES = ['CHAIN_SIGNER_PRIVATE_KEY', 'CHAIN_RPC_URL', 'CHAIN_ID', 'DDC_RPC_URL', 'DDC_CHAIN_ID', 'NODE_ENV'];
 let saved;
 beforeEach(() => {
   saved = Object.fromEntries(ENV_NAMES.map((name) => [name, process.env[name]]));
@@ -166,6 +166,20 @@ describe('chain settings', () => {
     assert.deepEqual(web3Utils.getDdcProvider().ctorArgs, ['http://localhost:8545', 31337, { batchMaxCount: 1 }]);
   });
 
+  it('follow DDC_RPC_URL / DDC_CHAIN_ID, the pair the other chain readers use, when CHAIN_* are not set', () => {
+    process.env.DDC_RPC_URL = 'https://rpc.example.test/eth';
+    process.env.DDC_CHAIN_ID = '777';
+    assert.deepEqual(web3Utils.getDdcProvider().ctorArgs, ['https://rpc.example.test/eth', 777, { batchMaxCount: 1 }]);
+  });
+
+  it('CHAIN_RPC_URL / CHAIN_ID win over DDC_RPC_URL / DDC_CHAIN_ID', () => {
+    process.env.DDC_RPC_URL = 'https://rpc.example.test/eth';
+    process.env.DDC_CHAIN_ID = '777';
+    process.env.CHAIN_RPC_URL = 'http://localhost:8545';
+    process.env.CHAIN_ID = '31337';
+    assert.deepEqual(web3Utils.getDdcProvider().ctorArgs, ['http://localhost:8545', 31337, { batchMaxCount: 1 }]);
+  });
+
   it('one provider is shared while the settings stay the same, and replaced when they change', () => {
     const a = web3Utils.getDdcProvider();
     assert.ok(web3Utils.getDdcProvider() === a);
@@ -186,6 +200,12 @@ describe('chain settings', () => {
     const badUrl = thrownBy(() => web3Utils.getDdcProvider());
     assert.ok(badUrl && badUrl.message.includes('CHAIN_RPC_URL') && badUrl.code === 'chain_rpc_url_invalid');
     assert.ok(!badUrl.message.includes('SENTINEL'));
+    delete process.env.CHAIN_RPC_URL;
+
+    process.env.DDC_RPC_URL = 'ftp://rpc.example.test/SENTINEL';
+    const badFallback = thrownBy(() => web3Utils.getDdcProvider());
+    assert.ok(badFallback && badFallback.message.includes('DDC_RPC_URL') && !badFallback.message.includes('CHAIN_RPC_URL'));
+    assert.ok(!badFallback.message.includes('SENTINEL'));
   });
 });
 

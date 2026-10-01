@@ -92,6 +92,64 @@ describe('CHAIN_RPC_URL and CHAIN_ID', () => {
   });
 });
 
+describe('the DDC_RPC_URL / DDC_CHAIN_ID pair the rest of the backend reads', () => {
+  it('is the fallback: used when CHAIN_RPC_URL / CHAIN_ID are not set', () => {
+    assert.equal(chainRpcUrl({ DDC_RPC_URL: ' https://rpc.example.test/eth ' }), 'https://rpc.example.test/eth');
+    assert.equal(chainId({ DDC_CHAIN_ID: ' 777 ' }), 777);
+  });
+
+  it('CHAIN_RPC_URL / CHAIN_ID win when both are set; a blank one falls through', () => {
+    assert.equal(chainRpcUrl({ CHAIN_RPC_URL: 'http://a.example.test', DDC_RPC_URL: 'http://b.example.test' }), 'http://a.example.test');
+    assert.equal(chainId({ CHAIN_ID: '1', DDC_CHAIN_ID: '2' }), 1);
+    assert.equal(chainRpcUrl({ CHAIN_RPC_URL: '   ', DDC_RPC_URL: 'http://b.example.test' }), 'http://b.example.test');
+    assert.equal(chainId({ CHAIN_ID: '', DDC_CHAIN_ID: '2' }), 2);
+  });
+
+  it('with neither set the production defaults apply (NODE_ENV plays no part)', () => {
+    assert.equal(chainRpcUrl({ NODE_ENV: 'production' }), DEFAULT_CHAIN_RPC_URL);
+    assert.equal(chainId({ NODE_ENV: 'development' }), DEFAULT_CHAIN_ID);
+  });
+
+  it('a bad value is an error that names the variable that holds it, never the value', () => {
+    const badUrl = thrownBy(() => chainRpcUrl({ DDC_RPC_URL: 'ftp://rpc.example.test/SENTINEL-4f2a' }));
+    assert.ok(badUrl && badUrl.code === 'chain_rpc_url_invalid' && badUrl.variable === 'DDC_RPC_URL');
+    assert.ok(badUrl.message.includes('DDC_RPC_URL') && !badUrl.message.includes('CHAIN_RPC_URL'));
+    assert.ok(!badUrl.message.includes('SENTINEL-4f2a'));
+
+    const badId = thrownBy(() => chainId({ DDC_CHAIN_ID: 'forty-four' }));
+    assert.ok(badId && badId.code === 'chain_id_invalid' && badId.variable === 'DDC_CHAIN_ID');
+    assert.ok(badId.message.includes('DDC_CHAIN_ID') && !badId.message.includes('forty-four'));
+  });
+
+  it('an invalid CHAIN_* value is an error even when the DDC_* one is fine (no silent fall-through)', () => {
+    const url = thrownBy(() => chainRpcUrl({ CHAIN_RPC_URL: 'not a url', DDC_RPC_URL: 'https://rpc.example.test' }));
+    assert.ok(url && url.variable === 'CHAIN_RPC_URL');
+    const id = thrownBy(() => chainId({ CHAIN_ID: 'abc', DDC_CHAIN_ID: '44508' }));
+    assert.ok(id && id.variable === 'CHAIN_ID');
+  });
+
+  it('the boot check reads through it, and warns about the variable that is really wrong', () => {
+    const ok = captureLog();
+    const report = warnIfChainSignerUnavailable({
+      env: { CHAIN_SIGNER_PRIVATE_KEY: KEY, DDC_RPC_URL: 'https://rpc.example.test/eth', DDC_CHAIN_ID: '777' },
+      log: ok,
+    });
+    assert.equal(ok.ofLevel('warn').length, 0);
+    assert.equal(report.rpcHost, 'rpc.example.test');
+    assert.equal(report.chainId, 777);
+
+    const bad = captureLog();
+    warnIfChainSignerUnavailable({ env: { CHAIN_SIGNER_PRIVATE_KEY: KEY, DDC_CHAIN_ID: 'x', DDC_RPC_URL: 'ftp://h.example.test/SENTINEL' }, log: bad });
+    assert.deepEqual(bad.ofLevel('warn').map((call) => call.meta.variable).sort(), ['DDC_CHAIN_ID', 'DDC_RPC_URL']);
+    assert.ok(!bad.text().includes('SENTINEL'));
+  });
+
+  it('is separate from the signer: BACKEND_WALLET_PRIVATE_KEY and the DDC_* pair never stand in for CHAIN_SIGNER_PRIVATE_KEY', () => {
+    const error = thrownBy(() => chainSignerKey({ BACKEND_WALLET_PRIVATE_KEY: KEY, DDC_RPC_URL: 'https://rpc.example.test', DDC_CHAIN_ID: '1' }));
+    assert.ok(error && error.code === 'chain_signer_unconfigured');
+  });
+});
+
 describe('chainSignerKey', () => {
   it('reads CHAIN_SIGNER_PRIVATE_KEY, with or without 0x, trimmed', () => {
     assert.equal(SIGNER_KEY_ENV, 'CHAIN_SIGNER_PRIVATE_KEY');
