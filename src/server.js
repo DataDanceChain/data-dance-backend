@@ -3,6 +3,7 @@ const dotenv = require('dotenv');
 const { assertPartnerConfig, assertFinancialGradeConfig } = require('./constants/partnerClient');
 const { applyPartnerKillSwitch } = require('./services/partnerKillSwitch');
 const { warnIfChainSignerUnavailable } = require('./constants/chainConfig');
+const { initVersionPolicy } = require('./constants/appVersionPolicy');
 
 // 加载环境变量
 dotenv.config();
@@ -11,6 +12,10 @@ dotenv.config();
 // variable, never a boot failure. Signing calls then fail with an error naming it; the rest of the
 // API is unaffected. The log carries the signer's public address, never the key.
 warnIfChainSignerUnavailable();
+
+// App version policy (GET /api/app/version-policy): validate APP_MIN_VERSION_* and the update URLs
+// once, now. A bad value is one warning and falls back (no minimum / default URL), never a failure.
+initVersionPolicy();
 
 // Partner (TGE) SSO: refuse to boot half-configured. Throws with every problem listed; the
 // summary never contains secrets.

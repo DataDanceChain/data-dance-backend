@@ -44,6 +44,7 @@ Object.assign(process.env, {
   APP_PUBLIC_URL: 'https://app.test.local',
   JWT_SECRET,
   SSO_SESSION_SECRET,
+  APP_MIN_VERSION_IOS: '2.1.0',
 });
 
 const app = require('../../src/app');
@@ -148,6 +149,16 @@ describe('src/app mount order', () => {
     const userJwt = jwt.sign({ id: user.id, ver: 2 }, JWT_SECRET, { expiresIn: '5m' });
     const ok = await request(server).get('/api/crawler-tasks').set('Authorization', `Bearer ${userJwt}`);
     assert.notEqual(ok.status, 401, 'a user JWT must still be accepted by the crawler routes');
+  });
+
+  it('the App version policy is public: no credential needed, and no router that protects /api answers it first', async () => {
+    const res = await request(server).get('/api/app/version-policy');
+    assert.equal(res.status, 200, `got ${res.status} ${JSON.stringify(res.body)}`);
+    assert.deepEqual(res.body, {
+      ios: { minVersion: '2.1.0', storeUrl: 'https://apps.apple.com/app/id6743675282' },
+      android: { minVersion: null, downloadUrl: 'https://app.datadance.ai/downloads/' },
+    });
+    assert.equal(res.headers['cache-control'], 'no-store');
   });
 
   it('the consent limiter stays per user: one user exhausting it does not throttle another from the same IP', async () => {
