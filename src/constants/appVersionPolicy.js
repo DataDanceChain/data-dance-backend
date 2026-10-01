@@ -4,19 +4,27 @@
  * send the user to the right place. No minimum configured means nothing is ever blocked.
  *
  *   APP_MIN_VERSION_IOS       e.g. 2.1.0. Unset or blank: minVersion is null (nobody is blocked).
- *   APP_MIN_VERSION_ANDROID   e.g. 2.1.0. Same.
- *   APP_STORE_URL_IOS         where an iOS App sends the user to update. Default: our App Store page.
- *   APP_DOWNLOAD_URL_ANDROID  where an Android App sends the user to update. Default: the APK page.
+ *   APP_MIN_VERSION_ANDROID   e.g. 2.1.0. Same, and it only counts together with the URL below.
+ *   APP_STORE_URL_IOS         where an iOS App sends the user to update. Default: our App Store listing.
+ *   APP_DOWNLOAD_URL_ANDROID  where an Android App sends the user to update: the APK file, or a page
+ *                             that offers it. NO default: downloadUrl is null unless configured.
  *
- * Validated once, at boot (initVersionPolicy, called from server.js): a minimum that is not a
- * dotted version number is ignored (treated as unset) and a URL that is not https falls back to its
- * default, each with one warning that names the variable. The Apps compare the version numerically,
- * so a value they cannot parse must never reach them; failing open (no gate) is the safe side
- * because decision 56 says a backend without this configuration never blocks anyone.
+ * There is deliberately no Android default. The directory https://app.datadance.ai/downloads/
+ * answers 403 (no index) and /downloads is the web app's HTML, so neither is a place to send a
+ * user; the one working address is an APK file, whose name carries the version and changes with
+ * every release. It has to be configured together with the minimum that needs it, and an Android
+ * minimum without a usable download URL is ignored (minVersion null) rather than put users in front
+ * of an "update required" screen with nowhere to go.
+ *
+ * Validated once, at boot (initVersionPolicy, called from server.js), each problem with one warning
+ * that names the variable(s): a minimum that is not a dotted version number is ignored (treated as
+ * unset), an iOS URL that is not https falls back to its default, an Android URL that is not https is
+ * treated as unset. The Apps compare the version numerically, so a value they cannot parse must never
+ * reach them; failing open (no gate) is the safe side because decision 56 says a backend without
+ * this configuration never blocks anyone.
  */
 
 const DEFAULT_IOS_STORE_URL = 'https://apps.apple.com/app/id6743675282';
-const DEFAULT_ANDROID_DOWNLOAD_URL = 'https://app.datadance.ai/downloads/';
 
 // 2 to 4 dot-separated numbers, no leading zeros: 2.1, 2.1.0, 2.1.0.15. Anything else (a leading
 // "v", "-beta", "2.1.x", a bare "2") would make a numeric comparison in the App guess.
@@ -31,7 +39,7 @@ function minVersion(env, variable, problems) {
   if (!raw) return null;
   if (VERSION_PATTERN.test(raw)) return raw;
   problems.push({
-    variable,
+    variables: [variable],
     detail: `${variable} is not a version number like 2.1.0 (2 to 4 dot-separated numbers); ignored, treated as unset`,
     // A version string is not a secret; capped so a pasted blob cannot flood the log.
     value: raw.length > 32 ? `${raw.slice(0, 32)}...` : raw,
@@ -39,18 +47,20 @@ function minVersion(env, variable, problems) {
   return null;
 }
 
+function isHttpsUrl(raw) {
+  try {
+    return new URL(raw).protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
+/** An https URL, or `fallback` when unset. A set value that is not https is a problem; the URL itself is never echoed. */
 function httpsUrl(env, variable, fallback, problems) {
   const raw = clean(env[variable]);
   if (!raw) return fallback;
-  let parsed = null;
-  try {
-    parsed = new URL(raw);
-  } catch {
-    parsed = null;
-  }
-  if (parsed && parsed.protocol === 'https:') return raw;
-  // The URL itself is not echoed.
-  problems.push({ variable, detail: `${variable} is not an https URL; using the default` });
+  if (isHttpsUrl(raw)) return raw;
+  problems.push({ variables: [variable], detail: `${variable} is not an https URL; using the default` });
   return fallback;
 }
 
@@ -58,22 +68,36 @@ function httpsUrl(env, variable, fallback, problems) {
  * The policy for one environment, plus every problem found in it. Pure: reads only `env`.
  *
  * @returns {{ policy: { ios: { minVersion: string|null, storeUrl: string },
- *                       android: { minVersion: string|null, downloadUrl: string } },
- *             problems: Array<{ variable: string, detail: string, value?: string }> }}
+ *                       android: { minVersion: string|null, downloadUrl: string|null } },
+ *             problems: Array<{ variables: string[], detail: string, value?: string }> }}
  */
 function buildVersionPolicy(env = process.env) {
   const problems = [];
-  const policy = {
-    ios: {
-      minVersion: minVersion(env, 'APP_MIN_VERSION_IOS', problems),
-      storeUrl: httpsUrl(env, 'APP_STORE_URL_IOS', DEFAULT_IOS_STORE_URL, problems),
-    },
-    android: {
-      minVersion: minVersion(env, 'APP_MIN_VERSION_ANDROID', problems),
-      downloadUrl: httpsUrl(env, 'APP_DOWNLOAD_URL_ANDROID', DEFAULT_ANDROID_DOWNLOAD_URL, problems),
-    },
+
+  const ios = {
+    minVersion: minVersion(env, 'APP_MIN_VERSION_IOS', problems),
+    storeUrl: httpsUrl(env, 'APP_STORE_URL_IOS', DEFAULT_IOS_STORE_URL, problems),
   };
-  return { policy, problems };
+
+  // Android has no default URL: null unless configured. A minimum with no usable URL to send the
+  // user to is dropped, and that is ONE warning naming both variables, not one per symptom.
+  let androidMin = minVersion(env, 'APP_MIN_VERSION_ANDROID', problems);
+  const rawUrl = clean(env.APP_DOWNLOAD_URL_ANDROID);
+  const urlIsSet = rawUrl !== '';
+  const downloadUrl = urlIsSet && isHttpsUrl(rawUrl) ? rawUrl : null;
+  if (androidMin && !downloadUrl) {
+    problems.push({
+      variables: ['APP_MIN_VERSION_ANDROID', 'APP_DOWNLOAD_URL_ANDROID'],
+      detail: 'APP_MIN_VERSION_ANDROID is set but APP_DOWNLOAD_URL_ANDROID is '
+        + `${urlIsSet ? 'not an https URL' : 'not set'}: the Android minimum is ignored (minVersion null), `
+        + 'because an update prompt needs somewhere to send the user',
+    });
+    androidMin = null;
+  } else if (urlIsSet && !downloadUrl) {
+    problems.push({ variables: ['APP_DOWNLOAD_URL_ANDROID'], detail: 'APP_DOWNLOAD_URL_ANDROID is not an https URL; ignored (downloadUrl null)' });
+  }
+
+  return { policy: { ios, android: { minVersion: androidMin, downloadUrl } }, problems };
 }
 
 function defaultLog() {
@@ -113,7 +137,6 @@ function getVersionPolicy() {
 
 module.exports = {
   DEFAULT_IOS_STORE_URL,
-  DEFAULT_ANDROID_DOWNLOAD_URL,
   VERSION_PATTERN,
   buildVersionPolicy,
   initVersionPolicy,

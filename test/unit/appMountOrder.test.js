@@ -156,7 +156,7 @@ describe('src/app mount order', () => {
     assert.equal(res.status, 200, `got ${res.status} ${JSON.stringify(res.body)}`);
     assert.deepEqual(res.body, {
       ios: { minVersion: '2.1.0', storeUrl: 'https://apps.apple.com/app/id6743675282' },
-      android: { minVersion: null, downloadUrl: 'https://app.datadance.ai/downloads/' },
+      android: { minVersion: null, downloadUrl: null },
     });
     assert.equal(res.headers['cache-control'], 'no-store');
   });
