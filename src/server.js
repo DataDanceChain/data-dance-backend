@@ -2,9 +2,15 @@ const app = require('./app');
 const dotenv = require('dotenv');
 const { assertPartnerConfig, assertFinancialGradeConfig } = require('./constants/partnerClient');
 const { applyPartnerKillSwitch } = require('./services/partnerKillSwitch');
+const { warnIfChainSignerUnavailable } = require('./constants/chainConfig');
 
 // 加载环境变量
 dotenv.config();
+
+// On-chain signer: a missing or malformed CHAIN_SIGNER_PRIVATE_KEY is ONE warning that names the
+// variable, never a boot failure. Signing calls then fail with an error naming it; the rest of the
+// API is unaffected. The log carries the signer's public address, never the key.
+warnIfChainSignerUnavailable();
 
 // Partner (TGE) SSO: refuse to boot half-configured. Throws with every problem listed; the
 // summary never contains secrets.

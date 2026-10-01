@@ -1,14 +1,32 @@
 const ethers = require('ethers');
+const { chainRpcUrl, chainId, chainSignerKey, createSignerWallet } = require('../constants/chainConfig');
 
-const PROD_PROVIDER = new ethers.JsonRpcProvider('https://dev-exp-alpha.datadance.ai/eth/rpc', 44508, {
-    batchMaxCount: 1,
-});
-const DEV_PROVIDER = new ethers.JsonRpcProvider('http://localhost:8545');
-const provider = process.env.NODE_ENV === 'production' ? PROD_PROVIDER : DEV_PROVIDER;
+// Chain settings and the signer key come from the environment (src/constants/chainConfig.js):
+// CHAIN_SIGNER_PRIVATE_KEY, CHAIN_RPC_URL, CHAIN_ID. No key is kept in this file, and nothing is
+// read or connected at require time, so the API boots with or without them.
 
-const PROD_MAIN_PRIVATE_KEY = "0xa174c554214fa873a481dc01aa2cf99c9486a07733b28b1f9b127efccd7bbb11";
-const DEV_MAIN_PRIVATE_KEY = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
-const mainPrivateKey = process.env.NODE_ENV === 'production' ? PROD_MAIN_PRIVATE_KEY : DEV_MAIN_PRIVATE_KEY;
+// One provider per distinct (endpoint, chain id); rebuilt only if the settings change.
+let cachedProvider = null;
+let cachedProviderKey = '';
+
+const getDdcProvider = () => {
+    const url = chainRpcUrl();
+    const id = chainId();
+    const key = `${id}|${url}`;
+    if (!cachedProvider || cachedProviderKey !== key) {
+        // Some RPC nodes reject batched requests.
+        cachedProvider = new ethers.JsonRpcProvider(url, id, { batchMaxCount: 1 });
+        cachedProviderKey = key;
+    }
+    return cachedProvider;
+};
+
+// The signing wallet. When CHAIN_SIGNER_PRIVATE_KEY is unset or not a key this throws an error that
+// names it, before any provider is built, so a misconfigured server fails without touching RPC.
+const signerWallet = (overrideProvider) => {
+    chainSignerKey();
+    return createSignerWallet(overrideProvider || getDdcProvider());
+};
 
 const ActivityNFTFactoryABI = [
     "function create(bytes32 activityId, address owner) external returns (address)",
@@ -33,26 +51,24 @@ const DataNFTABI = [
 ]
 
 const activityNFTFactoryAddress = '0x1Ee817752d98037eA6a2Ca38325e496dCAA3CB40';
-const activityNFTFactoryContract = new ethers.Contract(activityNFTFactoryAddress, ActivityNFTFactoryABI, provider);
 
 const dataNFTFactoryAddress = '0xc565EB7363769f8ffAe0005285ccD854c631A0a0';
-const dataNFTFactoryContract = new ethers.Contract(dataNFTFactoryAddress, DataNFTABI, provider);
 
 exports.getActivityNFTContract = async (address) => {
-    const contract = new ethers.Contract(address, ActivityNFTABI, provider);
+    const contract = new ethers.Contract(address, ActivityNFTABI, getDdcProvider());
     return contract;
 }
 
 exports.getDataNFTContract = async (address) => {
-    const contract = new ethers.Contract(address, DataNFTABI, provider);
+    const contract = new ethers.Contract(address, DataNFTABI, getDdcProvider());
     return contract;
 }
 
 exports.createActivityNFTContract = async (activityId, owner) => {
-    const wallet = new ethers.Wallet(mainPrivateKey, provider);
+    const wallet = signerWallet();
     console.log("Wallet:", wallet.address);
-    console.log("Wallet balance:", await provider.getBalance(wallet.address));
-    const activityNFTFactoryWithSigner = activityNFTFactoryContract.connect(wallet);
+    console.log("Wallet balance:", await wallet.provider.getBalance(wallet.address));
+    const activityNFTFactoryWithSigner = new ethers.Contract(activityNFTFactoryAddress, ActivityNFTFactoryABI, wallet);
 
     activityNFTFactoryWithSigner.on("ActivityNFTContractCreated", (contractAddress, event) => {
         console.log(`${contractAddress}`);
@@ -64,15 +80,17 @@ exports.createActivityNFTContract = async (activityId, owner) => {
     return receipt.logs;
 }
 
-exports.getDdcProvider = () => provider;
+exports.getDdcProvider = getDdcProvider;
 
 exports.getBackendWallet = (overrideProvider) => {
-    return new ethers.Wallet(mainPrivateKey, overrideProvider || provider);
+    return signerWallet(overrideProvider);
 };
 
 exports.createDataNFTContract = async (collectionId, owner) => {
-    const wallet = new ethers.Wallet(mainPrivateKey, provider);
-    const dataNFTFactoryWithSigner = dataNFTFactoryContract.connect(wallet);
+    const wallet = signerWallet();
+    // Unchanged from before: the factory is built from DataNFTABI, which has no `create`, so this
+    // function cannot work as written. Nothing calls it.
+    const dataNFTFactoryWithSigner = new ethers.Contract(dataNFTFactoryAddress, DataNFTABI, wallet);
 
     dataNFTFactoryWithSigner.on("DataNFTContractCreated", (contractAddress, event) => {
         console.log(`${contractAddress}`);
