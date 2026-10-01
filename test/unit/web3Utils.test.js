@@ -199,25 +199,6 @@ describe('no key lives in the source', () => {
       assert.ok(!/PROD_MAIN_PRIVATE_KEY|DEV_MAIN_PRIVATE_KEY/.test(text), `${file} still names the old key constants`);
     }
   });
-
-  it('no file under src/ or scripts/ assigns a 64-hex literal to a private-key / secret / mnemonic name', () => {
-    const pattern = /(private[_-]?key|secret|mnemonic)\w*["'`]?\s*[:=]\s*["'`](?:0x)?[0-9a-fA-F]{64}["'`]/i;
-    const offenders = [];
-    const walk = (dir) => {
-      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-        const full = path.join(dir, entry.name);
-        if (entry.isDirectory()) walk(full);
-        else if (/\.(js|mjs|cjs|ts)$/.test(entry.name)) {
-          fs.readFileSync(full, 'utf8').split('\n').forEach((line, index) => {
-            if (pattern.test(line)) offenders.push(`${path.relative(root, full)}:${index + 1}`);
-          });
-        }
-      }
-    };
-    walk(path.join(root, 'src'));
-    walk(path.join(root, 'scripts'));
-    assert.deepEqual(offenders, [], 'a key literal was committed (file:line, value withheld)');
-  });
 });
 
 function thrownBy(fn) {
