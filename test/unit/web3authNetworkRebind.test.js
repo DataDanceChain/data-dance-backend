@@ -194,5 +194,13 @@ describe('scripts/mainnetSwitch.js', () => {
     assert.match(devnet.blockers.join(' '), /still names sapphire-devnet connections/);
     assert.match(ms.checkEnvironment({ ...ON, WEB3AUTH_NETWORK_REBIND: 'off' }, opts).blockers.join(' '), /not "on"/);
     assert.match(ms.checkEnvironment({ ...ON, WEB3AUTH_REBIND_VERIFIERS: 'zzz' }, opts).blockers.join(' '), /would not boot/);
+    assert.match(
+      ms.checkEnvironment({ ...ON, WEB3AUTH_EXTERNAL_AUDIENCE: 'old-devnet-client-id' }, opts).blockers.join(' '),
+      /WEB3AUTH_EXTERNAL_AUDIENCE/
+    );
+    assert.deepEqual(
+      ms.checkEnvironment({ ...ON, WEB3AUTH_EXTERNAL_AUDIENCE: ON.WEB3AUTH_CLIENT_ID }, opts).blockers,
+      []
+    );
   });
 });

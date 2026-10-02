@@ -803,10 +803,12 @@ function defaultName(identity, accountEmail) {
 // Web3AuthNetworkRebind (status `pending`):
 //
 //   - the connection is in WEB3AUTH_REBIND_VERIFIERS (and WEB3AUTH_ALLOWED_VERIFIERS);
-//   - an account found by its e-mail column needs a connection in
+//   - an account found by an e-mail-shaped key needs a connection in
 //     WEB3AUTH_EMAIL_TRUSTED_VERIFIERS — one that verifies the address itself, which is what
-//     `email_verified` would have said; an account found by the exact verifierId the token
-//     carries (X: `twitter|<id>`) needs only the first list;
+//     `email_verified` would have said. That holds whether the token carried the address as an
+//     `email` claim or as its verifierId: the shape of the key that matched decides, not the
+//     claim it came from. Only an account found by an exact non-e-mail verifierId (X:
+//     `twitter|<id>`) needs just the first list;
 //   - the e-mail must name exactly one account (case-insensitively), the account must be an
 //     unlinked, enabled, non-organization `web3auth` row;
 //   - walletPolicy `replace` (a Web3Auth-derived address of the old network): the address the
@@ -814,11 +816,15 @@ function defaultName(identity, accountEmail) {
 //     holds the archived address (or none); `keep` (a server-held key or an external wallet): the
 //     wallet is never touched.
 //
-// Two more routes keep the external-wallet guarantee ("same account, never a duplicate"):
+// External wallets ("same account, never a duplicate"):
 //   - a recorded account found by the wallet the token proves is the ordinary wallet route; the
 //     record is then closed with the wallet kept;
-//   - a wallet a re-bind replaced is still proof of that account: a token proving it (e.g. the
-//     MetaMask a user had typed an e-mail for) logs into the same User.id instead of creating one.
+//   - a wallet a re-bind REPLACED is never a login credential again. Before P0 a legacy row's
+//     wallet came from the request body, so the archived address may belong to someone who
+//     squatted the e-mail, not to its owner. A token proving such an address gets
+//     IDENTITY_CONFLICT `replaced_wallet` — no login, and no duplicate account either. A real
+//     external-wallet owner is kept by listing the account in --keep-wallet-ids before --apply
+//     (walletPolicy `keep`), or handled by support.
 //
 // Accounts that once logged in through two connections with one e-mail (legacy accounts were
 // e-mail keyed) stay reachable through both while both verify e-mail: after the first re-bind,
@@ -910,7 +916,11 @@ async function networkRebind(db, cfg, { candidate, candidateBy, record, identity
   if (!isVerifierAllowed(cfg, identity.verifier)) {
     throw rebindConflict('verifier_not_in_allowlist', candidate, identity, candidateBy);
   }
-  if (candidateBy === 'email' && !emailTrusted) throw rebindConflict('email_not_trusted', candidate, identity, candidateBy);
+  // The key that found the account was its e-mail column (exactly or case-insensitively), so
+  // the account is found by an e-mail-shaped key whenever that column holds an address — also
+  // when the token carried the address as its verifierId and had no `email` claim.
+  const emailKeyed = candidateBy === 'email' || (typeof candidate.email === 'string' && candidate.email.includes('@'));
+  if (emailKeyed && !emailTrusted) throw rebindConflict('email_not_trusted', candidate, identity, candidateBy);
 
   // Replace only the address the record archived (or an empty slot). A wallet bound after the
   // apply by another path (a signed bind, a partner payout bind) is not an old-network address.
@@ -970,11 +980,13 @@ async function networkRebind(db, cfg, { candidate, candidateBy, record, identity
 }
 
 /**
- * External-wallet guarantee: a wallet a re-bind replaced still proves its account. Only an
- * address the token proves reaches here, and only after the pair, e-mail and wallet lookups
- * all missed (so it would otherwise create a duplicate account).
+ * A wallet a re-bind replaced is not a credential. Pre-P0 rows took their wallet from the
+ * request body, so the archived address proves nothing about who owns the account: logging in
+ * with it would hand a squatter the owner's re-bound account. Refuse instead of logging in, and
+ * instead of creating a duplicate account for that address. Only an address the token proves
+ * reaches here, after the pair, e-mail and wallet lookups all missed.
  */
-async function loginByReplacedWallet(db, cfg, identity, walletAddress) {
+async function refuseReplacedWallet(db, identity, walletAddress) {
   const record = await db.web3AuthNetworkRebind.findFirst({
     where: {
       oldAddress: { equals: walletAddress, mode: 'insensitive' },
@@ -982,15 +994,8 @@ async function loginByReplacedWallet(db, cfg, identity, walletAddress) {
       walletPolicy: 'replace',
     },
   });
-  if (!record) return null;
-  const user = await db.user.findUnique({ where: { id: record.userId } });
-  if (!user) return null;
-  guardAccount(user);
-  if (!isVerifierAllowed(cfg, identity.verifier)) {
-    throw rebindConflict('verifier_not_in_allowlist', user, identity, 'replaced_wallet');
-  }
-  logger.info('identity_replaced_wallet_login', { userId: user.id, verifier: identity.verifier });
-  return { user, action: 'login' };
+  if (!record) return;
+  throw rebindConflict('replaced_wallet', { id: record.userId }, identity, 'replaced_wallet');
 }
 
 /**
@@ -1069,8 +1074,7 @@ async function resolveUser(identity, options = {}) {
     candidateBy = candidate ? 'wallet' : null;
   }
   if (!candidate && rebindOn && walletAddress) {
-    const byReplaced = await loginByReplacedWallet(db, cfg, identity, walletAddress);
-    if (byReplaced) return byReplaced;
+    await refuseReplacedWallet(db, identity, walletAddress);
   }
 
   if (candidate) {

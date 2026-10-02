@@ -140,6 +140,7 @@ const ext = {
   walt: Wallet.createRandom(),
   wanda: Wallet.createRandom(),
   wes: Wallet.createRandom(),
+  squatter: Wallet.createRandom(),
 };
 const ids = {};
 const OLD = {};
@@ -200,6 +201,10 @@ before(async () => {
   await user('dupUpper', { email: `Dup-${RUN}@example.test`, walletAddress: devnet() });
   await user('dupLower', { email: `dup-${RUN}@example.test`, walletAddress: devnet() });
   await user('victim', { email: `victim-${RUN}@example.test`, walletAddress: devnet() });
+  // Pre-P0 squat: someone claimed this e-mail and bound their own MetaMask (body-asserted wallet).
+  await user('squat', { email: `squat-${RUN}@example.test`, walletAddress: ext.squatter.address });
+  // E-mail keyed row reached by a token that carries the address only as its verifierId.
+  await user('plain', { email: `plain-${RUN}@example.test`, walletAddress: devnet() });
   await user('password', { email: `pw-${RUN}@example.test`, authType: 'traditional', password: 'x' });
   await user('org', { email: `org-${RUN}@example.test`, userType: 'organization', isOrganization: true });
 
@@ -273,9 +278,9 @@ describe('mainnet switch on Postgres', () => {
     assert.equal(r.organizations, 1);
     assert.equal(r.web3auth_regular.by_pair_state.old_network, 1);
     assert.equal(r.web3auth_regular.with_server_key, 1);
-    assert.equal(r.to_record.total, 16); // every web3auth regular row
+    assert.equal(r.to_record.total, 18); // every web3auth regular row
     assert.deepEqual(r.to_record.by_evidence, {
-      email_unpaired: 10,
+      email_unpaired: 12,
       x_verifier_id: 1,
       operator_keep: 1,
       no_wallet: 2,
@@ -314,11 +319,11 @@ describe('mainnet switch on Postgres', () => {
     const { code, json, text } = await runScript(['--apply', '--yes', '--json', '--keep-wallet-ids', keepFile]);
     assert.equal(code, mainnetSwitch.EXIT.GO, text);
     assert.equal(json.applied, true);
-    assert.equal(json.accounts, 16);
+    assert.equal(json.accounts, 18);
     assert.equal(json.old_network_pairs_cleared, 1);
     runId = json.run_id;
     const backup = await prisma.$queryRawUnsafe(`SELECT id, "walletAddress", "web3authVerifier" FROM "${json.backup_table}"`);
-    assert.equal(backup.length, 16);
+    assert.equal(backup.length, 18);
     assert.equal(backup.find((b) => b.id === ids.paired).web3authVerifier, V.googleDevnet);
     const paired = await row('paired');
     assert.equal(paired.web3authVerifier, null);
@@ -432,15 +437,17 @@ describe('mainnet switch on Postgres', () => {
     assert.equal(await userCount(), before);
   });
 
-  it('external wallet whose owner used Google first: the wallet still opens the same account, never a duplicate', async () => {
+  it('a wallet a re-bind replaced never logs in again (409, no duplicate); an operator-kept wallet does', async () => {
     const before = await userCount();
     const google = await socialLogin(V.google, `wanda-${RUN}@example.test`, { email: `wanda-${RUN}@example.test` });
     assert.equal(google.res.status, 200);
     assert.equal(google.res.body.data.user.id, ids.wanda);
     const res = await externalLogin(ext.wanda);
-    assert.equal(res.status, 200, JSON.stringify(res.body));
-    assert.equal(res.body.data.user.id, ids.wanda);
-    assert.equal(await userCount(), before);
+    assert.equal(res.status, 409, JSON.stringify(res.body));
+    assert.equal(res.body.code, 'IDENTITY_CONFLICT');
+    assert.equal(res.body.data, undefined, 'no session');
+    assert.equal(await userCount(), before, 'no duplicate account for the replaced address');
+    assert.equal((await row('wanda')).walletAddress, google.wallet.address);
     // Operator-kept external wallet: Google re-binds the pair, the address stays.
     const wes = await socialLogin(V.google, `wes-${RUN}@example.test`, { email: `wes-${RUN}@example.test` });
     assert.equal(wes.res.status, 200);
@@ -448,6 +455,54 @@ describe('mainnet switch on Postgres', () => {
     const wesWallet = await externalLogin(ext.wes);
     assert.equal(wesWallet.status, 200);
     assert.equal(wesWallet.body.data.user.id, ids.wes);
+    assert.equal(await userCount(), before);
+  });
+
+  it('squat, then the owner re-binds: the squatter\'s pre-cut wallet gets 409, never the owner\'s account', async () => {
+    const before = await userCount();
+    const owner = await socialLogin(V.google, `squat-${RUN}@example.test`, { email: `squat-${RUN}@example.test` });
+    assert.equal(owner.res.status, 200, JSON.stringify(owner.res.body));
+    assert.equal(owner.res.body.data.user.id, ids.squat);
+    assert.equal((await row('squat')).walletAddress, owner.wallet.address);
+    const rec = await record('squat');
+    assert.equal(rec.status, 'rebound');
+    assert.equal(rec.oldAddress, ext.squatter.address, 'the squatter address stays only as history');
+    for (let i = 0; i < 2; i++) {
+      const attacker = await externalLogin(ext.squatter);
+      assert.equal(attacker.status, 409, JSON.stringify(attacker.body));
+      assert.equal(attacker.body.code, 'IDENTITY_CONFLICT');
+      assert.equal(attacker.body.data, undefined, 'no session for the squatter');
+      assert.doesNotMatch(JSON.stringify(attacker.body), new RegExp(ids.squat), 'the owner id is not disclosed');
+    }
+    const squat = await row('squat');
+    assert.equal(squat.web3authVerifier, V.google);
+    assert.equal(squat.walletAddress, owner.wallet.address);
+    assert.equal(await userCount(), before);
+  });
+
+  it('e-mail-shaped verifierId without an e-mail claim still needs an e-mail-trusted connection', async () => {
+    const before = await userCount();
+    // Apple on the re-bind list but NOT on the e-mail-trusted list.
+    process.env.WEB3AUTH_EMAIL_TRUSTED_VERIFIERS = [V.google, V.email].join(',');
+    identity._internals.resetConfig();
+    try {
+      const apple = await socialLogin(V.apple, `plain-${RUN}@example.test`); // no `email` claim
+      assert.equal(apple.res.status, 409, JSON.stringify(apple.res.body));
+      assert.equal(apple.res.body.code, 'IDENTITY_CONFLICT');
+      const differentCase = await socialLogin(V.apple, `PLAIN-${RUN}@example.test`);
+      assert.equal(differentCase.res.status, 409, 'case-insensitive match is e-mail keyed too');
+      const plain = await row('plain');
+      assert.equal(plain.web3authVerifier, null);
+      assert.equal(plain.walletAddress, OLD.plain);
+      assert.equal((await record('plain')).status, 'pending');
+    } finally {
+      process.env.WEB3AUTH_EMAIL_TRUSTED_VERIFIERS = CUT_ENV.WEB3AUTH_EMAIL_TRUSTED_VERIFIERS;
+      identity._internals.resetConfig();
+    }
+    // With Apple trusted again, the same token re-binds: the 409 came from the trust guard.
+    const ok = await socialLogin(V.apple, `plain-${RUN}@example.test`);
+    assert.equal(ok.res.status, 200, JSON.stringify(ok.res.body));
+    assert.equal(ok.res.body.data.user.id, ids.plain);
     assert.equal(await userCount(), before);
   });
 
@@ -510,7 +565,7 @@ describe('mainnet switch on Postgres', () => {
 
   it('--plan after the logins: pending and rebound counts', async () => {
     const { json } = await runScript(['--plan', '--json']);
-    assert.equal(json.report.records.rebound, 13);
+    assert.equal(json.report.records.rebound, 15);
     assert.equal(json.report.records.pending, 3); // the inviter (never came back) and the two case-duplicates
     assert.equal(json.runs.length, 1);
   });
@@ -519,9 +574,9 @@ describe('mainnet switch on Postgres', () => {
     const { code, json, text } = await runScript(['--rollback', '--run', runId, '--yes', '--json']);
     assert.equal(code, mainnetSwitch.EXIT.GO, text);
     assert.equal(json.rolled_back, true);
-    assert.equal(json.accounts_restored, 16);
-    assert.equal(json.rebinds_reverted, 13);
-    for (const name of ['gina', 'eve', 'apple', 'xavier', 'nowallet', 'latebound', 'server', 'walt', 'wanda', 'sam']) {
+    assert.equal(json.accounts_restored, 18);
+    assert.equal(json.rebinds_reverted, 15);
+    for (const name of ['gina', 'eve', 'apple', 'xavier', 'nowallet', 'latebound', 'server', 'walt', 'wanda', 'sam', 'squat', 'plain']) {
       const r = await row(name);
       assert.equal(r.walletAddress, OLD[name], name);
       assert.equal(r.web3authVerifier, null, name);
@@ -542,7 +597,7 @@ describe('mainnet switch on Postgres', () => {
 
     const reapply = await runScript(['--apply', '--yes', '--json']);
     assert.equal(reapply.code, mainnetSwitch.EXIT.GO);
-    assert.equal(reapply.json.accounts, 16);
+    assert.equal(reapply.json.accounts, 18);
     assert.notEqual(reapply.json.run_id, runId);
     const gina = await socialLogin(V.google, `gina-${RUN}@example.test`, { email: `gina-${RUN}@example.test` });
     assert.equal(gina.res.status, 200);

@@ -39,8 +39,11 @@
  *   replace  x_verifier_id          the e-mail column holds `twitter|<id>` (X login)
  *   replace  no_wallet              nothing bound yet
  *   replace  email_unpaired         e-mail keyed, wallet from the old network. An external-wallet
- *                                   user who typed an e-mail looks the same in the database; their
- *                                   wallet still proves the account after a re-bind (no duplicate).
+ *                                   user who typed an e-mail looks the same in the database (and
+ *                                   so does a pre-P0 squatter's wallet). Once a re-bind replaced
+ *                                   that address it never logs in again (409 replaced_wallet, no
+ *                                   duplicate): list real external-wallet owners in
+ *                                   --keep-wallet-ids before --apply.
  *
  * Output: counts and user ids only — never an e-mail, wallet address or key.
  *
@@ -161,6 +164,12 @@ function checkEnvironment(env, { fromNetwork, toNetwork }) {
   const newSuffix = networkSuffix(toNetwork);
   const stale = config.allowedVerifiers.filter((v) => v.includes(oldSuffix));
   if (stale.length) blockers.push(`WEB3AUTH_ALLOWED_VERIFIERS still names ${oldSuffix} connections: ${stale.join(', ')}`);
+  // An explicit external audience that is not the new client id would refuse every
+  // external-wallet login after the cut (typically the old devnet id left in place).
+  const externalAudience = csv(env.WEB3AUTH_EXTERNAL_AUDIENCE);
+  if (externalAudience.length && !externalAudience.includes(config.clientId)) {
+    blockers.push('WEB3AUTH_EXTERNAL_AUDIENCE is set and does not include WEB3AUTH_CLIENT_ID: empty it or set it to the new client id');
+  }
   if (!config.allowedVerifiers.includes(EXTERNAL_WALLET)) {
     warnings.push(`WEB3AUTH_ALLOWED_VERIFIERS has no ${EXTERNAL_WALLET}: external-wallet accounts cannot log in`);
   }
