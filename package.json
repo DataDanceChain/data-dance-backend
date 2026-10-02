@@ -17,6 +17,9 @@
     "seed:all": "node scripts/createAwards.js && node scripts/createBadges.js && node scripts/createCultureWeb3Event.js && node scripts/createGCCEvent.js && node scripts/createHashGlobalUser.js && node scripts/createOffGridEvent.js && node scripts/createRPCParty.js && node scripts/seedTestUserData.js"
   },
   "dependencies": {
+    "@alicloud/credentials": "2.4.7",
+    "@alicloud/kms20160120": "3.3.0",
+    "@alicloud/openapi-core": "1.0.8",
     "@babel/runtime": "7.29.7",
     "@ddcmarket/sdk": "^0.2.1",
     "@paralleldrive/cuid2": "^2.2.2",
