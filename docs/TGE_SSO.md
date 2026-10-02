@@ -243,7 +243,7 @@ indirectly, several helper calls down. One consequence is visible in the table b
 { "sub": "6f1c1a0e-…", "account_status": "active",
   "registered_at": "2025-05-03T09:12:44.000Z", "wallet_bound": true, "data_licence_granted": null,
   "points": { "balance": 1234.5, "as_of": "2026-09-21T02:15:31.000Z", "cache_max_age": 0 },
-  "referral": { "code": "AB23CD", "inviter_sub": "9d2e…", "direct_invitees": 12 },
+  "referral": { "code": "DDC-AB23CD", "inviter_sub": "9d2e…", "inviter_code": "DDC-ZZ99ZZ", "direct_invitees": 12 },
   "as_of": "2026-09-21T02:15:31.000Z", "cache_max_age": 0 }
 ```
 
@@ -280,6 +280,7 @@ the **scope** the user granted, and DataDance's per-environment freeze list
 | `points.as_of` | `tge:points` | `/status` | server clock at read time | never null | — |
 | `referral.code` | `tge:referral` | `/status` | the user's own short code (`User.referralCode`) **when the account already holds one in display form**, the same one the Wallet shows. A partner read never allocates one | the account has no display code yet (an older account whose code is still in the legacy form); it appears as soon as the Wallet allocates it | 60 s |
 | `referral.inviter_sub` | `tge:referral` | `/status` | `Referral.inviterId` for this user as invitee — the `sub` of whoever invited them, for an upline rebate | nobody invited this user | 60 s |
+| `referral.inviter_code` | `tge:referral` | `/status` | the inviter's own short code (their `User.referralCode`) in the same `DDC-XXXXXX` display form as `referral.code` — the code they share anyway, for the "upline inviter" row of a campaign page. Never their name, e-mail or anything else; a partner read never allocates one | nobody invited this user, or the inviter has no display code yet (legacy form) | 60 s |
 | `referral.direct_invitees` | `tge:referral` | `/status` | **count** of level-1 invitees, campaign invites included (may exceed the figure the Wallet referral page shows, which lists standard referrals only) | never null; `0` when they invited nobody | 60 s |
 | `as_of`, `cache_max_age` | — | `/status` | server clock | never null | — |
 
@@ -447,8 +448,9 @@ somebody else's.)
   can carry a balance and a referral summary. Everything v0.1 forbids that is not in the list
   above — orders, portrait, raw records — still holds; the downline-list prohibition was lifted on
   2026-09-23 (§7b). The contract is now v0.3.0.
-- **`referral` itself is unchanged** — the user's own code, their inviter's `sub` and a level-1
-  count. The complete network is the separate endpoint of §7b, under its own scope.
+- **`referral`** — the user's own code, their inviter's `sub` and that inviter's own invite code
+  (`inviter_code`, added for decision 47), and a level-1 count. The complete network is the
+  separate endpoint of §7b, under its own scope, and stays ids and dates only.
 - **A Web3Auth signing-key rotation can pause DataDance logins.** DataDance accepts Web3Auth ID
   tokens only from signing keys it has explicitly approved (pinned). If Web3Auth starts signing
   with a key DataDance has not approved yet, users cannot log in to DataDance — and therefore
