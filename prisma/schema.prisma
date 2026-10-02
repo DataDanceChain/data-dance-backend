@@ -1114,3 +1114,32 @@ model CampaignEvent {
 
   @@index([campaignId, createdAt])
 }
+
+model TrackedLink {
+  id          String           @id @default(uuid())
+  slug        String           @unique
+  name        String
+  kind        String
+  title       String
+  body        String           @default("")
+  buttonLabel String           @default("")
+  targetUrl   String?
+  active      Boolean          @default(true)
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+  hits        TrackedLinkHit[]
+}
+
+model TrackedLinkHit {
+  id           String      @id @default(uuid())
+  linkId       String
+  visitorId    String
+  event        String
+  dest         String?
+  referrerHost String?
+  createdAt    DateTime    @default(now())
+  link         TrackedLink @relation(fields: [linkId], references: [id], onDelete: Cascade)
+
+  @@index([linkId, event, createdAt])
+  @@index([linkId, visitorId, event])
+}
