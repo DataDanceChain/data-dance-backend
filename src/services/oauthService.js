@@ -44,6 +44,22 @@ const CIMD_HOSTS = new Set([
   '127.0.0.1',
 ]);
 
+// Claude's metadata host answers browsers and blocks many datacenter fetches.
+// Without this fallback, /oauth/authorize bounces straight back to Claude and
+// the consent page never opens.
+const KNOWN_CIMD_CLIENTS = {
+  'https://claude.ai/oauth/mcp-oauth-client-metadata': {
+    clientName: 'Claude',
+    redirectUris: ['https://claude.ai/api/mcp/auth_callback'],
+    clientUri: 'https://claude.ai',
+  },
+  'https://claude.ai/oauth/claude-code-client-metadata': {
+    clientName: 'Claude Code',
+    redirectUris: ['http://localhost/callback', 'http://127.0.0.1/callback'],
+    clientUri: 'https://claude.ai',
+  },
+};
+
 class OAuthError extends Error {
   constructor(statusCode, error, description) {
     super(description || error);
@@ -336,6 +352,19 @@ function publicRegistrationEnabled(env = process.env) {
   return String(env.OAUTH_PUBLIC_REGISTRATION_ENABLED ?? 'true').trim().toLowerCase() !== 'false';
 }
 
+function knownCimdClient(clientId) {
+  const known = KNOWN_CIMD_CLIENTS[String(clientId || '').trim()];
+  if (!known) return null;
+  return {
+    kind: 'mcp',
+    clientId,
+    clientName: known.clientName,
+    redirectUris: known.redirectUris,
+    tokenEndpointAuthMethod: 'none',
+    clientUri: known.clientUri,
+  };
+}
+
 async function loadCimdClient(clientId) {
   if (!publicRegistrationEnabled()) {
     throw new OAuthError(403, 'unauthorized_client', 'Client metadata documents are not accepted right now.');
@@ -347,21 +376,31 @@ async function loadCimdClient(clientId) {
   if (!CIMD_HOSTS.has(url.hostname) && !url.hostname.endsWith('.chatgpt.com') && !url.hostname.endsWith('.anthropic.com')) {
     throw new OAuthError(400, 'invalid_client', 'Unknown client metadata host.');
   }
-  const response = await fetch(url, {
-    headers: { Accept: 'application/json' },
-    signal: AbortSignal.timeout(5000),
-  });
-  if (!response.ok) throw new OAuthError(400, 'invalid_client', 'Client metadata could not be loaded.');
-  const doc = await response.json();
-  const redirectUris = Array.isArray(doc.redirect_uris) ? doc.redirect_uris.map(String) : [];
-  return {
-    kind: 'mcp',
-    clientId,
-    clientName: String(doc.client_name || doc.client_id || 'ChatGPT / Claude'),
-    redirectUris,
-    tokenEndpointAuthMethod: 'none',
-    clientUri: String(doc.client_uri || clientId),
-  };
+  try {
+    const response = await fetch(url, {
+      headers: { Accept: 'application/json', 'User-Agent': 'DataDance-OAuth' },
+      signal: AbortSignal.timeout(5000),
+    });
+    if (response.ok) {
+      const doc = await response.json();
+      const redirectUris = Array.isArray(doc.redirect_uris) ? doc.redirect_uris.map(String) : [];
+      if (redirectUris.length) {
+        return {
+          kind: 'mcp',
+          clientId,
+          clientName: String(doc.client_name || doc.client_id || 'ChatGPT / Claude'),
+          redirectUris,
+          tokenEndpointAuthMethod: 'none',
+          clientUri: String(doc.client_uri || clientId),
+        };
+      }
+    }
+  } catch (error) {
+    logger.warn('CIMD metadata fetch failed', { clientId, message: error && error.message });
+  }
+  const known = knownCimdClient(clientId);
+  if (known) return known;
+  throw new OAuthError(400, 'invalid_client', 'Client metadata could not be loaded.');
 }
 
 /**
@@ -394,13 +433,27 @@ async function resolveClient(clientId, req) {
 }
 
 /** Exact string match against a NON-EMPTY registered list, for every client (RFC 9700 §4.1.3). */
+function loopbackMatches(registered, actual) {
+  try {
+    const left = new URL(registered);
+    const right = new URL(actual);
+    if (!['localhost', '127.0.0.1'].includes(left.hostname)) return false;
+    return left.protocol === right.protocol
+      && left.hostname === right.hostname
+      && left.pathname === right.pathname;
+  } catch {
+    return false;
+  }
+}
+
 function assertRedirect(client, redirectUri) {
   const uri = String(redirectUri || '');
   if (!uri || !isAllowedRedirect(uri)) {
     throw new OAuthError(400, 'invalid_request', 'redirect_uri is not allowed.');
   }
   const registered = Array.isArray(client.redirectUris) ? client.redirectUris : [];
-  if (!registered.length || !registered.includes(uri)) {
+  const matches = registered.includes(uri) || registered.some((item) => loopbackMatches(item, uri));
+  if (!registered.length || !matches) {
     throw new OAuthError(400, 'invalid_request', 'redirect_uri is not registered for this client.');
   }
 }

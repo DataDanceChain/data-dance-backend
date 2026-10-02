@@ -656,6 +656,21 @@ describe('OAUTH_PUBLIC_REGISTRATION_ENABLED (item 11)', () => {
     assert.ok((await registerClient({ redirect_uris: ['https://claude.ai/api/mcp/auth_callback'] })).client_id);
   });
 
+  it('uses the known Claude client when the metadata host refuses the fetch', async () => {
+    const original = global.fetch;
+    global.fetch = async () => ({ ok: false, status: 403, json: async () => ({}) });
+    try {
+      const client = await resolveClient('https://claude.ai/oauth/mcp-oauth-client-metadata');
+      assert.equal(client.clientName, 'Claude');
+      assert.deepEqual(client.redirectUris, ['https://claude.ai/api/mcp/auth_callback']);
+      assert.doesNotThrow(() => oauth.assertRedirect(client, 'https://claude.ai/api/mcp/auth_callback'));
+      const code = await resolveClient('https://claude.ai/oauth/claude-code-client-metadata');
+      assert.doesNotThrow(() => oauth.assertRedirect(code, 'http://127.0.0.1:54321/callback'));
+    } finally {
+      global.fetch = original;
+    }
+  });
+
   it('closed: /oauth/register and the CIMD metadata fetch are 403, the partner client is untouched', async () => {
     process.env.OAUTH_PUBLIC_REGISTRATION_ENABLED = 'false';
     try {
