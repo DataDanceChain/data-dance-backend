@@ -20,7 +20,18 @@ const ORDER_INCLUDE = {
 
 const INVOICE_INCLUDE = {
   lineItems: true,
-  order: { select: { id: true, orderNumber: true, status: true, contractFile: true, contractStatus: true } },
+  order: {
+    select: {
+      id: true,
+      orderNumber: true,
+      status: true,
+      contractFile: true,
+      contractStatus: true,
+      attestationHash: true,
+      attestationTxHash: true,
+      attestedAt: true,
+    },
+  },
   buyer: { select: { id: true, name: true, email: true } },
   seller: { select: { id: true, name: true, email: true } },
   payments: { orderBy: { createdAt: 'desc' } },

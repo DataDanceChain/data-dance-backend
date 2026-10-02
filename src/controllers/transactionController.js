@@ -1,5 +1,33 @@
 const { PrismaClient } = require('@prisma/client');
 const prisma = new PrismaClient();
+const { publicAttestation } = require('../services/commerceAttest');
+
+function orderNumberFromMetadata(metadata) {
+  if (!metadata || typeof metadata !== 'object') return '';
+  const orderNumber = metadata.orderNumber;
+  return typeof orderNumber === 'string' ? orderNumber : '';
+}
+
+async function attachOrderAttestation(transactions) {
+  const numbers = [...new Set(transactions.map((tx) => orderNumberFromMetadata(tx.metadata)).filter(Boolean))];
+  if (!numbers.length) {
+    return transactions.map((tx) => ({ ...tx, attestation: null }));
+  }
+  const orders = await prisma.purchaseOrder.findMany({
+    where: { orderNumber: { in: numbers } },
+    select: {
+      orderNumber: true,
+      attestationHash: true,
+      attestationTxHash: true,
+      attestedAt: true,
+    },
+  });
+  const byNumber = new Map(orders.map((order) => [order.orderNumber, publicAttestation(order)]));
+  return transactions.map((tx) => ({
+    ...tx,
+    attestation: byNumber.get(orderNumberFromMetadata(tx.metadata)) || null,
+  }));
+}
 
 // 获取交易记录
 exports.getTransactions = async (req, res) => {
@@ -26,7 +54,7 @@ exports.getTransactions = async (req, res) => {
     res.status(200).json({
       status: 'success',
       data: {
-        transactions,
+        transactions: await attachOrderAttestation(transactions),
         pagination: {
           total,
           page: Number(page),

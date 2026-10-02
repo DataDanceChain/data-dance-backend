@@ -916,6 +916,8 @@ async function main() {
             serviceFeeAmount: order.margin,
             createdAt,
             updatedAt: paidAt,
+            // Local checksum only. scripts/attestRevenueBookOrders.js replaces this
+            // with the canonical procurement receipt and a real CommerceAttester tx.
             attestedAt: paidAt,
             attestationHash: sha256(`${orderNumber}|${order.revenue}|${order.count}`),
             attestationPayload: {
