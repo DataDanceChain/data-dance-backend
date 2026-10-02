@@ -2,18 +2,10 @@ const xClient = require('../utils/xClient');
 const prisma = require('../utils/prisma');
 const { createLogger } = require('../utils/logger');
 const logger = createLogger('xService');
-const crypto = require('crypto');
 const axios = require('axios');
 const querystring = require('querystring');
-// In-memory store for PKCE/verifier and user mapping
-const pkceStore = new Map();
-
-function base64URLEncode(str) {
-  return str.toString('base64')
-    .replace(/\+/g, '-')
-    .replace(/\//g, '_')
-    .replace(/=+$/, '');
-}
+// PKCE verifiers and the per-flow state live in ./xBindFlow (single-use, short-lived, bound to
+// the initiating user and session).
 
 /**
  * Fetches details for a specific X post.
@@ -32,32 +24,6 @@ async function getPostDetails(postId, ip) {
     logger.error('Error in xService.getPostDetails', { postId, error: error.message, status: error.status });
     throw error; // Re-throw to be handled by controller
   }
-}
-
-/**
- * Generate PKCE code_verifier and S256 code_challenge, store for user
- * @param {string} userId
- * @returns {{ state: string, codeVerifier: string, codeChallenge: string }}
- */
-function generatePKCE(userId) {
-  const state = crypto.randomBytes(16).toString('hex');
-  const codeVerifier = base64URLEncode(crypto.randomBytes(32));
-  const codeChallenge = base64URLEncode(
-    crypto.createHash('sha256').update(codeVerifier).digest()
-  );
-  pkceStore.set(state, { userId, codeVerifier });
-  return { state, codeVerifier, codeChallenge };
-}
-
-/**
- * Retrieve and delete PKCE data for given state
- * @param {string} state
- * @returns {{ userId: string, codeVerifier: string }|null}
- */
-function getPKCE(state) {
-  const data = pkceStore.get(state);
-  pkceStore.delete(state);
-  return data || null;
 }
 
 /**
@@ -168,7 +134,7 @@ async function verifyUserEngagement(userId, targetPostId) {
 
 /**
  * Generate X OAuth2 authorization URL
- * @param {string} state - PKCE state parameter
+ * @param {string} state - OAuth state (xBindFlow.createFlow)
  * @param {string} codeChallenge - PKCE code challenge
  * @param {string} redirectUri - OAuth callback URL
  * @returns {string} The complete authorization URL
@@ -188,8 +154,6 @@ function generateAuthUrl(state, codeChallenge, redirectUri) {
 module.exports = {
   getPostDetails,
   verifyUserEngagement,
-  generatePKCE,
-  getPKCE,
   generateAuthUrl,
   // Exchange OAuth2 code for tokens
   exchangeCodeForToken,
