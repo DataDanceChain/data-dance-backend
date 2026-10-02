@@ -50,6 +50,24 @@ const JWT_TTL_MAX_SEC = 60;
 const MIN_STATE_SECRET_BYTES = 32;
 const OTP_CODE_LENGTH = 6;
 
+/**
+ * Aliyun KMS (decision 54: production signing key in KMS, Singapore, same cloud as the server).
+ * The key is named by id (or ARN) AND version: AsymmetricSign and GetPublicKey both take the
+ * version, and pinning one version keeps the published kid stable. Aliases are refused because
+ * whoever may repoint an alias could swap the key behind the kid. A custom endpoint must be an
+ * Alibaba Cloud host (the VPC endpoint kms-vpc.<region>.aliyuncs.com, or a dedicated KMS instance
+ * gateway <instance-id>.cryptoservice.kms.aliyuncs.com): the request carries an STS token when
+ * the server runs on a RAM role, so it must never go anywhere else.
+ */
+const KMS_DEFAULT_REGION = 'ap-southeast-1';
+const KMS_TIMEOUT_DEFAULT_MS = 3000;
+const KMS_TIMEOUT_MIN_MS = 500;
+const KMS_TIMEOUT_MAX_MS = 10000;
+const KMS_KEY_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9:/_.-]{0,255}$/;
+const KMS_KEY_VERSION_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
+const KMS_REGION_PATTERN = /^[a-z]{2,}-[a-z]+(?:-[0-9]+)?$/;
+const KMS_ENDPOINT_PATTERN = /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+aliyuncs\.com$/;
+
 const logger = createLogger('nativeAuth');
 
 function csv(value) {
@@ -114,7 +132,18 @@ function parseConfig(env) {
     connectionId: str(env.DDC_AUTH_W3A_CONNECTION_ID),
     signer: str(env.DDC_AUTH_SIGNER).toLowerCase() || 'file',
     signingKeyFile: str(env.DDC_AUTH_SIGNING_KEY_FILE),
-    kmsKeyId: str(env.DDC_AUTH_KMS_KEY_ID),
+    kms: {
+      keyId: str(env.DDC_AUTH_KMS_KEY_ID),
+      keyVersionId: str(env.DDC_AUTH_KMS_KEY_VERSION_ID),
+      region: str(env.DDC_AUTH_KMS_REGION).toLowerCase() || KMS_DEFAULT_REGION,
+      endpoint: str(env.DDC_AUTH_KMS_ENDPOINT).toLowerCase(),
+      caFile: str(env.DDC_AUTH_KMS_CA_FILE),
+      timeoutMs: (() => {
+        const ms = positiveInt(env.DDC_AUTH_KMS_TIMEOUT_MS, KMS_TIMEOUT_DEFAULT_MS);
+        return Number.isNaN(ms) ? Number.NaN : clamp(ms, KMS_TIMEOUT_MIN_MS, KMS_TIMEOUT_MAX_MS);
+      })(),
+      extraKeys: csv(env.DDC_AUTH_KMS_EXTRA_KEYS),
+    },
     jwksPinned: csv(env.DDC_AUTH_JWKS_PINNED),
     jwksExtraFile: str(env.DDC_AUTH_JWKS_EXTRA_FILE),
     jwtTtlSec: Number.isNaN(jwtTtlRaw) ? Number.NaN : clamp(jwtTtlRaw, JWT_TTL_MIN_SEC, JWT_TTL_MAX_SEC),
@@ -324,6 +353,62 @@ function readExtraJwks(cfg) {
   return { keys, problems };
 }
 
+/**
+ * `<keyId>/<keyVersionId>` (DDC_AUTH_KMS_EXTRA_KEYS entries), split at the LAST slash so a key ARN
+ * (acs:kms:<region>:<uid>:key/<id>) works too. Returns { keyId, keyVersionId } or null.
+ */
+function parseKmsKeyRef(text) {
+  const value = str(text);
+  const cut = value.lastIndexOf('/');
+  if (cut <= 0 || cut === value.length - 1) return null;
+  const keyId = value.slice(0, cut);
+  const keyVersionId = value.slice(cut + 1);
+  if (kmsKeyIdProblem('x', keyId) || !KMS_KEY_VERSION_PATTERN.test(keyVersionId)) return null;
+  return { keyId, keyVersionId };
+}
+
+function kmsKeyIdProblem(name, keyId) {
+  if (!keyId) return `${name} is required with DDC_AUTH_SIGNER=kms`;
+  if (/^alias\//i.test(keyId) || /:alias\//i.test(keyId)) return `${name} must be a key id or key ARN, not an alias (an alias can be repointed to another key)`;
+  if (!KMS_KEY_ID_PATTERN.test(keyId)) return `${name} must be an Aliyun KMS key id (key-...) or key ARN`;
+  return '';
+}
+
+/** Rules for the DDC_AUTH_KMS_* variables (DDC_AUTH_SIGNER=kms). Network-free; values never echoed except names. */
+function kmsProblems(cfg) {
+  const problems = [];
+  const push = (problem) => problem && problems.push(problem);
+  const { kms } = cfg;
+  push(kmsKeyIdProblem('DDC_AUTH_KMS_KEY_ID', kms.keyId));
+  if (!kms.keyVersionId) problems.push('DDC_AUTH_KMS_KEY_VERSION_ID is required with DDC_AUTH_SIGNER=kms (the KMS console lists it under the key\'s versions)');
+  else if (!KMS_KEY_VERSION_PATTERN.test(kms.keyVersionId)) problems.push('DDC_AUTH_KMS_KEY_VERSION_ID must be a KMS key version id');
+  if (!KMS_REGION_PATTERN.test(kms.region)) problems.push(`DDC_AUTH_KMS_REGION must be an Alibaba Cloud region id such as ${KMS_DEFAULT_REGION}`);
+  if (kms.endpoint && !KMS_ENDPOINT_PATTERN.test(kms.endpoint)) {
+    problems.push('DDC_AUTH_KMS_ENDPOINT must be a bare *.aliyuncs.com host name (no scheme, port or path), e.g. kms-vpc.ap-southeast-1.aliyuncs.com');
+  }
+  if (kms.caFile) {
+    if (!kms.endpoint) problems.push('DDC_AUTH_KMS_CA_FILE is only used with a dedicated KMS instance endpoint (DDC_AUTH_KMS_ENDPOINT)');
+    let text = '';
+    try {
+      text = fs.readFileSync(kms.caFile, 'utf8');
+    } catch {
+      problems.push('DDC_AUTH_KMS_CA_FILE cannot be read');
+    }
+    if (text && !text.includes('-----BEGIN CERTIFICATE-----')) problems.push('DDC_AUTH_KMS_CA_FILE must be a PEM certificate bundle');
+  }
+  if (Number.isNaN(kms.timeoutMs)) problems.push('DDC_AUTH_KMS_TIMEOUT_MS must be a positive integer');
+  const seen = new Set([`${kms.keyId}/${kms.keyVersionId}`]);
+  kms.extraKeys.forEach((entry, index) => {
+    const ref = parseKmsKeyRef(entry);
+    if (!ref) return problems.push(`DDC_AUTH_KMS_EXTRA_KEYS entry #${index + 1} must be <keyId>/<keyVersionId>`);
+    const id = `${ref.keyId}/${ref.keyVersionId}`;
+    if (seen.has(id)) return problems.push(`DDC_AUTH_KMS_EXTRA_KEYS entry #${index + 1} repeats a key version already published`);
+    seen.add(id);
+    return undefined;
+  });
+  return problems;
+}
+
 // ---------------------------------------------------------------------------------------------
 // Boot assertions
 // ---------------------------------------------------------------------------------------------
@@ -352,7 +437,7 @@ function productionProblems(cfg) {
   const problems = [];
   if (cfg.network !== 'sapphire_mainnet') problems.push(`production requires DDC_AUTH_W3A_NETWORK=sapphire_mainnet (got "${cfg.network}")`);
   if (cfg.signer !== 'kms') problems.push(`production requires DDC_AUTH_SIGNER=kms (got "${cfg.signer}"); the file signer is for local/test only`);
-  if (cfg.jwksExtraFile) problems.push('DDC_AUTH_JWKS_EXTRA_FILE is refused in production (publish rotation keys through the KMS key set)');
+  if (cfg.jwksExtraFile) problems.push('DDC_AUTH_JWKS_EXTRA_FILE is refused in production (publish rotation keys with DDC_AUTH_KMS_EXTRA_KEYS)');
   if (NON_PROD_CONNECTION_IDS.includes(cfg.connectionId) || NON_PROD_CONNECTION_PATTERN.test(cfg.connectionId)) {
     problems.push(`DDC_AUTH_W3A_CONNECTION_ID "${cfg.connectionId}" is a non-production connection`);
   }
@@ -472,8 +557,9 @@ function nativeAuthProblems(cfg, env = process.env, { loadKey } = {}) {
       }
     }
   } else if (cfg.signer === 'kms') {
-    // The KMS signer is an interface stub in v1 (question 8): refuse rather than start without a key.
-    problems.push('DDC_AUTH_SIGNER=kms is not available in v1 (the KMS signer is chosen before the mainnet cut)');
+    // What can be checked without the network. The key itself (RSA >= 2048, pinned, not leaked,
+    // signs and verifies) is checked by prepareSigner() before the server listens (src/server.js).
+    problems.push(...kmsProblems(cfg));
   }
   problems.push(...readExtraJwks(cfg).problems);
 
@@ -525,6 +611,10 @@ function summarize(cfg, { loadKey } = {}) {
     } catch {
       kid = '(unusable)';
     }
+  } else if (cfg.signer === 'kms' && cfg.kms.keyId) {
+    // The KMS public key is fetched by prepareSigner() (asynchronous, before listen); until then
+    // the kid is not known here.
+    kid = require('./signer').readyKid(cfg) || '(kms: fetched at start)';
   }
   return {
     enabled: true,
@@ -535,6 +625,7 @@ function summarize(cfg, { loadKey } = {}) {
     connectionId: cfg.connectionId,
     signer: cfg.signer,
     kid,
+    ...(cfg.signer === 'kms' ? { kmsKeyId: cfg.kms.keyId, kmsKeyVersionId: cfg.kms.keyVersionId, kmsRegion: cfg.kms.region } : {}),
     newAccounts: cfg.newAccounts,
     rebindPolicy: cfg.rebindPolicy,
   };
@@ -546,7 +637,8 @@ function summaryLine(summary) {
   return (
     `nativeAuth=on env=${summary.env} methods=${summary.methods.join(',') || '(none)'} kid=${summary.kid} ` +
     `network=${summary.network} connection=${summary.connectionId} signer=${summary.signer} ` +
-    `platforms=${summary.platforms.join(',') || '(none)'} newAccounts=${summary.newAccounts} rebind=${summary.rebindPolicy}`
+    `platforms=${summary.platforms.join(',') || '(none)'} newAccounts=${summary.newAccounts} rebind=${summary.rebindPolicy}` +
+    (summary.kmsKeyId ? ` kmsKey=${summary.kmsKeyId}/${summary.kmsKeyVersionId || '(unset)'} kmsRegion=${summary.kmsRegion}` : '')
   );
 }
 
@@ -595,6 +687,8 @@ module.exports = {
   JWT_TTL_MAX_SEC,
   MIN_STATE_SECRET_BYTES,
   OTP_CODE_LENGTH,
+  KMS_DEFAULT_REGION,
+  KMS_TIMEOUT_DEFAULT_MS,
   logger,
   nativeAuthEnabled,
   readNativeAuthConfig,
@@ -610,6 +704,8 @@ module.exports = {
   keyProblem,
   enclosingGitWorkTree,
   readExtraJwks,
+  parseKmsKeyRef,
+  kmsProblems,
   productionProblems,
   nativeAuthProblems,
   assertNativeAuthConfig,

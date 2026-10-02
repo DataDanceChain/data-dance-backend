@@ -43,10 +43,32 @@ if (moneyPath.enforced) {
 // read and nothing is printed. On: refuse to start while any rule of the design's boot list fails
 // (every problem listed at once); the summary carries the public key thumbprint, never a secret.
 const nativeAuth = assertNativeAuthConfig();
-if (nativeAuth.enabled) console.log(`Native login enabled: ${nativeAuthSummaryLine(nativeAuth)}`);
 
 const PORT = process.env.PORT || 3000;
 
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
+async function start() {
+  // Native login with the KMS signer: before listening, fetch the KMS public key, check it is pinned
+  // and not leaked, and sign + verify one throwaway token through KMS. Any failure refuses to start
+  // (there is no fallback to a local key). Logs name the key id/version and the kid only.
+  if (nativeAuth.enabled && nativeAuth.signer === 'kms') {
+    const { prepareSigner } = require('./services/nativeAuth/signer');
+    try {
+      const kms = await prepareSigner();
+      nativeAuth.kid = kms.kid;
+      console.log(
+        `Native login KMS signer ready: kid=${kms.kid} key=${kms.keyId}/${kms.keyVersionId} region=${kms.region} endpoint=${kms.endpoint}` +
+          (kms.extraKids.length ? ` rotationKids=${kms.extraKids.join(',')}` : ''),
+      );
+    } catch (err) {
+      console.error(`Native login (DDC_AUTH_SIGNER=kms) cannot use its KMS key; refusing to start:\n - ${err.publicMessage || err.message}`);
+      process.exit(1);
+    }
+  }
+  if (nativeAuth.enabled) console.log(`Native login enabled: ${nativeAuthSummaryLine(nativeAuth)}`);
+
+  app.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
+  });
+}
+
+start();

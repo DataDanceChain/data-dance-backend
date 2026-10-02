@@ -1,6 +1,7 @@
 /**
  * The DDC issuer (design §2.4, §3.2, F1/F11/F13): the Web3Auth custom JWT's exact header and
- * claims, the signer interface (file signer for local/test only, KMS stub refusing to start),
+ * claims, the signer interface (file signer for local/test only; the KMS signer is covered by
+ * nativeAuthKmsSigner.test.js),
  * the published JWKS (pinned keys only, public members only), and logging without `sub` or the
  * token.
  */
@@ -165,9 +166,14 @@ describe('signers', () => {
     assert.throws(() => createSigner(cfgFor({ DDC_AUTH_ENV: '' })), /local\|test/);
   });
 
-  it('the KMS signer is an interface stub that refuses to start', () => {
-    assert.throws(() => createKmsSigner({ kmsKeyId: 'k' }), /not implemented in v1/);
-    assert.throws(() => createSigner(cfgFor({ DDC_AUTH_SIGNER: 'kms', DDC_AUTH_KMS_KEY_ID: 'k' })), /not implemented in v1/);
+  it('the KMS signer needs a key id and a key version, and reads nothing until ready()', () => {
+    assert.throws(() => createKmsSigner({ keyVersionId: 'v' }), /DDC_AUTH_KMS_KEY_ID is not configured/);
+    assert.throws(() => createKmsSigner({ keyId: 'key-x' }), /DDC_AUTH_KMS_KEY_VERSION_ID is not configured/);
+    const signer = createSigner(cfgFor({ DDC_AUTH_SIGNER: 'kms', DDC_AUTH_KMS_KEY_ID: 'key-x', DDC_AUTH_KMS_KEY_VERSION_ID: 'v-1' }));
+    assert.equal(signer.kind, 'kms');
+    assert.equal(signer.isReady(), false);
+    assert.throws(() => signer.kid, /not loaded yet/);
+    assert.throws(() => signer.publicJwk(), /not loaded yet/);
   });
 
   it('getSigner caches per configuration', () => {
