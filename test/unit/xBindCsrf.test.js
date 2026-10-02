@@ -223,6 +223,18 @@ describe('normal flow still works', () => {
     }
   });
 
+  it('a malformed configured return URL falls back to the default instead of throwing', async () => {
+    process.env.X_BIND_RETURN_URL_WEB = 'not a url';
+    try {
+      const flow = await start('victim');
+      xAccountForCode.set('c1', VICTIM_X);
+      const back = location(await callback({ code: 'c1', state: flow.state }));
+      assert.equal(back.toString().split('?')[0], WEB_RETURN);
+    } finally {
+      delete process.env.X_BIND_RETURN_URL_WEB;
+    }
+  });
+
   it('rebinding the same X account to the same user just refreshes it', async () => {
     for (let i = 0; i < 2; i += 1) {
       const flow = await start('victim');

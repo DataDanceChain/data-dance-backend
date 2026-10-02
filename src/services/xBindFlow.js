@@ -163,7 +163,24 @@ function returnUrlFor(platform, env = process.env) {
     android: 'ai.datadance.app://localhost/user/my',
   };
   const key = PLATFORMS.includes(platform) ? platform : 'web';
-  return String(configured[key] || defaults[key]).trim();
+  // A malformed value must not turn the callback into an unhandled throw: fall back to the
+  // platform default, then to the production Wallet page.
+  for (const candidate of [configured[key], defaults[key], LAST_RESORT_RETURN_URL]) {
+    const value = String(candidate || '').trim();
+    if (value && isAbsoluteUrl(value)) return value;
+  }
+  return LAST_RESORT_RETURN_URL;
+}
+
+const LAST_RESORT_RETURN_URL = 'https://app.datadance.ai/user/my';
+
+function isAbsoluteUrl(value) {
+  try {
+    new URL(value);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** `base` plus `params`, keeping any query `base` already has. */
