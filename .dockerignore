@@ -12,6 +12,9 @@
 **/.env
 **/.env.*
 **/*.env
+# Copies and variants with a suffix after ".env": backend.env.test,
+# backend.env.bak, backend.env.20260930, prod.env.local, ...
+**/*.env.*
 # env.example has no secrets and documents every variable; it stays.
 !env.example
 
@@ -27,6 +30,15 @@ keys/
 **/*.jks
 **/id_rsa*
 **/id_ed25519*
+# JWK signing keys (native-login's file signer reads one from
+# DDC_AUTH_SIGNING_KEY_FILE; it must be mounted, never baked in).
+**/*.jwk
+**/*.jwk.json
+# Credential files and directories that tools drop into a checkout.
+**/secrets/
+.npmrc
+.netrc
+.aws/
 
 # --- VCS, editor and OS files ---------------------------------------------
 .git
