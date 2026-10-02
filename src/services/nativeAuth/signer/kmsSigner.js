@@ -23,7 +23,7 @@
  *   selfTest()        one real sign + local verify (boot)
  *   signCount()       successful AsymmetricSign calls by this process (monitoring: compare with the
  *                     KMS-side count and with `native_auth.w3a_jwt_issued`)
- *   describe()        { keyId, keyVersionId, region, endpoint } — public identifiers only
+ *   describe()        { keyId, keyVersionId, region, endpoint, credentials } — public identifiers only
  *
  * Fail closed: there is no fallback to a local key. A KMS error, a timeout, a signature from
  * another key version or one that does not verify against the published key rejects the mint.
@@ -49,8 +49,9 @@ const RETRYABLE_CODE_PATTERN = /throttl|serviceunavailable|internalfailure|inter
 // @alicloud/credentials: the default chain found nothing (or the SDK's InvalidCredentials).
 const NO_CREDENTIALS_PATTERN = /unable to get credentials|InvalidCredentials|set up the credentials/i;
 const NO_CREDENTIALS_HINT =
-  'no Alibaba Cloud credentials found by the default credential chain (attach a RAM role to the ECS instance, ' +
-  'or set ALIBABA_CLOUD_ACCESS_KEY_ID / ALIBABA_CLOUD_ACCESS_KEY_SECRET for a RAM user limited to kms:GetPublicKey and kms:AsymmetricSign on this key)';
+  'no Alibaba Cloud credentials found (DDC_AUTH_KMS_CREDENTIALS=env: set ALIBABA_CLOUD_ACCESS_KEY_ID / ALIBABA_CLOUD_ACCESS_KEY_SECRET ' +
+  "of a RAM user limited to kms:GetPublicKey and kms:AsymmetricSign on this environment's key; =chain, production only: the default chain " +
+  'found nothing, e.g. no RAM role on the ECS instance)';
 
 function config() {
   // Required lazily: config.js requires the signer lazily too (summarize), and this module is
@@ -166,8 +167,8 @@ function keyLabel(ref) {
 }
 
 /**
- * Options: keyId, keyVersionId, region, endpoint, caFile, timeoutMs, extraKeys ([{keyId,
- * keyVersionId}]); tests inject `client` (the aliyunKmsClient interface), `now` and `wait`.
+ * Options: keyId, keyVersionId, region, endpoint, caFile, timeoutMs, credentials ('env' | 'chain',
+ * see aliyunKmsClient.js), extraKeys ([{keyId, keyVersionId}]); tests inject `client` (the aliyunKmsClient interface), `now` and `wait`.
  * Throws (publicMessage) on a missing key id / version; does not touch the network.
  */
 function createKmsSigner({
@@ -177,6 +178,7 @@ function createKmsSigner({
   endpoint = '',
   caFile = '',
   timeoutMs = 3000,
+  credentials = 'env',
   extraKeys = [],
   client: injectedClient = null,
   now = Date.now,
@@ -203,7 +205,7 @@ function createKmsSigner({
   function kms() {
     if (!client) {
       const { createAliyunKmsClient } = require('./aliyunKmsClient');
-      client = createAliyunKmsClient({ region, endpoint, caFile, timeoutMs });
+      client = createAliyunKmsClient({ region, endpoint, caFile, timeoutMs, credentials });
     }
     return client;
   }
@@ -308,7 +310,7 @@ function createKmsSigner({
       return token;
     },
     signCount: () => state.signs,
-    describe: () => ({ keyId: main.keyId, keyVersionId: main.keyVersionId, region, endpoint: endpoint || `kms.${region}.aliyuncs.com` }),
+    describe: () => ({ keyId: main.keyId, keyVersionId: main.keyVersionId, region, endpoint: endpoint || `kms.${region}.aliyuncs.com`, credentials }),
   });
 }
 

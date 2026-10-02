@@ -56,7 +56,7 @@ async function start() {
       const kms = await prepareSigner();
       nativeAuth.kid = kms.kid;
       console.log(
-        `Native login KMS signer ready: kid=${kms.kid} key=${kms.keyId}/${kms.keyVersionId} region=${kms.region} endpoint=${kms.endpoint}` +
+        `Native login KMS signer ready: kid=${kms.kid} key=${kms.keyId}/${kms.keyVersionId} region=${kms.region} endpoint=${kms.endpoint} credentials=${kms.credentials}` +
           (kms.extraKids.length ? ` rotationKids=${kms.extraKids.join(',')}` : ''),
       );
     } catch (err) {

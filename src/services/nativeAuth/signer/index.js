@@ -10,13 +10,13 @@
  */
 const { createFileSigner } = require('./fileSigner');
 const { createKmsSigner } = require('./kmsSigner');
-const { readNativeAuthConfig, isRelaxedEnv, parseKmsKeyRef, keyProblem } = require('../config');
+const { readNativeAuthConfig, isRelaxedEnv, parseKmsKeyRef, keyProblem, kmsCredentialsProblem, KMS_CREDENTIAL_MODES } = require('../config');
 
 let cached = null;
 
 function signerCacheKey(cfg) {
   const kms = cfg.kms || {};
-  return [cfg.signer, cfg.env, cfg.signingKeyFile, kms.keyId, kms.keyVersionId, kms.region, kms.endpoint, kms.caFile, kms.timeoutMs, (kms.extraKeys || []).join(',')].join('\u0000');
+  return [cfg.signer, cfg.env, cfg.signingKeyFile, kms.keyId, kms.keyVersionId, kms.region, kms.endpoint, kms.caFile, kms.timeoutMs, kms.credentials, kms.accessKeyInEnv, (kms.extraKeys || []).join(',')].join('\u0000');
 }
 
 function createSigner(cfg, { kmsClient } = {}) {
@@ -27,6 +27,13 @@ function createSigner(cfg, { kmsClient } = {}) {
   }
   if (cfg.signer === 'kms') {
     const { kms } = cfg;
+    // The credentials mode is enforced here too (not only at boot) because the public JWKS route
+    // can create the signer with native login off, when the boot rules do not run. A missing
+    // access key is left to the first KMS call, which fails closed with a clear message.
+    if (!KMS_CREDENTIAL_MODES.includes(kms.credentials) || (kms.credentials === 'chain' && cfg.env !== 'prod')) {
+      const problem = kmsCredentialsProblem(cfg);
+      throw Object.assign(new Error(problem), { publicMessage: problem });
+    }
     const extraKeys = kms.extraKeys.map(parseKmsKeyRef);
     if (extraKeys.some((ref) => !ref)) throw new Error('DDC_AUTH_KMS_EXTRA_KEYS entries must be <keyId>/<keyVersionId>');
     return createKmsSigner({
@@ -36,6 +43,7 @@ function createSigner(cfg, { kmsClient } = {}) {
       endpoint: kms.endpoint,
       caFile: kms.caFile,
       timeoutMs: kms.timeoutMs,
+      credentials: kms.credentials,
       extraKeys,
       client: kmsClient || null,
     });
@@ -71,7 +79,7 @@ function readyKid(cfg = readNativeAuthConfig()) {
  * Boot step for the KMS signer (no-op summary for the file signer, which boot already checked):
  * fetch the public key(s), refuse a key that is leaked or not in DDC_AUTH_JWKS_PINNED, then sign
  * one throwaway token through KMS and verify it locally. Throws an Error with a secret-free
- * message; returns { kid, extraKids, keyId, keyVersionId, region, endpoint }.
+ * message; returns { kid, extraKids, keyId, keyVersionId, region, endpoint, credentials }.
  */
 async function prepareSigner(cfg = readNativeAuthConfig(), options) {
   const signer = getSigner(cfg, options);

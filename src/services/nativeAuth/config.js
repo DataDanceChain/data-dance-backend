@@ -54,10 +54,17 @@ const OTP_CODE_LENGTH = 6;
  * Aliyun KMS (decision 54: production signing key in KMS, Singapore, same cloud as the server).
  * The key is named by id (or ARN) AND version: AsymmetricSign and GetPublicKey both take the
  * version, and pinning one version keeps the published kid stable. Aliases are refused because
- * whoever may repoint an alias could swap the key behind the kid. A custom endpoint must be an
- * Alibaba Cloud host (the VPC endpoint kms-vpc.<region>.aliyuncs.com, or a dedicated KMS instance
- * gateway <instance-id>.cryptoservice.kms.aliyuncs.com): the request carries an STS token when
- * the server runs on a RAM role, so it must never go anywhere else.
+ * whoever may repoint an alias could swap the key behind the kid. A custom endpoint must be a KMS
+ * host: kms.<region>.aliyuncs.com, the VPC endpoint kms-vpc.<region>.aliyuncs.com, or a dedicated
+ * KMS instance gateway kst-<id>.cryptoservice.kms.aliyuncs.com. Every request is signed with the
+ * server's credentials (and carries an STS token on a RAM role), so it must never go anywhere else,
+ * not even to another *.aliyuncs.com host such as an OSS bucket name.
+ *
+ * Credentials (DDC_AUTH_KMS_CREDENTIALS): test and production share one server (decision 51), and
+ * an ECS instance has one RAM role that every container on it can read from the instance metadata
+ * service. So the default is `env`: only ALIBABA_CLOUD_ACCESS_KEY_ID / _SECRET of a RAM user
+ * limited to THIS environment's key, never the instance role. `chain` (the SDK's default chain,
+ * which includes the instance role) is allowed only with DDC_AUTH_ENV=prod.
  */
 const KMS_DEFAULT_REGION = 'ap-southeast-1';
 const KMS_TIMEOUT_DEFAULT_MS = 3000;
@@ -66,7 +73,9 @@ const KMS_TIMEOUT_MAX_MS = 10000;
 const KMS_KEY_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9:/_.-]{0,255}$/;
 const KMS_KEY_VERSION_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const KMS_REGION_PATTERN = /^[a-z]{2,}-[a-z]+(?:-[0-9]+)?$/;
-const KMS_ENDPOINT_PATTERN = /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+aliyuncs\.com$/;
+const KMS_INSTANCE_ENDPOINT_PATTERN = /^kst-[a-z0-9]{3,64}\.cryptoservice\.kms\.aliyuncs\.com$/;
+const KMS_CREDENTIAL_MODES = Object.freeze(['env', 'chain']);
+const KMS_DEFAULT_CREDENTIALS = 'env';
 
 const logger = createLogger('nativeAuth');
 
@@ -143,6 +152,9 @@ function parseConfig(env) {
         return Number.isNaN(ms) ? Number.NaN : clamp(ms, KMS_TIMEOUT_MIN_MS, KMS_TIMEOUT_MAX_MS);
       })(),
       extraKeys: csv(env.DDC_AUTH_KMS_EXTRA_KEYS),
+      credentials: str(env.DDC_AUTH_KMS_CREDENTIALS).toLowerCase() || KMS_DEFAULT_CREDENTIALS,
+      // Presence only (a boolean): the values are read by the SDK, never by this module.
+      accessKeyInEnv: Boolean(str(env.ALIBABA_CLOUD_ACCESS_KEY_ID) && str(env.ALIBABA_CLOUD_ACCESS_KEY_SECRET)),
     },
     jwksPinned: csv(env.DDC_AUTH_JWKS_PINNED),
     jwksExtraFile: str(env.DDC_AUTH_JWKS_EXTRA_FILE),
@@ -374,6 +386,39 @@ function kmsKeyIdProblem(name, keyId) {
   return '';
 }
 
+/** '' when `endpoint` is empty or a KMS host for `region` (see the KMS block at the top), else the problem. */
+function kmsEndpointProblem(endpoint, region) {
+  if (!endpoint) return '';
+  if (endpoint === `kms.${region}.aliyuncs.com` || endpoint === `kms-vpc.${region}.aliyuncs.com` || KMS_INSTANCE_ENDPOINT_PATTERN.test(endpoint)) return '';
+  return (
+    `DDC_AUTH_KMS_ENDPOINT must be a bare KMS host name for DDC_AUTH_KMS_REGION (no scheme, port or path): kms.${region}.aliyuncs.com, ` +
+    `kms-vpc.${region}.aliyuncs.com or a dedicated KMS instance gateway kst-<id>.cryptoservice.kms.aliyuncs.com`
+  );
+}
+
+/**
+ * DDC_AUTH_KMS_CREDENTIALS rules (names only, never values). `env` needs the RAM user's access key
+ * in this process's environment; `chain` may fall through to the ECS instance RAM role, which every
+ * container on the shared server can reach, so it is production-only.
+ */
+function kmsCredentialsProblem(cfg) {
+  const { credentials, accessKeyInEnv } = cfg.kms;
+  if (!KMS_CREDENTIAL_MODES.includes(credentials)) return `DDC_AUTH_KMS_CREDENTIALS must be one of ${KMS_CREDENTIAL_MODES.join(' | ')} (got "${credentials}")`;
+  if (credentials === 'env' && !accessKeyInEnv) {
+    return (
+      'DDC_AUTH_KMS_CREDENTIALS=env needs ALIBABA_CLOUD_ACCESS_KEY_ID and ALIBABA_CLOUD_ACCESS_KEY_SECRET in this environment ' +
+      "(a RAM user whose policy allows only kms:AsymmetricSign and kms:GetPublicKey on this environment's key)"
+    );
+  }
+  if (credentials === 'chain' && cfg.env !== 'prod') {
+    return (
+      'DDC_AUTH_KMS_CREDENTIALS=chain is allowed only with DDC_AUTH_ENV=prod: it can use the ECS instance RAM role, which every ' +
+      "container on the shared server can read; a non-production stack must use its own RAM user's access key (DDC_AUTH_KMS_CREDENTIALS=env)"
+    );
+  }
+  return '';
+}
+
 /** Rules for the DDC_AUTH_KMS_* variables (DDC_AUTH_SIGNER=kms). Network-free; values never echoed except names. */
 function kmsProblems(cfg) {
   const problems = [];
@@ -383,9 +428,8 @@ function kmsProblems(cfg) {
   if (!kms.keyVersionId) problems.push('DDC_AUTH_KMS_KEY_VERSION_ID is required with DDC_AUTH_SIGNER=kms (the KMS console lists it under the key\'s versions)');
   else if (!KMS_KEY_VERSION_PATTERN.test(kms.keyVersionId)) problems.push('DDC_AUTH_KMS_KEY_VERSION_ID must be a KMS key version id');
   if (!KMS_REGION_PATTERN.test(kms.region)) problems.push(`DDC_AUTH_KMS_REGION must be an Alibaba Cloud region id such as ${KMS_DEFAULT_REGION}`);
-  if (kms.endpoint && !KMS_ENDPOINT_PATTERN.test(kms.endpoint)) {
-    problems.push('DDC_AUTH_KMS_ENDPOINT must be a bare *.aliyuncs.com host name (no scheme, port or path), e.g. kms-vpc.ap-southeast-1.aliyuncs.com');
-  }
+  push(kmsEndpointProblem(kms.endpoint, kms.region));
+  push(kmsCredentialsProblem(cfg));
   if (kms.caFile) {
     if (!kms.endpoint) problems.push('DDC_AUTH_KMS_CA_FILE is only used with a dedicated KMS instance endpoint (DDC_AUTH_KMS_ENDPOINT)');
     let text = '';
@@ -625,7 +669,7 @@ function summarize(cfg, { loadKey } = {}) {
     connectionId: cfg.connectionId,
     signer: cfg.signer,
     kid,
-    ...(cfg.signer === 'kms' ? { kmsKeyId: cfg.kms.keyId, kmsKeyVersionId: cfg.kms.keyVersionId, kmsRegion: cfg.kms.region } : {}),
+    ...(cfg.signer === 'kms' ? { kmsKeyId: cfg.kms.keyId, kmsKeyVersionId: cfg.kms.keyVersionId, kmsRegion: cfg.kms.region, kmsCredentials: cfg.kms.credentials } : {}),
     newAccounts: cfg.newAccounts,
     rebindPolicy: cfg.rebindPolicy,
   };
@@ -638,7 +682,7 @@ function summaryLine(summary) {
     `nativeAuth=on env=${summary.env} methods=${summary.methods.join(',') || '(none)'} kid=${summary.kid} ` +
     `network=${summary.network} connection=${summary.connectionId} signer=${summary.signer} ` +
     `platforms=${summary.platforms.join(',') || '(none)'} newAccounts=${summary.newAccounts} rebind=${summary.rebindPolicy}` +
-    (summary.kmsKeyId ? ` kmsKey=${summary.kmsKeyId}/${summary.kmsKeyVersionId || '(unset)'} kmsRegion=${summary.kmsRegion}` : '')
+    (summary.kmsKeyId ? ` kmsKey=${summary.kmsKeyId}/${summary.kmsKeyVersionId || '(unset)'} kmsRegion=${summary.kmsRegion} kmsCredentials=${summary.kmsCredentials}` : '')
   );
 }
 
@@ -689,6 +733,7 @@ module.exports = {
   OTP_CODE_LENGTH,
   KMS_DEFAULT_REGION,
   KMS_TIMEOUT_DEFAULT_MS,
+  KMS_CREDENTIAL_MODES,
   logger,
   nativeAuthEnabled,
   readNativeAuthConfig,
@@ -706,6 +751,7 @@ module.exports = {
   readExtraJwks,
   parseKmsKeyRef,
   kmsProblems,
+  kmsCredentialsProblem,
   productionProblems,
   nativeAuthProblems,
   assertNativeAuthConfig,

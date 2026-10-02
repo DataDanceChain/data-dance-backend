@@ -11,9 +11,11 @@
  *
  * Reads: DDC_AUTH_KMS_KEY_ID, DDC_AUTH_KMS_KEY_VERSION_ID, DDC_AUTH_KMS_REGION (default
  * ap-southeast-1), DDC_AUTH_KMS_ENDPOINT / DDC_AUTH_KMS_CA_FILE (optional), DDC_AUTH_KMS_TIMEOUT_MS,
- * DDC_AUTH_KMS_EXTRA_KEYS, DDC_AUTH_JWKS_PINNED (or --pinned). Credentials come from the Alibaba
- * Cloud default credential chain (ECS RAM role, or ALIBABA_CLOUD_ACCESS_KEY_ID/SECRET, ...), never
- * from arguments. DDC_AUTH_ENABLED does not need to be on.
+ * DDC_AUTH_KMS_EXTRA_KEYS, DDC_AUTH_KMS_CREDENTIALS, DDC_AUTH_ENV, DDC_AUTH_JWKS_PINNED (or
+ * --pinned). Credentials are read by the Alibaba Cloud SDK, never from arguments: with
+ * DDC_AUTH_KMS_CREDENTIALS=env (default) only ALIBABA_CLOUD_ACCESS_KEY_ID / _SECRET of this
+ * environment's RAM user; =chain (DDC_AUTH_ENV=prod only) the default chain, ECS RAM role included.
+ * DDC_AUTH_ENABLED does not need to be on.
  *
  * Steps:
  *   1. GetPublicKey: prints key id/version, RSA size and the kid (RFC 7638 thumbprint). The kid is
@@ -83,7 +85,7 @@ async function main(argv = process.argv.slice(2), { env = process.env, client, o
     return { code: 0 };
   }
   const cfg = readNativeAuthConfig(env);
-  const report = { keyId: cfg.kms.keyId, keyVersionId: cfg.kms.keyVersionId, region: cfg.kms.region, endpoint: cfg.kms.endpoint || `kms.${cfg.kms.region}.aliyuncs.com`, checks: [] };
+  const report = { keyId: cfg.kms.keyId, keyVersionId: cfg.kms.keyVersionId, region: cfg.kms.region, endpoint: cfg.kms.endpoint || `kms.${cfg.kms.region}.aliyuncs.com`, credentials: cfg.kms.credentials, checks: [] };
   const line = (ok, name, detail = '') => {
     report.checks.push({ name, ok, detail });
     if (!args.json) (ok ? out : err)(`${ok ? 'OK  ' : 'FAIL'} ${name}${detail ? `: ${detail}` : ''}`);
@@ -99,7 +101,7 @@ async function main(argv = process.argv.slice(2), { env = process.env, client, o
     for (const problem of problems) line(false, 'configuration', problem);
     return finish(2);
   }
-  if (!args.json) out(`KMS key ${report.keyId} version ${report.keyVersionId} via ${report.endpoint} (region ${report.region})`);
+  if (!args.json) out(`KMS key ${report.keyId} version ${report.keyVersionId} via ${report.endpoint} (region ${report.region}, credentials ${report.credentials})`);
 
   const signer = createKmsSigner({
     keyId: cfg.kms.keyId,
@@ -108,6 +110,7 @@ async function main(argv = process.argv.slice(2), { env = process.env, client, o
     endpoint: cfg.kms.endpoint,
     caFile: cfg.kms.caFile,
     timeoutMs: cfg.kms.timeoutMs,
+    credentials: cfg.kms.credentials,
     extraKeys: cfg.kms.extraKeys.map(parseKmsKeyRef),
     client,
   });

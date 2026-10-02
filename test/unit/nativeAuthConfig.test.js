@@ -295,6 +295,9 @@ describe('native auth boot rules 5 and 6: production and mainnet', () => {
     DDC_AUTH_PROOF_DOMAIN: 'app.datadance.ai',
     DDC_AUTH_PROOF_URI: 'https://app.datadance.ai',
     DDC_AUTH_ALLOWLIST: '@datadance.ai',
+    // Presence only (DDC_AUTH_KMS_CREDENTIALS=env, the default); throwaway strings.
+    ALIBABA_CLOUD_ACCESS_KEY_ID: 'TEST-ONLY-AK-ID',
+    ALIBABA_CLOUD_ACCESS_KEY_SECRET: 'test-only-not-a-secret',
     ...overrides,
   });
 
@@ -343,7 +346,7 @@ describe('native auth boot rules 5 and 6: production and mainnet', () => {
     assert.equal(summary.enabled, true);
     assert.equal(summary.signer, 'kms');
     assert.equal(summary.kid, '(kms: fetched at start)');
-    assert.match(config.summaryLine(summary), / kmsKey=key-sgp00000000000000000\/00000000-0000-4000-8000-000000000001 kmsRegion=ap-southeast-1$/);
+    assert.match(config.summaryLine(summary), / kmsKey=key-sgp00000000000000000\/00000000-0000-4000-8000-000000000001 kmsRegion=ap-southeast-1 kmsCredentials=env$/);
   });
 
   it('prod with DDC_AUTH_SIGNER=kms refuses to start, with a clear message, while the KMS key is not fully named', () => {
@@ -354,6 +357,9 @@ describe('native auth boot rules 5 and 6: production and mainnet', () => {
       return true;
     });
     assertRefused(prodBase({ DDC_AUTH_SIGNER: 'file' }), /production requires DDC_AUTH_SIGNER=kms/);
+    assertRefused(prodBase({ ALIBABA_CLOUD_ACCESS_KEY_SECRET: '' }), /DDC_AUTH_KMS_CREDENTIALS=env needs ALIBABA_CLOUD_ACCESS_KEY_ID and ALIBABA_CLOUD_ACCESS_KEY_SECRET/);
+    // Production may use the default chain (ECS instance RAM role) instead of an access key.
+    assert.equal(assertNativeAuthConfig(prodBase({ DDC_AUTH_KMS_CREDENTIALS: 'chain', ALIBABA_CLOUD_ACCESS_KEY_ID: '', ALIBABA_CLOUD_ACCESS_KEY_SECRET: '' })).signer, 'kms');
   });
 
   it('refuses sapphire_mainnet with DDC_AUTH_ENV=local|test', () => {

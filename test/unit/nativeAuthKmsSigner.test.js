@@ -95,6 +95,10 @@ function kmsEnv(overrides = {}) {
     DDC_AUTH_KMS_KEY_ID: KEY_ID,
     DDC_AUTH_KMS_KEY_VERSION_ID: VERSION,
     DDC_AUTH_JWKS_PINNED: kmsKey.thumbprint,
+    // Presence only: DDC_AUTH_KMS_CREDENTIALS=env (the default) needs both names set. Throwaway
+    // strings; the mock KMS never reads them.
+    ALIBABA_CLOUD_ACCESS_KEY_ID: 'TEST-ONLY-AK-ID',
+    ALIBABA_CLOUD_ACCESS_KEY_SECRET: 'test-only-not-a-secret',
     ...overrides,
   });
 }
@@ -224,10 +228,21 @@ describe('KMS signer: fails closed', () => {
         return undefined;
       },
     }));
-    await assert.rejects(issuer.mintW3aJwt({ subject: SUBJECT, cfg }), (err) => {
-      assert.match(err.message, /KMS AsymmetricSign failed after 1 attempt\(s\): Forbidden\.NoPermission — HTTP 403 — requestId req-403/);
-      return true;
-    });
+    const logs = captureLogs();
+    try {
+      await assert.rejects(issuer.mintW3aJwt({ subject: SUBJECT, cfg }), (err) => {
+        // The client sees a generic 503; the KMS details go to the operator log only.
+        assert.equal(err.statusCode, 503);
+        assert.equal(err.message, 'Sign-in is temporarily unavailable. Please try again shortly.');
+        assert.match(err.cause.message, /KMS AsymmetricSign failed after 1 attempt\(s\): Forbidden\.NoPermission — HTTP 403 — requestId req-403/);
+        return true;
+      });
+    } finally {
+      logs.stop();
+    }
+    const logged = logs.lines.join('');
+    assert.match(logged, /native_auth\.kms_sign_failed/);
+    assert.match(logged, /Forbidden\.NoPermission/);
     assert.equal(client.calls.filter((c) => c.op === 'AsymmetricSign').length, 1);
   });
 
@@ -343,7 +358,7 @@ describe('KMS signer: fails closed', () => {
     const noCreds = new Error('unable to get credentials from any of the providers in the chain: ...');
     assert.equal(kmsSigner.isNoCredentials(noCreds), true);
     assert.equal(isRetryable(noCreds), false, 'missing credentials is configuration, not a transient failure');
-    assert.match(describeError(noCreds), /^no Alibaba Cloud credentials found by the default credential chain \(attach a RAM role/);
+    assert.match(describeError(noCreds), /^no Alibaba Cloud credentials found \(DDC_AUTH_KMS_CREDENTIALS=env: set ALIBABA_CLOUD_ACCESS_KEY_ID/);
   });
 
   it('rebuilds the SDK client after a failure without an HTTP answer (sticky default credential chain), not after a KMS error', async () => {
@@ -372,7 +387,7 @@ describe('KMS signer: fails closed', () => {
       await signer.ready();
       assert.equal(signer.kid, kmsKey.thumbprint);
       assert.equal(built.length, 2, 'one rebuild after the network failure, none after the HTTP 503');
-      assert.deepEqual(built[0], { region: 'ap-southeast-1', endpoint: '', caFile: '', timeoutMs: 200 });
+      assert.deepEqual(built[0], { region: 'ap-southeast-1', endpoint: '', caFile: '', timeoutMs: 200, credentials: 'env' });
     } finally {
       clientModule.createAliyunKmsClient = original;
     }
@@ -392,7 +407,7 @@ describe('prepareSigner (boot step) and rotation keys', () => {
     const cfg = kmsCfg();
     const client = installMock(cfg);
     const result = await prepareSigner(cfg);
-    assert.deepEqual(result, { kid: kmsKey.thumbprint, extraKids: [], keyId: KEY_ID, keyVersionId: VERSION, region: 'ap-southeast-1', endpoint: 'kms.ap-southeast-1.aliyuncs.com' });
+    assert.deepEqual(result, { kid: kmsKey.thumbprint, extraKids: [], keyId: KEY_ID, keyVersionId: VERSION, region: 'ap-southeast-1', endpoint: 'kms.ap-southeast-1.aliyuncs.com', credentials: 'env' });
     assert.equal(client.calls.filter((c) => c.op === 'AsymmetricSign').length, 1);
     assert.equal(readyKid(cfg), kmsKey.thumbprint);
     assert.equal(config.summarize(cfg).kid, kmsKey.thumbprint);
@@ -524,12 +539,25 @@ describe('DDC_AUTH_KMS_* boot rules', () => {
     assert.deepEqual(problems({ DDC_AUTH_KMS_KEY_ID: 'acs:kms:ap-southeast-1:1234567890:key/key-sgp000' }), [], 'a key ARN is fine');
   });
 
-  it('accepts only bare *.aliyuncs.com endpoints (VPC or dedicated instance gateway)', () => {
-    for (const ok of ['kms-vpc.ap-southeast-1.aliyuncs.com', 'kst-sgp64abcd.cryptoservice.kms.aliyuncs.com', 'KMS.ap-southeast-1.aliyuncs.com']) {
+  it('accepts only KMS hosts for the region (standard, VPC or dedicated instance gateway)', () => {
+    for (const ok of ['kms.ap-southeast-1.aliyuncs.com', 'kms-vpc.ap-southeast-1.aliyuncs.com', 'kst-sgp64abcd.cryptoservice.kms.aliyuncs.com', 'KMS.ap-southeast-1.aliyuncs.com']) {
       assert.deepEqual(problems({ DDC_AUTH_KMS_ENDPOINT: ok }), [], ok);
     }
-    for (const bad of ['https://kms.ap-southeast-1.aliyuncs.com', 'kms.ap-southeast-1.aliyuncs.com:443', 'kms.example.com', 'aliyuncs.com.evil.example', 'kms.aliyuncs.com/x']) {
-      assert.ok(problems({ DDC_AUTH_KMS_ENDPOINT: bad }).some((p) => /DDC_AUTH_KMS_ENDPOINT must be a bare \*\.aliyuncs\.com host/.test(p)), bad);
+    for (const bad of [
+      'https://kms.ap-southeast-1.aliyuncs.com',
+      'kms.ap-southeast-1.aliyuncs.com:443',
+      'kms.example.com',
+      'aliyuncs.com.evil.example',
+      'kms.aliyuncs.com/x',
+      // Other Alibaba Cloud hosts, some with user-chosen names, must not receive signed requests.
+      'my-bucket.oss-ap-southeast-1.aliyuncs.com',
+      'kms.ap-southeast-1.aliyuncs.com.oss-ap-southeast-1.aliyuncs.com',
+      'sts.ap-southeast-1.aliyuncs.com',
+      'kms.cn-hangzhou.aliyuncs.com', // another region than DDC_AUTH_KMS_REGION
+      'kst-x.cryptoservice.kms.aliyuncs.com.evil.example',
+      'evil.cryptoservice.kms.aliyuncs.com',
+    ]) {
+      assert.ok(problems({ DDC_AUTH_KMS_ENDPOINT: bad }).some((p) => /DDC_AUTH_KMS_ENDPOINT must be a bare KMS host name/.test(p)), bad);
     }
   });
 
@@ -547,6 +575,32 @@ describe('DDC_AUTH_KMS_* boot rules', () => {
     assert.ok(problems({ DDC_AUTH_KMS_EXTRA_KEYS: `${KEY_ID}/${VERSION}` }).some((p) => /repeats a key version/.test(p)));
     assert.deepEqual(problems({ DDC_AUTH_KMS_EXTRA_KEYS: `acs:kms:ap-southeast-1:123:key/${KEY_ID}/${NEXT_VERSION}` }), []);
     assert.deepEqual(config.parseKmsKeyRef(`acs:kms:ap-southeast-1:123:key/${KEY_ID}/${NEXT_VERSION}`), { keyId: `acs:kms:ap-southeast-1:123:key/${KEY_ID}`, keyVersionId: NEXT_VERSION });
+  });
+
+  it('DDC_AUTH_KMS_CREDENTIALS: env (default) needs the access key names; chain (instance RAM role) is production-only', () => {
+    assert.equal(kmsCfg().kms.credentials, 'env');
+    for (const missing of ['ALIBABA_CLOUD_ACCESS_KEY_ID', 'ALIBABA_CLOUD_ACCESS_KEY_SECRET']) {
+      assert.ok(problems({ [missing]: '' }).some((p) => /DDC_AUTH_KMS_CREDENTIALS=env needs ALIBABA_CLOUD_ACCESS_KEY_ID and ALIBABA_CLOUD_ACCESS_KEY_SECRET/.test(p)), missing);
+    }
+    // The shared-server rule: a test stack can never fall through to the ECS instance role.
+    for (const env of ['test', 'local']) {
+      const found = problems({ DDC_AUTH_ENV: env, DDC_AUTH_KMS_CREDENTIALS: 'chain' });
+      assert.ok(found.some((p) => /DDC_AUTH_KMS_CREDENTIALS=chain is allowed only with DDC_AUTH_ENV=prod/.test(p)), env);
+    }
+    const prodChain = config.readNativeAuthConfig(kmsEnv({ DDC_AUTH_ENV: 'prod', DDC_AUTH_KMS_CREDENTIALS: 'chain', ALIBABA_CLOUD_ACCESS_KEY_ID: '', ALIBABA_CLOUD_ACCESS_KEY_SECRET: '' }));
+    assert.equal(config.kmsCredentialsProblem(prodChain), '');
+    assert.ok(problems({ DDC_AUTH_KMS_CREDENTIALS: 'imds' }).some((p) => /DDC_AUTH_KMS_CREDENTIALS must be one of env \| chain/.test(p)));
+    // Names only in messages and summaries, never values.
+    const all = problems({ ALIBABA_CLOUD_ACCESS_KEY_SECRET: '' }).join(' ');
+    assert.ok(!all.includes('TEST-ONLY-AK-ID'));
+    assert.ok(!JSON.stringify(kmsCfg()).includes('test-only-not-a-secret'));
+    assert.match(config.summaryLine(config.summarize(kmsCfg())), / kmsCredentials=env$/);
+  });
+
+  it('the signer itself refuses chain outside production (the JWKS route can create it with native login off)', () => {
+    assert.throws(() => getSigner(kmsCfg({ DDC_AUTH_KMS_CREDENTIALS: 'chain' }), { kmsClient: mockKms() }), /chain is allowed only with DDC_AUTH_ENV=prod/);
+    assert.throws(() => getSigner(kmsCfg({ DDC_AUTH_KMS_CREDENTIALS: 'imds' }), { kmsClient: mockKms() }), /must be one of env \| chain/);
+    assert.equal(getSigner(kmsCfg({ DDC_AUTH_ENV: 'prod', DDC_AUTH_KMS_CREDENTIALS: 'chain' }), { kmsClient: mockKms() }).kind, 'kms');
   });
 
   it('the money path still demands KMS for native login (production rules)', () => {
@@ -606,6 +660,62 @@ describe('the official SDK on the wire (loopback fake KMS, throwaway access key)
       const wrong = createKmsSigner({ keyId: 'key-other', keyVersionId: VERSION, region: 'ap-southeast-1', timeoutMs: 2000, client });
       await assert.rejects(wrong.ready(), /KMS GetPublicKey failed after 1 attempt\(s\): Forbidden\.KeyNotFound — HTTP 404 — requestId fake-404/);
     } finally {
+      await new Promise((resolve) => fake.close(resolve));
+    }
+  });
+});
+
+describe('DDC_AUTH_KMS_CREDENTIALS=env on the wire (shared server: never the instance RAM role)', () => {
+  it('signs requests with the access key from the environment, and without one fails at once without asking the metadata service', async () => {
+    const seen = [];
+    const fake = http.createServer((req, res) => {
+      seen.push({ action: req.headers['x-acs-action'], authorization: String(req.headers.authorization || '') });
+      req.resume();
+      req.on('end', () => {
+        res.setHeader('content-type', 'application/json');
+        res.end(JSON.stringify({ RequestId: 'fake-pk', KeyId: KEY_ID, KeyVersionId: VERSION, PublicKey: kmsKey.pem }));
+      });
+    });
+    await new Promise((resolve) => fake.listen(0, '127.0.0.1', resolve));
+    const names = ['ALIBABA_CLOUD_ACCESS_KEY_ID', 'ALIBABA_CLOUD_ACCESS_KEY_SECRET', 'ALIBABA_CLOUD_SECURITY_TOKEN'];
+    const saved = Object.fromEntries(names.map((n) => [n, process.env[n]]));
+    // Any use of the ECS instance RAM role provider (the metadata service) is recorded and refused.
+    const { ECSRAMRoleCredentialsProvider } = require('@alicloud/credentials');
+    const originalEcs = ECSRAMRoleCredentialsProvider.prototype.getCredentials;
+    let imdsCalls = 0;
+    ECSRAMRoleCredentialsProvider.prototype.getCredentials = async function refused() {
+      imdsCalls += 1;
+      throw new Error('test: the instance metadata service must not be used');
+    };
+    const options = { region: 'ap-southeast-1', endpoint: `127.0.0.1:${fake.address().port}`, timeoutMs: 2000, protocol: 'http', credentials: 'env' };
+    try {
+      process.env.ALIBABA_CLOUD_ACCESS_KEY_ID = 'TEST-ONLY-ENV-AK-ID';
+      process.env.ALIBABA_CLOUD_ACCESS_KEY_SECRET = 'test-only-env-not-a-secret';
+      delete process.env.ALIBABA_CLOUD_SECURITY_TOKEN;
+      const res = await createAliyunKmsClient(options).getPublicKey({ keyId: KEY_ID, keyVersionId: VERSION });
+      assert.equal(res.publicKey, kmsKey.pem);
+      assert.equal(seen.length, 1);
+      assert.match(seen[0].authorization, /^ACS3-HMAC-SHA256 Credential=TEST-ONLY-ENV-AK-ID,/);
+      assert.ok(!seen[0].authorization.includes('test-only-env-not-a-secret'));
+
+      delete process.env.ALIBABA_CLOUD_ACCESS_KEY_ID;
+      delete process.env.ALIBABA_CLOUD_ACCESS_KEY_SECRET;
+      const signer = createKmsSigner({ keyId: KEY_ID, keyVersionId: VERSION, region: 'ap-southeast-1', timeoutMs: 2000, credentials: 'env', wait: async () => {} });
+      const started = Date.now();
+      await assert.rejects(signer.ready(), (err) => {
+        assert.match(err.message, /GetPublicKey failed after 1 attempt\(s\): no Alibaba Cloud credentials found \(DDC_AUTH_KMS_CREDENTIALS=env/);
+        return true;
+      });
+      assert.ok(Date.now() - started < 1000, 'no retries, no metadata-service timeouts');
+      assert.equal(seen.length, 1, 'nothing was sent to KMS');
+      assert.equal(imdsCalls, 0, 'env mode never consulted the instance metadata service');
+      assert.throws(() => require('../../src/services/nativeAuth/signer/aliyunKmsClient').buildCredential('imds'), /DDC_AUTH_KMS_CREDENTIALS must be env or chain/);
+    } finally {
+      ECSRAMRoleCredentialsProvider.prototype.getCredentials = originalEcs;
+      for (const n of names) {
+        if (saved[n] === undefined) delete process.env[n];
+        else process.env[n] = saved[n];
+      }
       await new Promise((resolve) => fake.close(resolve));
     }
   });

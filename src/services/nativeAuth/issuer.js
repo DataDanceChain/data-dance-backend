@@ -36,6 +36,26 @@ function nativeError(message) {
   return err;
 }
 
+/**
+ * A KMS failure while minting (key load, AsymmetricSign, timeout, credentials) becomes a generic
+ * 503 for the client: the app's error handler echoes err.message, and the details (key id and
+ * version, the Aliyun error, the RAM hint) are for the operator log only. Still fail closed.
+ */
+async function kmsStep(cfg, step) {
+  try {
+    return await step();
+  } catch (cause) {
+    logger.error('native_auth.kms_sign_failed', {
+      keyId: cfg.kms.keyId,
+      keyVersionId: cfg.kms.keyVersionId,
+      problem: cause.publicMessage || 'KMS signer error',
+    });
+    const err = new Error('Sign-in is temporarily unavailable. Please try again shortly.', { cause });
+    err.statusCode = 503;
+    throw err;
+  }
+}
+
 /** The active signer, refused when its key is leaked or not pinned (boot checks this too). */
 function activeSigner(cfg) {
   const signer = getSigner(cfg);
@@ -54,13 +74,14 @@ async function mintW3aJwt({ subject, cfg = readNativeAuthConfig(), now = Date.no
   if (!cfg.issuer || !cfg.audience) throw nativeError('DDC_AUTH_ISSUER / DDC_AUTH_AUDIENCE are not configured');
   // KMS: the public key must be loaded before kid is known (fetched at start; this re-tries after
   // a failure). Any KMS failure rejects the mint: there is no fallback key.
-  if (cfg.signer === 'kms') await ensureSignerReady(cfg);
+  const kms = cfg.signer === 'kms';
+  if (kms) await kmsStep(cfg, () => ensureSignerReady(cfg));
   const signer = activeSigner(cfg);
   const iat = Math.floor(now / 1000) - IAT_BACKDATE_SEC;
   const exp = iat + cfg.jwtTtlSec;
   const header = { alg: 'RS256', typ: 'JWT', kid: signer.kid };
   const payload = { iss: cfg.issuer, aud: cfg.audience, sub: subject, user_id: subject, iat, exp, jti };
-  const idToken = await signer.sign(header, payload);
+  const idToken = kms ? await kmsStep(cfg, () => signer.sign(header, payload)) : await signer.sign(header, payload);
   return { idToken, jti, kid: signer.kid, iat, exp, expiresAt: new Date(exp * 1000).toISOString() };
 }
 
