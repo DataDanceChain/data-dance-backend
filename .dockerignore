@@ -1,0 +1,102 @@
+# Build context for the backend image (Dockerfile: `COPY . .` in the deps stage,
+# then the runner copies /app wholesale). Anything not listed here ends up in
+# the image, so secrets and local artefacts must be excluded here.
+#
+# What the image needs at runtime and must stay: package.json + lockfiles,
+# src/ (incl. src/contracts/*.json), prisma/ (schema + migrations), config/,
+# public/, scripts/ (operators run them inside the container), env.example,
+# nodemon.json/tsconfig.json/next.config.ts, and the four keys_fixed/ files the
+# code reads (see the end of this file).
+
+# --- Environment files: never bake configuration or secrets into the image ---
+**/.env
+**/.env.*
+**/*.env
+# env.example has no secrets and documents every variable; it stays.
+!env.example
+
+# --- Key material ---------------------------------------------------------
+# keys/ is not read by the runtime (native-login only reads keys/jwks.json when
+# it exists, as a deny-list, and pins the same thumbprint in code).
+keys/
+**/*.pem
+**/*.p8
+**/*.p12
+**/*.pfx
+**/*.key
+**/*.jks
+**/id_rsa*
+**/id_ed25519*
+
+# --- VCS, editor and OS files ---------------------------------------------
+.git
+.gitignore
+.vscode
+.idea
+.DS_Store
+.debug/
+
+# --- Dependencies: installed inside the image by the deps stage ------------
+# A host node_modules would overwrite the Linux build (`COPY . .` runs after
+# `yarn --frozen-lockfile`) with macOS binaries.
+**/node_modules
+.npm
+.yarn/cache
+.yarn/unplugged
+.yarn/install-state.gz
+.pnp.*
+*.tgz
+.eslintcache
+
+# --- Docker files themselves -----------------------------------------------
+Dockerfile*
+.dockerignore
+docker-compose*.yml
+docker-compose*.yaml
+
+# --- Tests, docs and local tools -------------------------------------------
+test/
+src/**/*.test.js
+coverage/
+.nyc_output/
+docs/
+*.md
+load-test-*.js
+debug-duplicates.js
+test-real-duplicate.sh
+eslint.config.mjs
+
+# --- Local data, logs and runtime output from a dev checkout ---------------
+# ./db is the Postgres data directory of the commented-out compose service.
+# src/uploads/ only holds multer temp files that the snapshot controller
+# deletes after use; the route recreates the directory at boot. public/ is
+# left whole on purpose: the app serves and reads files under it.
+db/
+logs/
+**/*.log
+tmp/
+temp/
+uploads/
+src/uploads/
+cleaned-data/
+data-pack-*.csv
+build/
+dist/
+out/
+.next/
+*.tsbuildinfo
+.vercel
+
+# --- keys_fixed/: only the files the running code opens ---------------------
+# src/controllers/passWebServiceController.js builds an APNs provider from
+# keys_fixed/apn_key.p8 when the module loads (the app does not boot without
+# it), and src/controllers/passController.js reads the three Wallet pass
+# certificates. Every other file in keys_fixed/ (backups, .p12 exports, ...)
+# stays out. These come last so they win over the key patterns above.
+# Moving them to a read-only mount instead of the image is the follow-up once
+# the keys are rotated (reports/2026-09-29-公开仓库中的密钥.md).
+keys_fixed/*
+!keys_fixed/apn_key.p8
+!keys_fixed/wwdr.pem
+!keys_fixed/signerCert.pem
+!keys_fixed/signerKey.pem
