@@ -35,6 +35,7 @@ const transactionRoutes = require('./routes/transactionRoutes');
 const ddcNFTMetadataRoutes = require('./routes/ddcNFTMetadataRoutes');
 const opsAdminRoutes = require('./routes/opsAdminRoutes');
 const campaignRoutes = require('./routes/campaignRoutes');
+const appRoutes = require('./routes/appRoutes');
 const commerceRoutes = require('./routes/commerceRoutes');
 const disbursementRoutes = require('./routes/disbursementRoutes');
 const lifeContextRoutes = require('./routes/lifeContextRoutes');
@@ -180,6 +181,10 @@ app.use('/api/sso', ssoRoutes);
 app.use('/', oauthRoutes);
 app.use('/api/ops', opsAdminRoutes);
 app.use('/api/campaigns', campaignRoutes);
+// Public App version policy (the forced-update gate). Mounted here, ahead of the bare `/api`
+// routers below, because crawlerRoutes protects everything that reaches it: mounted after it, this
+// public endpoint would be answered 401. test/unit/appMountOrder.test.js covers it.
+app.use('/api/app', appRoutes);
 app.use('/api/auth', authRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/assets', assetRoutes);
