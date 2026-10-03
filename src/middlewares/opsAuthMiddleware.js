@@ -20,7 +20,7 @@ function protectOps(req, res, next) {
     if (decoded.type !== OPS_TOKEN_TYPE) {
       return res.status(403).json({ status: 'fail', message: 'Invalid ops token' });
     }
-    req.opsAdmin = { username: decoded.sub };
+    req.opsAdmin = { username: decoded.sub, role: decoded.role === 'demo' ? 'demo' : 'admin' };
     next();
   } catch (error) {
     return res.status(401).json({
@@ -30,4 +30,14 @@ function protectOps(req, res, next) {
   }
 }
 
-module.exports = { protectOps, OPS_TOKEN_TYPE };
+/** External demo sessions can read every ops page and cannot change anything. */
+function restrictDemo(req, res, next) {
+  if (req.opsAdmin?.role !== 'demo') return next();
+  if (req.method === 'GET' || req.method === 'HEAD') return next();
+  return res.status(403).json({
+    status: 'fail',
+    message: 'This demo account can view data but cannot change it',
+  });
+}
+
+module.exports = { protectOps, restrictDemo, OPS_TOKEN_TYPE };

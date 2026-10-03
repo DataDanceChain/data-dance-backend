@@ -7,6 +7,10 @@ Internal operations panel backed by dedicated credentials (not end-user accounts
 ```bash
 OPS_ADMIN_USERNAME=ops
 OPS_ADMIN_PASSWORD=<strong-password>
+# optional external demo. Read-only: every GET under /api/ops, no writes.
+# Or put the same two fields in /app/config/ops-demo.json
+OPS_DEMO_USERNAME=demo
+OPS_DEMO_PASSWORD=<demo-password>
 # optional
 OPS_ADMIN_TOKEN_EXPIRES=7d
 JWT_SECRET=<existing-jwt-secret>

@@ -1,3 +1,4 @@
+const fs = require('fs');
 const jwt = require('jsonwebtoken');
 const prisma = require('../utils/prisma');
 const { OPS_TOKEN_TYPE } = require('../middlewares/opsAuthMiddleware');
@@ -39,31 +40,56 @@ function getOpsCredentials() {
   const username = process.env.OPS_ADMIN_USERNAME;
   const password = process.env.OPS_ADMIN_PASSWORD;
   if (!username || !password) return null;
-  return { username, password };
+  return { username, password, role: 'admin' };
+}
+
+function getDemoCredentials() {
+  const fromEnv = process.env.OPS_DEMO_USERNAME && process.env.OPS_DEMO_PASSWORD
+    ? { username: process.env.OPS_DEMO_USERNAME, password: process.env.OPS_DEMO_PASSWORD }
+    : null;
+  if (fromEnv) return { ...fromEnv, role: 'demo' };
+  const file = process.env.OPS_DEMO_FILE || '/app/config/ops-demo.json';
+  try {
+    const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
+    if (parsed && parsed.username && parsed.password) {
+      return { username: String(parsed.username), password: String(parsed.password), role: 'demo' };
+    }
+  } catch {
+    /* Demo login is optional. */
+  }
+  return null;
+}
+
+function signOpsToken(username, role) {
+  const secret = process.env.JWT_SECRET;
+  if (!secret) return null;
+  const expiresIn = process.env.OPS_ADMIN_TOKEN_EXPIRES || '7d';
+  const token = jwt.sign({ type: OPS_TOKEN_TYPE, sub: username, role }, secret, { expiresIn });
+  return { token, expiresIn };
 }
 
 exports.login = async (req, res) => {
   try {
     const creds = getOpsCredentials();
-    if (!creds) {
+    const demo = getDemoCredentials();
+    if (!creds && !demo) {
       return res.status(503).json({
         status: 'fail',
         message: 'Ops admin is not configured (set OPS_ADMIN_USERNAME and OPS_ADMIN_PASSWORD)',
       });
     }
     const { username, password } = req.body || {};
-    if (username !== creds.username || password !== creds.password) {
+    const match = [creds, demo].find((row) => row && username === row.username && password === row.password);
+    if (!match) {
       return res.status(401).json({ status: 'fail', message: 'Invalid username or password' });
     }
-    const secret = process.env.JWT_SECRET;
-    if (!secret) {
+    const signed = signOpsToken(match.username, match.role);
+    if (!signed) {
       return res.status(500).json({ status: 'error', message: 'JWT_SECRET is not configured' });
     }
-    const expiresIn = process.env.OPS_ADMIN_TOKEN_EXPIRES || '7d';
-    const token = jwt.sign({ type: OPS_TOKEN_TYPE, sub: username }, secret, { expiresIn });
     return res.json({
       status: 'success',
-      data: { token, expiresIn, username },
+      data: { token: signed.token, expiresIn: signed.expiresIn, username: match.username, role: match.role },
     });
   } catch (error) {
     console.error('Ops login error:', error);

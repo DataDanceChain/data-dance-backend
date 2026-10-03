@@ -15,7 +15,7 @@ const {
   listPrivacyRequests,
   resolvePrivacyRequest,
 } = require('../controllers/opsPrivacyController');
-const { protectOps } = require('../middlewares/opsAuthMiddleware');
+const { protectOps, restrictDemo } = require('../middlewares/opsAuthMiddleware');
 const { rateLimiters } = require('../middlewares/rateLimitMiddleware');
 const { uploadCampaignCover } = require('../middlewares/uploadMiddleware');
 const opsCampaigns = require('../controllers/opsCampaignController');
@@ -48,6 +48,7 @@ function acceptCampaignCover(req, res, next) {
 
 router.post('/auth/login', rateLimiters.opsLogin, login);
 router.use(protectOps);
+router.use(restrictDemo);
 mount('get', '/campaigns', opsCampaigns.list);
 mount('post', '/campaigns/translate', opsCampaigns.translate || opsTranslate.translate);
 mount('post', '/campaigns/cover', acceptCampaignCover, opsCampaigns.uploadCover);
@@ -69,6 +70,7 @@ mount('get', '/merchants/:userId', opsCommerce.getMerchant);
 mount('post', '/merchants/:userId/credit', opsCommerce.creditMerchant);
 mount('post', '/merchants/:userId/kyc', opsCommerce.reviewMerchantKyc);
 mount('get', '/orders', opsCommerce.listOrders);
+mount('get', '/orders/:id', opsCommerce.getOrder);
 mount('post', '/orders/:id/attest', opsCommerce.attestOrder);
 mount('get', '/disbursements', disbursement.opsList);
 mount('post', '/disbursements/items/:id/process', disbursement.opsRetry);

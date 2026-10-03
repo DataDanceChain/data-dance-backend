@@ -7,22 +7,25 @@
  * Unit economics, per valid record, varied so the book is not a flat formula:
  *   buyer pays about $10 (some even dollars, some with cents)
  *   contributor data cost $3–$5
- *   referral node about $3
- *   gross margin around 20%, different each month
+ *   referral node about $3 on a first acquisition
+ *   first-acquisition gross margin around 20%, different each month
+ *   a second cut of the same category is a reauthorization: the contributor
+ *   is paid again, the referral node is not, and that order's margin is 50–70%
  *
  * Purchase orders are not one-per-industry every month. Some months a vertical
  * is quiet, and busy months split the same vertical across two orders.
  * Each contributor has one reward-eligible upload and one, two, or three extra
  * data-pack rows.
- * September points are settled on 2026-09-30 with overseas Amazon and Apple
- * gift-card purchases. Those purchases match September cost; they are not a
- * second cost on top of the points already issued.
+ * On 2026-09-30, $2,000 of issued points are redeemed as 137 Amazon and Apple
+ * gift cards across 8 Amazon orders. That redemption is not a second cost, and
+ * it does not cash out the whole month.
  *
  *   node scripts/seedRevenueBook2026.js --dry-run
  *   node scripts/seedRevenueBook2026.js
  */
 
 const crypto = require('crypto');
+const { GIFT_CARD_BATCH, GIFT_CARD_PURCHASES, purchaseTotal, assertGiftCardBatch } = require('./revenueBookGiftCards');
 
 const SEED_TAG = '[revenue-book-2026]';
 const EMAIL_DOMAIN = '@book.datadance.test';
@@ -444,43 +447,35 @@ function buildPlan() {
   const margins = months.map((month) => ((month.margin / month.revenue) * 100).toFixed(1));
   if (new Set(margins).size < 4) throw new Error('monthly margins are too uniform');
 
-  const september = months[months.length - 1];
-  const giftCards = {};
-  for (const key of ['amazon', 'apple']) giftCards[key] = { cents: 0, payments: [] };
-  for (const order of september.orders) {
-    giftCards[order.giftCard].cents += order.dataCents + order.referralCents;
-  }
-  const slipShapes = {
-    amazon: [1500000, 800000, 420000],
-    apple: [2500000, 1750000, 900000, 350000],
-  };
-  for (const [key, card] of Object.entries(giftCards)) {
-    const desk = GIFT_CARDS[key];
-    const parts = [];
-    let left = card.cents;
-    for (const round of slipShapes[key]) {
-      if (left <= round + 8000) break;
-      parts.push(round);
-      left -= round;
+  // A "-2" order is a further authorization of a category already collected.
+  // The contributor is paid. The referral node is not paid a second time.
+  for (const month of months) {
+    for (const order of month.orders) {
+      if (!String(order.suffix).endsWith('-2')) continue;
+      order.licence = 'reauthorization';
+      for (const row of order.contributors) {
+        const node = referrerByIndustry[row.industryKey].find((item) => item.id === row.referrerId);
+        node.points -= row.referralCents;
+        row.referralCents = 0;
+        row.referralUsd = 0;
+      }
+      order.referralCents = 0;
+      finishOrder(order);
+      const pct = order.margin / order.revenue;
+      if (pct < 0.5 || pct > 0.7) {
+        throw new Error(`${month.key} ${order.suffix} reauthorization margin ${(pct * 100).toFixed(1)}% is outside 50–70%`);
+      }
     }
-    parts.push(left);
-    if (parts.length < 2 || parts[parts.length - 1] % 100 === 0) {
-      throw new Error(`${key} gift cards are too round`);
-    }
-    card.total = usd(card.cents);
-    card.payments = parts.map((cents, index) => ({
-      cents,
-      amount: usd(cents),
-      paymentNumber: `${desk.paymentNumber}-${index + 1}`,
-      reference: `${desk.reference}-${index + 1}`,
-    }));
-  }
-  const giftTotal = giftCards.amazon.cents + giftCards.apple.cents;
-  const septemberCost = september.dataCents + september.referralCents;
-  if (giftTotal !== septemberCost) {
-    throw new Error('September gift cards do not match September cost');
+    month.referralCents = month.orders.reduce((sum, order) => sum + order.referralCents, 0);
+    month.saleCents = month.orders.reduce((sum, order) => sum + order.saleCents, 0);
+    month.dataCents = month.orders.reduce((sum, order) => sum + order.dataCents, 0);
+    month.revenue = usd(month.saleCents);
+    month.dataCost = usd(month.dataCents);
+    month.referralCost = usd(month.referralCents);
+    month.margin = usd(month.saleCents - month.dataCents - month.referralCents);
   }
 
+  const giftCards = assertGiftCardBatch();
   return { referrers, months, giftCards, serial };
 }
 
@@ -496,11 +491,9 @@ function printPlan(plan) {
       console.log(`           ${order.suffix.padEnd(8)} $${money(order.saleCents)}   data $${money(order.dataCents)}   referral $${money(order.referralCents)}   records ${order.count}`);
     }
   }
-  for (const key of ['amazon', 'apple']) {
-    const card = plan.giftCards[key];
-    console.log(
-      `September ${key} gift cards $${money(card.cents)} = ${card.payments.map((row) => `$${money(row.cents)}`).join(' + ')}`,
-    );
+  for (const purchase of GIFT_CARD_PURCHASES) {
+    const lines = purchase.lines.map((line) => `${line.brand} $${line.face} x ${line.qty}`).join(', ');
+    console.log(`Gift card ${purchase.reference} $${purchaseTotal(purchase)}  ${lines}`);
   }
   const nodeLine = INDUSTRIES.map((industry) => {
     const nodes = plan.referrers.filter((row) => row.industryKey === industry.key);
@@ -869,15 +862,17 @@ async function main() {
           createdAt: billable.when,
           updatedAt: billable.when,
         });
-        points.push({
-          id: crypto.randomUUID(),
-          userId: contributor.referrerId,
-          amount: contributor.referralCents,
-          source: 'revenue_book_referral',
-          sourceId: contributor.id,
-          createdAt: billable.when,
-          updatedAt: billable.when,
-        });
+        if (contributor.referralCents > 0) {
+          points.push({
+            id: crypto.randomUUID(),
+            userId: contributor.referrerId,
+            amount: contributor.referralCents,
+            source: 'revenue_book_referral',
+            sourceId: contributor.id,
+            createdAt: billable.when,
+            updatedAt: billable.when,
+          });
+        }
       }
       await prisma.crawlerTask.createMany({ data: tasks });
       await prisma.crawlerData.createMany({ data: records });
@@ -897,7 +892,9 @@ async function main() {
         const invoiceId = crypto.randomUUID();
         const orderNumber = `PO-RB-${month.key.replace('-', '')}-${order.suffix}`;
         const lines = priceLines(order, month.label);
-        const note = `${SEED_TAG} ${month.label} ${order.label} ${order.suffix}: ${order.count} valid records, mixed prices, total $${money(order.saleCents)}. Data $${money(order.dataCents)}, referral $${money(order.referralCents)}, gross profit $${money(order.saleCents - order.dataCents - order.referralCents)}.`;
+        const note = order.licence === 'reauthorization'
+          ? `${SEED_TAG} Reauthorization of already collected data on PO-RB-${month.key.replace('-', '')}-${order.suffix}. Contributor reward $${money(order.dataCents)}. No second referral payment. Gross profit $${money(order.margin)}, margin ${((order.margin / order.revenue) * 100).toFixed(1)}%.`
+          : `${SEED_TAG} ${month.label} ${order.label} ${order.suffix}: ${order.count} valid records, mixed prices, total $${money(order.saleCents)}. Data $${money(order.dataCents)}, referral $${money(order.referralCents)}, gross profit $${money(order.saleCents - order.dataCents - order.referralCents)}.`;
         await prisma.purchaseOrder.create({
           data: {
             id: orderId,
@@ -1014,6 +1011,7 @@ async function main() {
           nodeReferral.set(row.referrerId, current);
         }
         for (const [referrerId, share] of nodeReferral) {
+          if (share.cents <= 0) continue;
           const node = referrerById.get(referrerId);
           allocations.push({
             id: crypto.randomUUID(),
@@ -1035,136 +1033,108 @@ async function main() {
           await prisma.procurementAllocation.createMany({ data: chunk });
         });
 
-        const userPoints = order.dataCents;
-        const referralPoints = order.referralCents;
-        await prisma.procurementCostItem.createMany({
-          data: [
-            {
-              orderId,
-              kind: 'points_issue',
-              description: `${SEED_TAG} Contributor points for ${order.count} valid ${order.label} records`,
-              points: userPoints,
-              unitPriceUsd: POINTS_USD,
-              amountUsd: order.dataCost,
-              sourceType: 'allocation',
-              sourceId: `${orderNumber}-users`,
-              createdAt,
-              updatedAt: createdAt,
-            },
-            {
-              orderId,
-              kind: 'points_issue',
-              description: `${SEED_TAG} Referral-node points, about $3 per valid record, mixed amounts`,
-              points: referralPoints,
-              unitPriceUsd: POINTS_USD,
-              amountUsd: order.referralCost,
-              sourceType: 'allocation',
-              sourceId: `${orderNumber}-referral`,
-              createdAt,
-              updatedAt: createdAt,
-            },
-          ],
-        });
-
-        if (month.key === '2026-09') {
-          const desk = GIFT_CARDS[order.giftCard];
-          const redeemUsd = order.dataCost + order.referralCost;
-          const redeemPoints = userPoints + referralPoints;
-          await prisma.procurementCostItem.create({
-            data: {
-              orderId,
-              kind: 'points_redeem',
-              description: `${SEED_TAG} September points settled with ${desk.vendor}`,
-              points: redeemPoints,
-              unitPriceUsd: POINTS_USD,
-              amountUsd: redeemUsd,
-              sourceType: 'gift_card_purchase',
-              sourceId: desk.paymentNumber,
-              createdAt: septemberPaidAt,
-              updatedAt: septemberPaidAt,
-            },
-          });
-          const redemptions = order.contributors.map((row) => ({
-            id: crypto.randomUUID(),
+        const costItems = [
+          {
             orderId,
-            createdById: seller.id,
-            email: row.email,
-            emailNormalized: row.email,
-            userId: row.id,
-            points: row.points,
-            asset: desk.asset,
-            amount: row.dataUsd,
-            vendor: desk.vendor,
-            vendorReference: `${desk.reference}-${order.suffix}-${row.localIndex}`,
-            status: 'paid',
-            paidAt: septemberPaidAt,
-            notes: `${SEED_TAG} September valid-record points paid as an overseas gift card`,
-            createdAt: septemberPaidAt,
-            updatedAt: septemberPaidAt,
-          }));
-          for (const [referrerId, share] of nodeReferral) {
-            const node = referrerById.get(referrerId);
-            redemptions.push({
-              id: crypto.randomUUID(),
-              orderId,
-              createdById: seller.id,
-              email: node.email,
-              emailNormalized: node.email,
-              userId: node.id,
-              points: share.cents,
-              asset: desk.asset,
-              amount: usd(share.cents),
-              vendor: desk.vendor,
-              vendorReference: `${desk.reference}-${order.suffix}-NODE-${node.node}`,
-              status: 'paid',
-              paidAt: septemberPaidAt,
-              notes: `${SEED_TAG} September referral points paid as an overseas gift card`,
-              createdAt: septemberPaidAt,
-              updatedAt: septemberPaidAt,
-            });
-          }
-          await inChunks(redemptions, 1000, async (chunk) => {
-            await prisma.pointsRedemption.createMany({ data: chunk });
+            kind: 'points_issue',
+            description: `${SEED_TAG} Contributor points for ${order.count} valid ${order.label} records`,
+            points: order.dataCents,
+            unitPriceUsd: POINTS_USD,
+            amountUsd: order.dataCost,
+            sourceType: 'allocation',
+            sourceId: `${orderNumber}-users`,
+            createdAt,
+            updatedAt: createdAt,
+          },
+        ];
+        if (order.referralCents > 0) {
+          costItems.push({
+            orderId,
+            kind: 'points_issue',
+            description: `${SEED_TAG} Referral-node points, about $3 per valid record, mixed amounts`,
+            points: order.referralCents,
+            unitPriceUsd: POINTS_USD,
+            amountUsd: order.referralCost,
+            sourceType: 'allocation',
+            sourceId: `${orderNumber}-referral`,
+            createdAt,
+            updatedAt: createdAt,
           });
         }
+        await prisma.procurementCostItem.createMany({ data: costItems });
+        for (const row of order.contributors) row.orderId = orderId;
         console.log(`  ${orderNumber}  $${order.revenue}  margin $${order.margin}`);
       }
     }
 
-    for (const key of ['amazon', 'apple']) {
-      const desk = GIFT_CARDS[key];
-      for (const part of plan.giftCards[key].payments) {
-        const ledger = await prisma.organizationTransaction.create({
-          data: {
-            amount: part.amount,
-            type: 'WITHDRAW',
-            status: 'COMPLETED',
-            description: `${SEED_TAG} ${desk.vendor}`,
-            userId: seller.id,
-            metadata: { source: 'revenue_book_2026', asset: desk.asset, paidAt: '2026-09-30', reference: part.reference },
-            createdAt: septemberPaidAt,
-            updatedAt: septemberPaidAt,
-          },
-        });
-        await prisma.payment.create({
-          data: {
-            paymentNumber: part.paymentNumber,
-            payerId: seller.id,
-            payeeId: desks[key].id,
-            amount: part.amount,
-            currency: 'USD',
-            method: 'gift_card',
-            status: 'confirmed',
-            matchStatus: 'matched',
-            paidAt: septemberPaidAt,
-            reference: part.reference,
-            notes: `${SEED_TAG} Overseas gift-card purchase on 2026-09-30. This slip is $${money(part.cents)} of the $${money(plan.giftCards[key].cents)} ${key} settlement for September points. It is not a second cost on top of points already issued.`,
-            organizationTransactionId: ledger.id,
-            createdAt: septemberPaidAt,
-            updatedAt: septemberPaidAt,
-          },
-        });
-      }
+    const redeemPool = plan.months
+      .flatMap((month) => month.orders.flatMap((order) => order.contributors))
+      .filter((row) => row.points === 500)
+      .sort((left, right) => left.email.localeCompare(right.email))
+      .slice(0, plan.giftCards.slots.length);
+    if (redeemPool.length !== plan.giftCards.slots.length) {
+      throw new Error(`need ${plan.giftCards.slots.length} contributors at $5.00, found ${redeemPool.length}`);
+    }
+    const redemptions = plan.giftCards.slots.map((slot, index) => {
+      const person = redeemPool[index];
+      const brand = slot.brand === 'apple' ? 'Apple' : 'Amazon';
+      return {
+        id: crypto.randomUUID(),
+        orderId: person.orderId,
+        createdById: seller.id,
+        email: person.email,
+        emailNormalized: person.email,
+        userId: person.id,
+        points: 500,
+        asset: slot.brand === 'apple' ? 'APPLE_GIFT_CARD' : 'AMAZON_GIFT_CARD',
+        amount: 5,
+        vendor: brand,
+        vendorReference: slot.reference,
+        status: 'paid',
+        paidAt: septemberPaidAt,
+        notes: `${SEED_TAG} ${GIFT_CARD_BATCH} Redeemed 500 points ($5.00) toward ${brand} $${slot.face} gift card ${slot.index} of ${slot.qty} on Amazon order ${slot.reference}.`,
+        createdAt: septemberPaidAt,
+        updatedAt: septemberPaidAt,
+      };
+    });
+    await inChunks(redemptions, 400, async (chunk) => {
+      await prisma.pointsRedemption.createMany({ data: chunk });
+    });
+    for (const purchase of GIFT_CARD_PURCHASES) {
+      const amount = purchaseTotal(purchase);
+      const lines = purchase.lines
+        .map((line) => `${line.brand === 'apple' ? 'Apple' : 'Amazon'} $${line.face} x ${line.qty}`)
+        .join('; ');
+      const ledger = await prisma.organizationTransaction.create({
+        data: {
+          amount,
+          type: 'WITHDRAW',
+          status: 'COMPLETED',
+          description: `${SEED_TAG} Gift cards on Amazon order ${purchase.reference}`,
+          userId: seller.id,
+          metadata: { source: 'revenue_book_2026', batch: GIFT_CARD_BATCH, reference: purchase.reference, lines },
+          createdAt: septemberPaidAt,
+          updatedAt: septemberPaidAt,
+        },
+      });
+      await prisma.payment.create({
+        data: {
+          paymentNumber: `PAY-RB-GC-${purchase.reference}`,
+          payerId: seller.id,
+          payeeId: desks.amazon.id,
+          amount,
+          currency: 'USD',
+          method: 'gift_card',
+          status: 'confirmed',
+          matchStatus: 'matched',
+          paidAt: septemberPaidAt,
+          reference: purchase.reference,
+          notes: `${SEED_TAG} ${GIFT_CARD_BATCH} Amazon order ${purchase.reference}: ${lines}. Total $${amount}. Redeems issued points. Not a second cost.`,
+          organizationTransactionId: ledger.id,
+          createdAt: septemberPaidAt,
+          updatedAt: septemberPaidAt,
+        },
+      });
     }
 
     const [bookUsers, validRows, extraRows, bookOrders] = await Promise.all([

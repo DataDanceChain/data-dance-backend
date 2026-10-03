@@ -1,3 +1,4 @@
+const { Prisma } = require('@prisma/client');
 const prisma = require('../utils/prisma');
 const commerceService = require('../services/commerceService');
 const { publicAttestation } = require('../services/commerceAttest');
@@ -19,10 +20,37 @@ const ORDER_ATTEST_SELECT = {
 
 function presentOpsOrder(order) {
   if (!order) return order;
-  return {
-    ...order,
+  const { buyer, ...rest } = order;
+  const view = {
+    ...rest,
     ...publicAttestation(order),
   };
+  if (buyer) {
+    view.buyerName = buyer.legalEntity?.companyName || buyer.name || null;
+  }
+  if (view.attestationTxHash) {
+    view.explorerUrl = `https://testnet.datadance.ai/tx/${view.attestationTxHash}`;
+  }
+  return view;
+}
+
+async function withProducts(orders) {
+  const ids = [...new Set(orders.map((order) => order.dataNFTId).filter(Boolean))];
+  if (!ids.length) return orders.map(presentOpsOrder);
+  const packs = await prisma.$queryRaw`
+    SELECT id::text AS id, name, ("dataRecords"->>'recordCount') AS "recordCount"
+    FROM "DataNFT"
+    WHERE id::text IN (${Prisma.join(ids)})
+  `;
+  const byId = new Map(packs.map((pack) => [pack.id, pack]));
+  return orders.map((order) => {
+    const view = presentOpsOrder(order);
+    const pack = byId.get(order.dataNFTId);
+    view.productName = pack?.name || null;
+    const count = Number(pack?.recordCount);
+    view.recordCount = Number.isFinite(count) && count > 0 ? count : null;
+    return view;
+  });
 }
 
 function asInt(value, fallback) {
@@ -33,6 +61,63 @@ function asInt(value, fallback) {
 function asMoney(value) {
   const n = Number(value);
   return Number.isFinite(n) ? n : 0;
+}
+
+function isDemo(req) {
+  return req.opsAdmin?.role === 'demo';
+}
+
+function maskEmail(value) {
+  const email = String(value || '').trim();
+  const at = email.indexOf('@');
+  if (at < 1) return email ? '••••' : '';
+  if (email.includes('•')) return email;
+  const local = email.slice(0, at);
+  const keep = Math.min(3, local.length);
+  return `${local.slice(0, keep)}${'•'.repeat(Math.max(3, Math.min(6, local.length - keep)))}@••••`;
+}
+
+function maskHash(value) {
+  const hash = String(value || '');
+  if (hash.length < 16 || hash.includes('…')) return hash;
+  return `${hash.slice(0, 6)}…${hash.slice(-4)}`;
+}
+
+function cleanNote(value) {
+  return String(value || '')
+    .replace(/\[[^\]]{0,80}\]\s*/g, '')
+    .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, (email) => maskEmail(email))
+    .trim();
+}
+
+function redactMerchant(row) {
+  if (!row) return row;
+  const next = { ...row, email: maskEmail(row.email) };
+  if (String(next.name || '').includes('@')) next.name = maskEmail(next.name);
+  if (next.kyc) next.kyc = { ...next.kyc, note: null, reviewedBy: null };
+  return next;
+}
+
+function redactLegalEntity(entity) {
+  if (!entity) return entity;
+  return {
+    companyName: entity.companyName || '',
+    country: entity.country || '',
+    currency: entity.currency || 'USD',
+    email: maskEmail(entity.email),
+    kyc: entity.kyc ? { ...entity.kyc, note: null, reviewedBy: null } : entity.kyc,
+  };
+}
+
+function redactDemoOrder(view) {
+  if (!view) return view;
+  view.productDescription = null;
+  view.grossProfit = null;
+  view.contributorCost = null;
+  view.referralCost = null;
+  if (view.attestationTxHash) view.attestationTxHash = maskHash(view.attestationTxHash);
+  if (view.attestationHash) view.attestationHash = maskHash(view.attestationHash);
+  return view;
 }
 
 /** Same USD wallet as merchant Account: completed ledger, withdrawals subtract. */
@@ -212,7 +297,10 @@ exports.listMerchants = async (req, res) => {
       prisma.user.count({ where }),
     ]);
     const items = await Promise.all(
-      users.map(async (user) => presentMerchantRow(user, await orgBalance(user.id))),
+      users.map(async (user) => {
+        const row = presentMerchantRow(user, await orgBalance(user.id));
+        return isDemo(req) ? redactMerchant(row) : row;
+      }),
     );
     return res.json({
       status: 'success',
@@ -264,17 +352,21 @@ exports.getMerchant = async (req, res) => {
       }),
     ]);
     const listed = presentMerchantRow(user, balance);
+    const demo = isDemo(req);
+    const account = demo ? redactMerchant({ ...merchant, kyc: listed.kyc, companyName: listed.companyName }) : { ...merchant, kyc: listed.kyc, companyName: listed.companyName };
     return res.json({
       status: 'success',
       data: {
-        user: { ...merchant, kyc: listed.kyc, companyName: listed.companyName },
-        legalEntity: presentLegalEntity(legalEntity),
-        kyc: listed.kyc,
+        user: account,
+        legalEntity: demo ? redactLegalEntity(presentLegalEntity(legalEntity)) : presentLegalEntity(legalEntity),
+        kyc: account.kyc,
         balance: listed.balance,
         currency: 'USD',
         companyName: listed.companyName,
-        transactions,
-        pendingPayments,
+        transactions: demo
+          ? transactions.map(({ metadata, ...tx }) => ({ ...tx, description: cleanNote(tx.description) }))
+          : transactions,
+        pendingPayments: demo ? [] : pendingPayments,
         orders: orders.map(presentOpsOrder),
       },
     });
@@ -333,8 +425,10 @@ exports.listOrders = async (req, res) => {
     const page = asInt(req.query.page, 1);
     const limit = Math.min(asInt(req.query.limit, 20), 100);
     const attestation = String(req.query.attestation || '').trim();
+    const productOnly = String(req.query.product || '') === '1';
     const where = {
       ...(req.query.status ? { status: String(req.query.status) } : {}),
+      ...(productOnly ? { dataNFTId: { not: null } } : {}),
       ...(attestation === 'pending'
         ? { attestationHash: { not: null }, attestationTxHash: null }
         : attestation === 'on_chain'
@@ -346,7 +440,10 @@ exports.listOrders = async (req, res) => {
     const [items, total] = await Promise.all([
       prisma.purchaseOrder.findMany({
         where,
-        select: ORDER_ATTEST_SELECT,
+        select: {
+          ...ORDER_ATTEST_SELECT,
+          buyer: { select: { name: true, legalEntity: { select: { companyName: true } } } },
+        },
         orderBy: { createdAt: 'desc' },
         skip: (page - 1) * limit,
         take: limit,
@@ -356,12 +453,96 @@ exports.listOrders = async (req, res) => {
     return res.json({
       status: 'success',
       data: {
-        items: items.map(presentOpsOrder),
+        items: await withProducts(items),
         pagination: { total, page, limit, pages: Math.ceil(total / limit) || 1 },
       },
     });
   } catch (error) {
     console.error('Ops orders error:', error);
+    return res.status(500).json({ status: 'error', message: 'Server error' });
+  }
+};
+
+function costRole(item) {
+  const text = `${item.kind || ''} ${item.description || ''}`;
+  if (/referral/i.test(text)) return 'referral';
+  if (/contributor/i.test(text)) return 'contributor';
+  return null;
+}
+
+exports.getOrder = async (req, res) => {
+  try {
+    const order = await prisma.purchaseOrder.findUnique({
+      where: { id: req.params.id },
+      select: {
+        ...ORDER_ATTEST_SELECT,
+        subtotal: true,
+        serviceFeeAmount: true,
+        licenceAcceptedAt: true,
+        licenceVersion: true,
+        buyer: { select: { name: true, legalEntity: { select: { companyName: true } } } },
+        lineItems: {
+          select: { id: true, description: true, quantity: true, unitPrice: true, total: true },
+          orderBy: { description: 'asc' },
+        },
+        invoices: {
+          select: { invoiceNumber: true, status: true, total: true, currency: true, issueDate: true, paidAt: true },
+          orderBy: { createdAt: 'desc' },
+          take: 1,
+        },
+        payments: {
+          where: { method: { not: 'gift_card' } },
+          select: { paymentNumber: true, amount: true, currency: true, method: true, status: true, paidAt: true },
+          orderBy: { paidAt: 'desc' },
+          take: 1,
+        },
+        costItems: {
+          where: { kind: 'points_issue' },
+          select: { kind: true, description: true, amountUsd: true },
+        },
+      },
+    });
+    if (!order) {
+      return res.status(404).json({ status: 'fail', message: 'Order not found' });
+    }
+    const [view] = await withProducts([order]);
+    delete view.costItems;
+    delete view.invoices;
+    delete view.payments;
+    if (order.dataNFTId) {
+      const packs = await prisma.$queryRaw`
+        SELECT description, image
+        FROM "DataNFT"
+        WHERE id::text = ${order.dataNFTId}
+      `;
+      view.productDescription = packs[0]?.description || null;
+      view.image = packs[0]?.image || null;
+    }
+    const costs = { contributor: 0, referral: 0 };
+    for (const item of order.costItems || []) {
+      const role = costRole(item);
+      if (role) costs[role] = asMoney(costs[role] + asMoney(item.amountUsd));
+    }
+    const invoice = order.invoices?.[0] || null;
+    const payment = order.payments?.[0] || null;
+    const data = {
+      ...view,
+      subtotal: order.subtotal,
+      grossProfit: order.serviceFeeAmount,
+      licenceAcceptedAt: order.licenceAcceptedAt,
+      licenceVersion: order.licenceVersion,
+      lineItems: order.lineItems,
+      invoice,
+      payment,
+      contributorCost: costs.contributor || null,
+      referralCost: costs.referral || null,
+    };
+    return res.json({
+      status: 'success',
+      data: isDemo(req) ? redactDemoOrder(data) : data,
+    });
+  } catch (error) {
+    console.error('Ops order detail error:', error);
     return res.status(500).json({ status: 'error', message: 'Server error' });
   }
 };
