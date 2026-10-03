@@ -37,7 +37,11 @@ router.use((req, res, next) => {
 router.get('/', async (req, res) => {
   const token = readBearer(req);
   const user = token ? await findUserByMcpToken(token) : null;
+  // Codex treats a 200 on the configured MCP URL as the RFC 9728 document and
+  // does not continue to /.well-known when that body has no `resource`.
+  const { resourceDoc } = metadataDocuments(req);
   res.json({
+    ...resourceDoc,
     name: MCP_SERVER_NAME,
     version: MCP_SERVER_VERSION,
     transport: 'streamable-http',

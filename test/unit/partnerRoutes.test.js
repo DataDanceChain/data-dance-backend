@@ -126,6 +126,13 @@ describe('discovery', () => {
     // SSO_TGE_REFERRAL_BIND is unset here, so the write scope is not offered (decision 30 A).
     assert.deepEqual(pr.body.scopes_supported, PARTNER_SCOPES.filter((s) => s !== 'tge:referral_bind'));
   });
+
+  it('serves the OpenAI domain challenge as the exact token', async () => {
+    const res = await request(app).get('/.well-known/openai-apps-challenge');
+    assert.equal(res.status, 200);
+    assert.match(res.headers['content-type'], /^text\/plain/);
+    assert.equal(res.text, 'MIztRJW4ZijXu_1jcd78AGzNlUN5fcXJlEnOuEzCP8c');
+  });
 });
 
 describe('GET /oauth/authorize', () => {

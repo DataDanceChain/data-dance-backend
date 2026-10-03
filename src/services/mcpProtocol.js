@@ -14,21 +14,21 @@ const TOOLS = [
     description:
       'Return the user’s public Data Dance identity: display name, handle, and connected life sources. Safe at every share level.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
-    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    annotations: { title: 'Get public profile', readOnlyHint: true, destructiveHint: false, openWorldHint: false },
   },
   {
     name: 'get_boundaries',
     description:
       'Return what this lifestyle portrait allows an assistant to say. Call this before advice that could expose private facts.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
-    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    annotations: { title: 'Get boundaries', readOnlyHint: true, destructiveHint: false, openWorldHint: false },
   },
   {
     name: 'get_life_capsule',
     description:
       'Return a distilled lifestyle portrait from Data Dance traces (shopping rhythm, travel places, events). Not raw receipts. Respects the user’s share level.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
-    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    annotations: { title: 'Get life capsule', readOnlyHint: true, destructiveHint: false, openWorldHint: false },
   },
   {
     name: 'search_life_signals',
@@ -45,7 +45,7 @@ const TOOLS = [
       required: ['query'],
       additionalProperties: false,
     },
-    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    annotations: { title: 'Search life signals', readOnlyHint: true, destructiveHint: false, openWorldHint: false },
   },
 ];
 

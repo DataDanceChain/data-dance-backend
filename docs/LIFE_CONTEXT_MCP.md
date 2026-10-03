@@ -27,7 +27,7 @@ This is the Life Capsule idea living inside Data Dance: shopping rhythm, travel 
 - `get_life_capsule`
 - `search_life_signals`
 
-Each tool advertises `readOnlyHint`, `destructiveHint: false`, and `openWorldHint: false`.
+Each tool advertises `title`, `readOnlyHint`, `destructiveHint: false`, and `openWorldHint: false`.
 
 Share levels: **public** (identity + sources) · **transparent** (themes / cities / cadence) · **intimate** (plus example titles). Prices, order IDs, and addresses are stripped in all levels.
 

@@ -221,6 +221,13 @@ router.get('/.well-known/oauth-protected-resource/partner/tge', (req, res) => {
   res.json(metadataDocuments(req).partnerResourceDoc);
 });
 
+// OpenAI plugin domain check. The body must be this token alone, not JSON.
+const OPENAI_APPS_CHALLENGE = 'MIztRJW4ZijXu_1jcd78AGzNlUN5fcXJlEnOuEzCP8c';
+router.get('/.well-known/openai-apps-challenge', (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  res.type('text/plain; charset=utf-8').send(OPENAI_APPS_CHALLENGE);
+});
+
 router.post('/oauth/register', lim('oauthRegister'), async (req, res) => {
   try {
     return res.status(201).json(await registerClient(req.body || {}));
