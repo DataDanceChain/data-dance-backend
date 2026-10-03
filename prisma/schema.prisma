@@ -81,6 +81,7 @@ model User {
   campaignRaffleWins       CampaignRaffleWin[]
   ssoTickets               SsoTicket[]
   disbursementItems        DisbursementItem[]
+  networkRebind            Web3AuthNetworkRebind?
 
   @@unique([web3authVerifier, web3authVerifierId])
 }
@@ -1113,4 +1114,46 @@ model CampaignEvent {
   campaign   Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
 
   @@index([campaignId, createdAt])
+}
+
+/// Web3Auth network switch (devnet -> mainnet), phase 1. One row per legacy account that may
+/// re-bind on its first mainnet login; written by scripts/mainnetSwitch.js --apply, resolved by
+/// web3authIdentity.resolveUser while WEB3AUTH_NETWORK_REBIND=on. Also the old -> new address map.
+model Web3AuthNetworkRebind {
+  userId        String                   @id
+  runId         String
+  fromNetwork   String
+  toNetwork     String
+  oldVerifier   String?
+  oldVerifierId String?
+  oldAddress    String?
+  /// replace = a Web3Auth-derived address of the old network, swapped for the proven new one;
+  /// keep = not derived from the old network (server-held key, external wallet), never touched
+  walletPolicy  String
+  /// devnet_pair | x_verifier_id | email_unpaired | no_wallet | server_wallet | external_wallet_email | operator_keep
+  evidence      String
+  /// pending | rebound
+  status        String                   @default("pending")
+  newVerifier   String?
+  newVerifierId String?
+  newAddress    String?
+  createdAt     DateTime                 @default(now())
+  reboundAt     DateTime?
+  user          User                     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  run           Web3AuthNetworkRebindRun @relation(fields: [runId], references: [id])
+
+  @@index([runId])
+  @@index([oldAddress])
+}
+
+/// One scripts/mainnetSwitch.js --apply run; backupTable holds the pre-run User columns.
+model Web3AuthNetworkRebindRun {
+  id           String                  @id
+  backupTable  String
+  fromNetwork  String
+  toNetwork    String
+  accountCount Int
+  appliedAt    DateTime                @default(now())
+  rolledBackAt DateTime?
+  rebinds      Web3AuthNetworkRebind[]
 }

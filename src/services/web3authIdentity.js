@@ -57,6 +57,17 @@ const DEFAULTS = {
   WEB3AUTH_JWKS_PINNED_THUMBPRINTS: '',
   // off = no check · log = accept, warn `jwks_key_not_pinned` · enforce = 401 IDTOKEN_KEY_NOT_PINNED
   WEB3AUTH_JWKS_PIN_MODE: 'log',
+  // Network switch (Sapphire devnet -> mainnet, phase 1). `off` = today's behaviour, bit for bit.
+  // `on` = a legacy account recorded by scripts/mainnetSwitch.js --apply may re-bind on its first
+  // login through the new network's connections (see resolveUser, "network re-bind").
+  WEB3AUTH_NETWORK_REBIND: 'off',
+  // Connections (csv, new-network names) that may re-bind a recorded account. Each must also be
+  // in WEB3AUTH_ALLOWED_VERIFIERS; external-wallet never re-binds (its identity is network-free).
+  WEB3AUTH_REBIND_VERIFIERS: '',
+  // The subset of WEB3AUTH_REBIND_VERIFIERS that verifies the e-mail address itself (Web3Auth's
+  // Google and e-mail passwordless; Apple only releases addresses it verified). Only these may
+  // re-bind an account found by its e-mail column; the rest (X) only by their exact verifierId.
+  WEB3AUTH_EMAIL_TRUSTED_VERIFIERS: '',
 };
 
 // Fixed (not env) claim fallbacks for display data. Never identity.
@@ -145,6 +156,11 @@ function loadConfig(env = process.env) {
     // G4: which signing keys may verify a token at all, by RFC 7638 thumbprint (both JWKS sets).
     pinMode: envOr(env, 'WEB3AUTH_JWKS_PIN_MODE').toLowerCase(),
     pinnedThumbprints: csv(envOr(env, 'WEB3AUTH_JWKS_PINNED_THUMBPRINTS')),
+    // Network switch: raw value (validated at boot) and the two connection lists.
+    networkRebindRaw: envOr(env, 'WEB3AUTH_NETWORK_REBIND').toLowerCase(),
+    networkRebind: envOr(env, 'WEB3AUTH_NETWORK_REBIND').toLowerCase() === 'on',
+    rebindVerifiers: csv(envOr(env, 'WEB3AUTH_REBIND_VERIFIERS')),
+    emailTrustedVerifiers: csv(envOr(env, 'WEB3AUTH_EMAIL_TRUSTED_VERIFIERS')),
     kinds: {
       social: {
         jwksUrl: envOr(env, 'WEB3AUTH_JWKS_URL'),
@@ -219,6 +235,7 @@ function assertBootConfig(env = process.env) {
         'Add "external-wallet" if sign-in-with-wallet is offered.'
     );
   }
+  assertRebindConfig(cfg);
   for (const kind of Object.keys(cfg.kinds)) {
     const k = cfg.kinds[kind];
     // eslint-disable-next-line no-new
@@ -226,6 +243,40 @@ function assertBootConfig(env = process.env) {
     if (!k.issuers.length) throw new Error(`Web3Auth ${kind} issuer list must not be empty`);
   }
   return cfg;
+}
+
+/**
+ * WEB3AUTH_NETWORK_REBIND: `off` needs nothing. `on` re-binds legacy accounts on trust in a named
+ * set of connections, so every prerequisite of that trust is checked here and the boot refuses
+ * a half-configured switch instead of degrading to "anything goes" or to "nobody gets in".
+ */
+function assertRebindConfig(cfg) {
+  if (!['on', 'off'].includes(cfg.networkRebindRaw)) {
+    throw new Error(`WEB3AUTH_NETWORK_REBIND must be "on" or "off" (got "${cfg.networkRebindRaw}")`);
+  }
+  if (!cfg.networkRebind) return;
+  const problems = [];
+  if (cfg.mode === 'off') problems.push('WEB3AUTH_VERIFY_MODE must be log or enforce');
+  if (cfg.allowLegacyFallback) {
+    problems.push('WEB3AUTH_ALLOW_LEGACY_FALLBACK must be false (the body-asserted path would bind old-network addresses)');
+  }
+  if (cfg.walletMatch === 'none') problems.push('WEB3AUTH_WALLET_MATCH must not be none (a re-bind binds the wallet the token proves)');
+  if (!cfg.allowedVerifiers.length) problems.push('WEB3AUTH_ALLOWED_VERIFIERS must be set');
+  if (!cfg.rebindVerifiers.length) problems.push('WEB3AUTH_REBIND_VERIFIERS must name the new-network connections that may re-bind');
+  const notAllowed = cfg.rebindVerifiers.filter((v) => !cfg.allowedVerifiers.includes(v));
+  if (cfg.allowedVerifiers.length && notAllowed.length) {
+    problems.push(`WEB3AUTH_REBIND_VERIFIERS entries not in WEB3AUTH_ALLOWED_VERIFIERS: ${notAllowed.join(', ')}`);
+  }
+  if (cfg.rebindVerifiers.includes(EXTERNAL_WALLET_VERIFIER)) {
+    problems.push(`WEB3AUTH_REBIND_VERIFIERS must not contain ${EXTERNAL_WALLET_VERIFIER} (its identity does not change with the network)`);
+  }
+  const untrusted = cfg.emailTrustedVerifiers.filter((v) => !cfg.rebindVerifiers.includes(v));
+  if (untrusted.length) {
+    problems.push(`WEB3AUTH_EMAIL_TRUSTED_VERIFIERS entries not in WEB3AUTH_REBIND_VERIFIERS: ${untrusted.join(', ')}`);
+  }
+  if (problems.length) {
+    throw new Error(`WEB3AUTH_NETWORK_REBIND=on is misconfigured: ${problems.join('; ')}.`);
+  }
 }
 
 let cachedConfig = null;
@@ -740,6 +791,213 @@ function defaultName(identity, accountEmail) {
   return accountEmail && accountEmail.includes('@') ? accountEmail.split('@')[0] : 'User';
 }
 
+// ---------------------------------------------------------------------------
+// Network re-bind (WEB3AUTH_NETWORK_REBIND=on; Sapphire devnet -> mainnet, phase 1)
+// ---------------------------------------------------------------------------
+//
+// A Web3Auth network switch changes every connection name (…-sapphire-devnet → …-sapphire-mainnet)
+// and every derived wallet, so no legacy account matches its owner's first new-network token:
+// the pair misses, the stored wallet is not the proven one (wallet_mismatch), and the e-mail
+// route needs an `email_verified` claim Web3Auth tokens never carry. The re-bind is the narrow
+// way back, and it only exists for accounts scripts/mainnetSwitch.js --apply recorded in
+// Web3AuthNetworkRebind (status `pending`):
+//
+//   - the connection is in WEB3AUTH_REBIND_VERIFIERS (and WEB3AUTH_ALLOWED_VERIFIERS);
+//   - an account found by an e-mail-shaped key needs a connection in
+//     WEB3AUTH_EMAIL_TRUSTED_VERIFIERS — one that verifies the address itself, which is what
+//     `email_verified` would have said. That holds whether the token carried the address as an
+//     `email` claim or as its verifierId: the shape of the key that matched decides, not the
+//     claim it came from. Only an account found by an exact non-e-mail verifierId (X:
+//     `twitter|<id>`) needs just the first list;
+//   - the e-mail must name exactly one account (case-insensitively), the account must be an
+//     unlinked, enabled, non-organization `web3auth` row;
+//   - walletPolicy `replace` (a Web3Auth-derived address of the old network): the address the
+//     token PROVES replaces it, the old one stays in the record — but only while the account still
+//     holds the archived address (or none); `keep` (a server-held key or an external wallet): the
+//     wallet is never touched.
+//
+// External wallets ("same account, never a duplicate"):
+//   - a recorded account found by the wallet the token proves is the ordinary wallet route; the
+//     record is then closed with the wallet kept;
+//   - a wallet a re-bind REPLACED is never a login credential again. Before P0 a legacy row's
+//     wallet came from the request body, so the archived address may belong to someone who
+//     squatted the e-mail, not to its owner. A token proving such an address gets
+//     IDENTITY_CONFLICT `replaced_wallet` — no login, and no duplicate account either. A real
+//     external-wallet owner is kept by listing the account in --keep-wallet-ids before --apply
+//     (walletPolicy `keep`), or handled by support.
+//
+// Accounts that once logged in through two connections with one e-mail (legacy accounts were
+// e-mail keyed) stay reachable through both while both verify e-mail: after the first re-bind,
+// a second e-mail-trusted connection with the same address logs in without changing the pair or
+// the wallet. Nothing of this applies to accounts created on the new network.
+
+const REBIND_STATUS = { PENDING: 'pending', REBOUND: 'rebound' };
+
+function rebindConflict(reason, candidate, identity, candidateBy) {
+  logger.warn('identity_conflict', {
+    reason,
+    candidateBy,
+    candidateUserId: candidate && candidate.id,
+    verifier: identity.verifier,
+    route: 'network_rebind',
+  });
+  return fail('IDENTITY_CONFLICT', 'This login cannot be linked to the existing account automatically', {
+    reason,
+    candidateUserId: candidate && candidate.id,
+  });
+}
+
+function sameEmail(a, b) {
+  return typeof a === 'string' && typeof b === 'string' && a.trim().toLowerCase() === b.trim().toLowerCase();
+}
+
+/** Close a pending record after the account was linked on another route (wallet kept). */
+async function closeRebindRecord(db, userId, identity, address) {
+  await db.web3AuthNetworkRebind.updateMany({
+    where: { userId, status: REBIND_STATUS.PENDING },
+    data: {
+      status: REBIND_STATUS.REBOUND,
+      newVerifier: identity.verifier,
+      newVerifierId: identity.verifierId,
+      newAddress: address || null,
+      reboundAt: new Date(),
+    },
+  });
+}
+
+/**
+ * The re-bind itself. Returns `{ user, action: 'rebound' }`, `{ user, action: 'login' }` (second
+ * e-mail-trusted connection), throws IDENTITY_CONFLICT, or returns null to let the ordinary
+ * checks decide (they then refuse or link exactly as without the switch).
+ */
+async function networkRebind(db, cfg, { candidate, candidateBy, record, identity, walletAddress, ambiguousEmail }) {
+  const unlinked = candidate.web3authVerifier == null && candidate.web3authVerifierId == null;
+  const emailTrusted = cfg.emailTrustedVerifiers.includes(identity.verifier);
+
+  if (record.status === REBIND_STATUS.REBOUND) {
+    // The token proves the wallet the account holds now (an external wallet that was kept while
+    // the account re-bound through a social connection): the cryptographic route, as always.
+    if (
+      candidateBy === 'wallet' &&
+      !unlinked &&
+      walletConsistent(candidate, walletAddress) &&
+      isVerifierAllowed(cfg, identity.verifier)
+    ) {
+      logger.info('identity_kept_wallet_login', { userId: candidate.id, verifier: identity.verifier });
+      return { user: candidate, action: 'login' };
+    }
+    // Second connection, same verified e-mail, on an account the first re-bind linked to an
+    // e-mail-trusted connection. Anything else falls through to candidate_already_linked.
+    if (
+      candidateBy === 'email' &&
+      !ambiguousEmail &&
+      !unlinked &&
+      emailTrusted &&
+      isVerifierAllowed(cfg, identity.verifier) &&
+      cfg.emailTrustedVerifiers.includes(candidate.web3authVerifier) &&
+      candidate.web3authVerifier !== identity.verifier &&
+      sameEmail(identity.email, candidate.email)
+    ) {
+      logger.info('identity_secondary_email_login', {
+        userId: candidate.id,
+        verifier: identity.verifier,
+        linkedVerifier: candidate.web3authVerifier,
+      });
+      return { user: candidate, action: 'login' };
+    }
+    return null;
+  }
+
+  // pending
+  if (candidateBy === 'wallet') return null; // the token proves the stored wallet: ordinary route
+  if (candidate.authType !== 'web3auth' || !unlinked) return null;
+  if (!cfg.rebindVerifiers.includes(identity.verifier)) return null;
+  if (ambiguousEmail) throw rebindConflict('ambiguous_email', candidate, identity, candidateBy);
+  if (!isVerifierAllowed(cfg, identity.verifier)) {
+    throw rebindConflict('verifier_not_in_allowlist', candidate, identity, candidateBy);
+  }
+  // The key that found the account was its e-mail column (exactly or case-insensitively), so
+  // the account is found by an e-mail-shaped key whenever that column holds an address — also
+  // when the token carried the address as its verifierId and had no `email` claim.
+  const emailKeyed = candidateBy === 'email' || (typeof candidate.email === 'string' && candidate.email.includes('@'));
+  if (emailKeyed && !emailTrusted) throw rebindConflict('email_not_trusted', candidate, identity, candidateBy);
+
+  // Replace only the address the record archived (or an empty slot). A wallet bound after the
+  // apply by another path (a signed bind, a partner payout bind) is not an old-network address.
+  const replace =
+    record.walletPolicy === 'replace' &&
+    (!candidate.walletAddress || sameAddress(candidate.walletAddress, record.oldAddress));
+  if (replace && !walletAddress) throw rebindConflict('rebind_no_wallet_proof', candidate, identity, candidateBy);
+  if (replace) {
+    const holder = await db.user.findFirst({
+      where: { walletAddress: { equals: walletAddress, mode: 'insensitive' }, id: { not: candidate.id } },
+    });
+    if (holder) throw rebindConflict('wallet_in_use', candidate, identity, candidateBy);
+  }
+
+  const now = new Date();
+  const newAddress = replace ? walletAddress : candidate.walletAddress || null;
+  try {
+    await db.$transaction(async (tx) => {
+      const linked = await tx.user.updateMany({
+        where: { id: candidate.id, web3authVerifier: null, web3authVerifierId: null },
+        data: {
+          web3authVerifier: identity.verifier,
+          web3authVerifierId: identity.verifierId,
+          web3authLinkedAt: now,
+          ...(replace && { walletAddress }),
+        },
+      });
+      const closed = await tx.web3AuthNetworkRebind.updateMany({
+        where: { userId: candidate.id, status: REBIND_STATUS.PENDING },
+        data: {
+          status: REBIND_STATUS.REBOUND,
+          newVerifier: identity.verifier,
+          newVerifierId: identity.verifierId,
+          newAddress,
+          reboundAt: now,
+        },
+      });
+      if (linked.count !== 1 || closed.count !== 1) {
+        throw Object.assign(new Error('rebind race'), { rebindRace: true });
+      }
+    });
+  } catch (err) {
+    if (err && err.rebindRace) throw rebindConflict('backfill_race', candidate, identity, candidateBy);
+    if (err && err.code === 'P2002') throw rebindConflict('unique_violation', candidate, identity, candidateBy);
+    throw err;
+  }
+  const user = await db.user.findUnique({ where: { id: candidate.id } });
+  logger.info('identity_network_rebound', {
+    userId: user.id,
+    candidateBy,
+    verifier: identity.verifier,
+    walletPolicy: record.walletPolicy,
+    evidence: record.evidence,
+    walletReplaced: Boolean(replace && record.oldAddress && !sameAddress(record.oldAddress, walletAddress)),
+  });
+  return { user, action: 'rebound' };
+}
+
+/**
+ * A wallet a re-bind replaced is not a credential. Pre-P0 rows took their wallet from the
+ * request body, so the archived address proves nothing about who owns the account: logging in
+ * with it would hand a squatter the owner's re-bound account. Refuse instead of logging in, and
+ * instead of creating a duplicate account for that address. Only an address the token proves
+ * reaches here, after the pair, e-mail and wallet lookups all missed.
+ */
+async function refuseReplacedWallet(db, identity, walletAddress) {
+  const record = await db.web3AuthNetworkRebind.findFirst({
+    where: {
+      oldAddress: { equals: walletAddress, mode: 'insensitive' },
+      status: REBIND_STATUS.REBOUND,
+      walletPolicy: 'replace',
+    },
+  });
+  if (!record) return;
+  throw rebindConflict('replaced_wallet', { id: record.userId }, identity, 'replaced_wallet');
+}
+
 /**
  * Map a verified identity to a DDC user (plan §2.1):
  *   1. hit by (web3authVerifier, web3authVerifierId) → login
@@ -749,6 +1007,7 @@ function defaultName(identity, accountEmail) {
  *        - the row is found by the key the token carries in the e-mail column AND the verifier
  *          is named in WEB3AUTH_LEGACY_VERIFIERS AND, when that key is an IdP-asserted e-mail,
  *          the token asserts `email_verified === true` (F03: an e-mail claim alone is not proof)
+ *      plus, only while WEB3AUTH_NETWORK_REBIND=on, the network re-bind described above
  *   3. otherwise IDENTITY_CONFLICT (never merged)
  *   4. no candidate → create
  *
@@ -758,13 +1017,14 @@ function defaultName(identity, accountEmail) {
  *        runs only when a new row will be created and may throw to abort
  * @param options.afterCreate async (tx, user) => void; runs inside the create transaction
  * @param options.db prisma client (tests inject a mock)
- * @returns {{ user, action: 'login'|'backfilled'|'created' }}
+ * @returns {{ user, action: 'login'|'backfilled'|'rebound'|'created' }}
  */
 async function resolveUser(identity, options = {}) {
   const cfg = getConfig();
   const db = options.db || require('../utils/prisma');
   const walletAddress = options.walletAddress || null;
   const pair = { web3authVerifier: identity.verifier, web3authVerifierId: identity.verifierId };
+  const rebindOn = cfg.networkRebind;
 
   // 1. Hit by pair
   const linked = await db.user.findUnique({ where: { web3authVerifier_web3authVerifierId: pair } });
@@ -776,24 +1036,67 @@ async function resolveUser(identity, options = {}) {
   // 2. Lazy backfill candidate — only facts the verified token asserts (e-mail / verifierId / proven wallet)
   const accountEmail = accountEmailFor(identity);
   let candidate = accountEmail ? await db.user.findUnique({ where: { email: accountEmail } }) : null;
+  let ambiguousEmail = false;
   if (!candidate && accountEmail && accountEmail.includes('@')) {
     // Legacy rows kept the provider's casing; the unique index is case-sensitive.
-    candidate = await db.user.findFirst({
-      where: { email: { equals: accountEmail, mode: 'insensitive' } },
-    });
+    if (rebindOn) {
+      // Two rows that differ only in case cannot be told apart by the token: never pick one.
+      const rows = await db.user.findMany({
+        where: { email: { equals: accountEmail, mode: 'insensitive' } },
+        take: 2,
+      });
+      candidate = rows[0] || null;
+      ambiguousEmail = rows.length > 1;
+    } else {
+      candidate = await db.user.findFirst({
+        where: { email: { equals: accountEmail, mode: 'insensitive' } },
+      });
+    }
   }
   // `email` = the IdP asserted this address; `verifier_id` = the legacy column holds the
   // token-proven verifierId (X rows kept `twitter|<id>` there, the column being NOT NULL).
   let candidateBy = candidate ? (identity.email ? 'email' : 'verifier_id') : null;
+  if (
+    !candidate &&
+    rebindOn &&
+    identity.email &&
+    identity.verifierId &&
+    !identity.verifierId.includes('@')
+  ) {
+    // An X token that now carries an e-mail: the legacy row is still keyed by `twitter|<id>`.
+    candidate = await db.user.findUnique({ where: { email: identity.verifierId } });
+    candidateBy = candidate ? 'verifier_id' : null;
+  }
   if (!candidate && walletAddress) {
     candidate = await db.user.findFirst({
       where: { walletAddress: { equals: walletAddress, mode: 'insensitive' } },
     });
     candidateBy = candidate ? 'wallet' : null;
   }
+  if (!candidate && rebindOn && walletAddress) {
+    await refuseReplacedWallet(db, identity, walletAddress);
+  }
 
   if (candidate) {
     guardAccount(candidate);
+    const record = rebindOn
+      ? await db.web3AuthNetworkRebind.findUnique({ where: { userId: candidate.id } })
+      : null;
+    if (rebindOn && ambiguousEmail && !record) {
+      throw rebindConflict('ambiguous_email', candidate, identity, candidateBy);
+    }
+    if (record) {
+      const rebound = await networkRebind(db, cfg, {
+        candidate,
+        candidateBy,
+        record,
+        identity,
+        walletAddress,
+        ambiguousEmail,
+      });
+      if (rebound) return rebound;
+    }
+
     // Explicit opt-in, by verifier name: an EMPTY list links nothing by e-mail (it used to mean
     // "any verifier", and the Web3Auth client id ships in the SPA bundle, so "any verifier with a
     // token whose e-mail claim the holder controls" was enough to claim a victim's row).
@@ -851,6 +1154,11 @@ async function resolveUser(identity, options = {}) {
         candidateUserId: candidate.id,
       });
     }
+    if (record && record.status === REBIND_STATUS.PENDING) {
+      // Linked on an ordinary route (typically an external wallet proving the stored address):
+      // the wallet stays, and the record says so.
+      await closeRebindRecord(db, candidate.id, identity, candidate.walletAddress || walletAddress);
+    }
     const user = await db.user.findUnique({ where: { id: candidate.id } });
     logger.info('identity_backfilled', { userId: user.id, candidateBy, verifier: identity.verifier });
     return { user, action: 'backfilled' };
@@ -907,7 +1215,9 @@ module.exports = {
   getAllowLegacyFallback,
   Web3AuthIdentityError,
   EXTERNAL_WALLET_VERIFIER,
+  isNetworkRebindOn: () => getConfig().networkRebind,
   _internals: {
+    assertRebindConfig,
     DEFAULTS,
     HTTP_STATUS,
     PIN_MODES,
