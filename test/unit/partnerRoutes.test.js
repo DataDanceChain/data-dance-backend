@@ -498,7 +498,7 @@ describe('/partner/tge — per-field scopes', () => {
   it('/status adds the referral summary, with and without an inviter', async () => {
     await withFields(ALL_FIELDS, async () => {
       const alone = await status(await mintToken(FULL_SCOPE));
-      assert.deepEqual(alone.body.referral, { code: 'DDC-AB23CD', inviter_sub: null, direct_invitees: 0 });
+      assert.deepEqual(alone.body.referral, { code: 'DDC-AB23CD', inviter_sub: null, inviter_code: null, direct_invitees: 0 });
 
       await prisma.referral.create({ data: { inviterId: 'upline-1', inviteeId: user.id, code: 'ZZ99ZZ', campaignSlug: null } });
       await prisma.referral.create({ data: { inviterId: user.id, inviteeId: 'downline-1', code: 'AB23CD', campaignSlug: null } });
@@ -511,7 +511,56 @@ describe('/partner/tge — per-field scopes', () => {
       await prisma.referral.create({ data: { inviterId: 'stranger', inviteeId: 'downline-4', code: 'QQ33QQ', campaignSlug: null } });
 
       const res = await status(await mintToken(FULL_SCOPE));
-      assert.deepEqual(res.body.referral, { code: 'DDC-AB23CD', inviter_sub: 'upline-1', direct_invitees: 3 });
+      // 'upline-1' has no User row here, so its code cannot be resolved: null, never invented.
+      assert.deepEqual(res.body.referral, { code: 'DDC-AB23CD', inviter_sub: 'upline-1', inviter_code: null, direct_invitees: 3 });
+    });
+  });
+
+  it('/status carries the inviter\'s own invite code in display form, and nothing else about them (decision 47)', async () => {
+    await withFields(ALL_FIELDS, async () => {
+      prisma.user.rows.push({
+        id: 'upline-1', email: 'upline-person@example.com', name: 'Upline Person', walletAddress: '0xdef',
+        referralCode: 'ZZ99ZZ', totalPoints: 777, createdAt: new Date('2025-01-01T00:00:00Z'),
+      });
+      await prisma.referral.create({ data: { inviterId: 'upline-1', inviteeId: user.id, code: 'ZZ99ZZ', campaignSlug: null } });
+
+      const res = await status(await mintToken(FULL_SCOPE));
+      assert.equal(res.status, 200, res.text);
+      assert.deepEqual(res.body.referral, { code: 'DDC-AB23CD', inviter_sub: 'upline-1', inviter_code: 'DDC-ZZ99ZZ', direct_invitees: 0 });
+      const body = JSON.stringify(res.body);
+      for (const secret of ['upline-person@example.com', 'u***@example.com', 'Upline Person', '0xdef', '777']) {
+        assert.equal(body.includes(secret), false, `the inviter's ${secret} must never be sent`);
+      }
+    });
+  });
+
+  it('an inviter whose code is still in the legacy form reads as null and is never allocated one', async () => {
+    await withFields(ALL_FIELDS, async () => {
+      prisma.user.rows.push({ id: 'upline-1', email: 'upline-person@example.com', referralCode: 'legacy-referral-code-0002' });
+      await prisma.referral.create({ data: { inviterId: 'upline-1', inviteeId: user.id, code: 'legacy-referral-code-0002', campaignSlug: null } });
+
+      const res = await status(await mintToken(FULL_SCOPE));
+      assert.equal(res.status, 200, res.text);
+      assert.equal(res.body.referral.inviter_sub, 'upline-1');
+      assert.equal(res.body.referral.inviter_code, null);
+      assert.equal(prisma.user.rows.find((r) => r.id === 'upline-1').referralCode, 'legacy-referral-code-0002', 'a GET must not change a row');
+    });
+  });
+
+  it('the inviter code follows the referral gates: absent without tge:referral or without the freeze-list entry', async () => {
+    prisma.user.rows.push({ id: 'upline-1', referralCode: 'ZZ99ZZ' });
+    await prisma.referral.create({ data: { inviterId: 'upline-1', inviteeId: user.id, code: 'ZZ99ZZ', campaignSlug: null } });
+    await withFields(ALL_FIELDS, async () => {
+      const res = await status(await mintToken('tge:identity tge:status tge:points'));
+      assert.equal(res.status, 200, res.text);
+      assert.equal('referral' in res.body, false);
+      assert.equal(JSON.stringify(res.body).includes('ZZ99ZZ'), false);
+    });
+    await withFields('registered_at,wallet_bound,data_licence_granted,points', async () => {
+      const res = await status(await mintToken(FULL_SCOPE));
+      assert.equal(res.status, 200, res.text);
+      assert.equal('referral' in res.body, false);
+      assert.equal(JSON.stringify(res.body).includes('ZZ99ZZ'), false);
     });
   });
 

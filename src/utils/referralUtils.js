@@ -154,6 +154,20 @@ async function getInviterId(userId) {
 }
 
 /**
+ * Who invited this user, plus the inviter's own invite code as stored (no "DDC-" prefix) — or
+ * null when nobody did. One read: the Referral row with the inviter's `referralCode` only, never
+ * their name, e-mail or anything else (decision 47: the partner shows the upline's code).
+ */
+async function getInviter(userId) {
+  const row = await prisma.referral.findUnique({
+    where: { inviteeId: userId },
+    include: { inviter: { select: { referralCode: true } } },
+  });
+  if (!row?.inviterId) return null;
+  return { id: row.inviterId, referralCode: row.inviter?.referralCode || null };
+}
+
+/**
  * How many people this user invited DIRECTLY (level 1).
  *
  * Counts EVERY direct invite, campaign invites (Mother's Day, Summer Travel) included: the
@@ -321,6 +335,7 @@ module.exports = {
   findUserByReferralCode,
   validateReferralCode,
   getInviterId,
+  getInviter,
   countDirectInvitees,
   DISPLAY_CODE_PREFIX,
   bareDisplayReferralCode,
