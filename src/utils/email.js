@@ -1,4 +1,5 @@
 const nodemailer = require('nodemailer');
+const { appPublicUrl } = require('../constants/lifeContext');
 
 // 检查必要的环境变量
 const requiredEnvVars = [
@@ -34,6 +35,8 @@ const transporter = missingEnvVars.length === 0 ? nodemailer.createTransport({
  */
 const sendPromotionEmail = async (to, promotionInfo) => {
   const { promotionTitle, promotionDescription, startDate, endDate } = promotionInfo;
+  // FRONTEND_URL is the CORS allow-list and may be a comma-separated list; the link needs ONE
+  // origin. appPublicUrl() is the app's public URL: APP_PUBLIC_URL, else FRONTEND_URL's first entry.
 
   const mailOptions = {
     from: process.env.SMTP_FROM,
@@ -44,7 +47,7 @@ const sendPromotionEmail = async (to, promotionInfo) => {
       <p>${promotionDescription}</p>
       <p>Start Date: ${new Date(startDate).toLocaleDateString()}</p>
       <p>End Date: ${new Date(endDate).toLocaleDateString()}</p>
-      <p>Click here to view more details: <a href="${process.env.FRONTEND_URL}/activities">View Promotion</a></p>
+      <p>Click here to view more details: <a href="${appPublicUrl()}/activities">View Promotion</a></p>
     `
   };
 
