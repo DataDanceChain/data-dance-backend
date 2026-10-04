@@ -216,6 +216,39 @@ describe('public rate limit', () => {
   });
 });
 
+describe('server errors', () => {
+  it('a database failure is a plain 500: the error text (query, file paths, database host) stays in the server log', async () => {
+    seedLink({ id: 'link-1' });
+    // What Prisma puts in error.message: the call, the server's file path and line, the database host.
+    const prismaText = "\nInvalid `prisma.trackedLink.findUnique()` invocation in\n/app/src/services/trackedLink.js:173:41\n\nCan't reach database server at `db.internal:5432`";
+    const fail = async () => { throw Object.assign(new Error(prismaText), { code: 'P1001' }); };
+    const saved = { ...prisma.trackedLink };
+    Object.assign(prisma.trackedLink, { findUnique: fail, findMany: fail, create: fail });
+    try {
+      const responses = {
+        'GET /api/go/event': await request(server).get('/api/go/event'),
+        'POST /api/go/event/events': await postEvent('event', { visitorId: VISITOR, event: 'open' }),
+        'GET /api/ops/links': await request(server).get('/api/ops/links').set('Authorization', ADMIN),
+        'POST /api/ops/links': await request(server)
+          .post('/api/ops/links')
+          .set('Authorization', ADMIN)
+          .send({ slug: 'new-link', name: 'n', kind: 'app', title: 't' }),
+        'GET /api/ops/links/link-1': await request(server).get('/api/ops/links/link-1').set('Authorization', ADMIN),
+        'PATCH /api/ops/links/link-1': await request(server)
+          .patch('/api/ops/links/link-1')
+          .set('Authorization', ADMIN)
+          .send({ active: false }),
+      };
+      for (const [route, res] of Object.entries(responses)) {
+        assert.equal(res.status, 500, route);
+        assert.deepEqual(res.body, { status: 'error', message: 'Server error' }, route);
+      }
+    } finally {
+      Object.assign(prisma.trackedLink, saved);
+    }
+  });
+});
+
 describe('/api/ops/links', () => {
   const routes = [
     ['get', '/api/ops/links'],

@@ -1,12 +1,21 @@
 const service = require('../services/trackedLink');
+const { createLogger } = require('../utils/logger');
 
+const logger = createLogger('trackedLinkController');
+
+/**
+ * A 4xx is one of the service's own errors: its code and message are written for the caller.
+ * Anything else is unexpected, usually a Prisma error, whose message carries the query, the
+ * server's file paths and source lines, or the database host. Two of these routes are public, so
+ * that text goes to the server log only and the caller gets a plain 500.
+ */
 function sendError(res, error) {
   const status = error.statusCode || 500;
-  return res.status(status).json({
-    status: status >= 500 ? 'error' : 'fail',
-    code: error.code,
-    message: error.message || 'Server error',
-  });
+  if (status >= 500) {
+    logger.error('Tracked link request failed', error);
+    return res.status(status).json({ status: 'error', message: 'Server error' });
+  }
+  return res.status(status).json({ status: 'fail', code: error.code, message: error.message });
 }
 
 async function list(req, res) {

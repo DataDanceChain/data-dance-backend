@@ -87,6 +87,14 @@ describe('tracked links on Postgres', () => {
     assert.deepEqual(columns.map((c) => c.name), ['createdAt', 'dest', 'event', 'id', 'linkId', 'referrerHost', 'visitorId']);
   });
 
+  it('an error Postgres raises is answered as a plain 500, without Prisma\'s text', async () => {
+    // Postgres refuses a NUL byte in a text column; the title reaches the insert unchanged.
+    const res = await ops('post', '/links').send({ slug: slugOf('nul'), name: 'NUL', kind: 'app', title: 'a\u0000b' });
+    assert.equal(res.status, 500, JSON.stringify(res.body));
+    assert.deepEqual(res.body, { status: 'error', message: 'Server error' });
+    assert.equal(await prisma.trackedLink.count({ where: { slug: slugOf('nul') } }), 0);
+  });
+
   it('create a link → the public page reads it → events → the ops list and detail count them', async () => {
     const slug = slugOf('page');
     const created = await ops('post', '/links').send({
