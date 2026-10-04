@@ -86,6 +86,32 @@ async function loadAttestedRows(prisma) {
 }
 
 /**
+ * True only for the DDC RPC's answer to an unknown transaction hash. Unlike the JSON-RPC spec
+ * (result null), DDC answers eth_getTransactionByHash for an unknown hash with the error
+ * {code: -32000, message: 'data not found'} (eth_getTransactionReceipt returns null as expected).
+ * ethers wraps it as UNKNOWN_ERROR "could not coalesce error" with the RPC error in `error`.
+ * Matches that exact code and message only; every other error is a real failure.
+ */
+function isTxNotFoundError(error) {
+  const rpc = error && (error.error || (error.info && error.info.error));
+  return Boolean(rpc)
+    && Number(rpc.code) === -32000
+    && String(rpc.message || '').trim().toLowerCase() === 'data not found';
+}
+
+/** Raw eth_getTransactionByHash; null when the chain does not know the hash. Other errors throw. */
+async function getRawTransaction(provider, txHash) {
+  try {
+    // Raw JSON-RPC on purpose: ethers' getTransaction() rejects DDC transactions ("yParity
+    // mismatch"), and only existence matters here.
+    return await provider.send('eth_getTransactionByHash', [txHash]);
+  } catch (error) {
+    if (isTxNotFoundError(error)) return null;
+    throw error;
+  }
+}
+
+/**
  * valid           receipt proves the attestation; left alone
  * needs_reattest  receipt missing / failed / without the right Attested log; re-attest
  * blocked         cannot be repaired safely by this script (no content hash, tx still pending)
@@ -101,9 +127,7 @@ async function classifyRow(row, { provider, attester, sender }) {
   }
   const receipt = await provider.getTransactionReceipt(txHash);
   if (!receipt) {
-    // Raw JSON-RPC on purpose: ethers' getTransaction() rejects DDC transactions ("yParity
-    // mismatch"), and only existence matters here.
-    const tx = await provider.send('eth_getTransactionByHash', [txHash]);
+    const tx = await getRawTransaction(provider, txHash);
     if (tx) return { status: 'blocked', code: 'tx_pending' };
     return { status: 'needs_reattest', code: 'tx_not_found' };
   }
@@ -331,6 +355,8 @@ if (require.main === module) {
 module.exports = {
   parseArgs,
   loadAttestedRows,
+  isTxNotFoundError,
+  getRawTransaction,
   classifyRow,
   planReattest,
   applyReattest,

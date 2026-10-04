@@ -11,7 +11,7 @@ const path = require('path');
 
 const { createMockPrisma } = require('../helpers/mockPrisma');
 const {
-  FakeChain, randomHash, randomAddress, contentHash, makeReceipt,
+  FakeChain, randomHash, randomAddress, contentHash, makeReceipt, dataNotFoundError,
 } = require('../helpers/fakeAttestChain');
 const script = require('../../scripts/reattestCommerceOrders');
 const { attestHashOnChain } = require('../../src/utils/commerceAttestChain');
@@ -147,6 +147,63 @@ describe('plan: selection', () => {
     await script.planReattest({ prisma, provider: chain.provider, attester: chain.attester, sender: signer });
     assert.equal(JSON.stringify(prisma.store), before);
     assert.equal(chain.calls.includes('sendTransaction'), false);
+  });
+});
+
+describe('classifyRow: what the DDC RPC really returns', () => {
+  const ctx = () => ({ prisma, provider: chain.provider, attester: chain.attester, sender: signer });
+
+  it('the fake chain answers an unknown hash like DDC: an error, not null', async () => {
+    await assert.rejects(
+      chain.provider.send('eth_getTransactionByHash', [randomHash()]),
+      (error) => error.error.code === -32000 && error.error.message === 'data not found',
+    );
+  });
+
+  it('classifies a row with an unknown tx hash as needs_reattest:tx_not_found without throwing', async () => {
+    const unknown = row('purchaseOrder', { attestationTxHash: `0x${'ab'.repeat(32)}` });
+    const verdict = await script.classifyRow({ model: 'purchaseOrder', ...unknown }, ctx());
+    assert.deepEqual(verdict, { status: 'needs_reattest', code: 'tx_not_found' });
+  });
+
+  it('one unknown hash does not abort the plan for the other rows', async () => {
+    const s = seedMatrix();
+    const plan = await script.planReattest(ctx());
+    const code = Object.fromEntries(plan.needs.map((r) => [r.id, r.code]));
+    assert.equal(code[s.notFound.id], 'tx_not_found');
+    assert.equal(plan.counts.purchaseOrder.checked, 7);
+  });
+
+  it('still blocks a hash the chain knows but has not mined', async () => {
+    const pendingHash = randomHash();
+    chain.pendingTxs.set(pendingHash.toLowerCase(), { hash: pendingHash, blockNumber: null });
+    const r = row('purchaseOrder', { attestationTxHash: pendingHash });
+    assert.deepEqual(await script.classifyRow({ model: 'purchaseOrder', ...r }, ctx()), { status: 'blocked', code: 'tx_pending' });
+  });
+
+  const otherErrors = [
+    ['another -32000 message', () => Object.assign(new Error('could not coalesce error'), { error: { code: -32000, message: 'header not found' } })],
+    ['"data not found" with another code', () => Object.assign(new Error('could not coalesce error'), { error: { code: -32603, message: 'data not found' } })],
+    ['a network error', () => Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' })],
+    ['a timeout', () => Object.assign(new Error('request timeout'), { code: 'TIMEOUT' })],
+  ];
+  for (const [label, make] of otherErrors) {
+    it(`rethrows ${label} from eth_getTransactionByHash`, async () => {
+      const r = row('purchaseOrder', { attestationTxHash: randomHash() });
+      const error = make();
+      chain.failures.send = error;
+      await assert.rejects(script.classifyRow({ model: 'purchaseOrder', ...r }, ctx()), (e) => e === error);
+      await assert.rejects(script.planReattest(ctx()), (e) => e === error);
+    });
+  }
+
+  it('isTxNotFoundError matches only code -32000 with message "data not found"', () => {
+    assert.equal(script.isTxNotFoundError(dataNotFoundError('eth_getTransactionByHash', [])), true);
+    assert.equal(script.isTxNotFoundError({ info: { error: { code: -32000, message: 'data not found' } } }), true);
+    assert.equal(script.isTxNotFoundError({ error: { code: -32000, message: 'data not found for block' } }), false);
+    assert.equal(script.isTxNotFoundError({ error: { code: -32001, message: 'data not found' } }), false);
+    assert.equal(script.isTxNotFoundError(new Error('data not found')), false);
+    assert.equal(script.isTxNotFoundError(null), false);
   });
 });
 

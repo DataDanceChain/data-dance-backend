@@ -25,6 +25,21 @@ function attestedLog({ attester, hash, sender, txHash, index = 0, ...over }) {
   };
 }
 
+/**
+ * What ethers v6 JsonRpcProvider.send() throws for the DDC RPC's answer to an unknown transaction
+ * hash: the RPC returns the error {code:-32000, message:'data not found'} instead of result null,
+ * and ethers wraps it (verified against https://dev-exp-alpha.datadance.ai/eth/rpc, 2026-10-04).
+ */
+function dataNotFoundError(method, params) {
+  const rpcError = { code: -32000, message: 'data not found' };
+  return Object.assign(new Error(`could not coalesce error (error=${JSON.stringify(rpcError)}, code=UNKNOWN_ERROR)`), {
+    code: 'UNKNOWN_ERROR',
+    shortMessage: 'could not coalesce error',
+    error: rpcError,
+    payload: { method, params, id: 1, jsonrpc: '2.0' },
+  });
+}
+
 function makeReceipt({ txHash, from, to, status = 1, logs = [] }) {
   return { hash: txHash, from, to, status, logs, blockNumber: 1 };
 }
@@ -51,7 +66,12 @@ class FakeChain {
       getCode: call('getCode', (address) => self.code.get(String(address).toLowerCase()) || '0x'),
       getTransactionReceipt: call('getTransactionReceipt', (hash) => self.receipts.get(String(hash).toLowerCase()) || null),
       send: call('send', (method, params) => {
-        if (method === 'eth_getTransactionByHash') return self.pendingTxs.get(String(params[0]).toLowerCase()) || null;
+        if (method === 'eth_getTransactionByHash') {
+          const tx = self.pendingTxs.get(String(params[0]).toLowerCase())
+            || [...self.receipts.values()].find((r) => String(r.hash).toLowerCase() === String(params[0]).toLowerCase());
+          if (tx) return tx;
+          throw dataNotFoundError('eth_getTransactionByHash', params);
+        }
         throw new Error(`FakeChain: unsupported raw method ${method}`);
       }),
       getTransactionCount: call('getTransactionCount', (address, tag) => {
@@ -128,6 +148,7 @@ module.exports = {
   FakeChain,
   attestedLog,
   makeReceipt,
+  dataNotFoundError,
   randomHash,
   randomAddress,
   contentHash,
