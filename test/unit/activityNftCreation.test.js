@@ -236,7 +236,8 @@ describe('ACTIVITY_NFT_ENABLED', () => {
     for (const value of ['true', 'TRUE', ' True ']) {
       assert.equal(isActivityNftEnabled({ ACTIVITY_NFT_ENABLED: value }), true, JSON.stringify(value));
     }
-    for (const value of [undefined, '', 'false', '0', '1', 'yes', 'on', 'enabled']) {
+    // Values that contain "true" but are not "true" must stay off (an `includes` check would pass them).
+    for (const value of [undefined, '', 'false', '0', '1', 'yes', 'on', 'enabled', 'untrue', 'true1', '"true"', 'true false']) {
       assert.equal(isActivityNftEnabled({ ACTIVITY_NFT_ENABLED: value }), false, JSON.stringify(value));
     }
     assert.equal(isActivityNftEnabled({}), false, 'unset');
