@@ -1,7 +1,12 @@
 /**
  * Deploy CommerceAttester to DDC chain 44508 using the backend wallet.
  * Does not print private keys. Writes src/contracts/commerceAttester.deployed.json
- * when the tx lands.
+ * only when the deploy receipt succeeded, names a contractAddress, and that
+ * address has code (eth_getCode).
+ *
+ * On DDC chain 44508 the contract address is NOT the standard CREATE address
+ * (sender + nonce): ethers' contract.getAddress() / getCreateAddress() give an
+ * address with no code. Only receipt.contractAddress is right.
  *
  * Usage:
  *   node scripts/deployCommerceAttester.js
@@ -43,6 +48,27 @@ async function compileIfNeeded() {
   return artifact;
 }
 
+/**
+ * The deployed address, read from the receipt and proven by eth_getCode. Throws (so nothing is
+ * written) when the receipt failed, has no contractAddress, or the address has no code.
+ */
+async function deployedAddressFromReceipt(provider, receipt) {
+  if (!receipt) throw new Error('Deploy transaction has no receipt');
+  if (Number(receipt.status) !== 1) {
+    throw new Error(`Deploy transaction failed (status ${String(receipt.status)}); not writing ${path.basename(ARTIFACT)}`);
+  }
+  const raw = String(receipt.contractAddress || '').trim();
+  if (!ethers.isAddress(raw)) {
+    throw new Error(`Deploy receipt has no contractAddress; not writing ${path.basename(ARTIFACT)}`);
+  }
+  const address = ethers.getAddress(raw);
+  const code = await provider.getCode(address);
+  if (typeof code !== 'string' || code === '0x' || code.length <= 2) {
+    throw new Error(`No contract code at receipt.contractAddress ${address}; not writing ${path.basename(ARTIFACT)}`);
+  }
+  return address;
+}
+
 async function main() {
   const artifact = await compileIfNeeded();
   const provider = getProvider();
@@ -55,7 +81,7 @@ async function main() {
   const factory = new ethers.ContractFactory(artifact.abi, artifact.bytecode, wallet);
   const contract = await factory.deploy();
   const receipt = await contract.deploymentTransaction().wait();
-  const address = await contract.getAddress();
+  const address = await deployedAddressFromReceipt(provider, receipt);
   const deployed = {
     chainId: getChainId(),
     address,
@@ -71,7 +97,11 @@ async function main() {
   console.log('CommerceAttester', address, 'tx', deployed.deployTxHash);
 }
 
-main().catch((error) => {
-  console.error(error.message || error);
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch((error) => {
+    console.error(error.message || error);
+    process.exit(1);
+  });
+}
+
+module.exports = { deployedAddressFromReceipt };
