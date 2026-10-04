@@ -1,0 +1,10 @@
+# Local only, never committed: this package lives in a PUBLIC repository.
+# local.env holds the server login and the 1Password reference (copy local.env.example); a copy or backup of it too.
+local.env
+local.env.*
+!local.env.example
+# remote.sh writes every call's output to logs/ and the packed frontend source (a private repository) to out/.
+logs/
+out/
+*.part
+.DS_Store
