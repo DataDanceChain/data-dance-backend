@@ -3,10 +3,11 @@
  * of src/utils/prisma.js BEFORE any service is required, so no test needs a database.
  *
  * Supported: findUnique / findFirst / findMany / count / create / update / upsert / updateMany /
- * delete / deleteMany / groupBy (`by` one column, optional `_max`) with `where` conditions on scalar
- * equality, null, { gt, gte, lt, lte, not, in, equals }, `NOT: {...}`, `OR: [...]` and JSON path filters
- * (`{ path: [...], equals }`); `{ increment }` in update data; `include` for the relations
- * declared below (to-one with optional `select`, to-many with optional `where`).
+ * delete / deleteMany / groupBy (`by` one or more columns, optional `_max` and `_count`) with `where`
+ * conditions on scalar equality, null, { gt, gte, lt, lte, not, in, equals }, `NOT: {...}`,
+ * `OR: [...]` and JSON path filters (`{ path: [...], equals }`); `{ increment }` in update data;
+ * `include` for the relations declared below (to-one with optional `select`, to-many with optional
+ * `where`); column defaults on create for the models that declare them below.
  * `select` is ignored on reads — the whole row comes back — so a test must never rely on it to
  * hide a column.
  */
@@ -72,7 +73,7 @@ function matches(row, where = {}) {
   });
 }
 
-function makeModel(store, name, { relations = {} } = {}) {
+function makeModel(store, name, { relations = {}, defaults = () => ({}) } = {}) {
   const rows = (store[name] = store[name] || []);
   const withInclude = (row, include) => {
     if (!row || !include) return row;
@@ -110,7 +111,7 @@ function makeModel(store, name, { relations = {} } = {}) {
     findMany: async ({ where, include } = {}) => rows.filter((r) => matches(r, where)).map((r) => withInclude({ ...r }, include)),
     count: async ({ where } = {}) => rows.filter((r) => matches(r, where)).length,
     create: async ({ data }) => {
-      const row = { id: crypto.randomUUID(), createdAt: new Date(), ...data };
+      const row = { id: crypto.randomUUID(), createdAt: new Date(), ...defaults(), ...data };
       rows.push(row);
       return { ...row };
     },
@@ -122,7 +123,7 @@ function makeModel(store, name, { relations = {} } = {}) {
     upsert: async ({ where, update, create }) => {
       const row = rows.find((r) => matches(r, where));
       if (row) return { ...applyData(row, update || {}) };
-      const created = { id: crypto.randomUUID(), createdAt: new Date(), ...create };
+      const created = { id: crypto.randomUUID(), createdAt: new Date(), ...defaults(), ...create };
       rows.push(created);
       return { ...created };
     },
@@ -136,20 +137,28 @@ function makeModel(store, name, { relations = {} } = {}) {
       if (index < 0) throw new Error(`mockPrisma: ${name} record not found`);
       return rows.splice(index, 1)[0];
     },
-    groupBy: async ({ by, where, _max } = {}) => {
-      if (!Array.isArray(by) || by.length !== 1) throw new Error('mockPrisma: groupBy supports one `by` column');
-      const [column] = by;
+    groupBy: async ({ by, where, _max, _count } = {}) => {
+      if (!Array.isArray(by) || by.length === 0) throw new Error('mockPrisma: groupBy needs at least one `by` column');
+      // One column groups on the raw value (as before); several on their JSON tuple.
+      const groupKey = (row) => (by.length === 1 ? row[by[0]] : JSON.stringify(by.map((column) => row[column])));
       const groups = new Map();
       for (const r of rows.filter((row) => matches(row, where))) {
-        if (!groups.has(r[column])) groups.set(r[column], []);
-        groups.get(r[column]).push(r);
+        const key = groupKey(r);
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(r);
       }
-      return [...groups.entries()].map(([value, members]) => {
-        const out = { [column]: value };
+      return [...groups.values()].map((members) => {
+        const out = Object.fromEntries(by.map((column) => [column, members[0][column]]));
         if (_max) {
           out._max = {};
           for (const field of Object.keys(_max).filter((k) => _max[k])) {
             out._max[field] = members.reduce((best, m) => (best == null || m[field] > best ? m[field] : best), null);
+          }
+        }
+        if (_count) {
+          out._count = {};
+          for (const field of Object.keys(_count).filter((k) => _count[k])) {
+            out._count[field] = field === '_all' ? members.length : members.filter((m) => m[field] != null).length;
           }
         }
         return out;
@@ -208,6 +217,13 @@ function createMockPrisma() {
     disbursementPartner: makeModel(store, 'disbursementPartner'),
     disbursementItem: makeModel(store, 'disbursementItem', {
       relations: { partner: { model: 'disbursementPartner', field: 'partnerId', references: 'id' } },
+    }),
+    // Column defaults as in prisma/migrations/20260929010000_tracked_links.
+    trackedLink: makeModel(store, 'trackedLink', {
+      defaults: () => ({ body: '', buttonLabel: '', targetUrl: null, active: true, updatedAt: new Date() }),
+    }),
+    trackedLinkHit: makeModel(store, 'trackedLinkHit', {
+      defaults: () => ({ dest: null, referrerHost: null }),
     }),
     /** Interactive transactions run inline: the mock is single-threaded and never rolls back. */
     async $transaction(arg) {

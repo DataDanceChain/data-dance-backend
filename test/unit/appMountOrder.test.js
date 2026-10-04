@@ -161,6 +161,32 @@ describe('src/app mount order', () => {
     assert.equal(res.headers['cache-control'], 'no-store');
   });
 
+  it('the tracked-link page is public: /api/go answers without a credential, ahead of the routers that protect /api', async () => {
+    const at = new Date();
+    prisma.trackedLink.rows.splice(0, prisma.trackedLink.rows.length, {
+      id: 'link-mount-1',
+      slug: 'mount-check',
+      name: 'Mount check',
+      kind: 'page',
+      title: 'Mount check',
+      body: '',
+      buttonLabel: 'Go',
+      targetUrl: 'https://example.com/',
+      active: true,
+      createdAt: at,
+      updatedAt: at,
+    });
+    prisma.trackedLinkHit.rows.splice(0, prisma.trackedLinkHit.rows.length);
+    const page = await request(server).get('/api/go/mount-check');
+    assert.equal(page.status, 200, `got ${page.status} ${JSON.stringify(page.body)}`);
+    assert.equal(page.body.data.slug, 'mount-check');
+    const hit = await request(server).post('/api/go/mount-check/events').send({ visitorId: 'mountvisitor1', event: 'open' });
+    assert.equal(hit.status, 200, `got ${hit.status} ${JSON.stringify(hit.body)}`);
+    assert.deepEqual(hit.body.data, { counted: true });
+    const ops = await request(server).get('/api/ops/links');
+    assert.equal(ops.status, 401, 'the ops list of links still needs an ops token');
+  });
+
   it('the consent limiter stays per user: one user exhausting it does not throttle another from the same IP', async () => {
     const other = { ...user, id: 'user-mount-2', email: 'mount2@example.com' };
     prisma.user.rows.push(other);
