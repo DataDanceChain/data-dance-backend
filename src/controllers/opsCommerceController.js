@@ -552,11 +552,16 @@ exports.attestOrder = async (req, res) => {
     const commerceAttest = require('../services/commerceAttest');
     const data = await commerceAttest.attestPaidOrder(req.params.id, {
       txHash: req.body?.txHash,
+      submittedBy: `ops:${req.opsAdmin?.username || 'unknown'}`,
     });
     return res.json({ status: 'success', data });
   } catch (error) {
     const code = error.statusCode || 500;
-    return res.status(code).json({ status: code >= 500 ? 'error' : 'fail', message: error.message });
+    return res.status(code).json({
+      status: code >= 500 ? 'error' : 'fail',
+      ...(error.code ? { code: error.code } : {}),
+      message: error.message,
+    });
   }
 };
 

@@ -1,7 +1,15 @@
 const crypto = require('crypto');
 const prisma = require('../utils/prisma');
 const { BUYER_LICENCE_VERSION } = require('../constants/buyerLicence');
-const { attestHashOnChain } = require('../utils/commerceAttestChain');
+const commerceAttestChain = require('../utils/commerceAttestChain');
+
+const { attestHashOnChain } = commerceAttestChain;
+
+let cachedLogger = null;
+function log() {
+  if (!cachedLogger) cachedLogger = require('../utils/logger').createLogger('commerceAttest');
+  return cachedLogger;
+}
 
 const LICENCE_SCHEMA = 'datadance.commerce.licence.v1';
 const LICENCE_VERSION = 1;
@@ -107,6 +115,40 @@ function looksLikeTxHash(value) {
   return /^0x[0-9a-fA-F]{64}$/.test(String(value || '').trim());
 }
 
+function wasSubmitted(txHash) {
+  return txHash !== undefined && txHash !== null && String(txHash).trim() !== '';
+}
+
+/**
+ * A caller-supplied tx hash is stored only after the chain proves it: status 1 and an Attested
+ * log from the configured attester for exactly `attestationHash` (any sender; the org may attest
+ * from its own wallet). Returns null when no hash was supplied, else { txHash, sender }.
+ * Throws 422 (does not prove it) or 503 (chain unreachable) with a `code`; callers store nothing.
+ */
+async function verifySubmittedTxHash(txHash, attestationHash, { orderId, submittedBy } = {}) {
+  if (!wasSubmitted(txHash)) return null;
+  try {
+    const proof = await commerceAttestChain.verifySubmittedAttestation(txHash, attestationHash);
+    log().info('commerce attestation tx submitted and verified', {
+      orderId,
+      submittedBy: submittedBy || null,
+      txHash: proof.txHash,
+      sender: proof.sender,
+      attester: proof.attester,
+      blockNumber: proof.blockNumber == null ? null : String(proof.blockNumber),
+    });
+    return proof;
+  } catch (error) {
+    log().warn('commerce attestation tx rejected', {
+      orderId,
+      submittedBy: submittedBy || null,
+      code: error.code || 'ATTESTATION_VERIFY_FAILED',
+      statusCode: error.statusCode || 500,
+    });
+    throw error;
+  }
+}
+
 async function loadOrderForAttest(orderId) {
   return prisma.purchaseOrder.findUnique({
     where: { id: orderId },
@@ -157,7 +199,7 @@ async function persistAttestation(orderId, {
   return publicAttestation(updated);
 }
 
-async function attestPaidOrder(orderId, { txHash } = {}) {
+async function attestPaidOrder(orderId, { txHash, submittedBy } = {}) {
   const order = await loadOrderForAttest(orderId);
   if (!order) {
     throw Object.assign(new Error('Order not found'), { statusCode: 404 });
@@ -168,8 +210,10 @@ async function attestPaidOrder(orderId, { txHash } = {}) {
     : null;
   const payload = existingPayload || await buildReceiptForOrder(order);
   const attestationHash = hashLicenceReceipt(payload);
-  const pasted = looksLikeTxHash(txHash) ? String(txHash).trim() : null;
-  let attestationTxHash = pasted || (looksLikeTxHash(order.attestationTxHash) ? order.attestationTxHash : null);
+  const proof = await verifySubmittedTxHash(txHash, attestationHash, { orderId: order.id, submittedBy });
+  let attestationTxHash = proof
+    ? proof.txHash
+    : (looksLikeTxHash(order.attestationTxHash) ? order.attestationTxHash : null);
   let chain = null;
 
   if (!attestationTxHash) {
@@ -190,6 +234,7 @@ async function attestPaidOrder(orderId, { txHash } = {}) {
     orderNumber: order.orderNumber,
     chainPending: !saved.attestationTxHash,
     chainReason: chain && !chain.ok ? chain.reason : null,
+    ...(proof ? { attestationSender: proof.sender } : {}),
   };
 }
 
@@ -218,6 +263,7 @@ module.exports = {
   attestationLabelFor,
   omitAttestationPayload,
   publicAttestation,
+  verifySubmittedTxHash,
   attestPaidOrder,
   attestPaidOrderSafe,
 };

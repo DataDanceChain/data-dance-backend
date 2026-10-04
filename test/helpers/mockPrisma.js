@@ -4,7 +4,7 @@
  *
  * Supported: findUnique / findFirst / findMany / count / create / update / upsert / updateMany /
  * delete / deleteMany / groupBy (`by` one column, optional `_max`) with `where` conditions on scalar
- * equality, null, { gt, gte, lt, lte, not, in, equals }, `NOT: {...}` and JSON path filters
+ * equality, null, { gt, gte, lt, lte, not, in, equals }, `NOT: {...}`, `OR: [...]` and JSON path filters
  * (`{ path: [...], equals }`); `{ increment }` in update data; `include` for the relations
  * declared below (to-one with optional `select`, to-many with optional `where`).
  * `select` is ignored on reads — the whole row comes back — so a test must never rely on it to
@@ -58,6 +58,7 @@ function isJsonPathFilter(cond) {
 function matches(row, where = {}) {
   return Object.entries(where).every(([key, cond]) => {
     if (key === 'NOT') return !matches(row, cond);
+    if (key === 'OR') return cond.some((alt) => matches(row, alt));
     if (isJsonPathFilter(cond)) {
       const { path: jsonPath, ...rest } = cond;
       const value = jsonPath.reduce((obj, part) => (obj == null ? undefined : obj[part]), row[key]);
@@ -192,6 +193,22 @@ function createMockPrisma() {
     userDailyEvent: makeModel(store, 'userDailyEvent'),
     crawlerTask: makeModel(store, 'crawlerTask'),
     ssoTicket: makeModel(store, 'ssoTicket'),
+    // Commerce rows that attestHashOnChain writes to (purchase orders and disbursement items).
+    purchaseOrder: makeModel(store, 'purchaseOrder', {
+      relations: {
+        lineItems: { model: 'orderLineItem', field: 'id', references: 'orderId', many: true },
+        payments: { model: 'payment', field: 'id', references: 'orderId', many: true },
+        allocations: { model: 'procurementAllocation', field: 'id', references: 'orderId', many: true },
+      },
+    }),
+    orderLineItem: makeModel(store, 'orderLineItem'),
+    payment: makeModel(store, 'payment'),
+    procurementAllocation: makeModel(store, 'procurementAllocation'),
+    dataNFT: makeModel(store, 'dataNFT'),
+    disbursementPartner: makeModel(store, 'disbursementPartner'),
+    disbursementItem: makeModel(store, 'disbursementItem', {
+      relations: { partner: { model: 'disbursementPartner', field: 'partnerId', references: 'id' } },
+    }),
     /** Interactive transactions run inline: the mock is single-threaded and never rolls back. */
     async $transaction(arg) {
       if (typeof arg === 'function') return arg(prisma);
