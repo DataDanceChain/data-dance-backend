@@ -158,6 +158,14 @@ const keyGenerators = {
     if (!match) return `ip:${req.ip || 'anonymous'}`;
     return `tok:${crypto.createHash('sha256').update(match[1]).digest('hex')}`;
   },
+  // Per submitted e-mail, hashed (the address never enters the store or the "Rate limit exceeded"
+  // log). The caller chooses this key, so it is ONLY ever stacked behind an IP limiter: a fresh
+  // address per request gains nothing there. Falls back to the IP when no e-mail was sent.
+  bodyEmailHash: (req) => {
+    const email = req.body && typeof req.body.email === 'string' ? req.body.email.trim().toLowerCase() : '';
+    if (!email) return `ip:${req.ip || 'anonymous'}`;
+    return `email:${crypto.createHash('sha256').update(email).digest('hex')}`;
+  },
 };
 
 /** Per-client ceiling for authenticated confidential token requests; env, read per request. */
@@ -197,6 +205,28 @@ const rateLimiters = {
     message: 'Too many authentication attempts, please try again later.',
     skipSuccessfulRequests: true, // Only count failed attempts
     keyGenerator: keyGenerators.ip
+  }),
+
+  // POST /api/auth/register — EVERY attempt counts, successes included (decision 43 A). `auth`
+  // only counts failures, so a successful sign-up was free: anyone could create unverified
+  // accounts for any address without limit. Ten an hour per IP is plenty for a person (or an
+  // office behind one NAT) and nothing for a script. Stacked with `auth`, which stays as it is.
+  registerIp: createRateLimiter({
+    name: 'registerIp',
+    windowMs: 60 * 60 * 1000,
+    max: 10,
+    message: 'Too many sign-ups from this network. Please try again later.',
+    keyGenerator: keyGenerators.ip
+  }),
+
+  // POST /api/auth/register — per submitted e-mail (hashed), behind registerIp. Stops the same
+  // address being hammered (the endpoint tells an existing address apart) from many IPs.
+  registerEmail: createRateLimiter({
+    name: 'registerEmail',
+    windowMs: 60 * 60 * 1000,
+    max: 5,
+    message: 'Too many sign-up attempts for this e-mail address. Please try again later.',
+    keyGenerator: keyGenerators.bodyEmailHash
   }),
 
   // Public endpoints (more lenient)
