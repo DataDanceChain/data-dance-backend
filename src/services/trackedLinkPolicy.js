@@ -1,5 +1,6 @@
 const KINDS = new Set(['app', 'page', 'redirect']);
 const SLUG_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const DEST_PATTERN = /^[A-Za-z0-9_-]{1,32}$/;
 
 function publicOrigin() {
   return String(process.env.TRACKED_LINK_ORIGIN || 'https://app.datadance.ai').replace(/\/$/, '');
@@ -35,6 +36,15 @@ function normalizeTarget(kind, value) {
   return { url: parsed.toString() };
 }
 
+/**
+ * Where a visitor went next, as the public page reports it ('ios', 'android', 'target'). The
+ * caller is anonymous, so only a short token is kept; anything else is stored as null.
+ */
+function normalizeDest(value) {
+  const raw = String(value ?? '').trim();
+  return DEST_PATTERN.test(raw) ? raw : null;
+}
+
 function referrerHost(header) {
   const raw = String(header || '').trim();
   if (!raw) return null;
@@ -52,5 +62,6 @@ module.exports = {
   validSlug,
   cleanText,
   normalizeTarget,
+  normalizeDest,
   referrerHost,
 };

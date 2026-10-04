@@ -6,6 +6,7 @@ const {
   validSlug,
   cleanText,
   normalizeTarget,
+  normalizeDest,
   referrerHost,
 } = require('./trackedLinkPolicy');
 
@@ -169,15 +170,26 @@ async function linkStats(id) {
   };
 }
 
+/**
+ * The active link behind a public slug, or null. A slug no link could have (createLink only
+ * accepts validSlug) is answered without a query: the public routes take anything a caller sends,
+ * and a NUL byte, for one, makes Postgres throw.
+ */
+async function findActiveBySlug(slug) {
+  const key = normalizeSlug(slug);
+  if (!validSlug(key)) return null;
+  const link = await prisma.trackedLink.findUnique({ where: { slug: key } });
+  return link && link.active ? link : null;
+}
+
 async function publicLink(slug) {
-  const link = await prisma.trackedLink.findUnique({ where: { slug: normalizeSlug(slug) } });
-  if (!link || !link.active) return null;
-  return presentPublic(link);
+  const link = await findActiveBySlug(slug);
+  return link ? presentPublic(link) : null;
 }
 
 async function recordHit(slug, { visitorId, event, dest, referrer }) {
-  const link = await prisma.trackedLink.findUnique({ where: { slug: normalizeSlug(slug) } });
-  if (!link || !link.active) throw httpError(404, 'link_not_found', 'Link not found');
+  const link = await findActiveBySlug(slug);
+  if (!link) throw httpError(404, 'link_not_found', 'Link not found');
   const visitor = cleanText(visitorId, 64);
   if (!/^[A-Za-z0-9_-]{8,64}$/.test(visitor)) {
     throw httpError(400, 'invalid_visitor', 'A visitor id is required');
@@ -196,7 +208,7 @@ async function recordHit(slug, { visitorId, event, dest, referrer }) {
       linkId: link.id,
       visitorId: visitor,
       event,
-      dest: cleanText(dest, 32) || null,
+      dest: normalizeDest(dest),
       referrerHost: referrerHost(referrer),
     },
   });

@@ -195,6 +195,64 @@ describe('POST /api/go/:slug/events (public)', () => {
   });
 });
 
+describe('public input that never reaches the database', () => {
+  // Percent-encoded as a browser would send them: NUL, too short, too long, a space, an RTL override.
+  const badSlugs = ['%00', 'a', 'x'.repeat(41), 'has%20space', '%E2%80%AEevent', 'event%00'];
+
+  it('a malformed slug is a 404 without a lookup, for the page and for its events', async () => {
+    seedLink();
+    let lookups = 0;
+    const findUnique = prisma.trackedLink.findUnique;
+    prisma.trackedLink.findUnique = async (...args) => { lookups += 1; return findUnique(...args); };
+    try {
+      for (const slug of badSlugs) {
+        const page = await request(server).get(`/api/go/${slug}`);
+        assert.equal(page.status, 404, `GET ${slug}`);
+        assert.equal(page.body.code, 'link_not_found');
+        const hit = await postEvent(slug, { visitorId: VISITOR, event: 'open' });
+        assert.equal(hit.status, 404, `POST ${slug}`);
+        assert.equal(hit.body.code, 'link_not_found');
+      }
+      assert.equal(lookups, 0, 'no malformed slug was looked up');
+      assert.equal((await request(server).get('/api/go/event')).status, 200, 'a well-formed slug still is');
+      assert.equal(lookups, 1);
+    } finally {
+      prisma.trackedLink.findUnique = findUnique;
+    }
+    assert.equal(hits().length, 0);
+  });
+
+  it('`dest` is kept only as a short token (ios, android, target); anything else is stored as null', async () => {
+    seedLink();
+    const sent = {
+      ios: 'ios',
+      android: 'android',
+      target: 'target',
+      nul: '\u0000',
+      markup: '<script>alert(1)</script>',
+      long: 'x'.repeat(33),
+      object: { $gt: '' },
+      empty: '',
+    };
+    for (const [name, dest] of Object.entries(sent)) {
+      const res = await postEvent('event', { visitorId: `visitor-${name}`, event: 'continue', dest });
+      assert.equal(res.status, 200, `${name}: ${JSON.stringify(res.body)}`);
+      assert.deepEqual(res.body.data, { counted: true }, name);
+    }
+    const stored = Object.fromEntries(hits().map((h) => [h.visitorId.slice('visitor-'.length), h.dest]));
+    assert.deepEqual(stored, {
+      ios: 'ios',
+      android: 'android',
+      target: 'target',
+      nul: null,
+      markup: null,
+      long: null,
+      object: null,
+      empty: null,
+    });
+  });
+});
+
 describe('public rate limit', () => {
   it('the page and its events share the per-IP `public` limiter: 200 a minute, then 429', async () => {
     seedLink();

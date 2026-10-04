@@ -95,6 +95,22 @@ describe('tracked links on Postgres', () => {
     assert.equal(await prisma.trackedLink.count({ where: { slug: slugOf('nul') } }), 0);
   });
 
+  it('a NUL byte in the public slug or in `dest` never reaches Postgres', async () => {
+    const page = await request(server).get('/api/go/%00');
+    assert.equal(page.status, 404, JSON.stringify(page.body));
+    const event = await postEvent('event%00', { visitorId: visitorOf('nul'), event: 'open' });
+    assert.equal(event.status, 404, JSON.stringify(event.body));
+
+    const slug = slugOf('dest');
+    const created = await ops('post', '/links').send({ slug, name: 'dest', kind: 'app', title: 'dest' });
+    assert.equal(created.status, 201, JSON.stringify(created.body));
+    const hit = await postEvent(slug, { visitorId: visitorOf('nul'), event: 'continue', dest: 'a\u0000b' });
+    assert.equal(hit.status, 200, JSON.stringify(hit.body));
+    assert.deepEqual(hit.body.data, { counted: true });
+    const [row] = await prisma.trackedLinkHit.findMany({ where: { linkId: created.body.data.id } });
+    assert.equal(row.dest, null);
+  });
+
   it('create a link → the public page reads it → events → the ops list and detail count them', async () => {
     const slug = slugOf('page');
     const created = await ops('post', '/links').send({
