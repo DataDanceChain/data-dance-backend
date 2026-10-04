@@ -4,7 +4,7 @@ const { ethers } = require('ethers');
 
 const DEFAULT_RPC = 'https://dev-exp-alpha.datadance.ai/eth/rpc';
 const DEFAULT_CHAIN_ID = 44508;
-const DEFAULT_ATTESTER = '0xE0fFF93Ae34D87E6393242b7BbB46029E8d02FeC';
+const DEFAULT_ATTESTER = '0xe944f723af28659622425F62a49F48844C152a93';
 const CHAIN_TIMEOUT_MS = 20000;
 
 function withTimeout(promise, label) {
