@@ -5,7 +5,7 @@
  * the consent endpoints when the credential is an SSO session, and the property the whole
  * design rests on: that session opens NOTHING else.
  */
-const { describe, it, beforeEach, afterEach } = require('node:test');
+const { describe, it, before, after, beforeEach, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('crypto');
 const express = require('express');
@@ -13,6 +13,7 @@ const request = require('supertest');
 const jwt = require('jsonwebtoken');
 
 const { installMockPrisma } = require('../helpers/mockPrisma');
+const { listenLoopback } = require('../helpers/loopbackServer');
 
 const prisma = installMockPrisma();
 // `protect` builds its own PrismaClient when authMiddleware loads; point it at the same store
@@ -73,6 +74,13 @@ app.use('/partner/tge', partnerTgeRoutes);
 app.get('/api/profile', protect, (req, res) => res.json({ status: 'success', data: { id: req.user.id } }));
 app.use('/', oauthRoutes);
 
+// Bound to 127.0.0.1, not the wildcard address `request(server)` would use: on macOS a wildcard
+// listener can share its port with another local service on 127.0.0.1, which then answers our
+// requests (see test/helpers/loopbackServer.js).
+let server;
+before(async () => { server = await listenLoopback(app); });
+after(() => new Promise((resolve) => server.close(resolve)));
+
 const cUser = {
   id: 'user-1',
   email: 'sloan@example.com',
@@ -104,13 +112,13 @@ function userJwt(user = cUser, extra = {}) {
 }
 
 function appTicket(token, body = { client_id: 'tge-test' }) {
-  const call = request(app).post('/api/sso/app-ticket');
+  const call = request(server).post('/api/sso/app-ticket');
   if (token) call.set('Authorization', `Bearer ${token}`);
   return call.send(body);
 }
 
 function exchange(ticket) {
-  return request(app).post('/api/sso/ticket/exchange').send({ ticket });
+  return request(server).post('/api/sso/ticket/exchange').send({ ticket });
 }
 
 function pkce() {
@@ -129,7 +137,7 @@ let authzCookie = '';
 
 /** Browser step: start an authorize transaction and return the consent request id. */
 async function authorizeRequestId() {
-  const res = await request(app).get('/oauth/authorize').query({
+  const res = await request(server).get('/oauth/authorize').query({
     response_type: 'code',
     client_id: 'tge-test',
     redirect_uri: REDIRECT,
@@ -144,7 +152,7 @@ async function authorizeRequestId() {
 
 /** POST /api/oauth/consent from the browser that started the authorization. */
 function consentCall(token) {
-  const call = request(app).post('/api/oauth/consent');
+  const call = request(server).post('/api/oauth/consent');
   if (token) call.set('Authorization', `Bearer ${token}`);
   if (authzCookie) call.set('Cookie', authzCookie);
   return call;
@@ -421,7 +429,7 @@ describe('consent with an SSO session', () => {
     const session = (await handoff()).body.data.session_token;
     const requestId = await authorizeRequestId();
 
-    const summary = await request(app)
+    const summary = await request(server)
       .get(`/api/oauth/requests/${requestId}`)
       .set('Authorization', `Bearer ${session}`);
     assert.equal(summary.status, 200, summary.text);
@@ -444,7 +452,7 @@ describe('consent with an SSO session', () => {
     // Even validly signed, a session for anything but the partner client is not a live session.
     const { token } = signSsoSession({ userId: cUser.id, clientId: 'mcp-demo', jti: 'ticket-x' });
 
-    const summary = await request(app)
+    const summary = await request(server)
       .get(`/api/oauth/requests/${requestId}`)
       .set('Authorization', `Bearer ${token}`);
     assert.equal(summary.status, 401);
@@ -466,7 +474,7 @@ describe('consent with an SSO session', () => {
       { now: Date.now() - 10 * 60 * 1000 },
     );
 
-    const summary = await request(app)
+    const summary = await request(server)
       .get(`/api/oauth/requests/${requestId}`)
       .set('Authorization', `Bearer ${token}`);
     const consent = await consentCall(token).send({ requestId, allow: true });
@@ -491,11 +499,11 @@ describe('consent with an SSO session', () => {
 
   it('reads the request summary anonymously, but refuses a credential it cannot use (T12.5)', async () => {
     const requestId = await authorizeRequestId();
-    const anonymous = await request(app).get(`/api/oauth/requests/${requestId}`);
-    const withJwt = await request(app)
+    const anonymous = await request(server).get(`/api/oauth/requests/${requestId}`);
+    const withJwt = await request(server)
       .get(`/api/oauth/requests/${requestId}`)
       .set('Authorization', `Bearer ${userJwt()}`);
-    const withPartnerToken = await request(app)
+    const withPartnerToken = await request(server)
       .get(`/api/oauth/requests/${requestId}`)
       .set('Authorization', `Bearer ddc_tge_${crypto.randomBytes(24).toString('base64url')}`);
 
@@ -543,7 +551,7 @@ describe('App hand-off ⇄ initiator binding (item 1)', () => {
     assert.ok(authzCookie.startsWith('__Host-ddc_authz='), 'the cookie is set on the API origin, in this browser');
 
     // 4. The consent page (same browser) reads the request and approves it.
-    const summary = await request(app).get(`/api/oauth/requests/${requestId}`).set('Authorization', `Bearer ${session}`);
+    const summary = await request(server).get(`/api/oauth/requests/${requestId}`).set('Authorization', `Bearer ${session}`);
     assert.equal(summary.status, 200, summary.text);
     const consent = await consentCall(session).send({ requestId, allow: true });
     assert.equal(consent.status, 200, consent.text);
@@ -554,7 +562,7 @@ describe('App hand-off ⇄ initiator binding (item 1)', () => {
     const session = (await handoff()).body.data.session_token;
     const requestId = await authorizeRequestId();
     // Same user, same client, live session — but the request was started somewhere else.
-    const res = await request(app)
+    const res = await request(server)
       .post('/api/oauth/consent')
       .set('Authorization', `Bearer ${session}`)
       .send({ requestId, allow: true });
@@ -570,22 +578,22 @@ describe('the SSO session is consent-only (T12)', () => {
   it('is rejected by /partner/tge/me, /api/sso/app-ticket and any protect-guarded route', async () => {
     const session = (await handoff()).body.data.session_token;
 
-    const me = await request(app).get('/partner/tge/me').set('Authorization', `Bearer ${session}`);
+    const me = await request(server).get('/partner/tge/me').set('Authorization', `Bearer ${session}`);
     const ticket = await appTicket(session);
-    const profile = await request(app).get('/api/profile').set('Authorization', `Bearer ${session}`);
+    const profile = await request(server).get('/api/profile').set('Authorization', `Bearer ${session}`);
 
     assert.equal(me.status, 401, me.text);
     assert.equal(ticket.status, 401, ticket.text);
     assert.equal(ticket.body.data, undefined);
     assert.equal(profile.status, 401, profile.text);
     // The same user JWT does work on that route: it is the credential that is scoped, not the user.
-    assert.equal((await request(app).get('/api/profile').set('Authorization', `Bearer ${userJwt()}`)).status, 200);
+    assert.equal((await request(server).get('/api/profile').set('Authorization', `Bearer ${userJwt()}`)).status, 200);
   });
 
   it('cannot be replayed as a user JWT even with the prefix stripped', async () => {
     const session = (await handoff()).body.data.session_token;
     const bare = session.replace(/^ddc_sso_/, '');
-    assert.equal((await request(app).get('/api/profile').set('Authorization', `Bearer ${bare}`)).status, 401);
+    assert.equal((await request(server).get('/api/profile').set('Authorization', `Bearer ${bare}`)).status, 401);
     assert.equal((await appTicket(bare)).status, 401);
   });
 });
@@ -690,7 +698,7 @@ describe('App page session (decision 37)', () => {
 
   async function approve(session) {
     const requestId = await authorizeRequestId();
-    const summary = await request(app).get(`/api/oauth/requests/${requestId}`).set('Authorization', `Bearer ${session}`);
+    const summary = await request(server).get(`/api/oauth/requests/${requestId}`).set('Authorization', `Bearer ${session}`);
     const consent = await consentCall(session).send({ requestId, allow: true });
     return { requestId, summary, consent };
   }
@@ -773,7 +781,7 @@ describe('App page session (decision 37)', () => {
       },
     });
 
-    const summary = await request(app).get('/api/oauth/requests/req-mcp').set('Authorization', `Bearer ${session}`);
+    const summary = await request(server).get('/api/oauth/requests/req-mcp').set('Authorization', `Bearer ${session}`);
     assert.equal(summary.status, 401, summary.text);
     assert.equal(summary.body.code, 'UNAUTHORIZED');
 
@@ -787,8 +795,8 @@ describe('App page session (decision 37)', () => {
   it('stays consent-only for its whole life', async () => {
     const session = (await handoff()).body.data.session_token;
     assert.equal((await approve(session)).consent.status, 200);
-    assert.equal((await request(app).get('/partner/tge/me').set('Authorization', `Bearer ${session}`)).status, 401);
-    assert.equal((await request(app).get('/api/profile').set('Authorization', `Bearer ${session}`)).status, 401);
+    assert.equal((await request(server).get('/partner/tge/me').set('Authorization', `Bearer ${session}`)).status, 401);
+    assert.equal((await request(server).get('/api/profile').set('Authorization', `Bearer ${session}`)).status, 401);
     assert.equal((await appTicket(session)).status, 401);
   });
 
@@ -797,7 +805,7 @@ describe('App page session (decision 37)', () => {
     const requestId = await authorizeRequestId();
     process.env.SSO_TGE_ENABLED = 'false';
 
-    const summary = await request(app).get(`/api/oauth/requests/${requestId}`).set('Authorization', `Bearer ${session}`);
+    const summary = await request(server).get(`/api/oauth/requests/${requestId}`).set('Authorization', `Bearer ${session}`);
     const consent = await consentCall(session).send({ requestId, allow: true });
     for (const res of [summary, consent]) {
       assert.equal(res.status, 401, res.text);
