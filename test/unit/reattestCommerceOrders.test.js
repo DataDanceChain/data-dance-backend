@@ -11,7 +11,7 @@ const path = require('path');
 
 const { createMockPrisma } = require('../helpers/mockPrisma');
 const {
-  FakeChain, randomHash, randomAddress, contentHash, makeReceipt, dataNotFoundError,
+  FakeChain, randomHash, randomAddress, contentHash, makeReceipt, attestedLog, dataNotFoundError,
 } = require('../helpers/fakeAttestChain');
 const script = require('../../scripts/reattestCommerceOrders');
 const { attestHashOnChain } = require('../../src/utils/commerceAttestChain');
@@ -204,6 +204,29 @@ describe('classifyRow: what the DDC RPC really returns', () => {
     assert.equal(script.isTxNotFoundError({ error: { code: -32001, message: 'data not found' } }), false);
     assert.equal(script.isTxNotFoundError(new Error('data not found')), false);
     assert.equal(script.isTxNotFoundError(null), false);
+  });
+
+  it('throws when the RPC returns a receipt for a different transaction', async () => {
+    // Stored under the row's hash, but the receipt (otherwise a perfect proof) names another tx.
+    const hash = contentHash();
+    const asked = randomHash();
+    const other = randomHash();
+    chain.receipts.set(asked.toLowerCase(), makeReceipt({
+      txHash: other, from: signer, to: chain.attester, status: 1,
+      logs: [attestedLog({ attester: chain.attester, hash, sender: signer, txHash: other })],
+    }));
+    const r = row('purchaseOrder', { attestationHash: hash, attestationTxHash: asked });
+    await assert.rejects(
+      script.classifyRow({ model: 'purchaseOrder', ...r }, ctx()),
+      new RegExp(`receipt for a different transaction \\(purchaseOrder ${r.id}\\)`),
+    );
+  });
+
+  it('accepts a receipt whose hash differs from the stored one only in case', async () => {
+    const hash = contentHash();
+    const txHash = chain.mineAttest({ hash, sender: signer });
+    const r = row('purchaseOrder', { attestationHash: hash, attestationTxHash: `0x${txHash.slice(2).toUpperCase()}` });
+    assert.deepEqual(await script.classifyRow({ model: 'purchaseOrder', ...r }, ctx()), { status: 'valid', code: 'valid' });
   });
 });
 

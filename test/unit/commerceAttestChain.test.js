@@ -11,6 +11,7 @@ const { ethers } = require('ethers');
 const {
   attestHashOnChain,
   verifyAttestedReceipt,
+  attesterHasCode,
   ATTESTED_TOPIC,
   toBytes32,
 } = require('../../src/utils/commerceAttestChain');
@@ -112,6 +113,7 @@ describe('attestHashOnChain: success only with a proving receipt', () => {
     ['with a different sender', (ctx) => attestedLog({ ...ctx, sender: randomAddress() })],
     ['with a different event signature', (ctx) => ({ ...attestedLog(ctx), topics: [ethers.id('Other(bytes32,address)'), ...attestedLog(ctx).topics.slice(1)] })],
     ['with a missing sender topic', (ctx) => ({ ...attestedLog(ctx), topics: attestedLog(ctx).topics.slice(0, 2) })],
+    ['with an extra fourth topic (another event shape)', (ctx) => ({ ...attestedLog(ctx), topics: [...attestedLog(ctx).topics, randomHash()] })],
     ['with non-empty data', (ctx) => ({ ...attestedLog(ctx), data: '0x01' })],
     ['marked removed (reorg)', (ctx) => ({ ...attestedLog(ctx), removed: true })],
   ];
@@ -280,7 +282,44 @@ describe('verifyAttestedReceipt (pure)', () => {
     assert.equal(verifyAttestedReceipt(good(), { attester, hash: 'zz', sender }).code, 'invalid_hash');
   });
 
+  it('rejects a log with exactly the right first three topics plus a fourth', () => {
+    const receipt = good();
+    receipt.logs[0].topics = [...receipt.logs[0].topics, randomHash()];
+    const verdict = verifyAttestedReceipt(receipt, { attester, hash, sender });
+    assert.equal(verdict.ok, false);
+    assert.equal(verdict.code, 'no_matching_log');
+  });
+
   it('uses the Attested(bytes32,address) topic', () => {
     assert.equal(ATTESTED_TOPIC, ethers.id('Attested(bytes32,address)'));
+  });
+});
+
+describe('attesterHasCode: only a positive answer is cached', () => {
+  it('asks again after a "no code" answer, so a later deploy is seen without a restart', async () => {
+    const chain = new FakeChain({ withCode: false });
+    assert.equal(await attesterHasCode(chain.provider, chain.attester), false);
+    chain.code.set(chain.attester.toLowerCase(), '0x6080604052');
+    assert.equal(await attesterHasCode(chain.provider, chain.attester), true);
+    assert.equal(chain.calls.filter((c) => c === 'getCode').length, 2);
+  });
+
+  it('attestHashOnChain sends once the attester gains code after an earlier "no code" skip', async () => {
+    const chain = new FakeChain({ withCode: false });
+    const w = chain.wallet();
+    const first = await run(chain, w, contentHash());
+    assert.equal(first.result.ok, false);
+    assert.match(first.result.reason, /has no contract code/);
+    chain.code.set(chain.attester.toLowerCase(), '0x6080604052');
+    const second = await run(chain, w, contentHash());
+    assert.equal(second.result.ok, true);
+    assert.equal(chain.sent.length, 1);
+  });
+
+  it('caches a positive answer (one eth_getCode per address)', async () => {
+    const chain = new FakeChain();
+    assert.equal(await attesterHasCode(chain.provider, chain.attester), true);
+    assert.equal(await attesterHasCode(chain.provider, chain.attester), true);
+    assert.equal(chain.calls.filter((c) => c === 'getCode').length, 1);
   });
 });
