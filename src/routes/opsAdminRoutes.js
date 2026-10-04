@@ -19,6 +19,7 @@ const { protectOps, restrictDemo } = require('../middlewares/opsAuthMiddleware')
 const { rateLimiters } = require('../middlewares/rateLimitMiddleware');
 const { uploadCampaignCover } = require('../middlewares/uploadMiddleware');
 const opsCampaigns = require('../controllers/opsCampaignController');
+const trackedLinks = require('../controllers/trackedLinkController');
 
 let opsTranslate = {};
 try {
@@ -49,6 +50,10 @@ function acceptCampaignCover(req, res, next) {
 router.post('/auth/login', rateLimiters.opsLogin, login);
 router.use(protectOps);
 router.use(restrictDemo);
+mount('get', '/links', trackedLinks.list);
+mount('post', '/links', trackedLinks.create);
+mount('get', '/links/:id', trackedLinks.detail);
+mount('patch', '/links/:id', trackedLinks.update);
 mount('get', '/campaigns', opsCampaigns.list);
 mount('post', '/campaigns/translate', opsCampaigns.translate || opsTranslate.translate);
 mount('post', '/campaigns/cover', acceptCampaignCover, opsCampaigns.uploadCover);
