@@ -35,6 +35,7 @@ const {
 } = require('../services/partnerReferralBind');
 const { issueConfirmToken, verifyConfirmToken } = require('../services/referralBindConfirm');
 const { findUserByPartnerToken } = require('../services/mcpTokenService');
+const { withPartnerVisibleWallet } = require('../services/networkRebindWallet');
 const { hasActiveConsent } = require('../services/dataLicenceConsent');
 const { isDisplayReferralCode, getInviter, countDirectInvitees } = require('../utils/referralUtils');
 const { formatReferralCodeForDisplay, normalizeReferralCodeInput } = require('../utils/referralCodeFormat');
@@ -127,7 +128,10 @@ async function requirePartnerToken(req, res, next) {
     if (!resolved || resolved.token.clientId !== client.clientId) {
       return sendError(req, res, 401, 'invalid_token', 'The access token is invalid, expired or revoked.');
     }
-    req.partner = { client, user: resolved.user, token: resolved.token };
+    // During the Web3Auth network switch an account whose re-bind is pending still stores its
+    // old-network address; every field below then reads it as unbound (networkRebindWallet.js).
+    const user = await withPartnerVisibleWallet(resolved.user);
+    req.partner = { client, user, token: resolved.token };
     return next();
   } catch (error) {
     return next(error);
