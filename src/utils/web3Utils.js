@@ -28,11 +28,6 @@ const signerWallet = (overrideProvider) => {
     return createSignerWallet(overrideProvider || getDdcProvider());
 };
 
-const ActivityNFTFactoryABI = [
-    "function create(bytes32 activityId, address owner) external returns (address)",
-    "event ActivityNFTContractCreated(address indexed newContract)"
-];
-
 const ActivityNFTABI = [
     "function mint(bytes32 hashedUserId) external onlyOwner returns (uint256 tokenId)",
     "function snapshot() external onlyOwner returns (uint256 snapId)",
@@ -40,19 +35,10 @@ const ActivityNFTABI = [
     "event ActivityNFTSnapshot(uint256 snapId, bytes32[] holders)"
 ]
 
-const DataNFTFactoryABI = [
-    "function create(bytes32 collectionId, address owner) external returns (address)",
-    "event DataNFTContractCreated(address indexed newContract)"
-]
-
 const DataNFTABI = [
     "function mint(bytes32 hashedUserId) external onlyOwner returns (uint256 tokenId)",
     "event DataNFTMinted(uint256 tokenId, bytes32 hashedUserId)"
 ]
-
-const activityNFTFactoryAddress = '0x1Ee817752d98037eA6a2Ca38325e496dCAA3CB40';
-
-const dataNFTFactoryAddress = '0xc565EB7363769f8ffAe0005285ccD854c631A0a0';
 
 exports.getActivityNFTContract = async (address) => {
     const contract = new ethers.Contract(address, ActivityNFTABI, getDdcProvider());
@@ -64,40 +50,39 @@ exports.getDataNFTContract = async (address) => {
     return contract;
 }
 
-exports.createActivityNFTContract = async (activityId, owner) => {
-    const wallet = signerWallet();
-    console.log("Wallet:", wallet.address);
-    console.log("Wallet balance:", await wallet.provider.getBalance(wallet.address));
-    const activityNFTFactoryWithSigner = new ethers.Contract(activityNFTFactoryAddress, ActivityNFTFactoryABI, wallet);
+// ---------------------------------------------------------------------------
+// Creating an activity's NFT contract (POST /api/activities/new).
+//
+// Refused here whatever ACTIVITY_NFT_ENABLED says, before any wallet, provider or RPC call. The code
+// this replaces could never succeed: it called create(bytes32,address), which the deployed factory
+// does not implement (its creation function takes other arguments), and it passed the creator's user
+// id, a UUID, as the bytes32, so ethers threw before sending. The deployed factories must not be
+// reused. It also registered a listener for the factory's creation event before sending and removed
+// it only from inside that event's callback, so every call left a listener on the shared provider
+// for the life of the process.
+//
+// Re-enabling needs a new factory with a verified ABI and a new owner key. Then only the two
+// functions below change: activityNftUnavailableReason() returns null once that factory is
+// configured, and createActivityNFTContract() sends the transaction, waits for the receipt and reads
+// the new contract's address from receipt.logs (factory.interface.parseLog). Never contract.on() or
+// provider.on() here: a request must not leave a subscription behind.
+// ---------------------------------------------------------------------------
 
-    activityNFTFactoryWithSigner.on("ActivityNFTContractCreated", (contractAddress, event) => {
-        console.log(`${contractAddress}`);
-        event.removeListener();
+/** Why an activity's NFT contract cannot be created now, for the server log; null once it can. */
+const activityNftUnavailableReason = () =>
+    'no activity NFT factory with a verified interface is configured (the deployed factories must not be reused)';
+
+/** Always rejects with code ACTIVITY_NFT_UNAVAILABLE today, before any wallet, provider or RPC call. */
+exports.createActivityNFTContract = async () => {
+    throw Object.assign(new Error(`activity NFT creation is unavailable: ${activityNftUnavailableReason()}`), {
+        code: 'ACTIVITY_NFT_UNAVAILABLE',
     });
+};
 
-    const tx = await activityNFTFactoryWithSigner.create(activityId, owner);
-    const receipt = await tx.wait();
-    return receipt.logs;
-}
+exports.activityNftUnavailableReason = activityNftUnavailableReason;
 
 exports.getDdcProvider = getDdcProvider;
 
 exports.getBackendWallet = (overrideProvider) => {
     return signerWallet(overrideProvider);
 };
-
-exports.createDataNFTContract = async (collectionId, owner) => {
-    const wallet = signerWallet();
-    // Unchanged from before: the factory is built from DataNFTABI, which has no `create`, so this
-    // function cannot work as written. Nothing calls it.
-    const dataNFTFactoryWithSigner = new ethers.Contract(dataNFTFactoryAddress, DataNFTABI, wallet);
-
-    dataNFTFactoryWithSigner.on("DataNFTContractCreated", (contractAddress, event) => {
-        console.log(`${contractAddress}`);
-        event.removeListener();
-    });
-
-    const tx = await dataNFTFactoryWithSigner.create(collectionId, owner);
-    const receipt = await tx.wait();
-    return receipt.logs;
-}

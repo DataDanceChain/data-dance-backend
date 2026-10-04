@@ -20,12 +20,19 @@ class RecordingProvider {
   constructor(url, network, options) {
     this.ctorArgs = [url, network, options];
     this.balanceCalls = [];
+    this.subscriptions = [];
     created.push(this);
   }
 
   async getBalance(address) {
     this.balanceCalls.push(address);
     throw Object.assign(new Error('recording provider: RPC reached'), { code: 'RECORDED_RPC_CALL' });
+  }
+
+  // An event subscription (contract.on() ends here) is recorded, never started.
+  async on(event) {
+    this.subscriptions.push(event);
+    return this;
   }
 }
 // Same module, one export swapped. Everything else (Wallet, Contract, ...) is the real thing.
@@ -63,8 +70,8 @@ describe('loading the module', () => {
     assert.equal(created.length, 0, 'a provider was built at require time');
     // The public surface the callers rely on is unchanged.
     for (const name of [
+      'activityNftUnavailableReason',
       'createActivityNFTContract',
-      'createDataNFTContract',
       'getActivityNFTContract',
       'getBackendWallet',
       'getDataNFTContract',
@@ -72,6 +79,49 @@ describe('loading the module', () => {
     ]) {
       assert.equal(typeof web3Utils[name], 'function', `${name} is still exported`);
     }
+    // Dead code with no caller, aimed at a factory address that was never deployed on the chain.
+    assert.equal(web3Utils.createDataNFTContract, undefined, 'createDataNFTContract is gone');
+  });
+});
+
+describe('activity NFT creation', () => {
+  const contractListenerMethods = ['on', 'once', 'addListener'];
+
+  for (const [setting, key] of [['no key', undefined], ['a valid key', KEY]]) {
+    it(`createActivityNFTContract refuses before any wallet, provider, listener or RPC call (${setting})`, async () => {
+      if (key !== undefined) process.env.CHAIN_SIGNER_PRIVATE_KEY = key;
+      const listenerCalls = contractListenerMethods.map((name) =>
+        mock.method(realEthers.BaseContract.prototype, name, async function recorded() { return this; }));
+      const providersBefore = created.length;
+      const callsBefore = rpcCalls();
+      const subscriptionsBefore = created.reduce((sum, provider) => sum + provider.subscriptions.length, 0);
+
+      let error = null;
+      try {
+        await web3Utils.createActivityNFTContract('3f2b8c1e-0000-4000-8000-000000000001', ADDRESS);
+      } catch (caught) {
+        error = caught;
+      }
+
+      assert.ok(error, 'it must refuse');
+      assert.equal(error.code, 'ACTIVITY_NFT_UNAVAILABLE');
+      assert.ok(error.message.includes(web3Utils.activityNftUnavailableReason()), 'the message carries the reason');
+      assert.ok(!error.message.includes(KEY_HEX), 'the message never carries the key');
+      for (const spy of listenerCalls) assert.equal(spy.mock.callCount(), 0, 'no contract event listener');
+      assert.equal(created.length, providersBefore, 'no provider was built');
+      assert.equal(rpcCalls(), callsBefore, 'no RPC call was made');
+      assert.equal(
+        created.reduce((sum, provider) => sum + provider.subscriptions.length, 0),
+        subscriptionsBefore,
+        'no provider subscription was created',
+      );
+    });
+  }
+
+  it('activityNftUnavailableReason explains the refusal for the server log', () => {
+    const reason = web3Utils.activityNftUnavailableReason();
+    assert.equal(typeof reason, 'string');
+    assert.match(reason, /verified interface/);
   });
 });
 
@@ -103,24 +153,12 @@ describe('the signing key', () => {
     process.env.CHAIN_SIGNER_PRIVATE_KEY = KEY;
     assert.equal(web3Utils.getBackendWallet({}).address, ADDRESS);
   });
-
-  it('createActivityNFTContract builds its signer from the environment key', async () => {
-    process.env.CHAIN_SIGNER_PRIVATE_KEY = KEY;
-    const provider = web3Utils.getDdcProvider();
-    const calls = provider.balanceCalls.length;
-    await assert.rejects(
-      web3Utils.createActivityNFTContract('activity-1', ADDRESS),
-      (error) => error.code === 'RECORDED_RPC_CALL',
-    );
-    assert.deepEqual(provider.balanceCalls.slice(calls), [ADDRESS], 'the first RPC call asks for the env key\'s own balance');
-  });
 });
 
 describe('without a usable key', () => {
+  // createActivityNFTContract no longer signs anything (see 'activity NFT creation' above).
   const entryPoints = {
     getBackendWallet: () => web3Utils.getBackendWallet(),
-    createActivityNFTContract: () => web3Utils.createActivityNFTContract('activity-1', ADDRESS),
-    createDataNFTContract: () => web3Utils.createDataNFTContract('collection-1', ADDRESS),
   };
 
   for (const [setting, value] of [['unset', undefined], ['blank', '  '], ['malformed', `${KEY_HEX.slice(0, 40)}-SENTINEL`], ['too short', KEY_HEX.slice(2)]]) {
@@ -218,6 +256,15 @@ describe('no key lives in the source', () => {
       assert.ok(!/[0-9a-fA-F]{64}/.test(text), `${file} contains a 64-hex run`);
       assert.ok(!/PROD_MAIN_PRIVATE_KEY|DEV_MAIN_PRIVATE_KEY/.test(text), `${file} still names the old key constants`);
     }
+  });
+
+  it('web3Utils.js holds no contract address and registers no event listener', () => {
+    const text = fs.readFileSync(path.join(root, 'src/utils/web3Utils.js'), 'utf8');
+    // The retired activity/data NFT factory addresses lived here; none may come back.
+    assert.ok(!/0x[0-9a-fA-F]{40}(?![0-9a-fA-F])/.test(text), 'web3Utils.js contains a contract address literal');
+    // Comments may describe .on(); code may not call it.
+    const code = text.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+    assert.ok(!/\.(on|once|addListener)\s*\(/.test(code), 'web3Utils.js calls .on()/.once()/.addListener()');
   });
 });
 
