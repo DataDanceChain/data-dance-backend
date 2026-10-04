@@ -36,7 +36,7 @@ const {
 const { issueConfirmToken, verifyConfirmToken } = require('../services/referralBindConfirm');
 const { findUserByPartnerToken } = require('../services/mcpTokenService');
 const { hasActiveConsent } = require('../services/dataLicenceConsent');
-const { isDisplayReferralCode, getInviterId, countDirectInvitees } = require('../utils/referralUtils');
+const { isDisplayReferralCode, getInviter, countDirectInvitees } = require('../utils/referralUtils');
 const { formatReferralCodeForDisplay, normalizeReferralCodeInput } = require('../utils/referralCodeFormat');
 const { createLogger } = require('../utils/logger');
 const prisma = require('../utils/prisma');
@@ -223,12 +223,19 @@ router.get('/me', requirePartnerToken, readOnlyRequest, requireScope('tge:identi
 });
 
 /**
- * `{ code, inviter_sub, direct_invitees }` — unchanged. `direct_invitees` is a COUNT for the
+ * `{ code, inviter_sub, inviter_code, direct_invitees }`. `direct_invitees` is a COUNT for the
  * partner's leaderboard and `inviter_sub` is the one id the user's own upline rebate needs.
+ * `inviter_code` (decision 47 A, for the "upline inviter" row of the campaign page) is that
+ * inviter's own invite code, shown as "DDC-XXXXXX" like `code` — the code they hand out anyway,
+ * never their name or e-mail. Same scope and freeze-list entry as the rest of `referral`.
  * The complete network — every upline and every downline at any depth, as ids and dates only —
  * is GET /partner/tge/referral-network under its own scope (`tge:referral_network`, Sloan's
  * decision of 2026-09-23). Other users' e-mail, name, wallet, points and status never leave here.
  */
+function displayCodeOrNull(stored) {
+  return isDisplayReferralCode(stored) ? formatReferralCodeForDisplay(stored) : null;
+}
+
 async function referralSummary(user) {
   // READ ONLY. This used to call ensureDisplayReferralCode(), which allocates a short code and
   // writes it to the User row — a partner GET mutating DataDance state, with no request of its
@@ -237,9 +244,16 @@ async function referralSummary(user) {
   // the contract's "a display code could not be resolved". Allocation belongs to the Wallet,
   // where the user is present and the write has a reason.
   // Shown as "DDC-XXXXXX" (decision 36); the stored code has no prefix.
-  const code = isDisplayReferralCode(user.referralCode) ? formatReferralCodeForDisplay(user.referralCode) : null;
-  const [inviterSub, directInvitees] = await Promise.all([getInviterId(user.id), countDirectInvitees(user.id)]);
-  return { code, inviter_sub: inviterSub, direct_invitees: directInvitees };
+  const code = displayCodeOrNull(user.referralCode);
+  const [inviter, directInvitees] = await Promise.all([getInviter(user.id), countDirectInvitees(user.id)]);
+  return {
+    code,
+    inviter_sub: inviter ? inviter.id : null,
+    // Same read-only rule as `code`: an inviter whose code is still in the legacy form reads as
+    // null; it is never allocated from here.
+    inviter_code: inviter ? displayCodeOrNull(inviter.referralCode) : null,
+    direct_invitees: directInvitees,
+  };
 }
 
 router.get('/status', requirePartnerToken, readOnlyRequest, requireScope('tge:status'), async (req, res, next) => {
