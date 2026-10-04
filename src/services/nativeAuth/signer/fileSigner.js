@@ -89,6 +89,8 @@ function b64urlJson(value) {
  *   publicJwk() { kty, n, e } — public members only
  *   sign(header, payload) → Promise<compact JWS>; header.alg must be RS256 and header.kid, when
  *               present, must be this signer's kid.
+ *   ready() / isReady()  the key is usable (always, for a file: it is loaded on creation; KMS
+ *               fetches its public key asynchronously).
  */
 function createFileSigner({ keyFile }) {
   const { privateKey, publicJwk, thumbprint } = loadSigningKey(keyFile);
@@ -96,6 +98,8 @@ function createFileSigner({ keyFile }) {
     kind: 'file',
     kid: thumbprint,
     publicJwk: () => ({ ...publicJwk }),
+    ready: async () => {},
+    isReady: () => true,
     async sign(header, payload) {
       if (!header || header.alg !== 'RS256') throw new Error('fileSigner signs RS256 only');
       if (header.kid !== undefined && header.kid !== thumbprint) throw new Error('fileSigner: header kid does not name this key');

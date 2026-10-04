@@ -467,6 +467,7 @@ module.exports = {
   rawTextErrors,
   checkJwksText,
   fetchJwksText,
+  loadJwksText,
   checkSource,
   watchJwks,
   formatResult,
