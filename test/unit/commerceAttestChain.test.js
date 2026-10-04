@@ -11,6 +11,7 @@ const { ethers } = require('ethers');
 const {
   attestHashOnChain,
   verifyAttestedReceipt,
+  verifySubmittedAttestation,
   attesterHasCode,
   ATTESTED_TOPIC,
   toBytes32,
@@ -321,5 +322,87 @@ describe('attesterHasCode: only a positive answer is cached', () => {
     assert.equal(await attesterHasCode(chain.provider, chain.attester), true);
     assert.equal(await attesterHasCode(chain.provider, chain.attester), true);
     assert.equal(chain.calls.filter((c) => c === 'getCode').length, 1);
+  });
+});
+
+describe('verifySubmittedAttestation (caller-supplied tx hash)', () => {
+  const setup = () => {
+    const chain = new FakeChain();
+    const hash = contentHash();
+    const sender = randomAddress();
+    return { chain, hash, sender, deps: { provider: chain.provider, attester: chain.attester } };
+  };
+  const rejectsWith = (promise, statusCode, code) => assert.rejects(promise, (e) => e.statusCode === statusCode && e.code === code);
+  const mineWithLog = (chain, hash, sender, mutate) => {
+    const txHash = randomHash();
+    const log = mutate(attestedLog({ attester: chain.attester, hash, sender, txHash }));
+    chain.mine(makeReceipt({ txHash, from: sender, to: chain.attester, status: 1, logs: [log] }));
+    return txHash;
+  };
+
+  it('accepts any sender and returns it, checksummed', async () => {
+    const { chain, hash, sender, deps } = setup();
+    const txHash = chain.mineAttest({ hash, sender });
+    const proof = await verifySubmittedAttestation(txHash.toUpperCase().replace('0X', '0x'), `0x${hash.toUpperCase()}`, deps);
+    assert.equal(proof.sender, ethers.getAddress(sender));
+    assert.equal(proof.attester, ethers.getAddress(chain.attester));
+    assert.equal(proof.txHash.toLowerCase(), txHash.toLowerCase());
+  });
+
+  it('accepts a raw JSON-RPC receipt (status "0x1", transactionHash)', async () => {
+    const { chain, hash, sender, deps } = setup();
+    const txHash = randomHash();
+    chain.receipts.set(txHash, {
+      transactionHash: txHash, status: '0x1', blockNumber: '0x10',
+      logs: [attestedLog({ attester: chain.attester.toLowerCase(), hash, sender, txHash })],
+    });
+    assert.equal((await verifySubmittedAttestation(txHash, hash, deps)).sender, ethers.getAddress(sender));
+  });
+
+  const badLogs = [
+    ['removed (reorg)', (l) => ({ ...l, removed: true })],
+    ['with a fourth topic', (l) => ({ ...l, topics: [...l.topics, randomHash()] })],
+    ['with two topics', (l) => ({ ...l, topics: l.topics.slice(0, 2) })],
+    ['with non-empty data', (l) => ({ ...l, data: '0x01' })],
+    ['with another event signature', (l) => ({ ...l, topics: [ethers.id('Other(bytes32,address)'), ...l.topics.slice(1)] })],
+    ['whose sender topic is not a padded address', (l) => ({ ...l, topics: [l.topics[0], l.topics[1], randomHash()] })],
+  ];
+  for (const [label, mutate] of badLogs) {
+    it(`422 ATTESTATION_TX_NOT_ATTESTED for a log ${label}`, async () => {
+      const { chain, hash, sender, deps } = setup();
+      const txHash = mineWithLog(chain, hash, sender, mutate);
+      await rejectsWith(verifySubmittedAttestation(txHash, hash, deps), 422, 'ATTESTATION_TX_NOT_ATTESTED');
+    });
+  }
+
+  it('422 ATTESTATION_TX_FAILED for a missing status', async () => {
+    const { chain, hash, sender, deps } = setup();
+    const txHash = randomHash();
+    chain.mine(makeReceipt({ txHash, from: sender, to: chain.attester, status: null, logs: [attestedLog({ attester: chain.attester, hash, sender, txHash })] }));
+    await rejectsWith(verifySubmittedAttestation(txHash, hash, deps), 422, 'ATTESTATION_TX_FAILED');
+  });
+
+  it('503 when the attester is not configured', async () => {
+    const { chain, hash, sender } = setup();
+    const txHash = chain.mineAttest({ hash, sender });
+    await rejectsWith(verifySubmittedAttestation(txHash, hash, { provider: chain.provider, attester: 'nope' }), 503, 'ATTESTATION_CHAIN_UNAVAILABLE');
+  });
+
+  it('503 when the RPC fails, without leaking the RPC error text', async () => {
+    const { chain, hash, deps } = setup();
+    chain.failures.getTransactionReceipt = new Error('connect ECONNREFUSED 10.0.0.5:8545');
+    await assert.rejects(verifySubmittedAttestation(randomHash(), hash, deps), (e) => {
+      assert.equal(e.statusCode, 503);
+      assert.doesNotMatch(e.message, /10\.0\.0\.5|ECONNREFUSED/);
+      return true;
+    });
+  });
+
+  it('422 ATTESTATION_TX_MALFORMED before any RPC call', async () => {
+    const { chain, hash, deps } = setup();
+    for (const bad of ['0x1234', 'ab'.repeat(32), `0x${'zz'.repeat(32)}`, {}]) {
+      await rejectsWith(verifySubmittedAttestation(bad, hash, deps), 422, 'ATTESTATION_TX_MALFORMED');
+    }
+    assert.equal(chain.calls.length, 0);
   });
 });

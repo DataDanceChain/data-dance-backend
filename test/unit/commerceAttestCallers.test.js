@@ -13,7 +13,9 @@ const { installMockPrisma } = require('../helpers/mockPrisma');
 const prisma = installMockPrisma();
 
 const realChain = require('../../src/utils/commerceAttestChain');
-const { FakeChain, randomAddress } = require('../helpers/fakeAttestChain');
+const {
+  FakeChain, randomAddress, randomHash, contentHash, makeReceipt, attestedLog,
+} = require('../helpers/fakeAttestChain');
 
 // Route every attestHashOnChain call through the real implementation with fake chain deps.
 let deps = null;
@@ -26,11 +28,14 @@ require.cache[chainFile] = {
   exports: {
     ...realChain,
     attestHashOnChain: (hash) => realChain.attestHashOnChain(hash, { ...deps, log: { warn() {} } }),
+    verifySubmittedAttestation: (txHash, hash) => realChain.verifySubmittedAttestation(txHash, hash, deps),
   },
 };
 
 const commerceAttest = require('../../src/services/commerceAttest');
 const procurementService = require('../../src/services/procurementService');
+const commerceController = require('../../src/controllers/commerceController');
+const opsCommerceController = require('../../src/controllers/opsCommerceController');
 const disbursement = require('../../src/services/disbursement/service');
 
 const SELLER = 'seller-1';
@@ -185,5 +190,213 @@ describe('disbursement items (processItem)', () => {
     const result = await disbursement.processItem(item.id);
     assert.match(String(result.attestationTxHash), /^0x[0-9a-f]{64}$/);
     assert.equal(result.failureReason, null);
+  });
+});
+
+/*
+ * POST /commerce/orders/:id/attest and POST /ops/orders/:id/attest accept a caller-supplied
+ * txHash. It is stored only when the chain proves it: status 1 and an Attested log from the
+ * configured attester for exactly the order's attestationHash (any sender). Otherwise 422 (or 503
+ * when the chain cannot be asked) and nothing is stored.
+ */
+const PATHS = {
+  licence: {
+    seed: () => seedOrder({ purchaseId: `purchase-${Math.random().toString(36).slice(2)}` }),
+    attest: (orderId, txHash) => commerceAttest.attestPaidOrder(orderId, { txHash }),
+  },
+  'licence via /commerce route (procurementService)': {
+    seed: () => seedOrder({ purchaseId: `purchase-${Math.random().toString(36).slice(2)}` }),
+    attest: (orderId, txHash) => procurementService.attestOrder({ id: SELLER }, orderId, { txHash }),
+  },
+  procurement: {
+    seed: () => seedOrder(),
+    attest: (orderId, txHash) => procurementService.attestOrder({ id: BUYER }, orderId, { txHash }),
+  },
+};
+
+/** Records the order's attestationHash with no tx (attester without code), then returns it. */
+async function primed(p) {
+  useChain(new FakeChain({ withCode: false }));
+  const order = p.seed();
+  await p.attest(order.id);
+  const row = stored('purchaseOrder', order.id);
+  assert.match(row.attestationHash, /^[0-9a-f]{64}$/);
+  assert.equal(row.attestationTxHash, null);
+  const chain = useChain(new FakeChain());
+  return { order, chain, hash: row.attestationHash, before: structuredClone(row) };
+}
+
+async function assertRejected(p, orderId, txHash, before, statusCode, code) {
+  await assert.rejects(p.attest(orderId, txHash), (error) => {
+    assert.equal(error.statusCode, statusCode);
+    assert.equal(error.code, code);
+    assert.match(error.message, /nothing was saved|txHash must be/);
+    return true;
+  });
+  assert.deepEqual(stored('purchaseOrder', orderId), before, 'nothing stored');
+}
+
+for (const [label, p] of Object.entries(PATHS)) {
+  describe(`submitted txHash is verified before it is stored: ${label}`, () => {
+    beforeEach(() => prisma.reset());
+
+    it('stores a proving tx sent from the org\'s own wallet and records the sender', async () => {
+      const { order, chain, hash } = await primed(p);
+      const orgWallet = randomAddress();
+      const txHash = chain.mineAttest({ hash, sender: orgWallet });
+      const result = await p.attest(order.id, ` ${txHash} `);
+      assert.equal(result.attestationTxHash, txHash);
+      assert.equal(result.attestationStatus, 'on_chain');
+      assert.equal(result.attestationSender, orgWallet);
+      assert.equal(stored('purchaseOrder', order.id).attestationTxHash, txHash);
+      assert.equal(chain.sent.length, 0, 'a submitted hash never triggers a backend send');
+    });
+
+    it('422 ATTESTATION_TX_NOT_FOUND for a hash the chain does not know', async () => {
+      const { order, before } = await primed(p);
+      await assertRejected(p, order.id, `0x${'ab'.repeat(32)}`, before, 422, 'ATTESTATION_TX_NOT_FOUND');
+    });
+
+    it('422 ATTESTATION_TX_FAILED for a reverted transaction, even with a matching log', async () => {
+      const { order, chain, hash, before } = await primed(p);
+      const sender = randomAddress();
+      const txHash = randomHash();
+      chain.mine(makeReceipt({
+        txHash, from: sender, to: chain.attester, status: 0,
+        logs: [attestedLog({ attester: chain.attester, hash, sender, txHash })],
+      }));
+      await assertRejected(p, order.id, txHash, before, 422, 'ATTESTATION_TX_FAILED');
+    });
+
+    it('422 ATTESTATION_TX_NOT_ATTESTED for a call to an address without code (no logs)', async () => {
+      const { order, chain, hash, before } = await primed(p);
+      const txHash = chain.mineAttest({ hash, sender: randomAddress(), to: randomAddress() });
+      await assertRejected(p, order.id, txHash, before, 422, 'ATTESTATION_TX_NOT_ATTESTED');
+    });
+
+    it('422 ATTESTATION_TX_NOT_ATTESTED for a valid attestation of a different hash', async () => {
+      const { order, chain, before } = await primed(p);
+      const txHash = chain.mineAttest({ hash: contentHash(), sender: randomAddress() });
+      await assertRejected(p, order.id, txHash, before, 422, 'ATTESTATION_TX_NOT_ATTESTED');
+    });
+
+    it('422 ATTESTATION_TX_NOT_ATTESTED for an Attested log from another contract', async () => {
+      const { order, chain, hash, before } = await primed(p);
+      const sender = randomAddress();
+      const other = randomAddress();
+      const txHash = randomHash();
+      chain.mine(makeReceipt({
+        txHash, from: sender, to: other, status: 1,
+        logs: [attestedLog({ attester: other, hash, sender, txHash })],
+      }));
+      await assertRejected(p, order.id, txHash, before, 422, 'ATTESTATION_TX_NOT_ATTESTED');
+    });
+
+    it('422 ATTESTATION_TX_MALFORMED for a value that is not a tx hash', async () => {
+      const { order, before } = await primed(p);
+      await assertRejected(p, order.id, 'pasted-by-hand', before, 422, 'ATTESTATION_TX_MALFORMED');
+    });
+
+    it('503 ATTESTATION_CHAIN_UNAVAILABLE when the chain cannot be asked', async () => {
+      const { order, chain, hash, before } = await primed(p);
+      const txHash = chain.mineAttest({ hash, sender: randomAddress() });
+      chain.failures.getTransactionReceipt = new Error('connect ECONNREFUSED');
+      await assertRejected(p, order.id, txHash, before, 503, 'ATTESTATION_CHAIN_UNAVAILABLE');
+    });
+
+    it('503 when the RPC returns a receipt for another transaction', async () => {
+      const { order, chain, hash, before } = await primed(p);
+      const asked = randomHash();
+      const real = randomHash();
+      const sender = randomAddress();
+      chain.receipts.set(asked.toLowerCase(), makeReceipt({
+        txHash: real, from: sender, to: chain.attester, status: 1,
+        logs: [attestedLog({ attester: chain.attester, hash, sender, txHash: real })],
+      }));
+      await assertRejected(p, order.id, asked, before, 503, 'ATTESTATION_CHAIN_UNAVAILABLE');
+    });
+
+    it('an empty or missing txHash keeps the backend attestation path', async () => {
+      for (const txHash of [undefined, null, '', '  ']) {
+        prisma.reset();
+        const chain = useChain(new FakeChain());
+        const order = p.seed();
+        const result = await p.attest(order.id, txHash);
+        assert.equal(result.attestationStatus, 'on_chain');
+        assert.equal(chain.sent.length, 1);
+        assert.equal(result.attestationSender, undefined);
+      }
+    });
+  });
+}
+
+function fakeRes() {
+  const res = { statusCode: 200, body: null };
+  res.status = (code) => { res.statusCode = code; return res; };
+  res.json = (body) => { res.body = body; return res; };
+  return res;
+}
+
+describe('attest routes: HTTP shape of the new failures', () => {
+  beforeEach(() => prisma.reset());
+
+  it('POST /commerce/orders/:id/attest answers 422 { status:"fail", code, message }', async () => {
+    const { order } = await primed(PATHS.procurement);
+    const res = fakeRes();
+    await commerceController.attestOrder({ user: { id: BUYER }, params: { id: order.id }, body: { txHash: randomHash() } }, res);
+    assert.equal(res.statusCode, 422);
+    assert.equal(res.body.status, 'fail');
+    assert.equal(res.body.code, 'ATTESTATION_TX_NOT_FOUND');
+    assert.match(res.body.message, /not found/);
+  });
+
+  it('POST /commerce/orders/:id/attest answers 503 { status:"error", code } when the chain is down', async () => {
+    const { order, chain } = await primed(PATHS.procurement);
+    chain.failures.getTransactionReceipt = new Error('timeout');
+    const res = fakeRes();
+    await commerceController.attestOrder({ user: { id: BUYER }, params: { id: order.id }, body: { txHash: randomHash() } }, res);
+    assert.equal(res.statusCode, 503);
+    assert.equal(res.body.status, 'error');
+    assert.equal(res.body.code, 'ATTESTATION_CHAIN_UNAVAILABLE');
+  });
+
+  it('POST /commerce/orders/:id/attest still answers 200 with the stored hash when it verifies', async () => {
+    const { order, chain, hash } = await primed(PATHS.procurement);
+    const txHash = chain.mineAttest({ hash, sender: randomAddress() });
+    const res = fakeRes();
+    await commerceController.attestOrder({ user: { id: BUYER }, params: { id: order.id }, body: { txHash } }, res);
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.body.status, 'success');
+    assert.equal(res.body.data.attestationTxHash, txHash);
+  });
+
+  it('POST /ops/orders/:id/attest answers 422 with a code and stores nothing', async () => {
+    const { order, chain, before } = await primed(PATHS.licence);
+    const txHash = chain.mineAttest({ hash: contentHash(), sender: randomAddress() });
+    const res = fakeRes();
+    await opsCommerceController.attestOrder({ opsAdmin: { username: 'ops1', role: 'admin' }, params: { id: order.id }, body: { txHash } }, res);
+    assert.equal(res.statusCode, 422);
+    assert.deepEqual(Object.keys(res.body).sort(), ['code', 'message', 'status']);
+    assert.equal(res.body.status, 'fail');
+    assert.equal(res.body.code, 'ATTESTATION_TX_NOT_ATTESTED');
+    assert.deepEqual(stored('purchaseOrder', order.id), before);
+  });
+
+  it('POST /ops/orders/:id/attest answers 503 when the chain is down', async () => {
+    const { order, chain } = await primed(PATHS.licence);
+    chain.failures.getTransactionReceipt = new Error('timeout');
+    const res = fakeRes();
+    await opsCommerceController.attestOrder({ opsAdmin: { username: 'ops1', role: 'admin' }, params: { id: order.id }, body: { txHash: randomHash() } }, res);
+    assert.equal(res.statusCode, 503);
+    assert.equal(res.body.status, 'error');
+    assert.equal(res.body.code, 'ATTESTATION_CHAIN_UNAVAILABLE');
+  });
+
+  it('POST /ops/orders/:id/attest keeps its 404 shape (no code field)', async () => {
+    useChain(new FakeChain());
+    const res = fakeRes();
+    await opsCommerceController.attestOrder({ opsAdmin: { username: 'ops1' }, params: { id: 'missing' }, body: {} }, res);
+    assert.equal(res.statusCode, 404);
+    assert.deepEqual(res.body, { status: 'fail', message: 'Order not found' });
   });
 });

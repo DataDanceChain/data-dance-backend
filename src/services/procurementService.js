@@ -256,7 +256,7 @@ async function attestOrder(user, orderId, { txHash } = {}) {
   const order = await requireOrder(user, orderId);
   const commerceAttest = require('./commerceAttest');
   if (order.purchaseId || order.dataNFTId) {
-    const attested = await commerceAttest.attestPaidOrder(order.id, { txHash });
+    const attested = await commerceAttest.attestPaidOrder(order.id, { txHash, submittedBy: `user:${user.id}` });
     return {
       id: order.id,
       orderNumber: attested.orderNumber || order.orderNumber,
@@ -272,8 +272,13 @@ async function attestOrder(user, orderId, { txHash } = {}) {
     : null;
   const payload = existing || buildAttestationPayload(full, full.allocations || []);
   const attestationHash = sha256(JSON.stringify(payload));
-  let attestationTxHash = txHash && /^0x[0-9a-fA-F]{64}$/.test(String(txHash).trim())
-    ? String(txHash).trim()
+  // A submitted hash is stored only once the chain proves it (422 / 503 otherwise, nothing stored).
+  const proof = await commerceAttest.verifySubmittedTxHash(txHash, attestationHash, {
+    orderId: order.id,
+    submittedBy: `user:${user.id}`,
+  });
+  let attestationTxHash = proof
+    ? proof.txHash
     : (full.attestationTxHash && /^0x[0-9a-fA-F]{64}$/.test(full.attestationTxHash) ? full.attestationTxHash : null);
   if (!attestationTxHash) {
     const { attestHashOnChain } = require('../utils/commerceAttestChain');
@@ -293,6 +298,7 @@ async function attestOrder(user, orderId, { txHash } = {}) {
     id: updated.id,
     orderNumber: updated.orderNumber,
     ...commerceAttest.publicAttestation(updated),
+    ...(proof ? { attestationSender: proof.sender } : {}),
   };
 }
 

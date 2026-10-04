@@ -116,6 +116,19 @@ function addressTopic(address) {
 }
 
 /**
+ * Lower-cased topics of `log` when it is an un-removed Attested(bytes32,address) log emitted by
+ * `attester` with exactly three topics and empty data; otherwise null.
+ */
+function attestedLogTopics(log, attester) {
+  if (!log || log.removed === true) return null;
+  if (!sameAddress(log.address, attester)) return null;
+  const topics = Array.isArray(log.topics) ? log.topics.map((t) => String(t).toLowerCase()) : [];
+  if (topics.length !== 3 || topics[0] !== ATTESTED_TOPIC) return null;
+  if (!(log.data === undefined || log.data === null || log.data === '0x')) return null;
+  return topics;
+}
+
+/**
  * True only when `receipt` succeeded (status 1) and carries an Attested(hash, sender) log emitted
  * by `attester` with exactly `hash` and `sender`. Pure: no network. Works on ethers receipts and on
  * raw JSON-RPC receipts (status "0x1").
@@ -136,14 +149,8 @@ function verifyAttestedReceipt(receipt, { attester, hash, sender }) {
   const expectedSender = addressTopic(sender);
   const logs = Array.isArray(receipt.logs) ? receipt.logs : [];
   const match = logs.find((log) => {
-    if (!log || log.removed === true) return false;
-    if (!sameAddress(log.address, attester)) return false;
-    const topics = Array.isArray(log.topics) ? log.topics.map((t) => String(t).toLowerCase()) : [];
-    return topics.length === 3
-      && topics[0] === ATTESTED_TOPIC
-      && topics[1] === expectedHash
-      && topics[2] === expectedSender
-      && (log.data === undefined || log.data === null || log.data === '0x');
+    const topics = attestedLogTopics(log, attester);
+    return Boolean(topics) && topics[1] === expectedHash && topics[2] === expectedSender;
   });
   if (!match) {
     return {
@@ -155,6 +162,67 @@ function verifyAttestedReceipt(receipt, { attester, hash, sender }) {
     };
   }
   return { ok: true, logIndex: match.index ?? match.logIndex ?? null };
+}
+
+function submittedError(statusCode, code, message) {
+  return Object.assign(new Error(message), { statusCode, code });
+}
+
+const ADDRESS_TOPIC = /^0x0{24}[0-9a-f]{40}$/;
+
+/**
+ * Checks a transaction hash that a caller (an org user or ops) says attests `hashHex`, before it is
+ * stored as attestationTxHash. Passes only when the mined receipt has status 1 and an
+ * Attested(hash, sender) log from the configured attester whose hash topic equals `hashHex`. The
+ * sender is not required to be the backend wallet (an org may attest from its own wallet); it is
+ * returned so the caller can record it.
+ *
+ * Resolves { txHash, sender, attester, blockNumber }. Rejects with an Error carrying
+ * statusCode/code: 422 when the transaction does not prove the attestation, 503 when the chain
+ * cannot be asked. Callers store nothing on rejection.
+ *
+ * `deps` exists for tests: { provider, attester }.
+ */
+async function verifySubmittedAttestation(txHash, hashHex, deps = {}) {
+  const submitted = String(txHash ?? '').trim();
+  if (!/^0x[0-9a-fA-F]{64}$/.test(submitted)) {
+    throw submittedError(422, 'ATTESTATION_TX_MALFORMED', 'txHash must be a 0x-prefixed 32-byte transaction hash');
+  }
+  const expectedHash = toBytes32(hashHex);
+  const attester = deps.attester || getAttesterAddress();
+  if (!attester || !ethers.isAddress(attester)) {
+    throw submittedError(503, 'ATTESTATION_CHAIN_UNAVAILABLE', 'The attester contract is not configured; nothing was saved');
+  }
+
+  let receipt;
+  try {
+    const provider = deps.provider || getProvider();
+    receipt = await withTimeout(provider.getTransactionReceipt(submitted), 'eth_getTransactionReceipt timed out');
+  } catch {
+    throw submittedError(503, 'ATTESTATION_CHAIN_UNAVAILABLE', 'Could not reach the DDC chain to verify the transaction; nothing was saved. Try again later');
+  }
+  if (!receipt) {
+    throw submittedError(422, 'ATTESTATION_TX_NOT_FOUND', 'Transaction not found on the DDC chain, or not mined yet; nothing was saved');
+  }
+  const receiptHash = String(receipt.hash || receipt.transactionHash || '').toLowerCase();
+  if (receiptHash !== submitted.toLowerCase()) {
+    throw submittedError(503, 'ATTESTATION_CHAIN_UNAVAILABLE', 'The DDC chain returned an inconsistent receipt; nothing was saved. Try again later');
+  }
+  if (!receiptStatusIsSuccess(receipt.status)) {
+    throw submittedError(422, 'ATTESTATION_TX_FAILED', 'Transaction did not succeed on the DDC chain (status is not 1); nothing was saved');
+  }
+  const logs = Array.isArray(receipt.logs) ? receipt.logs : [];
+  for (const log of logs) {
+    const topics = attestedLogTopics(log, attester);
+    if (!topics || topics[1] !== expectedHash || !ADDRESS_TOPIC.test(topics[2])) continue;
+    return {
+      txHash: submitted,
+      sender: ethers.getAddress(`0x${topics[2].slice(26)}`),
+      attester: ethers.getAddress(attester),
+      blockNumber: receipt.blockNumber ?? null,
+    };
+  }
+  throw submittedError(422, 'ATTESTATION_TX_NOT_ATTESTED', 'Transaction has no Attested log from the CommerceAttester contract for this order\'s attestation hash; nothing was saved');
 }
 
 // Addresses already seen with code. Only positive results are cached.
@@ -290,6 +358,7 @@ module.exports = {
   getBackendWallet,
   attestHashOnChain,
   verifyAttestedReceipt,
+  verifySubmittedAttestation,
   attesterHasCode,
   addressTopic,
   toBytes32,
