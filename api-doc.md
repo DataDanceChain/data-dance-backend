@@ -947,6 +947,10 @@ Authorization: Bearer <token>
 POST /api/activities/new
 ```
 
+> **当前状态：已停用。** 鉴权通过后一律返回 `503`，不访问链、不写数据库、不保存上传的文件：
+> `{"success": false, "code": "ACTIVITY_NFT_UNAVAILABLE", "message": "Activity creation is temporarily unavailable"}`。
+> 服务端开关 `ACTIVITY_NFT_ENABLED` 默认关闭；即使打开，在部署经过验证的新 NFT 工厂合约之前仍返回同样的 503。
+
 **请求头**:
 ```
 Authorization: Bearer <token>

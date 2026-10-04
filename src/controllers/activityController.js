@@ -1,7 +1,11 @@
 const crypto = require('crypto');
 const { PrismaClient } = require('@prisma/client');
-const { createActivityNFTContract } = require('../utils/web3Utils');
+// Called through the module object, not destructured, so tests can stand in for the chain layer.
+const web3Utils = require('../utils/web3Utils');
+const { isActivityNftEnabled } = require('../constants/activityNftFeature');
+const { createLogger } = require('../utils/logger');
 const prisma = new PrismaClient();
+const logger = createLogger('activityController');
 
 /**
  * 获取活动列表
@@ -170,10 +174,11 @@ exports.getActivity = async (req, res) => {
       data: formattedActivity
     });
   } catch (error) {
+    logger.error('activity.get_failed', { reqId: req.reqId, error });
     res.status(500).json({
       status: 'error',
-      message: 'Server error',
-      error: error.message
+      code: 'SERVER_ERROR',
+      message: 'Server error'
     });
   }
 };
@@ -408,10 +413,11 @@ exports.getCategories = async (req, res) => {
       data: categories
     });
   } catch (error) {
+    logger.error('activity.categories_failed', { reqId: req.reqId, error });
     res.status(500).json({
       status: 'error',
-      message: 'Server error',
-      error: error.message
+      code: 'SERVER_ERROR',
+      message: 'Server error'
     });
   }
 };
@@ -1153,8 +1159,45 @@ exports.setActivityTags = async (req, res) => {
     });
     res.status(200).json({ status: 'success', data: updated.tags });
   } catch (error) {
-    res.status(500).json({ status: 'error', message: 'Server error', error: error.message });
+    logger.error('activity.set_tags_failed', { reqId: req.reqId, error });
+    res.status(500).json({ status: 'error', code: 'SERVER_ERROR', message: 'Server error' });
   }
+};
+
+// POST /api/activities/new answers this 503 while activity NFT creation cannot run: when
+// ACTIVITY_NFT_ENABLED is off, and while the chain layer still refuses (src/utils/web3Utils.js).
+// The reason goes to the server log only.
+const ACTIVITY_NFT_UNAVAILABLE = 'ACTIVITY_NFT_UNAVAILABLE';
+
+/** Why activity creation must be refused right now, or null when it may run. Fails closed. */
+function activityCreationRefusal() {
+  if (!isActivityNftEnabled()) return 'ACTIVITY_NFT_ENABLED is off';
+  try {
+    return web3Utils.activityNftUnavailableReason();
+  } catch (error) {
+    return `activity NFT availability check failed: ${error && error.message}`;
+  }
+}
+
+function refuseActivityCreation(req, res, reason) {
+  // Off is the configured state; on while still refused is an operator surprise worth a warning.
+  const level = isActivityNftEnabled() ? 'warn' : 'info';
+  logger[level]('activity.create_refused', { reqId: req.reqId, userId: req.user?.id, reason });
+  return res.status(503).json({
+    success: false,
+    code: ACTIVITY_NFT_UNAVAILABLE,
+    message: 'Activity creation is temporarily unavailable'
+  });
+}
+
+/**
+ * Mounted on POST /api/activities/new BEFORE the upload middleware, so a refused request stores no
+ * file. createActivity checks again, so the handler is safe without it.
+ */
+exports.activityCreationGate = (req, res, next) => {
+  const refusal = activityCreationRefusal();
+  if (refusal) return refuseActivityCreation(req, res, refusal);
+  return next();
 };
 
 /**
@@ -1163,6 +1206,10 @@ exports.setActivityTags = async (req, res) => {
  * @access Private
  */
 exports.createActivity = async (req, res) => {
+  // First, before any logging of the request, chain call or database query.
+  const refusal = activityCreationRefusal();
+  if (refusal) return refuseActivityCreation(req, res, refusal);
+
   try {
     console.log('创建活动请求:', {
       body: req.body,
@@ -1224,7 +1271,7 @@ exports.createActivity = async (req, res) => {
 
     // 创建活动NFT合约
     const user = await prisma.user.findUnique({ where: { id: req.user.id } });
-    const activityNFTContract = await createActivityNFTContract(req.user.id, user.walletAddress);
+    const activityNFTContract = await web3Utils.createActivityNFTContract(req.user.id, user.walletAddress);
 
 
     // 准备活动数据
@@ -1282,16 +1329,14 @@ exports.createActivity = async (req, res) => {
       data: activity
     });
   } catch (error) {
-    console.error('创建活动失败:', {
-      name: error.name,
-      message: error.message,
-      code: error.code,
-      stack: error.stack
-    });
+    if (error && error.code === ACTIVITY_NFT_UNAVAILABLE) {
+      return refuseActivityCreation(req, res, error.message);
+    }
+    logger.error('activity.create_failed', { reqId: req.reqId, userId: req.user?.id, error });
     res.status(500).json({
       success: false,
-      message: '创建活动失败',
-      error: error.message
+      code: 'SERVER_ERROR',
+      message: '创建活动失败'
     });
   }
-}; 
+};
