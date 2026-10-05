@@ -96,6 +96,8 @@ for c in $(docker ps -a --format '{{.Names}}' | { grep -E '^ddc-mainnet-' || tru
   docker inspect --format '{{.Name}} restart={{.HostConfig.RestartPolicy.Name}} started={{.State.StartedAt}}' "$c" 2>/dev/null || true
 done
 echo "ddc-mainnet-* containers: $(docker ps -a --format '{{.Names}}' | { grep -cE '^ddc-mainnet-' || true; })"
+# The host ports they bind (running or stopped): the only upstreams a vhost may have for 30-nginx.sh to take it over.
+echo "ddc-mainnet-* host ports: $(for c in $(docker ps -a --format '{{.Names}}' | { grep -E '^ddc-mainnet-' || true; }); do docker inspect --format '{{range $p, $b := .HostConfig.PortBindings}}{{range $b}}{{.HostPort}} {{end}}{{end}}' "$c" 2>/dev/null || true; done | tr ' ' '\n' | { grep -E '^[0-9]+$' || true; } | sort -un | tr '\n' ' ')"
 # Directories under /root/ddc-mainnet that a container mounts read-write hold data it writes itself: not fingerprinted.
 RW_MOUNTS=$(for id in $(docker ps -aq 2>/dev/null || true); do docker inspect --format '{{range .Mounts}}{{if and (eq .Type "bind") .RW}}{{.Source}}{{"\n"}}{{end}}{{end}}' "$id" 2>/dev/null || true; done \
   | awk -v d="$MAINNET_DIR" '$0 == d || index($0, d "/") == 1' | LC_ALL=C sort -u)

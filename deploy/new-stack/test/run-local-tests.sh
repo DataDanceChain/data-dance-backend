@@ -29,9 +29,22 @@
 #   11. ROOT mode in ubuntu:22.04 without DDC_LOCAL_TEST: write guard (first run and re-run), run lock, server log.
 #   12. pass criteria that stop: p1 verify, 30-nginx apply/undo, 40-up step 8; the 99-teardown label fallback.
 #   12b. (10-05) 30-nginx.sh never overwrites a vhost it did not write: Race's entries at the default names stop apply;
-#      TAKE_OVER_VHOSTS=yes backs them up and replaces them, restore puts them back byte for byte, a failing nginx -t
-#      puts them back at once; a server_name clash and a port held by another container stop apply; outcome B (other
-#      names) leaves Race's entries untouched and stops if his hosts answer differently after the reload.
+#      TAKE_OVER_VHOSTS=yes is refused until this stack answers on its own ports, then backs them up and replaces them,
+#      restore puts them back byte for byte; any failure after the removal (before nginx -t, nginx -t itself, another
+#      host changing after the reload) puts them back at once; a restore whose entries fail nginx -t brings this
+#      package's back; an interrupted backup (SIGKILL) blocks nothing; only a vhost proxying to ddc-mainnet-* ports is
+#      ever taken over (static sites, other upstreams, second names, docs.datadance.ai refused); a server_name clash
+#      and a port held by another container stop apply; outcome B leaves Race's entries untouched and stops if his
+#      hosts answer differently after the reload; teardown undoes the vhosts at the RECORDED hosts.
+# Follow-ups of the 10-05 review:
+#   3. REHEARSAL_CLIENT_ID (required, no default, the backend's rule, recorded only by a passing run) and the settings
+#      record (each of the five names exactly once); 3a: this checkout's own src/server.js boots through every check on
+#      the env 20-env.sh writes, and refuses tge-rehearsal (test/helpers/backend-boot.js).
+#   10d. every allowlisted override with ;, $(), backticks, a newline or a CR is refused before connecting; the
+#      settings, the client id and TAKE_OVER_VHOSTS are checked with the server's rules before connecting.
+#   12. the Host-header checks after the reload, the https probe with SNI on 443 when it is served.
+# No check ends the run early: after the prologue the suite runs without set -e, so a broken state shows up as named
+# FAIL lines, and an EXIT trap always runs the label-only cleanup.
 # Public repository (this package lives in one):
 #   10e. local.env: remote.sh and survey/ro-ssh.sh refuse to connect, and do not ask 1Password, without a usable
 #        local.env (missing, placeholders, empty, wrong shape); the preflight passes the git-tree apn_key.p8 hash.
@@ -64,6 +77,34 @@ LT=(--label "ddcnew-localtest=$RUN_ID")
 mkdir -p "$T/ddcnew"
 fails=0; ok() { echo "PASS $*"; }; bad() { echo "FAIL $*"; fails=$((fails+1)); }
 echo "run id: $RUN_ID (label ddcnew-localtest=$RUN_ID on every container and image this run creates)"
+# The cleanup of this run's containers and images (by its label only). It runs once: at the end, or from the EXIT trap
+# when the run ends early (an interrupted run, or a bug that ends the shell), so nothing of this run is ever left.
+CLEANED=0
+cleanup_run() {
+  [ "$CLEANED" = 0 ] || return 0
+  CLEANED=1
+  echo; echo "== cleanup: only what this run created (label ddcnew-localtest=$RUN_ID); nothing is selected by name"
+  docker info >/dev/null 2>&1 || return 0
+  for id in $(docker ps -aq --filter "label=ddcnew-localtest=$RUN_ID"); do
+    n=$(docker inspect --format '{{.Name}}' "$id" 2>/dev/null || echo "$id")
+    docker rm -fv "$id" >/dev/null 2>&1 && echo "removed leftover container of this run: ${n#/}"
+  done
+  if [ "${KEEP_TEST_IMAGES:-0}" != 1 ]; then
+    # Images this run built carry its label (docker build --label); nothing else does.
+    for ref in $(docker image ls --filter "label=ddcnew-localtest=$RUN_ID" --format '{{.Repository}}:{{.Tag}}' | grep -v '<none>' || true); do
+      docker image rm "$ref" >/dev/null 2>&1 && echo "removed image built by this run: $ref"
+    done
+    for id in $(docker image ls -q --filter "label=ddcnew-localtest=$RUN_ID" | LC_ALL=C sort -u); do docker image rm "$id" >/dev/null 2>&1 && echo "removed untagged image built by this run: $id"; done
+  else echo "KEEP_TEST_IMAGES=1: the images this run built are kept (label ddcnew-localtest=$RUN_ID)"; fi
+  c_left=$(docker ps -aq --filter "label=ddcnew-localtest=$RUN_ID" | grep -c . || true)
+  i_left=$(docker image ls -q --filter "label=ddcnew-localtest=$RUN_ID" | grep -c . || true)
+  [ "$c_left" = 0 ] && ok "this run's containers left: 0; its images left: $i_left" || bad "$c_left container(s) of this run left"
+  now=$(docker ps -aq --no-trunc 2>/dev/null | LC_ALL=C sort || true)
+  gone=$(LC_ALL=C comm -23 <(printf '%s\n' "${PRE_CONTAINERS:-}" | grep . || true) <(printf '%s\n' "$now" | grep . || true) | grep -c . || true)
+  echo "containers that existed before this run: $(printf '%s\n' "${PRE_CONTAINERS:-}" | grep -c . || true), gone now: $gone (this run removes only containers with its own label, all created after it started)"
+}
+trap 'cleanup_run' EXIT
+trap 'exit 130' INT; trap 'exit 143' TERM
 # Containers that exist before this run (other sessions' included): reported at the end, never touched.
 PRE_CONTAINERS=$(docker ps -aq --no-trunc 2>/dev/null | LC_ALL=C sort || true)
 # The default settings this suite expects from common.sh (10-05: Race's host names, three free ports).
@@ -71,6 +112,13 @@ D_API_HOST=api-rehearsal.datadance.ai; D_APP_HOST=app-rehearsal.datadance.ai; D_
 DEFAULTS_SEEN=$( (unset API_HOST APP_HOST API_PORT WEB_PORT DB_PORT; . "$PKG/common.sh"; settings_env_lines) | tr '\n' ' ')
 [ "$DEFAULTS_SEEN" = "API_HOST=$D_API_HOST APP_HOST=$D_APP_HOST API_PORT=$D_API_PORT WEB_PORT=$D_WEB_PORT DB_PORT=$D_DB_PORT " ] \
   && ok "common.sh defaults: $DEFAULTS_SEEN" || bad "common.sh defaults are $DEFAULTS_SEEN"
+# The rehearsal client id this suite gives 20-env.sh (REHEARSAL_CLIENT_ID: required, no default; the api refuses tge and
+# tge-rehearsal at boot since backend fd2d4e9).
+CID=lt-partner-client
+# From here on a failing command never ends the run: every check reports PASS or FAIL itself, so a broken state (a
+# mutation, a slip in a refactoring) shows up as named FAIL lines, the summary is always printed, and the cleanup of
+# this run's containers always runs (EXIT trap).
+set +e
 
 echo "== 1. syntax and lint"
 for f in "$PKG"/*.sh "$PKG"/test/*.sh "$PKG"/test/helpers/*.sh "$PKG"/survey/*.sh; do
@@ -97,7 +145,12 @@ printf 'NODE_ENV=production\n' > "$T/compose/.env.api"; printf 'POSTGRES_USER=u\
 export API_PORT="$D_API_PORT" WEB_PORT="$D_WEB_PORT" DB_PORT="$D_DB_PORT"
 if (cd "$T/compose" && docker compose -f compose.yaml config -q); then ok "compose.yaml valid"; else bad "compose.yaml invalid"; fi
 if (cd "$T/compose" && env -u API_PORT -u WEB_PORT -u DB_PORT docker compose -f compose.yaml config -q) > "$T/compose/noports.out" 2>&1; then bad "compose.yaml interpolated without the port settings"
-else grep -q 'API_PORT missing' "$T/compose/noports.out" && ok "without API_PORT / WEB_PORT / DB_PORT compose refuses to run (no default port)" || bad "compose without ports: $(tail -1 "$T/compose/noports.out")"; fi
+else grep -qE '(API|WEB|DB)_PORT missing - common.sh dc\(\) passes the settings' "$T/compose/noports.out" && ok "without API_PORT / WEB_PORT / DB_PORT compose refuses to run (no default port; compose names whichever it meets first: $(grep -oE '(API|WEB|DB)_PORT missing' "$T/compose/noports.out" | head -1))" || bad "compose without ports: $(tail -1 "$T/compose/noports.out")"; fi
+# Each of the three is required on its own (compose meets them in no fixed order, so each is left out alone).
+for v in API_PORT WEB_PORT DB_PORT; do
+  if (cd "$T/compose" && env -u "$v" API_PORT="${API_PORT:-$D_API_PORT}" WEB_PORT="${WEB_PORT:-$D_WEB_PORT}" DB_PORT="${DB_PORT:-$D_DB_PORT}" env -u "$v" docker compose -f compose.yaml config -q) > "$T/compose/no-$v.out" 2>&1; then bad "compose.yaml interpolated without $v"
+  else grep -q "$v missing - common.sh dc() passes the settings" "$T/compose/no-$v.out" || bad "compose without $v: $(tail -1 "$T/compose/no-$v.out")"; fi
+done
 dcp=$( (unset API_PORT WEB_PORT DB_PORT; DDC_LOCAL_TEST=1; NEW_DIR="$T/compose"; . "$PKG/common.sh"; dc config --format json) | python3 -c '
 import json, sys
 c = json.load(sys.stdin)
@@ -216,7 +269,8 @@ printf '%s\n' '# synthetic .env.tge for the local test' 'VITE_MODE=tge' 'VITE_WE
 echo "synthetic old file: $(grep -c . "$OLD") non-empty lines, $(grep -c DUMMYSECRET "$OLD") lines with DUMMYSECRET markers"
 
 run20() { DDC_LOCAL_TEST=1 NEW_DIR="$T/ddcnew" OLD_ENV="$OLD" FE_ENV_TGE="$T/env.tge" bash "$PKG/20-env.sh"; }
-run20 > "$T/run1.out" 2>&1 || { cat "$T/run1.out"; bad "20-env.sh run 1 failed"; }
+# Run 1 names the client (REHEARSAL_CLIENT_ID is required, no default); run 2 has no override and reuses the record.
+REHEARSAL_CLIENT_ID="$CID" run20 > "$T/run1.out" 2>&1 || { cat "$T/run1.out"; bad "20-env.sh run 1 failed"; }
 run20 > "$T/run2.out" 2>&1 || { cat "$T/run2.out"; bad "20-env.sh run 2 failed"; }
 echo "--- 20-env.sh output (run 1) ---"; cat "$T/run1.out"; echo "--- end ---"
 h1=$(grep -o 'env_file_sha256=[0-9a-f]*' "$T/run1.out" || true); h2=$(grep -o 'env_file_sha256=[0-9a-f]*' "$T/run2.out" || true)
@@ -250,8 +304,94 @@ grep -q '^PASS LOGIN_MISSING_IDTOKEN_MEANS_OLD_APP=on; WEB3AUTH_RETIRED_CLIENT_I
   && ok "20-env.sh checks the issuer and the consent origin against the settings, and PR #38's boot rules on the old-App names" || bad "issuer / consent / old-App check lines missing"
 grep -qF "settings: API_HOST=$D_API_HOST APP_HOST=$D_APP_HOST API_PORT=$D_API_PORT WEB_PORT=$D_WEB_PORT DB_PORT=$D_DB_PORT (defaults)" "$T/run1.out" \
   && grep -q '^settings recorded in ' "$T/run1.out" && grep -qF "(recorded in $T/ddcnew/settings.env)" "$T/run2.out" \
-  && [ "$(tr '\n' ' ' < "$T/ddcnew/settings.env")" = "API_HOST=$D_API_HOST APP_HOST=$D_APP_HOST API_PORT=$D_API_PORT WEB_PORT=$D_WEB_PORT DB_PORT=$D_DB_PORT " ] \
-  && ok "run 1 used the default settings and recorded them in settings.env; run 2 used the record" || bad "settings record of 20-env.sh"
+  && [ "$(tr '\n' ' ' < "$T/ddcnew/settings.env")" = "API_HOST=$D_API_HOST APP_HOST=$D_APP_HOST API_PORT=$D_API_PORT WEB_PORT=$D_WEB_PORT DB_PORT=$D_DB_PORT REHEARSAL_CLIENT_ID=$CID " ] \
+  && ok "run 1 used the default settings and recorded them, with REHEARSAL_CLIENT_ID, in settings.env; run 2 used the record" || bad "settings record of 20-env.sh"
+# B1: REHEARSAL_CLIENT_ID is required, has no default, follows the api's rule, and is recorded only by a run that passes.
+grep -qx "rehearsal client id: $CID (override)" "$T/run1.out" && grep -qx "rehearsal client id: $CID (recorded in $T/ddcnew/settings.env)" "$T/run2.out" \
+  && grep -qx "SSO_TGE_CLIENT_ID=\"$CID\"" "$T/ddcnew/.env.rehearsal" && grep -q "^PASS SSO_TGE_CLIENT_ID=$CID: matches" "$T/run1.out" \
+  && ok "SSO_TGE_CLIENT_ID=$CID from REHEARSAL_CLIENT_ID on run 1, from the record on run 2 (no override)" || bad "client id from the override and the record"
+cid20() { # <label> <NEW_DIR> [REHEARSAL_CLIENT_ID]: one 20-env.sh run, output in <NEW_DIR>.out, status in RC
+  RC=0
+  if [ $# -ge 3 ]; then DDC_LOCAL_TEST=1 NEW_DIR="$2" OLD_ENV="$OLD" FE_ENV_TGE="$T/env.tge" REHEARSAL_CLIENT_ID="$3" bash "$PKG/20-env.sh" > "$2.out" 2>&1 || RC=$?
+  else DDC_LOCAL_TEST=1 NEW_DIR="$2" OLD_ENV="$OLD" FE_ENV_TGE="$T/env.tge" bash "$PKG/20-env.sh" > "$2.out" 2>&1 || RC=$?; fi
+}
+mkdir -p "$T/cid"
+cid20 none "$T/cid/none"
+[ "$RC" != 0 ] && grep -q '^FAIL REHEARSAL_CLIENT_ID=<the partner.s client id> is required, and has no default' "$T/cid/none.out" && [ ! -e "$T/cid/none/.env.rehearsal" ] \
+  && ok "no REHEARSAL_CLIENT_ID and no record: 20-env.sh stops before it writes anything (no default)" || bad "missing client id (rc=$RC): $(grep '^FAIL' "$T/cid/none.out" | head -1)"
+n=0
+for v in tge tge-rehearsal 'a b' 'a:b' "$(printf 'x%.0s' $(seq 1 65))" 'https://x' 'id;x'; do
+  n=$((n + 1)); cid20 "bad$n" "$T/cid/bad$n" "$v"
+  if [ "$RC" != 0 ] && grep -qE '^FAIL REHEARSAL_CLIENT_ID(=| must match)' "$T/cid/bad$n.out" && [ ! -e "$T/cid/bad$n/.env.rehearsal" ] && [ ! -e "$T/cid/bad$n/settings.env" ]; then :
+  else bad "REHEARSAL_CLIENT_ID='$v' was not refused before anything was written (rc=$RC)"; fi
+done
+ok "REHEARSAL_CLIENT_ID refused before anything is written: tge, tge-rehearsal (retired, the api refuses them at boot), a blank, a colon, 65 characters, a URL, a semicolon"
+cp -Rp "$T/ddcnew" "$T/cid/rec"; rm -rf "$T/cid/rec/logs"
+cid20 other "$T/cid/rec" lt-other-client
+[ "$RC" != 0 ] && grep -qF "FAIL REHEARSAL_CLIENT_ID=lt-other-client differs from REHEARSAL_CLIENT_ID=$CID recorded in $T/cid/rec/settings.env" "$T/cid/rec.out" \
+  && grep -qx "SSO_TGE_CLIENT_ID=\"$CID\"" "$T/cid/rec/.env.rehearsal" && ok "an override that differs from the recorded client id stops 20-env.sh; the installed env keeps $CID" || bad "client id conflict (rc=$RC)"
+cid20 same "$T/cid/rec" "$CID"
+[ "$RC" = 0 ] && ok "the same client id as the record is accepted" || bad "same client id refused (rc=$RC)"
+# A run that fails leaves no client id in the record (it is recorded only once every check passed).
+d="$T/cid/failing"; mkdir -p "$d"; cp "$OLD" "$d.env"; printf 'APIKEY=DUMMYSECRET-apikey\n' >> "$d.env"; RC=0
+DDC_LOCAL_TEST=1 NEW_DIR="$d" OLD_ENV="$d.env" FE_ENV_TGE="$T/env.tge" REHEARSAL_CLIENT_ID="$CID" bash "$PKG/20-env.sh" > "$d.out" 2>&1 || RC=$?
+[ "$RC" != 0 ] && [ -f "$d/settings.env" ] && ! grep -q '^REHEARSAL_CLIENT_ID=' "$d/settings.env" \
+  && ok "a failing 20-env.sh run records the settings but not the client id" || bad "client id recorded by a failing run (rc=$RC)"
+# S5: the record must hold each of the five settings exactly once (REHEARSAL_CLIENT_ID at most once), nothing else.
+rec_case() { # <label> <record content> <expected FAIL text>
+  local d="$T/rec-$1" rc=0
+  mkdir -p "$d"; printf '%s' "$2" > "$d/settings.env"
+  ( DDC_LOCAL_TEST=1; NEW_DIR="$d"; . "$PKG/common.sh"; require_server; echo REQ-OK ) > "$d.out" 2>&1 || rc=$?
+  [ "$rc" != 0 ] && grep -qF -- "$3" "$d.out" && ! grep -q REQ-OK "$d.out" || bad "record '$1' was accepted or refused for another reason: $(tail -1 "$d.out")"
+}
+GOODREC=$(printf 'API_HOST=%s\nAPP_HOST=%s\nAPI_PORT=%s\nWEB_PORT=%s\nDB_PORT=%s\n' "$D_API_HOST" "$D_APP_HOST" "$D_API_PORT" "$D_WEB_PORT" "$D_DB_PORT")
+rec_case empty '' 'holds API_HOST 0 times'
+rec_case partial "$(printf '%s\n' "$GOODREC" | grep -v '^DB_PORT=')
+" 'holds DB_PORT 0 times'
+rec_case twice "$GOODREC
+API_PORT=$D_API_PORT
+" 'holds API_PORT 2 times'
+rec_case unknown "$GOODREC
+EXTRA=1
+" 'has a line that is not API_HOST'
+rec_case cidtwice "$GOODREC
+REHEARSAL_CLIENT_ID=$CID
+REHEARSAL_CLIENT_ID=$CID
+" 'holds REHEARSAL_CLIENT_ID 2 times'
+rec_case blankvalue "$(printf '%s\n' "$GOODREC" | sed 's/^WEB_PORT=.*/WEB_PORT=/')
+" 'has a line that is not API_HOST'
+d="$T/rec-good"; mkdir -p "$d"; printf '%s\n' "$GOODREC" > "$d/settings.env"
+( DDC_LOCAL_TEST=1; NEW_DIR="$d"; . "$PKG/common.sh"; require_server; echo REQ-OK ) > "$d.out" 2>&1
+grep -qx REQ-OK "$d.out" && ok "the settings record: an empty or partial record, a repeated or unknown name, a repeated client id and an empty value each stop require_server; a complete record passes" || bad "complete record refused: $(tail -1 "$d.out")"
+
+echo; echo "== 3a. the backend's own boot code (src/server.js of this checkout) on the env 20-env.sh writes"
+# test/helpers/backend-boot.js runs src/server.js with every boot check, src/app.js stubbed (nothing listens or
+# connects), on .env.api exactly as 40-up.sh writes it: .env.rehearsal with the JWKS pins of the day (two well-formed
+# thumbprints here). Its money-path and old-App lines then go through the same checks as in 40-up.sh.
+REPO="$(cd "$PKG/../.." && pwd)"; BB="$T/boot"; mkdir -p "$BB"
+if [ -f "$REPO/src/server.js" ] && [ -d "$REPO/node_modules/dotenv" ] && command -v node >/dev/null 2>&1; then
+  mkapi() { # <.env.rehearsal> <out>
+    { grep -vE '^[[:space:]]*(export[[:space:]]+)?WEB3AUTH_JWKS_PINNED_THUMBPRINTS[[:space:]]*=' "$1"
+      printf '\n# 40-up.sh: Web3Auth JWKS pins (local test)\nWEB3AUTH_JWKS_PINNED_THUMBPRINTS="%s,%s"\n' "$(printf 'A%.0s' $(seq 1 43))" "$(printf 'b%.0s' $(seq 1 43))"; } > "$2"
+  }
+  boot() { (cd "$BB" && env -i PATH="$PATH" node "$PKG/test/helpers/backend-boot.js" "$REPO" "$1") > "$2" 2>&1; }
+  mkapi "$T/ddcnew/.env.rehearsal" "$BB/env.api"
+  rc=0; boot "$BB/env.api" "$BB/out" || rc=$?
+  grep -E '^(Partner SSO|Old App|BOOT CHECKS)' "$BB/out" | sed 's/^/  /'
+  mp=$(grep 'Partner SSO money-path assertions OK' "$BB/out" | tail -1)
+  req=0; git -C "$REPO" merge-base --is-ancestor "$( . "$PKG/common.sh"; echo "$OLD_APP_COMMIT")" HEAD 2>/dev/null && req=1
+  if [ "$rc" = 0 ] && grep -qx 'BOOT CHECKS OK' "$BB/out" && grep -q "^Partner SSO enabled \[prod\] client=$CID " "$BB/out" \
+     && ( DDC_LOCAL_TEST=1; . "$PKG/common.sh"; money_path_fields_check "$mp" 2 ) > "$BB/mp.out" 2>&1 \
+     && ( DDC_LOCAL_TEST=1; . "$PKG/common.sh"; old_app_line_check "$(cat "$BB/out")" "$(sed -n 's/^WEB3AUTH_CLIENT_ID=//p' "$OLD" | tail -1 | cut -c1-8)" "$req" ) > "$BB/oa.out" 2>&1; then
+    ok "this checkout's src/server.js boots through every check on the env 20-env.sh wrote (client=$CID); its money-path line passes money_path_fields_check and its old-App line old_app_line_check (required: $req), as in 40-up.sh"
+  else sed 's/^/    /' "$BB/out" "$BB/mp.out" "$BB/oa.out" 2>/dev/null | grep -v '^    {' | tail -12; bad "the backend's boot code on the env 20-env.sh wrote (rc=$rc)"; fi
+  sed 's/^SSO_TGE_CLIENT_ID=.*/SSO_TGE_CLIENT_ID="tge-rehearsal"/' "$BB/env.api" > "$BB/env.retired"
+  rc=0; boot "$BB/env.retired" "$BB/out.retired" || rc=$?
+  [ "$rc" = 1 ] && grep -q '^BOOT CHECKS FAIL: .*SSO_TGE_CLIENT_ID cannot be tge or tge-rehearsal' "$BB/out.retired" \
+    && ok "control: the same env with SSO_TGE_CLIENT_ID=tge-rehearsal stops the backend's boot ($(grep -o 'SSO_TGE_CLIENT_ID cannot be tge or tge-rehearsal' "$BB/out.retired"))" || bad "control: tge-rehearsal was not refused by the backend (rc=$rc)"
+  leaks=$(cat "$BB/out" "$BB/out.retired" | grep -c DUMMYSECRET || true); for sf in "$T"/ddcnew/secrets/*; do leaks=$((leaks + $(cat "$BB/out" | grep -cF "$(cat "$sf")" || true))); done
+  [ "$leaks" = 0 ] && ok "the backend's boot output carries no dummy or generated secret" || bad "the backend's boot output carries a secret ($leaks)"
+else bad "section 3a needs this checkout's src/ and node_modules (npm ci in the repository) and node"; fi
 
 echo; echo "== compose's own env_file parser: old vs new (counts only)"
 mkdir -p "$T/parse"; cp "$OLD" "$T/parse/old.env"; cp "$T/ddcnew/.env.rehearsal" "$T/parse/new.env"
@@ -260,9 +400,9 @@ services:
   old: { image: busybox, env_file: old.env }
   new: { image: busybox, env_file: new.env }
 EOF
-(cd "$T/parse" && docker compose config --format json) | D_API_HOST="$D_API_HOST" D_APP_HOST="$D_APP_HOST" python3 -c '
+(cd "$T/parse" && docker compose config --format json) | D_API_HOST="$D_API_HOST" D_APP_HOST="$D_APP_HOST" CID="$CID" python3 -c '
 import json, os, sys
-API_HOST = os.environ["D_API_HOST"]; APP_HOST = os.environ["D_APP_HOST"]
+API_HOST = os.environ["D_API_HOST"]; APP_HOST = os.environ["D_APP_HOST"]; CID = os.environ["CID"]
 c = json.load(sys.stdin)
 o = c["services"]["old"]["environment"]; n = c["services"]["new"]["environment"]
 sets = """GOOGLE_WALLET_ISSUER_ID GOOGLE_WALLET_SERVICE_ACCOUNT GEMINI_API_KEY X_CLIENT_ID X_CLIENT_SECRET X_BEARER_TOKEN DATABASE_URL PUBLIC_BASE_URL APP_PUBLIC_URL FRONTEND_URL API_BASE_URL JWT_SECRET WEB3AUTH_CLIENT_ID WEB3AUTH_ALLOWED_VERIFIERS WEB3AUTH_RETIRED_CLIENT_IDS LOGIN_MISSING_IDTOKEN_MEANS_OLD_APP
@@ -281,7 +421,7 @@ gone = [k for k in ("BSC_PAYOUT_PRIVATE_KEY", "BACKEND_WALLET_PRIVATE_KEY", "CHA
                     "SSO_TICKET_TTL_SEC", "SSO_SESSION_TTL_SEC", "WEB3AUTH_ALGS") if k in n]
 print("removed names absent from new: %s" % (not gone))
 exp = {"DISBURSEMENT_PAUSED": "true", "SMTP_HOST": "", "SMTP_PASS": "", "WEB3AUTH_NETWORK_REBIND": "on", "WEB3AUTH_VERIFY_MODE": "enforce",
-       "WEB3AUTH_ALLOW_LEGACY_FALLBACK": "false", "WEB3AUTH_JWKS_PIN_MODE": "enforce", "SSO_TGE_ENABLED": "true", "SSO_TGE_CLIENT_ID": "tge-rehearsal",
+       "WEB3AUTH_ALLOW_LEGACY_FALLBACK": "false", "WEB3AUTH_JWKS_PIN_MODE": "enforce", "SSO_TGE_ENABLED": "true", "SSO_TGE_CLIENT_ID": CID,
        "PUBLIC_BASE_URL": "https://" + API_HOST, "APP_PUBLIC_URL": "https://" + APP_HOST, "FRONTEND_URL": "https://" + APP_HOST,
        "API_BASE_URL": "https://" + API_HOST, "SSO_TGE_CLIENT_NAME": "DDC TGE",
        "WEB3AUTH_RETIRED_CLIENT_IDS": o.get("WEB3AUTH_CLIENT_ID"), "LOGIN_MISSING_IDTOKEN_MEANS_OLD_APP": "on",
@@ -308,7 +448,7 @@ grep -q 'PASS every name with a value is classified' "$T/run1.out" && grep -q 'P
 neg() { # <expect> <line>
   local exp="$1" line="$2" n d rc=0
   n="${line%%=*}"; d="$T/neg-$n"; mkdir -p "$d/ddcnew"; cp "$OLD" "$d/old.env"; printf '%s\n' "$line" >> "$d/old.env"
-  DDC_LOCAL_TEST=1 NEW_DIR="$d/ddcnew" OLD_ENV="$d/old.env" FE_ENV_TGE="$T/env.tge" bash "$PKG/20-env.sh" > "$d/out" 2>&1 || rc=$?
+  DDC_LOCAL_TEST=1 NEW_DIR="$d/ddcnew" OLD_ENV="$d/old.env" FE_ENV_TGE="$T/env.tge" REHEARSAL_CLIENT_ID="$CID" bash "$PKG/20-env.sh" > "$d/out" 2>&1 || rc=$?
   if grep -q DUMMYSECRET "$d/out" || cat "$d"/ddcnew/logs/*.log 2>/dev/null | grep -q DUMMYSECRET; then bad "$n: a value was printed (output or server-side log)"; return; fi
   case "$exp" in
     stop) if [ "$rc" != 0 ] && grep -q "^FAIL .*$n" "$d/out" && [ ! -e "$d/ddcnew/.env.rehearsal" ] && [ ! -e "$d/ddcnew/.env.rehearsal.tmp" ]; then
@@ -337,7 +477,7 @@ for c in "empty|WEB3AUTH_CLIENT_ID=|is empty" "mainnet|WEB3AUTH_CLIENT_ID=BBpkxU
          "shape|WEB3AUTH_CLIENT_ID=BGiGcxrXA-too-short|does not look like a Web3Auth client id"; do
   lbl=${c%%|*}; r=${c#*|}; line=${r%%|*}; want=${r#*|}
   d="$T/neg-retired-$lbl"; mkdir -p "$d/ddcnew"; cp "$OLD" "$d/old.env"; printf '%s\n' "$line" >> "$d/old.env"; rc=0
-  DDC_LOCAL_TEST=1 NEW_DIR="$d/ddcnew" OLD_ENV="$d/old.env" FE_ENV_TGE="$T/env.tge" bash "$PKG/20-env.sh" > "$d/out" 2>&1 || rc=$?
+  DDC_LOCAL_TEST=1 NEW_DIR="$d/ddcnew" OLD_ENV="$d/old.env" FE_ENV_TGE="$T/env.tge" REHEARSAL_CLIENT_ID="$CID" bash "$PKG/20-env.sh" > "$d/out" 2>&1 || rc=$?
   if [ "$rc" != 0 ] && grep -q "^FAIL WEB3AUTH_RETIRED_CLIENT_IDS: the old env's WEB3AUTH_CLIENT_ID $want" "$d/out" && [ ! -e "$d/ddcnew/.env.rehearsal" ] \
      && ! grep -qF -- "BBpkxUTUr-synthetic" "$d/out"; then ok "retired client id: the old WEB3AUTH_CLIENT_ID $want -> 20-env.sh stops, no .env.rehearsal"
   else sed 's/^/    /' "$d/out" | tail -3; bad "retired client id case '$lbl' (rc=$rc)"; fi
@@ -353,7 +493,7 @@ r1=$(oa "$A" "$B" "" on); r2=$(oa " $A , ,$B" "$B" "" on); r3=$(oa "$A" "$B" "x,
   || bad "old_app_env_check: [$r1] [$r2] [$r3] [$r4] [$r5]"
 # Outcome B (other names): the overrides reach every host value; a later override that differs from the record stops.
 d="$T/hosts-b"; mkdir -p "$d/ddcnew"; rc=0
-DDC_LOCAL_TEST=1 NEW_DIR="$d/ddcnew" OLD_ENV="$OLD" FE_ENV_TGE="$T/env.tge" API_HOST=api-coexist.datadance.ai APP_HOST=app-coexist.datadance.ai bash "$PKG/20-env.sh" > "$d/out" 2>&1 || rc=$?
+DDC_LOCAL_TEST=1 NEW_DIR="$d/ddcnew" OLD_ENV="$OLD" FE_ENV_TGE="$T/env.tge" REHEARSAL_CLIENT_ID="$CID" API_HOST=api-coexist.datadance.ai APP_HOST=app-coexist.datadance.ai bash "$PKG/20-env.sh" > "$d/out" 2>&1 || rc=$?
 gv() { sed -n "s/^$1=\"\(.*\)\"$/\1/p" "$d/ddcnew/.env.rehearsal" | tail -1; }
 [ "$rc" = 0 ] && [ "$(gv PUBLIC_BASE_URL) $(gv API_BASE_URL) $(gv APP_PUBLIC_URL) $(gv FRONTEND_URL)" = "https://api-coexist.datadance.ai https://api-coexist.datadance.ai https://app-coexist.datadance.ai https://app-coexist.datadance.ai" ] \
   && grep -q '^API_HOST=api-coexist.datadance.ai$' "$d/ddcnew/settings.env" && ok "API_HOST / APP_HOST overrides: PUBLIC_BASE_URL, API_BASE_URL, APP_PUBLIC_URL and FRONTEND_URL follow them, and settings.env records them" \
@@ -362,7 +502,7 @@ rc=0; DDC_LOCAL_TEST=1 NEW_DIR="$d/ddcnew" OLD_ENV="$OLD" FE_ENV_TGE="$T/env.tge
 [ "$rc" != 0 ] && grep -q '^FAIL API_HOST=api-other.datadance.ai differs from API_HOST=api-coexist.datadance.ai recorded in ' "$d/out2" \
   && [ "$(gv PUBLIC_BASE_URL)" = https://api-coexist.datadance.ai ] && ok "an override that differs from the recorded settings stops 20-env.sh (99-teardown.sh first); the file is unchanged" || bad "settings conflict (rc=$rc)"
 for o in API_HOST=api.datadance.ai APP_HOST=x.datadance.co API_PORT=10000 WEB_PORT=abc TAKE_OVER_VHOSTS=maybe; do
-  rc=0; DDC_LOCAL_TEST=1 NEW_DIR="$T/hosts-bad" OLD_ENV="$OLD" FE_ENV_TGE="$T/env.tge" env "$o" bash "$PKG/20-env.sh" > "$T/hosts-bad.out" 2>&1 || rc=$?
+  rc=0; DDC_LOCAL_TEST=1 NEW_DIR="$T/hosts-bad" OLD_ENV="$OLD" FE_ENV_TGE="$T/env.tge" REHEARSAL_CLIENT_ID="$CID" env "$o" bash "$PKG/20-env.sh" > "$T/hosts-bad.out" 2>&1 || rc=$?
   [ "$rc" != 0 ] && grep -q "^FAIL ${o%%=*}" "$T/hosts-bad.out" || bad "setting $o was not refused: $(tail -1 "$T/hosts-bad.out")"
 done
 [ ! -e "$T/hosts-bad/settings.env" ] && ok "invalid settings refused before anything is written (a production host, another domain, an old-stack port, a non-number, TAKE_OVER_VHOSTS=maybe)" || bad "a refused setting was recorded"
@@ -519,14 +659,19 @@ fi
 
 # ---------------------------------------------------------------------------
 echo; echo "== 6. memory watchdog (fake meminfo, local Docker Desktop only)"
+# Several suites may run at once on the same Docker Desktop VM: every RUN step here sleeps for a number unique to this
+# run (42/43 followed by this shell's pid), only this run's step is looked for, marked or killed, and every wait is a
+# wall-clock deadline sized for a loaded VM.
 if docker info >/dev/null 2>&1; then
   WD="$T/wd"; mkdir -p "$WD/ok" "$WD/kill" "$WD/sel"
-  printf 'FROM nginx:stable\nRUN echo watchdog-ok > /wd-ok\n' > "$WD/ok/Dockerfile"
-  printf 'FROM nginx:stable\nRUN sleep 4242\n' > "$WD/kill/Dockerfile"
-  printf 'FROM nginx:stable\nRUN sleep 4243\n' > "$WD/sel/Dockerfile"
+  WDN=$(( ($$ % 90000) + 10000 )); KSLEEP="42$WDN"; SSLEEP="43$WDN"
+  printf 'FROM nginx:stable\nRUN echo watchdog-ok-%s > /wd-ok\n' "$RUN_ID" > "$WD/ok/Dockerfile"
+  printf 'FROM nginx:stable\nRUN sleep %s\n' "$KSLEEP" > "$WD/kill/Dockerfile"
+  printf 'FROM nginx:stable\nRUN sleep %s\n' "$SSLEEP" > "$WD/sel/Dockerfile"
   hi() { printf 'MemTotal:       16000000 kB\nMemAvailable:    8000000 kB\n' > "$WD/meminfo"; }
   lo() { printf 'MemTotal:       16000000 kB\nMemAvailable:     512000 kB\n' > "$WD/meminfo"; }
   vmps() { docker run --rm "${LT[@]}" --pid=host --name "wdps-$RANDOM-$RUN_ID" node:22-alpine ps -o pid,args 2>/dev/null; }
+  sees() { vmps | grep -qE "(^|[[:space:]])sleep $1([[:space:]]|$)"; }   # <seconds>: this run's RUN step is running
   wdrun() { ( DDC_LOCAL_TEST=1; NEW_DIR="$T/ddcnew"; DDC_MEMINFO="$WD/meminfo"; BUILD_WATCH_INTERVAL=1
     # shellcheck source=../common.sh
     . "$PKG/common.sh"; run_build_watched "$@" ); }
@@ -535,32 +680,35 @@ if docker info >/dev/null 2>&1; then
     cat "$T/wd-ok.out"; docker image inspect "ddcnew-wdtest:ok-$RUN_ID" >/dev/null 2>&1 && ok "normal build under the watchdog passes and tags the image" || bad "image missing"
   else cat "$T/wd-ok.out"; bad "normal build under the watchdog failed"; fi
   hi
-  ( for _ in $(seq 1 90); do vmps | grep -q 'sleep 4242' && { echo "test: sleep 4242 (the RUN step) is running; MemAvailable -> 500MB"; lo; exit 0; }; sleep 1; done; echo "test: RUN step never seen"; lo ) > "$T/wd-flip.out" 2>&1 &
+  ( end=$(( $(date +%s) + 300 )); while [ "$(date +%s)" -lt "$end" ]; do sees "$KSLEEP" && { echo "test: sleep $KSLEEP (this run's RUN step) is running; MemAvailable -> 500MB"; lo; exit 0; }; sleep 1; done
+    echo "test: RUN step never seen"; lo ) > "$T/wd-flip.out" 2>&1 &
   flip=$!
   t0=$(date +%s); rc=0
   wdrun "$WD/kill.log" --no-cache "${LT[@]}" -t "ddcnew-wdtest:kill-$RUN_ID" "$WD/kill" > "$T/wd-kill.out" 2>&1 || rc=$?
   t1=$(date +%s); wait "$flip" || true
   cat "$T/wd-flip.out"; sed 's/^/  expected> /' "$T/wd-kill.out"
-  left=1; for _ in $(seq 1 15); do vmps | grep -q 'sleep 4242' || { left=0; break; }; sleep 1; done
+  left=1; end=$(( $(date +%s) + 120 )); while [ "$(date +%s)" -lt "$end" ]; do sees "$KSLEEP" || { left=0; break; }; sleep 1; done
   [ "$rc" != 0 ] && grep -q 'BUILD STOPPED BY THE WATCHDOG: MemAvailable' "$T/wd-kill.out" && grep -q 'RUN step) is running' "$T/wd-flip.out" && [ "$left" = 0 ] && ! docker image inspect "ddcnew-wdtest:kill-$RUN_ID" >/dev/null 2>&1 \
-    && ok "watchdog stopped the build during RUN sleep 4242: exit=$rc after $((t1-t0))s, step process gone, no image tagged" || bad "watchdog kill test (rc=$rc left=$left)"
+    && ok "watchdog stopped the build during RUN sleep $KSLEEP: exit=$rc after $((t1-t0))s, step process gone, no image tagged" || bad "watchdog kill test (rc=$rc left=$left)"
   # escalation path: are BuildKit step processes found by their cgroup? (plain build, no watchdog)
   docker build --no-cache "${LT[@]}" -t "ddcnew-wdtest:sel-$RUN_ID" "$WD/sel" > "$WD/sel.log" 2>&1 &
   sel=$!
-  for _ in $(seq 1 90); do vmps | grep -q 'sleep 4243' && break; sleep 1; done
-  docker run --rm "${LT[@]}" --pid=host --cgroupns=host --privileged -v "$PKG:/pkg:ro" --name "wdsel-$RANDOM-$RUN_ID" --entrypoint bash nginx:stable -c \
-    '. /pkg/common.sh; for p in $(buildkit_step_pids); do printf "pid=%s cgroup=%s cmd=" "$p" "$(cut -d: -f3 /proc/$p/cgroup | head -1)"; tr "\0" " " < /proc/$p/cmdline; echo; done
-     echo "oom_marked=$(buildkit_oom_prefer)"; for p in $(buildkit_step_pids); do echo "oom pid=$p adj=$(cat /proc/$p/oom_score_adj)"; done' > "$T/wd-sel.out" 2>&1 || true
+  end=$(( $(date +%s) + 300 )); while [ "$(date +%s)" -lt "$end" ]; do sees "$SSLEEP" && break; sleep 1; done
+  # The selector lists every BuildKit step on the VM (other suites' too); buildkit_oom_prefer marks them all, which is
+  # its job. Only this run's step (sleep $SSLEEP) is checked, and only it is killed.
+  docker run --rm "${LT[@]}" --pid=host --cgroupns=host --privileged -v "$PKG:/pkg:ro" -e WANT="sleep $SSLEEP" --name "wdsel-$RANDOM-$RUN_ID" --entrypoint bash nginx:stable -c \
+    '. /pkg/common.sh; for p in $(buildkit_step_pids); do c=$(tr "\0" " " < /proc/$p/cmdline 2>/dev/null | sed "s/ $//"); printf "pid=%s cgroup=%s cmd=%s%s\n" "$p" "$(cut -d: -f3 /proc/$p/cgroup | head -1)" "$c" "$([ "$c" = "$WANT" ] && echo " (this run)")"; done
+     echo "oom_marked=$(buildkit_oom_prefer)"; for p in $(buildkit_step_pids); do c=$(tr "\0" " " < /proc/$p/cmdline 2>/dev/null | sed "s/ $//"); [ "$c" = "$WANT" ] && echo "oom this-run pid=$p adj=$(cat /proc/$p/oom_score_adj)"; done' > "$T/wd-sel.out" 2>&1 || true
   cat "$T/wd-sel.out"
-  if grep -q 'cmd=sleep 4243' "$T/wd-sel.out" && ! grep -qE 'cmd=[^ ]*(dockerd|containerd)' "$T/wd-sel.out"; then
-    docker run --rm "${LT[@]}" --pid=host --cgroupns=host --privileged -v "$PKG:/pkg:ro" --name "wdkill-$RANDOM-$RUN_ID" --entrypoint bash nginx:stable -c \
-      '. /pkg/common.sh; for p in $(buildkit_step_pids); do grep -q "sleep" /proc/$p/cmdline 2>/dev/null && kill -KILL "$p" && echo "killed step pid $p"; done' || true
+  if grep -q "cmd=sleep $SSLEEP (this run)" "$T/wd-sel.out" && ! grep -qE 'cmd=[^ ]*(dockerd|containerd)' "$T/wd-sel.out"; then
+    docker run --rm "${LT[@]}" --pid=host --cgroupns=host --privileged -v "$PKG:/pkg:ro" -e WANT="sleep $SSLEEP" --name "wdkill-$RANDOM-$RUN_ID" --entrypoint bash nginx:stable -c \
+      '. /pkg/common.sh; for p in $(buildkit_step_pids); do [ "$(tr "\0" " " < /proc/$p/cmdline 2>/dev/null | sed "s/ $//")" = "$WANT" ] && kill -KILL "$p" && echo "killed this run'"'"'s step pid $p"; done' || true
     src=0; wait "$sel" || src=$?
-    [ "$src" != 0 ] && ok "buildkit_step_pids finds the RUN step by cgroup (not dockerd/containerd); SIGKILL on it fails the build (exit $src)" || bad "build survived the step kill"
-    grep -q '^oom_marked=[1-9]' "$T/wd-sel.out" && ! grep -E '^oom pid=' "$T/wd-sel.out" | grep -vq 'adj=1000$' && ok "buildkit_oom_prefer sets oom_score_adj=1000 on every BuildKit step process ($(grep -c '^oom pid=' "$T/wd-sel.out"))" || bad "oom_score_adj not set on the step processes"
+    [ "$src" != 0 ] && ok "buildkit_step_pids finds this run's RUN step by its cgroup (not dockerd/containerd); SIGKILL on it fails the build (exit $src)" || bad "build survived the step kill"
+    grep -qE '^oom this-run pid=[0-9]+ adj=1000$' "$T/wd-sel.out" && ok "buildkit_oom_prefer sets oom_score_adj=1000 on the BuildKit step process (this run's checked: $(grep '^oom this-run' "$T/wd-sel.out" | cut -d' ' -f3-))" || bad "oom_score_adj not set on this run's step process"
   else
     kill "$sel" 2>/dev/null || true; wait "$sel" 2>/dev/null || true
-    bad "buildkit_step_pids did not find the RUN step (see above)"
+    bad "buildkit_step_pids did not find this run's RUN step (see above)"
   fi
   for i in ok kill sel; do docker image rm "ddcnew-wdtest:$i-$RUN_ID" >/dev/null 2>&1 || true; done   # built by this run (run-id tags)
   echo "test images ddcnew-wdtest:*-$RUN_ID removed; this run's containers still present: $(docker ps -aq --filter "label=ddcnew-localtest=$RUN_ID" | grep -c . || true)"
@@ -629,7 +777,7 @@ EOF
   C6="sysdtest-$RANDOM-$RUN_ID"
   if C6ID=$(docker run -d "${LT[@]}" --name "$C6" --privileged --cgroupns=private -v /var/lib/docker -v /var/lib/containerd --tmpfs /run --tmpfs /run/lock \
        -v "$PKG:/pkg:ro" "$SYSD_IMG"); then
-    for _ in $(seq 1 60); do docker exec "$C6ID" docker info >/dev/null 2>&1 && break; sleep 1; done
+    end=$(( $(date +%s) + 180 )); while [ "$(date +%s)" -lt "$end" ]; do docker exec "$C6ID" docker info >/dev/null 2>&1 && break; sleep 1; done
     if timeout 400 docker exec "$C6ID" bash /pkg/test/helpers/sysd-driver.sh /pkg "$RUN_ID" > "$T/sysd.out" 2>&1; then cat "$T/sysd.out"; ok "watchdog, selector and SIGKILL fallback on the real systemd driver"
     else cat "$T/sysd.out"; bad "real systemd-driver test"; fi
     docker rm -fv "$C6ID" >/dev/null 2>&1 || true   # by the id this run got back from docker run
@@ -661,6 +809,17 @@ out=$(b10 --infra-only); printf '%s\n' "$out" | grep -q "API_IMAGE=ddcnew/backen
 out=$(b10 --infra-only --overlays-reconciled) && bad "both flags accepted" || { printf '%s\n' "$out" | grep -q 'together is an error' && ok "both flags -> $out" || bad "both: $out"; }
 out=$(b10) && bad "no flag accepted" || ok "no flag -> $(printf '%s' "$out" | cut -c1-90)..."
 out=$(b10 --yes) && bad "unknown flag accepted" || ok "unknown flag -> $out"
+# The frontend check comes before the settings record: a frontend built for another API host stops 10-build.sh before it
+# records anything (and before any build or network fetch).
+B="$T/build-order"; mkdir -p "$B/ddcnew/src" "$B/fe/src/config" "$B/bin"; FE40=fedcba9876543210fedcba9876543210fedcba98
+printf "export const API_BASE_URLS = {\n  tge: 'https://other.example.invalid/api',\n};\n" > "$B/fe/src/config/environment.ts"
+tar -czf "$B/ddcnew/src/ddc-frontend-$FE40.tar.gz" -C "$B/fe" src
+(cd "$B/ddcnew/src" && shasum -a 256 < "ddc-frontend-$FE40.tar.gz" | cut -c1-64 > "ddc-frontend-$FE40.tar.gz.sha256")
+printf '#!/bin/sh\nexit 0\n' > "$B/bin/docker"; chmod 755 "$B/bin/docker"
+RC=0; PATH="$B/bin:$PATH" DDC_LOCAL_TEST=1 NEW_DIR="$B/ddcnew" NGINX_AVAIL="$B/none" NGINX_ENABLED="$B/none" NGINX_CONFD="$B/none" MAINNET_DIR="$B/none" \
+  bash "$PKG/10-build.sh" "$S40" "$FE40" --infra-only > "$B/out" 2>&1 || RC=$?
+[ "$RC" != 0 ] && grep -q "^FAIL the frontend commit builds its tge web app for https://other.example.invalid/api, not https://$D_API_HOST/api" "$B/out" && [ ! -e "$B/ddcnew/settings.env" ] \
+  && ok "10-build.sh: a frontend built for another API host stops it before the settings are recorded (no settings.env left behind)" || { tail -3 "$B/out"; bad "10-build.sh frontend check order (rc=$RC)"; }
 for v in 1 0 missing; do
   d="$T/infra-$v"; mkdir -p "$d"; [ "$v" = missing ] || printf 'API_IMAGE=x\nWEB_IMAGE=y\nINFRA_ONLY=%s\n' "$v" > "$d/.env"
   if ( DDC_LOCAL_TEST=1; NEW_DIR="$d"; . "$PKG/common.sh"; refuse_if_infra_only ) > "$T/infra-$v.out" 2>&1; then r=allowed; else r=refused; fi
@@ -720,16 +879,40 @@ GOODB="${GOOD/issuer=https:\/\/$D_API_HOST/issuer=https://api-coexist.datadance.
 out=$( ( DDC_LOCAL_TEST=1; API_HOST=api-coexist.datadance.ai; APP_HOST=app-coexist.datadance.ai; . "$PKG/common.sh"; money_path_fields_check "$GOODB" 2 ) 2>&1) \
   && printf '%s\n' "$out" | grep -q '^PASS log: issuer=https://api-coexist.datadance.ai$' && ! ( ( DDC_LOCAL_TEST=1; API_HOST=api-coexist.datadance.ai; APP_HOST=app-coexist.datadance.ai; . "$PKG/common.sh"; money_path_fields_check "$GOOD" 2 ) >/dev/null 2>&1 ) \
   && ok "with API_HOST/APP_HOST overrides the money-path check requires issuer/consentOrigin of those hosts (and refuses the default ones)" || { echo "$out"; bad "money-path check with host overrides"; }
-# Backend PR #38's startup line (40-up.sh step 5): checked when the image prints it, said and skipped when it does not.
+# Backend PR #38's startup line (40-up.sh step 5): checked whenever the image prints it; REQUIRED when 10-build.sh found
+# PR #38's commit in the backend commit (OLD_APP_SWITCHES=1), otherwise its absence is said, not failed.
 RL="api-1  | Old App update answer (426 APP_UPDATE_REQUIRED): WEB3AUTH_RETIRED_CLIENT_IDS count=1 first8=BGiGcxrX LOGIN_MISSING_IDTOKEN_MEANS_OLD_APP=on"
-oal() { ( . "$PKG/common.sh"; old_app_line_check "$1" "$2" ) 2>&1 | tail -1 || true; }
-r1=$(oal "$RL" BGiGcxrX); r2=$(oal "${RL/=on/=off}" BGiGcxrX); r3=$(oal "${RL/count=1/count=2}" BGiGcxrX); r4=$(oal "${RL/first8=BGiGcxrX/first8=BBpkxUTU}" BGiGcxrX); r5=$(oal "api-1  | server started" BGiGcxrX)
-case "$r1|$r2|$r3|$r4|$r5" in
-  "PASS old-App switches (backend PR #38 in this image): WEB3AUTH_RETIRED_CLIENT_IDS count=1 first8=BGiGcxrX LOGIN_MISSING_IDTOKEN_MEANS_OLD_APP=on|FAIL "*"lacks: LOGIN_MISSING_IDTOKEN_MEANS_OLD_APP=on|FAIL "*"lacks: count=1|FAIL "*"lacks: first8=BGiGcxrX|old-App switches: no 'Old App update answer' line in the api log: this image does not have backend PR #38"*)
-    ok "old-App startup line: passes when exact, stops on =off, count=2 or another prefix, and an image without PR #38 is reported as such (not failed)";;
-  *) printf '    %s\n' "$r1" "$r2" "$r3" "$r4" "$r5"; bad "old_app_line_check cases";;
+oal() { ( . "$PKG/common.sh"; old_app_line_check "$1" "$2" "$3" ) 2>&1 | tail -1 || true; }
+r1=$(oal "$RL" BGiGcxrX 1); r2=$(oal "${RL/=on/=off}" BGiGcxrX 1); r3=$(oal "${RL/count=1/count=2}" BGiGcxrX 1); r4=$(oal "${RL/first8=BGiGcxrX/first8=BBpkxUTU}" BGiGcxrX 1)
+r5=$(oal "api-1  | server started" BGiGcxrX 0); r6=$(oal "api-1  | server started" BGiGcxrX 1); r7=$(oal "$RL" BGiGcxrX 0)
+case "$r1|$r2|$r3|$r4|$r5|$r6|$r7" in
+  "PASS old-App switches (backend PR #38 in this image): WEB3AUTH_RETIRED_CLIENT_IDS count=1 first8=BGiGcxrX LOGIN_MISSING_IDTOKEN_MEANS_OLD_APP=on|FAIL "*"lacks: LOGIN_MISSING_IDTOKEN_MEANS_OLD_APP=on|FAIL "*"lacks: count=1|FAIL "*"lacks: first8=BGiGcxrX|old-App switches: no 'Old App update answer' line in the api log, and the backend commit does not contain PR #38 (OLD_APP_SWITCHES=0)"*"|FAIL the api log has no 'Old App update answer' line, but the backend commit contains PR #38"*"|PASS old-App switches"*)
+    ok "old-App startup line: passes when exact, stops on =off, count=2 or another prefix; missing: said when the backend commit lacks PR #38, a STOP when it has it; a line printed anyway is still checked";;
+  *) printf '    %s\n' "$r1" "$r2" "$r3" "$r4" "$r5" "$r6" "$r7"; bad "old_app_line_check cases";;
 esac
-grep -qF 'old_app_line_check "$LOG" "$(env_get_simple WEB3AUTH_RETIRED_CLIENT_IDS "$NEW_DIR/.env.api" | cut -c1-8)"' "$PKG/40-up.sh" && ok "40-up.sh checks that line against the first 8 characters of WEB3AUTH_RETIRED_CLIENT_IDS in .env.api" || bad "40-up.sh does not call old_app_line_check"
+grep -qF 'old_app_line_check "$LOG" "$(env_get_simple WEB3AUTH_RETIRED_CLIENT_IDS "$NEW_DIR/.env.api" | cut -c1-8)" "$OLD_APP_SWITCHES"' "$PKG/40-up.sh" \
+  && grep -q 'OLD_APP_SWITCHES=$(env_get_simple OLD_APP_SWITCHES "$NEW_DIR/.env")' "$PKG/40-up.sh" \
+  && grep -qF 'OLD_APP_SWITCHES=$(old_app_switches "$BE_DIR" "$BE_REPO" "$BE_SHA")' "$PKG/10-build.sh" && grep -qF 'OLD_APP_SWITCHES=%s' "$PKG/10-build.sh" \
+  && ok "40-up.sh checks that line against the first 8 characters of WEB3AUTH_RETIRED_CLIENT_IDS, required per OLD_APP_SWITCHES, which 10-build.sh records from an ancestor check of PR #38's commit" || bad "40-up.sh / 10-build.sh old-App wiring"
+# The ancestor check itself, on this repository: PR #38's commit is in HEAD (main has it since 8ebfe5b), not in its parent of 10-04.
+REPO="$(cd "$PKG/../.." && pwd)"; OAC=$( . "$PKG/common.sh"; echo "$OLD_APP_COMMIT")
+if git -C "$REPO" cat-file -e "$OAC^{commit}" 2>/dev/null && git -C "$REPO" merge-base --is-ancestor "$OAC" HEAD \
+   && ! git -C "$REPO" merge-base --is-ancestor "$OAC" 6e61be2 2>/dev/null; then ok "OLD_APP_COMMIT ${OAC:0:12} is PR #38's commit: an ancestor of HEAD, not of 6e61be2 (the PR #37 merge, before #38)"
+else bad "OLD_APP_COMMIT ${OAC:0:12} is not where this suite expects it in the history"; fi
+# old_app_switches (10-build.sh) on this repository through file://, fetched the way 10-build.sh fetches from GitHub: the
+# commit at depth 1, then the shallow history since 2026-10-01. A fetch that fails gives no answer (10-build.sh stops),
+# unless the commit is older than 2026-10-01.
+OAS="$T/oas"; mkdir -p "$OAS"
+oas() { # <label> <sha> [<url>]: 1, 0, or unknown
+  local g="$OAS/$1"
+  git init -q "$g" && git -C "$g" fetch -q --depth 1 "file://$REPO" "$2" 2>/dev/null || { echo setup-failed; return 0; }
+  ( . "$PKG/common.sh"; old_app_switches "$g" "${3:-file://$REPO}" "$2" ) 2>/dev/null || echo unknown
+}
+OAH=$(git -C "$REPO" rev-parse HEAD); OAP=$(git -C "$REPO" rev-parse 6e61be2 2>/dev/null || true); OAO=$(git -C "$REPO" rev-list -1 --before=2026-09-25 HEAD)
+a1=$(oas head "$OAH"); a2=$(oas pre38 "$OAP"); a3=$(oas sept "$OAO"); a4=$(oas nofetch "$OAH" "file://$T/no-such-repo"); a5=$(oas nofetch-old "$OAO" "file://$T/no-such-repo")
+[ "$a1|$a2|$a3|$a4|$a5" = "1|0|0|unknown|0" ] \
+  && ok "old_app_switches (10-build.sh): HEAD (with PR #38) -> 1; 6e61be2 (before #38) -> 0; a commit of 09-24 (no history since 10-01) -> 0; a failing history fetch -> no answer (10-build.sh stops), 0 for a commit before 10-01" \
+  || bad "old_app_switches answers $a1|$a2|$a3|$a4|$a5 (want 1|0|0|unknown|0)"
 
 echo; echo "== 10c. SSH login guard (sshpw.sh, remote.sh, ro-ssh.sh) against a throwaway Ubuntu 22.04 sshd (password + keyboard-interactive via PAM)"
 if docker info >/dev/null 2>&1; then
@@ -743,7 +926,7 @@ if docker info >/dev/null 2>&1; then
     printf "root:%s\n" "$TESTPW" | chpasswd
     exec /usr/sbin/sshd -D -e -o PermitRootLogin=yes -o PasswordAuthentication=yes -o KbdInteractiveAuthentication=yes -o UsePAM=yes -o LogLevel=VERBOSE -o MaxAuthTries=6')   # C = the id docker run returned
   PORT=$(docker port "$C" 22/tcp | head -1 | sed 's/.*://')
-  for _ in $(seq 1 30); do docker logs "$C" 2>&1 | grep -q 'Server listening' && break; sleep 1; done
+  end=$(( $(date +%s) + 90 )); while [ "$(date +%s)" -lt "$end" ]; do docker logs "$C" 2>&1 | grep -q 'Server listening' && break; sleep 1; done
   ssh-keyscan -p "$PORT" 127.0.0.1 2>/dev/null > "$SS/known_hosts"
   # A scratch copy of sshpw.sh with a TEST local.env next to it (loopback target, test vault): the package's own
   # local.env, if one exists, is never read by these tests.
@@ -816,13 +999,14 @@ if docker info >/dev/null 2>&1; then
     ok "disk full (/dev/full, ENOSPC on every write): sshpw_make_askpass fails"
   else bad "sshpw_make_askpass accepted /dev/full"; fi
   # remote.sh and ro-ssh.sh themselves, with an askpass that cannot be created: scratch COPIES whose test local.env points
-  # at the throwaway sshd. remote.sh and survey/ro-ssh.sh are byte-identical to the package's; sshpw.sh differs in two
-  # lines only (the op binary; port + known_hosts appended), asserted below. The host comes from local.env alone.
+  # at the throwaway sshd. remote.sh, common.sh (remote.sh checks the overrides with it before connecting) and
+  # survey/ro-ssh.sh are byte-identical to the package's; sshpw.sh differs in two lines only (the op binary; port +
+  # known_hosts appended), asserted below. The host comes from local.env alone.
   CP="$T/sshcopy/deploy/new-stack"; mkdir -p "$CP/survey"
-  cp "$PKG/remote.sh" "$PKG/00-preflight.sh" "$CP/"; cp "$PKG/survey/ro-ssh.sh" "$CP/survey/"; cp "$SS/pkg/local.env" "$CP/local.env"
+  cp "$PKG/remote.sh" "$PKG/common.sh" "$PKG/00-preflight.sh" "$CP/"; cp "$PKG/survey/ro-ssh.sh" "$CP/survey/"; cp "$SS/pkg/local.env" "$CP/local.env"
   sed "s#^SSHPW_OP_BIN=/opt/homebrew/bin/op #SSHPW_OP_BIN=$SS/op-ok #" "$PKG/sshpw.sh" > "$CP/sshpw.sh"
   printf 'SSHPW_OPTS+=(-p %s -o UserKnownHostsFile=%s)\n' "$PORT" "$SS/known_hosts" >> "$CP/sshpw.sh"
-  nd=$( { diff "$PKG/survey/ro-ssh.sh" "$CP/survey/ro-ssh.sh"; diff "$PKG/sshpw.sh" "$CP/sshpw.sh"; diff "$PKG/remote.sh" "$CP/remote.sh"; } | grep -c '^>' || true)
+  nd=$( { diff "$PKG/survey/ro-ssh.sh" "$CP/survey/ro-ssh.sh"; diff "$PKG/sshpw.sh" "$CP/sshpw.sh"; diff "$PKG/remote.sh" "$CP/remote.sh"; diff "$PKG/common.sh" "$CP/common.sh"; } | grep -c '^>' || true)
   if [ "$nd" = 2 ] && [ "$(sed -n 's/^DDC_SSH_TARGET=//p' "$CP/local.env")" = root@127.0.0.1 ]; then
     printf 'echo PROBE-OK\n' > "$CP/probe.sh"
     c0=$(nconn); f0=$(nfail); rc=0; out=$(TMPDIR="$T/no-such-dir" bash "$CP/survey/ro-ssh.sh" "$CP/probe.sh" "$CP/probe.out" 2>&1) || rc=$?; sleep 2; c1=$(nconn); f1=$(nfail)
@@ -854,7 +1038,7 @@ IFS= read -r line; printf 'remote got-sha=%s args=%s ip=%s\n' "$(printf '%s' "$l
 EOF
   CP2="$T/sshcopy2/deploy/new-stack"; mkdir -p "$CP2"
   printf '#!/bin/sh\ncat > "%s/op-drain.stdin.$$"\nprintf "%%s\\n" "%s"\n' "$SS" "$TESTPW" > "$SS/op-drain"; chmod 700 "$SS/op-drain"
-  cp "$PKG/remote.sh" "$CP2/"; cp "$SS/pkg/local.env" "$CP2/local.env"
+  cp "$PKG/remote.sh" "$PKG/common.sh" "$CP2/"; cp "$SS/pkg/local.env" "$CP2/local.env"
   sed "s#^SSHPW_OP_BIN=/opt/homebrew/bin/op #SSHPW_OP_BIN=$SS/op-drain #" "$PKG/sshpw.sh" > "$CP2/sshpw.sh"
   printf 'SSHPW_OPTS+=(-p %s -o UserKnownHostsFile=%s)\n' "$PORT" "$SS/known_hosts" >> "$CP2/sshpw.sh"
   ( umask 077; printf 'lt-%s\n' "$(openssl rand -hex 16)" > "$SS/page-pw" )   # a dummy page password for this test only
@@ -880,6 +1064,34 @@ for a in PATH=/tmp BASH_ENV=/tmp/x LD_PRELOAD=/tmp/x.so DDC_LOCAL_TEST=1 NEW_DIR
   [ "$rc" = 2 ] && printf '%s\n' "$out" | grep -q "override ${a%%=*} is not allowed" && ! printf '%s\n' "$out" | grep -q STUB || bad "override ${a%%=*}: rc=$rc $out"
 done
 ok "10 non-allowlisted overrides (PATH, BASH_ENV, LD_PRELOAD, DDC_LOCAL_TEST, NEW_DIR, OLD_ENV, BACKUP_DIR, DDC_MEMINFO, BUILD_WATCH_INTERVAL, lower_case) refused before any connection"
+# Every allowlisted override, with a ;, $(), backticks, a newline or a carriage return in its value: refused before
+# anything connects (the server runs `env NAME=value ./script` in a root shell). The names come from remote.sh itself.
+SERVER_NAMES=$(sed -n 's/^SERVER_ENV_ALLOWED="\(.*\)"$/\1/p' "$PKG/remote.sh"); NL=$'\n'; CR=$'\r'; n=0; through=""
+for name in $SERVER_NAMES; do
+  for v in 'a;id' 'a$(id)' 'a`id`' "a${NL}id" "a${CR}"; do
+    n=$((n + 1)); rc=0; out=$(DDC_APPROVED=yes bash "$R/remote.sh" run 40-up.sh "$name=$v" 2>&1 < /dev/null) || rc=$?
+    [ "$rc" = 2 ] && [ "$out" = "unsafe argument" ] || through="$through $name=$(printf '%q' "$v")"
+  done
+  for v in 'a;id' 'a$(id)' "a${NL}id"; do   # the same through preflight, for the five settings it takes
+    case "$name" in API_HOST|APP_HOST|API_PORT|WEB_PORT|DB_PORT) ;; *) continue;; esac
+    n=$((n + 1)); rc=0; out=$(bash "$R/remote.sh" preflight "$name=$v" 2>&1 < /dev/null) || rc=$?
+    [ "$rc" = 2 ] && printf '%s\n' "$out" | grep -q '^preflight takes only' && ! printf '%s\n' "$out" | grep -q STUB || through="$through preflight:$name=$(printf '%q' "$v")"
+  done
+done
+[ -n "$SERVER_NAMES" ] && [ -z "$through" ] && ok "$n refusals before any connection: each of the $(set -- $SERVER_NAMES; echo $#) allowlisted overrides with ;, \$(), backticks, a newline or a carriage return (run), and the five settings with ;, \$() or a newline (preflight)" \
+  || bad "dangerous characters in an override got through to the (stubbed) connection:$through"
+# run checks the settings, the client id and TAKE_OVER_VHOSTS with the server's own rules (common.sh), before connecting.
+for c in "API_HOST=api.datadance.ai|is a production host" "APP_HOST=a.b.datadance.ai|is not a host name of the form" "API_PORT=10000|is a port of the old stack" \
+         "WEB_PORT=10020|the three ports must differ" "TAKE_OVER_VHOSTS=YES|TAKE_OVER_VHOSTS must be yes" "REHEARSAL_CLIENT_ID=tge-rehearsal|is retired" \
+         "REHEARSAL_CLIENT_ID=tge|is retired" "REHEARSAL_CLIENT_ID=$(printf 'x%.0s' $(seq 1 65))|must match"; do
+  rc=0; out=$(DDC_APPROVED=yes bash "$R/remote.sh" run 30-nginx.sh apply "${c%%|*}" 2>&1 < /dev/null) || rc=$?
+  [ "$rc" = 2 ] && printf '%s\n' "$out" | grep -q "^refusing before connecting: FAIL .*${c#*|}" && ! printf '%s\n' "$out" | grep -q STUB || bad "remote.sh run with ${c%%|*}: rc=$rc $out"
+done
+out=$(DDC_APPROVED=yes bash "$R/remote.sh" run 20-env.sh REHEARSAL_CLIENT_ID=lt-partner-client API_HOST=api-coexist.datadance.ai 2>&1 < /dev/null || true)
+printf '%s\n' "$out" | grep -q STUB && ok "remote.sh run checks the settings, REHEARSAL_CLIENT_ID and TAKE_OVER_VHOSTS with the server's rules before connecting (8 refusals); valid ones pass through" || bad "valid overrides refused: $out"
+rc=0; out=$(DDC_APPROVED=yes bash "$R/remote.sh" run 00-preflight.sh 2>&1 < /dev/null) || rc=$?
+[ "$rc" = 2 ] && printf '%s\n' "$out" | grep -q '^refusing: run the preflight with ./remote.sh preflight' && ! printf '%s\n' "$out" | grep -q STUB \
+  && ok "remote.sh run 00-preflight.sh is refused (the preflight only runs through ./remote.sh preflight)" || bad "run 00-preflight.sh: rc=$rc $out"
 out=$(DDC_APPROVED=yes bash "$R/remote.sh" run 40-up.sh JWKS_NEW_PINS_VERIFIED=abc REHEARSAL_DB=ddc_rehearsal2 2>&1 < /dev/null || true)
 printf '%s\n' "$out" | grep -q STUB && ok "allowlisted overrides (JWKS_NEW_PINS_VERIFIED, REHEARSAL_DB) pass through to the (stubbed) connection" || bad "allowlisted override refused: $out"
 out=$(DDC_APPROVED=yes bash "$R/remote.sh" run p1-backup.sh verify P1_USERS_MIN=1000 2>&1 < /dev/null || true)
@@ -1075,16 +1287,10 @@ else bad "section 12 (p1) needs Docker Desktop"; fi
 # 30-nginx.sh apply/undo with stub nginx/systemctl/curl/docker in scratch vhost directories (DDC_LOCAL_TEST=1)
 ST="$T/stubs"; mkdir -p "$ST"
 printf '#!/bin/sh\nexit 0\n' > "$ST/nginx"
-printf '#!/bin/sh\n[ "$1 $2" = "reload nginx" ] && touch "$STUB_DIR/reloaded"\nexit 0\n' > "$ST/systemctl"
-cat > "$ST/curl" <<'STUB'
-#!/bin/sh
-# answers like the host nginx: 502 for the hosts of this stack ($OUR_HOSTS, nothing runs behind them here), 200 for
-# every other host; after a reload, $CHANGE_HOST answers 502
-host=""; prev=""
-for a in "$@"; do [ "$prev" = -H ] && host="${a#Host: }"; prev="$a"; done
-case " ${OUR_HOSTS:-} " in *" $host "*) printf 502; exit 0;; esac
-if [ -f "$STUB_DIR/reloaded" ] && [ "$host" = "${CHANGE_HOST:-none}" ]; then printf 502; else printf 200; fi
-STUB
+printf '#!/bin/sh\n[ "$1 $2" = "reload nginx" ] && { touch "$STUB_DIR/reloaded"; echo reload >> "$STUB_DIR/reloads"; }\nexit 0\n' > "$ST/systemctl"
+cp "$PKG/test/helpers/stub-curl.py" "$ST/curl"
+# ss: something listens on the TLS port while $STUB_DIR/tls-on exists (nothing else is ever reported as listening)
+printf '#!/bin/sh\ncase "$*" in *":${NGINX_LOCAL_TLS_PORT:-443}"*) [ -f "$STUB_DIR/tls-on" ] && echo "LISTEN 0 511 0.0.0.0:${NGINX_LOCAL_TLS_PORT:-443} 0.0.0.0:*";; esac\nexit 0\n' > "$ST/ss"
 chmod 755 "$ST"/*
 vhosts() { # <dir>: avail/ and enabled/ with the two synthetic vhost fixtures, conf.d/, a stub docker
   mkdir -p "$1/avail" "$1/enabled" "$1/confd" "$1/ddcnew" "$1/bin"
@@ -1094,19 +1300,38 @@ vhosts() { # <dir>: avail/ and enabled/ with the two synthetic vhost fixtures, c
 }
 NX="$T/nginx-stop"; vhosts "$NX"
 ngx() { # <dir> <host whose code changes after the reload | none> <30-nginx.sh args...>; output in <dir>/out, status in $RC
-  local d="$1" ch="$2"; shift 2; rm -f "$d/reloaded"; RC=0
-  env PATH="$d/bin:$ST:$PATH" STUB_DIR="$d" CHANGE_HOST="$ch" OUR_HOSTS="${OUR_HOSTS:-$D_API_HOST $D_APP_HOST}" DDC_LOCAL_TEST=1 NEW_DIR="${NGX_NEW:-$d/ddcnew}" \
-    NGINX_AVAIL="$d/avail" NGINX_ENABLED="$d/enabled" NGINX_CONFD="$d/confd" MAINNET_DIR="$d/mainnet" ${NGX_ENV:-} bash "$PKG/30-nginx.sh" "$@" > "$d/out" 2>&1 || RC=$?
+  local d="$1" ch="$2"; shift 2; rm -f "$d/reloaded" "$d/reloads"; RC=0
+  env PATH="$d/bin:$ST:$PATH" STUB_DIR="$d" CHANGE_HOST="$ch" CHANGE_TLS_HOST="${CHANGE_TLS_HOST:-none}" OUR_HOSTS="${OUR_HOSTS:-$D_API_HOST $D_APP_HOST}" \
+    STUB_API_HOST="${STUB_API_HOST:-$D_API_HOST}" STUB_API_PORT="${STUB_API_PORT:-$D_API_PORT}" STUB_WEB_PORT="${STUB_WEB_PORT:-$D_WEB_PORT}" \
+    DDC_LOCAL_TEST=1 NEW_DIR="${NGX_NEW:-$d/ddcnew}" NGINX_AVAIL="$d/avail" NGINX_ENABLED="$d/enabled" NGINX_CONFD="$d/confd" MAINNET_DIR="$d/mainnet" \
+    ${NGX_ENV:-} bash "$PKG/30-nginx.sh" "$@" > "$d/out" 2>&1 || RC=$?
 }
 ng() { ngx "$NX" "$1" "$2"; }
+nreloads() { grep -c . "$1/reloads" 2>/dev/null || echo 0; }
 HOSTS4="admin.datadance.ai=200 api.datadance.ai=200 app.datadance.ai=200 business.datadance.ai=200"
 ng none apply
 [ "$RC" = 0 ] && grep -q '^PASS every other host answers exactly as before (4 hosts)' "$NX/out" && [ -L "$NX/enabled/$D_API_HOST" ] \
-  && [ "$(head -n 1 "$NX/avail/$D_API_HOST")" = "$MARKER" ] && ok "30-nginx.sh apply, other hosts' codes unchanged -> passes; both files carry the marker line" || { cat "$NX/out"; bad "apply baseline (rc=$RC)"; }
+  && [ "$(head -n 1 "$NX/avail/$D_API_HOST")" = "$MARKER" ] && grep -q "this stack does not answer yet (api on 127.0.0.1:$D_API_PORT answers 000 .*), so 40-up.sh runs the Host-header checks" "$NX/out" \
+  && ok "30-nginx.sh apply, other hosts' codes unchanged -> passes; both files carry the marker line; the stack is not up, so the Host-header checks are left to 40-up.sh" || { cat "$NX/out"; bad "apply baseline (rc=$RC)"; }
+touch "$NX/stack-up"; ng none apply
+[ "$RC" = 0 ] && grep -q "^PASS $D_API_HOST answers 401 JSON$" "$NX/out" && grep -q "^PASS $D_APP_HOST serves the tge mainnet build for https://$D_API_HOST/api$" "$NX/out" \
+  && ok "30-nginx.sh apply with the stack up: the Host-header checks run right after the reload (401 JSON through $D_API_HOST, the build marker through $D_APP_HOST)" || { cat "$NX/out"; bad "apply with the stack up (rc=$RC)"; }
+NGX_ENV="STUB_VIA_NGINX_BROKEN=1" ng none apply
+[ "$RC" = 1 ] && [ "$(tail -1 "$NX/out")" = "FAIL the Host-header checks failed after the reload — run ./30-nginx.sh undo now" ] \
+  && ok "30-nginx.sh apply: a Host-header check that fails after the reload STOPS and says to undo" || { tail -5 "$NX/out"; bad "failing Host-header check (rc=$RC)"; }
+rm -f "$NX/stack-up"
 ng api.datadance.ai apply
 [ "$RC" = 1 ] && grep -qF "FAIL status codes of other hosts changed: before [$HOSTS4] after [admin.datadance.ai=200 api.datadance.ai=502 app.datadance.ai=200" "$NX/out" \
   && grep -q '^PASS old-stack containers unchanged' "$NX/out" && [ "$(tail -1 "$NX/out")" = "FAIL status codes of other hosts changed after the reload — run ./30-nginx.sh undo now" ] \
   && ok "30-nginx.sh apply, old api vhost answers 502 after the reload -> integrity check printed, then STOPS: $(tail -1 "$NX/out")" || { cat "$NX/out"; bad "apply stop case (rc=$RC)"; }
+# https with SNI on 443 joins the check whenever something listens there; a change on https alone is caught too.
+touch "$NX/tls-on"; ng none apply
+[ "$RC" = 0 ] && grep -qF "other hosts before: admin.datadance.ai=200/200 api.datadance.ai=200/200 app.datadance.ai=200/200 business.datadance.ai=200/200" "$NX/out" \
+  && ok "with a listener on 443 every other host is probed over http and over https with SNI (host=<http>/<https>)" || { grep 'other hosts' "$NX/out"; bad "https probe (rc=$RC)"; }
+CHANGE_TLS_HOST=app.datadance.ai ng none apply
+[ "$RC" = 1 ] && grep -qF "after [admin.datadance.ai=200/200 api.datadance.ai=200/200 app.datadance.ai=200/502" "$NX/out" \
+  && ok "a host that changes only over https after the reload STOPS apply" || { grep -E 'FAIL|other hosts' "$NX/out"; bad "https-only change (rc=$RC)"; }
+rm -f "$NX/tls-on"
 ng app.datadance.ai undo
 [ "$RC" = 1 ] && grep -q "FAIL status codes of other hosts changed after the reload — this package's vhosts are already removed" "$NX/out" && [ ! -e "$NX/avail/$D_API_HOST" ] \
   && ok "30-nginx.sh undo, old app vhost changed after the reload -> STOPS (this package's vhosts already removed)" || { cat "$NX/out"; bad "undo stop case (rc=$RC)"; }
@@ -1117,31 +1342,62 @@ ng none undo
   && ok "30-nginx.sh undo with nothing of this package's left: no change and no reload" || { cat "$NX/out"; bad "undo with nothing to remove (rc=$RC)"; }
 for f in 30-nginx.sh 40-up.sh; do grep -qE 'warn "old (vhost )?(status )?codes|warn "status codes' "$PKG/$f" && bad "$f still only warns on changed codes"; done
 grep -q 'die "status codes of other hosts changed while 40-up.sh ran' "$PKG/40-up.sh" && ok "40-up.sh step 8: changed codes of other hosts STOP the script (same pattern as 30-nginx.sh; no warn left in either)" || bad "40-up.sh step 8 still warns"
+# 40-up.sh step 7 runs the Host-header checks only through this package's own vhosts, else it defers them to 30-nginx.sh.
+grep -q '^if vhosts_ours; then$' "$PKG/40-up.sh" && grep -q '^  host_checks$' "$PKG/40-up.sh" && grep -q 'DEFERRED: the vhost entries at' "$PKG/40-up.sh" \
+  && ( DDC_LOCAL_TEST=1; NEW_DIR="$NX/ddcnew"; NGINX_AVAIL="$NX/avail"; NGINX_ENABLED="$NX/enabled"; . "$PKG/common.sh"; ! vhosts_ours ) \
+  && ok "40-up.sh step 7: the Host-header checks run only while this package's vhosts serve both hosts (vhosts_ours), otherwise they are DEFERRED to 30-nginx.sh apply" || bad "40-up.sh step 7 wiring"
 
-echo; echo "== 12b. 30-nginx.sh and the vhosts it did not write (Race's at the default names): refusal, take-over with backup, restore, rollback, clash, port, outcome B"
+echo; echo "== 12b. 30-nginx.sh and the vhosts it did not write (Race's at the default names): refusal, take-over with backup, rollback, restore, limits, clash, port, outcome B"
 NR="$T/nginx-race"; vhosts "$NR"
-race_entries() { # Race's rehearsal entries as on 10-05 (synthetic): his two vhosts at the default names (a link, and a
-  # regular file in sites-enabled), and his older tge-api / tge files, enabled by links
-  printf 'server {\n    server_name %s;\n    location / { proxy_pass http://localhost:10010; }\n    listen 80;\n}\n' "$D_API_HOST" > "$NR/avail/$D_API_HOST"
-  printf 'server {\n    server_name %s;\n    location / { proxy_pass http://localhost:9011; }\n    listen 80;\n}\n' "$D_APP_HOST" > "$NR/avail/$D_APP_HOST"
-  printf 'server {\n    server_name tge-api.datadance.ai;\n    location / { proxy_pass http://localhost:10010; }\n    listen 80;\n}\n' > "$NR/avail/tge-api.datadance.ai"
-  printf 'server {\n    server_name tge.datadance.ai;\n    location / { proxy_pass http://localhost:9011; }\n    listen 80;\n}\n' > "$NR/avail/tge.datadance.ai"
-  ln -sfn "../avail/$D_API_HOST" "$NR/enabled/$D_API_HOST"; cp -p "$NR/avail/$D_APP_HOST" "$NR/enabled/$D_APP_HOST"
-  ln -sfn "../avail/tge-api.datadance.ai" "$NR/enabled/tge-api.datadance.ai"; ln -sfn "../avail/tge.datadance.ai" "$NR/enabled/tge.datadance.ai"
+mainnet_docker() { # <dir> [port]: stub docker with Race's two containers, ddc-mainnet-api (host port 10010) and
+  # ddc-mainnet-app (9011); with <port>, ddc-mainnet-api also publishes 127.0.0.1:<port> (a port held by another container)
+  cat > "$1/bin/docker" <<STUB
+#!/bin/sh
+HELD="${2:-}"
+STUB
+  cat >> "$1/bin/docker" <<'STUB'
+case "$1" in
+  ps) case "$*" in *"{{.Names}} {{.Ports}}"*) [ -z "$HELD" ] || echo "ddc-mainnet-api 127.0.0.1:$HELD->3000/tcp";; *"{{.Names}}"*) printf '%s\n' ddc-mainnet-api ddc-mainnet-app;; esac;;
+  inspect) for c; do :; done
+           case "$*" in
+             *PortBindings*) case "$c" in ddc-mainnet-api) echo "10010 ";; ddc-mainnet-app) echo "9011 ";; esac;;
+             *"{{.Name}}|{{.Id}}"*) echo "/$c|id-$c|running|2026-10-05T04:00:00Z|0|unless-stopped";;
+           esac;;
+esac
+exit 0
+STUB
+  chmod 755 "$1/bin/docker"
 }
-race_entries
-vsnap() { (cd "$NR" && find avail enabled confd -mindepth 1 \( -type f -o -type l \) | LC_ALL=C sort | while IFS= read -r f; do
+mainnet_docker "$NR"
+race_entries() { # <dir>: Race's rehearsal entries as on 10-05 (synthetic): his two vhosts at the default names (a link,
+  # and a regular file in sites-enabled), and his older tge-api / tge files, enabled by links
+  printf 'server {\n    server_name %s;\n    location / { proxy_pass http://localhost:10010; }\n    listen 80;\n}\n' "$D_API_HOST" > "$1/avail/$D_API_HOST"
+  printf 'server {\n    server_name %s;\n    location / { proxy_pass http://localhost:9011; }\n    listen 80;\n}\n' "$D_APP_HOST" > "$1/avail/$D_APP_HOST"
+  printf 'server {\n    server_name tge-api.datadance.ai;\n    location / { proxy_pass http://localhost:10010; }\n    listen 80;\n}\n' > "$1/avail/tge-api.datadance.ai"
+  printf 'server {\n    server_name tge.datadance.ai;\n    location / { proxy_pass http://localhost:9011; }\n    listen 80;\n}\n' > "$1/avail/tge.datadance.ai"
+  ln -sfn "../avail/$D_API_HOST" "$1/enabled/$D_API_HOST"; cp -p "$1/avail/$D_APP_HOST" "$1/enabled/$D_APP_HOST"
+  ln -sfn "../avail/tge-api.datadance.ai" "$1/enabled/tge-api.datadance.ai"; ln -sfn "../avail/tge.datadance.ai" "$1/enabled/tge.datadance.ai"
+}
+race_entries "$NR"
+vsnap() { local d="${1:-$NR}"; (cd "$d" && find avail enabled confd -mindepth 1 \( -type f -o -type l \) | LC_ALL=C sort | while IFS= read -r f; do
   if [ -L "$f" ]; then echo "L $f -> $(readlink "$f")"; else echo "F $f $(shasum -a 256 < "$f" | cut -c1-16) $(stat -f %Lp "$f")"; fi; done); }
 vsnap > "$NR/orig.snap"
 nr() { ngx "$NR" "$@"; }
+backups() { find "$1/ddcnew/vhost-takeover" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | LC_ALL=C sort; }
 nr none apply
 [ "$RC" = 1 ] && grep -q "^FAIL refusing: 4 vhost entry(s) at the names $D_API_HOST / $D_APP_HOST were not written by this package" "$NR/out" \
   && [ "$(grep -c '^  not written by this package: ' "$NR/out")" = 4 ] && [ ! -f "$NR/reloaded" ] && vsnap | cmp -s - "$NR/orig.snap" \
   && ok "apply with Race's vhost and link (and a regular file in sites-enabled) at the default names: STOPS, names all 4, changes nothing, no reload" || { cat "$NR/out"; bad "refusal of Race's entries (rc=$RC)"; }
+# S3: never point the other party's hosts at a stack that has not booted.
 NGX_ENV="TAKE_OVER_VHOSTS=yes" nr none apply
-bk=$(find "$NR/ddcnew/vhost-takeover" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | head -n 1)
+[ "$RC" = 1 ] && grep -q "^FAIL refusing TAKE_OVER_VHOSTS=yes until this stack answers on its own ports: api on 127.0.0.1:$D_API_PORT answers 000" "$NR/out" \
+  && vsnap | cmp -s - "$NR/orig.snap" && [ -z "$(backups "$NR")" ] && [ ! -f "$NR/reloaded" ] \
+  && ok "TAKE_OVER_VHOSTS=yes while this stack does not answer on 127.0.0.1:$D_API_PORT: refused before any backup or change (40-up.sh first)" || { cat "$NR/out"; bad "take-over before the stack is up (rc=$RC)"; }
+touch "$NR/stack-up"
+NGX_ENV="TAKE_OVER_VHOSTS=yes" nr none apply
+bk=$(backups "$NR" | tail -n 1)
 copies_ok=0
-if [ -n "$bk" ] && [ "$(grep -c . "$bk/MANIFEST")" = 4 ]; then
+if [ -n "$bk" ] && [ -f "$bk/MANIFEST" ] && [ ! -e "$bk/MANIFEST.part" ] && [ "$(grep -c . "$bk/MANIFEST")" = 4 ]; then
   copies_ok=1
   while read -r t k nm x; do
     if [ "$t" = file ]; then [ "$(shasum -a 256 < "$bk/$k/$nm" | cut -c1-64)" = "$x" ] || copies_ok=0; else [ "$x" = "../avail/$D_API_HOST" ] || copies_ok=0; fi
@@ -1149,55 +1405,152 @@ if [ -n "$bk" ] && [ "$(grep -c . "$bk/MANIFEST")" = 4 ]; then
 fi
 [ "$RC" = 0 ] && [ "$copies_ok" = 1 ] && [ "$(head -n 1 "$NR/avail/$D_API_HOST")" = "$MARKER" ] && [ "$(head -n 1 "$NR/avail/$D_APP_HOST")" = "$MARKER" ] \
   && [ "$(readlink "$NR/enabled/$D_APP_HOST")" = "$NR/avail/$D_APP_HOST" ] && grep -q '^PASS every other host answers exactly as before (6 hosts)' "$NR/out" \
-  && grep -q '^PASS old-stack files unchanged' "$NR/out" && [ "$(vsnap | grep -E 'tge(-api)?\.datadance\.ai' | tr '\n' ' ')" = "$(grep -E 'tge(-api)?\.datadance\.ai' "$NR/orig.snap" | tr '\n' ' ')" ] \
-  && ok "TAKE_OVER_VHOSTS=yes: the 4 entries backed up first (MANIFEST: sha256 of each copy, the link target), then replaced by this package's (marker line); Race's other vhosts untouched and his hosts among the 6 that answer as before" \
+  && grep -q "^PASS $D_API_HOST answers 401 JSON$" "$NR/out" && grep -q '^PASS take-over complete: ' "$NR/out" && grep -q '^PASS old-stack files unchanged' "$NR/out" \
+  && [ "$(vsnap | grep -E 'tge(-api)?\.datadance\.ai' | tr '\n' ' ')" = "$(grep -E 'tge(-api)?\.datadance\.ai' "$NR/orig.snap" | tr '\n' ' ')" ] \
+  && ok "TAKE_OVER_VHOSTS=yes with this stack up: the 4 entries backed up first (complete MANIFEST: sha256 of each copy, the link target), replaced, and the Host-header checks pass through the new vhosts; Race's other vhosts untouched" \
   || { cat "$NR/out"; bad "take-over (rc=$RC copies_ok=$copies_ok)"; }
 nr none undo
 [ "$RC" = 0 ] && grep -q "^take-over backup not restored yet: " "$NR/out" && [ ! -e "$NR/avail/$D_API_HOST" ] && [ ! -e "$NR/enabled/$D_APP_HOST" ] \
   && ok "undo after a take-over removes this package's entries and names the backup that restore puts back" || { cat "$NR/out"; bad "undo after take-over (rc=$RC)"; }
 nr none restore
 [ "$RC" = 0 ] && vsnap | cmp -s - "$NR/orig.snap" && [ -f "$bk/RESTORED" ] && grep -q '^PASS restored 4 entries from ' "$NR/out" && grep -q '^PASS old-stack files unchanged' "$NR/out" \
-  && ok "restore puts Race's 4 entries back exactly (content, modes, the link target, the regular file in sites-enabled) and marks the backup RESTORED" || { cat "$NR/out"; vsnap | diff "$NR/orig.snap" - | head; bad "restore (rc=$RC)"; }
+  && ok "restore puts Race's 4 entries back exactly (content, modes, the link target, the regular file in sites-enabled) and marks the backup RESTORED" || { cat "$NR/out"; vsnap | diff "$NR/orig.snap" - || true; bad "restore (rc=$RC)"; }
 nr none restore "$(basename "$bk")"
 [ "$RC" = 1 ] && grep -q 'was already restored' "$NR/out" && vsnap | cmp -s - "$NR/orig.snap" && ok "a second restore of the same backup is refused" || { cat "$NR/out"; bad "second restore (rc=$RC)"; }
+# E3: restore when nginx -t fails with the restored entries: this package's entries come back, never neither.
+NGX_ENV="TAKE_OVER_VHOSTS=yes" nr none apply; vsnap > "$NR/ours.snap"
+mkdir -p "$NR/bin-e3"; cp "$NR/bin/docker" "$NR/bin-e3/docker"
+printf '#!/bin/sh\n[ "$1" = -t ] && grep -q "localhost:10010" "%s/avail/%s" 2>/dev/null && { echo "nginx: [emerg] stub failure" >&2; exit 1; }\nexit 0\n' "$NR" "$D_API_HOST" > "$NR/bin-e3/nginx"
+chmod 755 "$NR/bin-e3/nginx"; mv "$NR/bin" "$NR/bin-ok"; mv "$NR/bin-e3" "$NR/bin"
+nr none restore
+mv "$NR/bin" "$NR/bin-e3"; mv "$NR/bin-ok" "$NR/bin"
+bk=$(backups "$NR" | tail -n 1)
+[ "$RC" = 1 ] && grep -q 'nginx -t fails with the restored entries' "$NR/out" && vsnap | cmp -s - "$NR/ours.snap" && [ ! -f "$NR/reloaded" ] && [ ! -e "$bk/RESTORED" ] \
+  && grep -q "put back .*(this package's)" "$NR/out" \
+  && ok "restore with nginx -t failing on the restored entries: they go again and this package's come back exactly (set aside, not deleted); no reload, the backup is not marked RESTORED" || { cat "$NR/out"; vsnap | diff "$NR/ours.snap" - || true; bad "restore when nginx -t fails (rc=$RC)"; }
+nr none restore
+[ "$RC" = 0 ] && vsnap | cmp -s - "$NR/orig.snap" && ok "the same restore with a working nginx -t then puts Race's entries back exactly" || { cat "$NR/out"; bad "restore after the failed one (rc=$RC)"; }
+# E1: a failure after Race's entries were removed and before nginx -t (here: chmod of the new file fails).
+mkdir -p "$NR/bin-e1"; cp "$NR/bin/docker" "$NR/bin-e1/docker"
+printf '#!/bin/sh\nfor a in "$@"; do case "$a" in *.new) echo "chmod: stub failure (disk full)" >&2; exit 1;; esac; done\nexec /bin/chmod "$@"\n' > "$NR/bin-e1/chmod"
+chmod 755 "$NR/bin-e1/chmod"; mv "$NR/bin" "$NR/bin-ok"; mv "$NR/bin-e1" "$NR/bin"
+NGX_ENV="TAKE_OVER_VHOSTS=yes" nr none apply
+mv "$NR/bin" "$NR/bin-e1"; mv "$NR/bin-ok" "$NR/bin"
+bk=$(backups "$NR" | tail -n 1)
+[ "$RC" != 0 ] && vsnap | cmp -s - "$NR/orig.snap" && [ -f "$bk/RESTORED" ] && grep -q '^FAIL the take-over did not complete: putting the taken-over entries back' "$NR/out" \
+  && grep -q "rolled back: the other party's entries are back; nginx was not reloaded" "$NR/out" && [ ! -f "$NR/reloaded" ] \
+  && ok "a failure after Race's entries were removed (before nginx -t) puts them back at once from the backup (RESTORED), exactly; nothing reloaded" || { cat "$NR/out"; vsnap | diff "$NR/orig.snap" - || true; bad "rollback before nginx -t (rc=$RC)"; }
+# E1 + E5: a failure after the reload (another host changed): the take-over is rolled back and nginx reloaded again;
+# the message names undo and restore in case the rollback could not finish.
+NGX_ENV="TAKE_OVER_VHOSTS=yes" nr api.datadance.ai apply
+bk=$(backups "$NR" | tail -n 1)
+[ "$RC" = 1 ] && grep -qF "the take-over is rolled back now, the other party's entries go back from the backup (if that fails: ./30-nginx.sh undo, then ./30-nginx.sh restore)" "$NR/out" \
+  && vsnap | cmp -s - "$NR/orig.snap" && [ -f "$bk/RESTORED" ] && [ "$(nreloads "$NR")" = 2 ] && grep -q "rolled back: the other party's entries are back and nginx is reloaded with them" "$NR/out" \
+  && ok "another host changing after a take-over's reload: STOP that names undo and restore, then the rollback puts Race's entries back and reloads nginx again (2 reloads)" || { cat "$NR/out"; bad "rollback after the reload (rc=$RC reloads=$(nreloads "$NR"))"; }
+# S3 + E1: the Host-header checks run through the new vhosts right after a take-over's reload; when they fail there, the
+# take-over is rolled back the same way.
+NGX_ENV="TAKE_OVER_VHOSTS=yes STUB_VIA_NGINX_BROKEN=1" nr none apply
+bk=$(backups "$NR" | tail -n 1)
+[ "$RC" = 1 ] && grep -qF "FAIL the Host-header checks failed after the reload — the take-over is rolled back now" "$NR/out" \
+  && vsnap | cmp -s - "$NR/orig.snap" && [ -f "$bk/RESTORED" ] && [ "$(nreloads "$NR")" = 2 ] && grep -q "rolled back: the other party's entries are back and nginx is reloaded with them" "$NR/out" \
+  && ok "the Host-header checks failing through the new vhosts after a take-over's reload: STOP, Race's entries put back exactly, nginx reloaded again (2 reloads)" || { cat "$NR/out"; bad "rollback after failing Host-header checks (rc=$RC reloads=$(nreloads "$NR"))"; }
+# A rollback that cannot finish (here: the backup copy no longer matches its MANIFEST when the install fails) says to run
+# undo, then restore, with the backup's name.
+mkdir -p "$NR/bin-e1b"; cp "$NR/bin/docker" "$NR/bin-e1b/docker"
+cat > "$NR/bin-e1b/chmod" <<STUB
+#!/bin/sh
+for a in "\$@"; do case "\$a" in *.new)
+  for b in "$NR"/ddcnew/vhost-takeover/*/; do [ -e "\$b/RESTORED" ] || printf 'damaged\\n' >> "\$b/avail/$D_API_HOST"; done
+  echo "chmod: stub failure" >&2; exit 1;; esac; done
+exec /bin/chmod "\$@"
+STUB
+chmod 755 "$NR/bin-e1b/chmod"; mv "$NR/bin" "$NR/bin-ok"; mv "$NR/bin-e1b" "$NR/bin"
+NGX_ENV="TAKE_OVER_VHOSTS=yes" nr none apply
+mv "$NR/bin" "$NR/bin-e1b"; mv "$NR/bin-ok" "$NR/bin"
+bk=$(backups "$NR" | tail -n 1)
+[ "$RC" != 0 ] && grep -qF "FAIL could not put the taken-over entries back: run ./30-nginx.sh undo, then ./30-nginx.sh restore $(basename "$bk")" "$NR/out" && [ ! -e "$bk/RESTORED" ] \
+  && ok "a rollback that cannot finish (the backup no longer matches its MANIFEST) says to run ./30-nginx.sh undo, then ./30-nginx.sh restore $(basename "$bk")" || { tail -6 "$NR/out"; bad "rollback that cannot finish (rc=$RC)"; }
+rm -rf -- "$bk"; rm -f "$NR/avail/$D_API_HOST" "$NR/avail/$D_APP_HOST" "$NR/enabled/$D_API_HOST" "$NR/enabled/$D_APP_HOST"; race_entries "$NR"
+vsnap | cmp -s - "$NR/orig.snap" || bad "test setup: Race's entries not back to the original after the damaged-backup case"
 # nginx -t fails with the new files: the taken-over entries go back at once, nothing is reloaded.
 mkdir -p "$NR/bin-ntf"; printf '#!/bin/sh\nif grep -lq "^# ddcnew-vhost:" "%s"/avail/* 2>/dev/null; then echo "nginx: [emerg] stub failure" >&2; exit 1; fi\nexit 0\n' "$NR" > "$NR/bin-ntf/nginx"; chmod 755 "$NR/bin-ntf/nginx"
 cp "$NR/bin/docker" "$NR/bin-ntf/docker"; mv "$NR/bin" "$NR/bin-ok"; mv "$NR/bin-ntf" "$NR/bin"
 NGX_ENV="TAKE_OVER_VHOSTS=yes" nr none apply
 mv "$NR/bin" "$NR/bin-ntf"; mv "$NR/bin-ok" "$NR/bin"
-[ "$RC" = 1 ] && grep -q 'the taken-over entries are back in place from ' "$NR/out" && grep -q '^FAIL nginx -t failed with the new vhosts' "$NR/out" && [ ! -f "$NR/reloaded" ] \
-  && vsnap | cmp -s - "$NR/orig.snap" && [ -z "$( (cd "$NR/ddcnew/vhost-takeover" && for d in */; do [ -f "$d/RESTORED" ] || echo "$d"; done) )" ] \
-  && ok "nginx -t failing after a take-over: Race's entries are put back at once (the backup marked RESTORED), nothing reloaded" || { cat "$NR/out"; bad "take-over rollback (rc=$RC)"; }
+[ "$RC" = 1 ] && grep -q "rolled back: the other party's entries are back" "$NR/out" && grep -q '^FAIL nginx -t failed with the new vhosts' "$NR/out" && [ ! -f "$NR/reloaded" ] \
+  && vsnap | cmp -s - "$NR/orig.snap" && [ -z "$(for b in $(backups "$NR"); do [ -f "$b/RESTORED" ] || echo "$b"; done)" ] \
+  && ok "nginx -t failing after a take-over: Race's entries are put back at once (every backup marked RESTORED), nothing reloaded" || { cat "$NR/out"; bad "take-over rollback on nginx -t (rc=$RC)"; }
+# E2: an interrupted backup (the process killed mid-way, so no trap runs) leaves no MANIFEST, only MANIFEST.part, and
+# then blocks neither restore, nor undo, nor 99-teardown.sh --delete-dir.
+NE="$T/nginx-e2"; vhosts "$NE"; mainnet_docker "$NE"; race_entries "$NE"; touch "$NE/stack-up"; vsnap "$NE" > "$NE/orig.snap"
+cat > "$NE/bin/cp" <<STUB
+#!/bin/sh
+# kills the script (SIGKILL: no trap runs) while it copies Race's regular file in sites-enabled into the backup
+for a; do :; done
+case "\$a" in */vhost-takeover/*/enabled/$D_APP_HOST) ls "\$(dirname "\$(dirname "\$a")")" > "$NE/at-kill.ls"; kill -9 \$PPID; exit 1;; esac
+exec /bin/cp "\$@"
+STUB
+chmod 755 "$NE/bin/cp"
+NGX_ENV="TAKE_OVER_VHOSTS=yes" ngx "$NE" none apply
+rm -f "$NE/bin/cp"
+e2b=$(backups "$NE" | tail -n 1)
+[ "$RC" != 0 ] && [ -n "$e2b" ] && grep -qx 'MANIFEST.part' "$NE/at-kill.ls" && ! grep -qx MANIFEST "$NE/at-kill.ls" && [ ! -e "$e2b/MANIFEST" ] && vsnap "$NE" | cmp -s - "$NE/orig.snap" \
+  && ok "a backup interrupted by SIGKILL half way holds MANIFEST.part only (no MANIFEST), and nothing was taken over" || { cat "$NE/out" "$NE/at-kill.ls" 2>/dev/null; bad "interrupted backup (rc=$RC)"; }
+ngx "$NE" none restore
+[ "$RC" = 1 ] && grep -q '^FAIL no take-over backup to restore' "$NE/out" && ok "restore ignores the interrupted backup (no complete backup to restore)" || { cat "$NE/out"; bad "restore with an interrupted backup (rc=$RC)"; }
+ngx "$NE" none undo
+[ "$RC" = 0 ] && ! grep -q 'take-over backup not restored yet' "$NE/out" && ok "undo does not report the interrupted backup as one to restore" || { cat "$NE/out"; bad "undo with an interrupted backup (rc=$RC)"; }
+printf 'name: ddcnew\n' > "$NE/ddcnew/compose.yaml"
+printf '#!/bin/sh\ncase "$1" in compose) exit 1;; esac\nexit 0\n' > "$NE/bin/docker"; chmod 755 "$NE/bin/docker"
+RC=0; env PATH="$NE/bin:$ST:$PATH" STUB_DIR="$NE" OUR_HOSTS="$D_API_HOST $D_APP_HOST" DDC_LOCAL_TEST=1 NEW_DIR="$NE/ddcnew" NGINX_AVAIL="$NE/avail" NGINX_ENABLED="$NE/enabled" \
+  NGINX_CONFD="$NE/confd" MAINNET_DIR="$NE/mainnet" bash "$PKG/99-teardown.sh" --delete-dir > "$NE/td.out" 2>&1 || RC=$?
+! grep -q 'refusing --delete-dir' "$NE/td.out" && grep -q 'is not the real /root/ddcnew directory' "$NE/td.out" \
+  && ok "99-teardown.sh --delete-dir is not blocked by the interrupted backup (it stops later, at the local-test guard of the real /root/ddcnew)" || { tail -3 "$NE/td.out"; bad "teardown with an interrupted backup (rc=$RC)"; }
+# S4: what TAKE_OVER_VHOSTS takes over: only the other party's rehearsal vhost of exactly that host, every upstream a
+# ddc-mainnet-* port. Each variant stays refused with the flag and changes nothing.
+cp -p "$NR/avail/$D_APP_HOST" "$NR/race-app.keep"; cp -p "$NR/enabled/$D_APP_HOST" "$NR/race-app-en.keep"
+for v in "static|server_name $D_APP_HOST; root /opt/ddc/docs;|it proxies to nothing (a static site, not a rehearsal stack)" \
+         "otherport|server_name $D_APP_HOST; location / { proxy_pass http://localhost:9500; }|it proxies to port 9500, which no ddc-mainnet-* container binds (they bind: 9011 10010)" \
+         "oldport|server_name $D_APP_HOST; location / { proxy_pass http://localhost:10000; }|it proxies to port 10000, which no ddc-mainnet-* container binds" \
+         "remote|server_name $D_APP_HOST; location / { proxy_pass https://upstream.example.invalid; }|it proxies to https://upstream.example.invalid, not to a local port" \
+         "second-name|server_name $D_APP_HOST other-rehearsal.datadance.ai; location / { proxy_pass http://localhost:9011; }|it declares server_name $D_APP_HOST other-rehearsal.datadance.ai instead of only $D_APP_HOST"; do
+  lbl=${v%%|*}; r=${v#*|}; body=${r%%|*}; why=${r#*|}
+  printf 'server {\n    %s\n    listen 80;\n}\n' "$body" > "$NR/avail/$D_APP_HOST"; cp -p "$NR/avail/$D_APP_HOST" "$NR/enabled/$D_APP_HOST"
+  vsnap > "$NR/variant.snap"; nb=$(backups "$NR" | grep -c . || true)
+  NGX_ENV="TAKE_OVER_VHOSTS=yes" nr none apply
+  [ "$RC" = 1 ] && grep -qF "refusing to take over $NR/" "$NR/out" && grep -qF -- "$why" "$NR/out" && vsnap | cmp -s - "$NR/variant.snap" && [ ! -f "$NR/reloaded" ] && [ "$(backups "$NR" | grep -c . || true)" = "$nb" ] \
+    || { grep '^FAIL' "$NR/out" | head -2; bad "take-over limit ($lbl, rc=$RC)"; }
+done
+cp -p "$NR/race-app.keep" "$NR/avail/$D_APP_HOST"; cp -p "$NR/race-app-en.keep" "$NR/enabled/$D_APP_HOST"; vsnap | cmp -s - "$NR/orig.snap" || bad "test setup: Race's entries not back to the original"
+ok "TAKE_OVER_VHOSTS=yes refuses, before any backup or change: a static site, an upstream on a port no ddc-mainnet-* container binds (another port, an old-stack port), a remote upstream, and a file that also serves another name"
+printf '#!/bin/sh\nexit 0\n' > "$NR/bin/docker"
+NGX_ENV="TAKE_OVER_VHOSTS=yes" nr none apply
+mainnet_docker "$NR"
+[ "$RC" = 1 ] && grep -qF "no ddc-mainnet-* container binds a host port, so its upstream cannot be shown to be the other party's rehearsal" "$NR/out" && vsnap | cmp -s - "$NR/orig.snap" \
+  && ok "with no ddc-mainnet-* container (none bound to a port), nothing is taken over" || { grep '^FAIL' "$NR/out"; bad "take-over without ddc-mainnet containers (rc=$RC)"; }
+# The reviewer's case: APP_HOST names a real static site (docs.datadance.ai) on this server.
+DOCS=docs.datadance.ai; printf 'server {\n    server_name %s;\n    root /opt/ddc/docs;\n    listen 80;\n}\n' "$DOCS" > "$NR/avail/$DOCS"; ln -sfn "../avail/$DOCS" "$NR/enabled/$DOCS"; vsnap > "$NR/docs.snap"
+OUR_HOSTS="$D_API_HOST $DOCS" NGX_NEW="$NR/ddcnew-docs" NGX_ENV="TAKE_OVER_VHOSTS=yes APP_HOST=$DOCS" nr none apply
+[ "$RC" = 1 ] && grep -qF "refusing to take over $NR/enabled/$DOCS: it proxies to nothing (a static site, not a rehearsal stack)" "$NR/out" && vsnap | cmp -s - "$NR/docs.snap" \
+  && ok "APP_HOST=docs.datadance.ai (a static site here) with TAKE_OVER_VHOSTS=yes: refused, the docs vhost stays as it is" || { grep -E '^(FAIL|PASS TAKE)' "$NR/out"; bad "docs take-over (rc=$RC)"; }
+rm -f "$NR/avail/$DOCS" "$NR/enabled/$DOCS"
 # A server_name clash in another loaded file stops apply, even with TAKE_OVER_VHOSTS=yes.
 printf 'server { server_name other.datadance.ai %s; }\n' "$D_APP_HOST" > "$NR/confd/extra.conf"; vsnap > "$NR/clash.snap"
-nbk=$(find "$NR/ddcnew/vhost-takeover" -mindepth 1 -maxdepth 1 -type d | grep -c . || true)
+nbk=$(backups "$NR" | grep -c . || true)
 NGX_ENV="TAKE_OVER_VHOSTS=yes" nr none apply
 [ "$RC" = 1 ] && grep -q "^FAIL refusing: another file that nginx loads declares $D_API_HOST or $D_APP_HOST as a server_name" "$NR/out" && grep -q "$D_APP_HOST declared by $NR/confd/extra.conf" "$NR/out" \
-  && vsnap | cmp -s - "$NR/clash.snap" && [ "$(find "$NR/ddcnew/vhost-takeover" -mindepth 1 -maxdepth 1 -type d | grep -c . || true)" = "$nbk" ] \
+  && vsnap | cmp -s - "$NR/clash.snap" && [ "$(backups "$NR" | grep -c . || true)" = "$nbk" ] \
   && ok "a clashing server_name in conf.d stops apply before anything is backed up or changed (TAKE_OVER_VHOSTS does not cover it)" || { cat "$NR/out"; bad "server_name clash (rc=$RC)"; }
 rm -f "$NR/confd/extra.conf"
 # A port of the settings held by another container (Race's) stops apply.
-printf '#!/bin/sh\ncase "$*" in *":%s"*) echo "LISTEN 0 4096 127.0.0.1:%s 0.0.0.0:*";; esac\n' "$D_API_PORT" "$D_API_PORT" > "$NR/bin/ss"
-printf '#!/bin/sh\ncase "$1" in ps) case "$*" in *Ports*) echo "ddc-mainnet-api 127.0.0.1:%s->3000/tcp";; esac;; esac\nexit 0\n' "$D_API_PORT" > "$NR/bin/docker"; chmod 755 "$NR/bin/ss" "$NR/bin/docker"
+printf '#!/bin/sh\ncase "$*" in *":%s"*) echo "LISTEN 0 4096 127.0.0.1:%s 0.0.0.0:*";; esac\n' "$D_API_PORT" "$D_API_PORT" > "$NR/bin/ss"; chmod 755 "$NR/bin/ss"
+mainnet_docker "$NR" "$D_API_PORT"
 NGX_ENV="TAKE_OVER_VHOSTS=yes" nr none apply
 [ "$RC" = 1 ] && grep -q "^FAIL port $D_API_PORT (API_PORT) is in use by ddc-mainnet-api: choose another one" "$NR/out" && vsnap | cmp -s - "$NR/orig.snap" \
   && ok "API_PORT held by another container (ddc-mainnet-api) stops apply, nothing changed" || { cat "$NR/out"; bad "port held (rc=$RC)"; }
-rm -f "$NR/bin/ss"; printf '#!/bin/sh\nexit 0\n' > "$NR/bin/docker"
-# TAKE_OVER_VHOSTS takes over only a rehearsal vhost of exactly the host: another server_name in it, or an upstream on an
-# old-stack port, stays refused (e.g. a typo in API_HOST pointing at another site).
-cp -p "$NR/avail/$D_API_HOST" "$NR/race-api.keep"
-for v in "second-name|server_name $D_API_HOST api.datadance.ai;|it declares server_name $D_API_HOST api.datadance.ai instead of only $D_API_HOST" \
-         "old-port|proxy_pass http://localhost:10000;|it proxies to the old stack's port 10000"; do
-  lbl=${v%%|*}; r=${v#*|}; line=${r%%|*}; why=${r#*|}
-  printf 'server {\n    %s\n    location / { proxy_pass http://localhost:10010; }\n}\n' "$line" > "$NR/avail/$D_API_HOST"
-  [ "$lbl" = old-port ] && printf 'server {\n    server_name %s;\n    location / { %s }\n}\n' "$D_API_HOST" "$line" > "$NR/avail/$D_API_HOST"
-  vsnap > "$NR/variant.snap"
-  NGX_ENV="TAKE_OVER_VHOSTS=yes" nr none apply
-  [ "$RC" = 1 ] && grep -qF "refusing to take over $NR/enabled/$D_API_HOST: $why" "$NR/out" && vsnap | cmp -s - "$NR/variant.snap" && [ ! -f "$NR/reloaded" ] \
-    && ok "TAKE_OVER_VHOSTS=yes refuses an entry that is not a rehearsal vhost of exactly the host ($lbl: $why); nothing changed" || { cat "$NR/out"; bad "take-over limit ($lbl, rc=$RC)"; }
-done
-cp -p "$NR/race-api.keep" "$NR/avail/$D_API_HOST"; vsnap | cmp -s - "$NR/orig.snap" || bad "test setup: Race's entries not back to the original"
+rm -f "$NR/bin/ss"; mainnet_docker "$NR"
 # Outcome B: this stack on other names next to Race's; his entries stay as they are, and his hosts must answer as before.
+rm -f "$NR/stack-up"
 OUR_HOSTS="api-coexist.datadance.ai app-coexist.datadance.ai" NGX_NEW="$NR/ddcnew-b" NGX_ENV="API_HOST=api-coexist.datadance.ai APP_HOST=app-coexist.datadance.ai API_PORT=10031 WEB_PORT=9031" nr none apply
 [ "$RC" = 0 ] && [ "$(vsnap | grep -v coexist)" = "$(cat "$NR/orig.snap")" ] && [ "$(head -n 1 "$NR/avail/api-coexist.datadance.ai")" = "$MARKER" ] \
   && grep -q '^PASS every other host answers exactly as before (8 hosts)' "$NR/out" && grep -q "other hosts after: .*$D_API_HOST=200 .*$D_APP_HOST=200" "$NR/out" \
@@ -1207,8 +1560,14 @@ OUR_HOSTS="api-coexist.datadance.ai app-coexist.datadance.ai" NGX_NEW="$NR/ddcne
   && ok "outcome B: if Race's host answers differently after the reload, apply STOPS" || { cat "$NR/out"; bad "outcome B stop (rc=$RC)"; }
 OUR_HOSTS="api-coexist.datadance.ai app-coexist.datadance.ai" NGX_NEW="$NR/ddcnew-b" nr none undo
 [ "$RC" = 0 ] && vsnap | cmp -s - "$NR/orig.snap" && ok "outcome B undo (hosts from the settings record): removes only this package's coexist entries; Race's exactly as before" || { cat "$NR/out"; bad "outcome B undo (rc=$RC)"; }
-# 99-teardown.sh when docker compose cannot run (e.g. .env missing): removal by the ddcnew compose label only
-TD="$T/teardown"; vhosts "$TD"; mkdir -p "$TD/bin"; printf 'name: ddcnew\n' > "$TD/ddcnew/compose.yaml"
+# 99-teardown.sh when docker compose cannot run (e.g. .env missing): removal by the ddcnew compose label only. The record
+# holds NON-default hosts and ports, with this package's vhosts written at those names: teardown must undo the vhosts
+# with the recorded hosts BEFORE it forgets the record (else undo would look at the defaults and leave them).
+TD="$T/teardown"; vhosts "$TD"; mkdir -p "$TD/bin"
+TDH="API_HOST=api-tdtest.datadance.ai APP_HOST=app-tdtest.datadance.ai API_PORT=10041 WEB_PORT=9041 DB_PORT=15441"
+OUR_HOSTS="api-tdtest.datadance.ai app-tdtest.datadance.ai" NGX_ENV="$TDH" ngx "$TD" none apply
+[ "$RC" = 0 ] && [ -f "$TD/avail/api-tdtest.datadance.ai" ] && [ -L "$TD/enabled/app-tdtest.datadance.ai" ] && grep -qx 'API_HOST=api-tdtest.datadance.ai' "$TD/ddcnew/settings.env" || bad "teardown setup: apply with non-default settings (rc=$RC)"
+printf 'name: ddcnew\n' > "$TD/ddcnew/compose.yaml"
 cat > "$TD/bin/docker" <<'EOF'
 #!/bin/bash
 # stub docker for 99-teardown.sh: compose fails like a missing .env; one old-stack container that must stay untouched
@@ -1227,17 +1586,17 @@ exit 0
 EOF
 chmod 755 "$TD/bin/docker"
 td() { rm -f "$TD/calls" "$TD/rm.done" "$TD/net.done" "$TD/reloaded"; RC=0
-  PATH="$TD/bin:$ST:$PATH" STUB_DIR="$TD" STUB_BAD="$1" CHANGE_HOST=none DDC_LOCAL_TEST=1 NEW_DIR="$TD/ddcnew" NGINX_AVAIL="$TD/avail" NGINX_ENABLED="$TD/enabled" \
-    NGINX_CONFD="$TD/confd" MAINNET_DIR="$TD/mainnet" bash "$PKG/99-teardown.sh" ${2:-} > "$TD/out" 2>&1 || RC=$?; }
-printf 'API_HOST=%s\nAPP_HOST=%s\nAPI_PORT=%s\nWEB_PORT=%s\nDB_PORT=%s\n' "$D_API_HOST" "$D_APP_HOST" "$D_API_PORT" "$D_WEB_PORT" "$D_DB_PORT" > "$TD/ddcnew/settings.env"
+  PATH="$TD/bin:$ST:$PATH" STUB_DIR="$TD" STUB_BAD="$1" CHANGE_HOST=none OUR_HOSTS="api-tdtest.datadance.ai app-tdtest.datadance.ai" DDC_LOCAL_TEST=1 NEW_DIR="$TD/ddcnew" \
+    NGINX_AVAIL="$TD/avail" NGINX_ENABLED="$TD/enabled" NGINX_CONFD="$TD/confd" MAINNET_DIR="$TD/mainnet" bash "$PKG/99-teardown.sh" ${2:-} > "$TD/out" 2>&1 || RC=$?; }
 td 0
 rmc=$(grep -E '^(rm|network rm)' "$TD/calls" | tr '\n' ';')
 [ "$RC" = 0 ] && grep -q '^WARN docker compose down is not possible or failed' "$TD/out" && [ "$rmc" = "rm -f 1111 2222;network rm net1;" ] \
   && grep -q 'ps -aq --filter label=com.docker.compose.project=ddcnew' "$TD/calls" && grep -q 'network ls -q --filter label=com.docker.compose.project=ddcnew' "$TD/calls" \
   && grep -q '^PASS no ddcnew containers left' "$TD/out" && grep -q '^PASS old-stack containers unchanged (1 containers' "$TD/out" \
   && ok "99-teardown.sh, compose down fails -> removes only the ddcnew-labelled containers, then the ddcnew network; the old container untouched" || { cat "$TD/out"; cat "$TD/calls"; bad "teardown fallback (rc=$RC rm calls: $rmc)"; }
-[ "$RC" = 0 ] && [ ! -e "$TD/ddcnew/settings.env" ] && grep -q '^settings record .* removed: the next run may choose other hosts or ports' "$TD/out" \
-  && grep -q "^settings: API_HOST=$D_API_HOST .*(recorded in " "$TD/out" && ok "99-teardown.sh uses the recorded settings, then removes the record" || bad "teardown settings record"
+[ "$RC" = 0 ] && [ ! -e "$TD/avail/api-tdtest.datadance.ai" ] && [ ! -e "$TD/avail/app-tdtest.datadance.ai" ] && [ ! -e "$TD/enabled/api-tdtest.datadance.ai" ] && [ ! -e "$TD/enabled/app-tdtest.datadance.ai" ] \
+  && [ ! -e "$TD/ddcnew/settings.env" ] && grep -q '^settings record .* removed: the next run may choose other hosts' "$TD/out" && grep -q "^settings: API_HOST=api-tdtest.datadance.ai .*(recorded in " "$TD/out" \
+  && ok "99-teardown.sh undoes this package's vhosts at the RECORDED non-default hosts, then removes the record" || { cat "$TD/out"; bad "teardown with non-default recorded settings"; }
 mkdir -p "$TD/ddcnew/vhost-takeover/20261005-170000-1"; : > "$TD/ddcnew/vhost-takeover/20261005-170000-1/MANIFEST"
 td 0 --delete-dir
 [ "$RC" = 1 ] && grep -q 'FAIL refusing --delete-dir: .*never restored ( 20261005-170000-1)' "$TD/out" && [ -d "$TD/ddcnew" ] \
@@ -1382,7 +1741,7 @@ grep -q -- '--pids-limit 64 --ulimit core=0 --log-driver none' "$PKG/50-partner-
 [ "$rc_right" = 0 ] && [ "$(tail -1 "$PP/verify-right.out")" = match=yes ] && [ "$rc_wrong" = 1 ] && [ "$(tail -1 "$PP/verify-wrong.out")" = match=no ] \
   && ok "verify: match=yes with the password (exit 0); match=no with a wrong one (exit 1)" || bad "verify (right rc=$rc_right, wrong rc=$rc_wrong)"
 miss=""
-for s in "issuer</span>: <span class=\"s\">\"https://$D_API_HOST\"" 'client_id</span>: <span class="s">"tge-rehearsal"' "redirect_uri</span>: <span class=\"s\">\"$REDIR1\"" \
+for s in "issuer</span>: <span class=\"s\">\"https://$D_API_HOST\"" "client_id</span>: <span class=\"s\">\"$CID\"" "redirect_uri</span>: <span class=\"s\">\"$REDIR1\"" \
          "<span class=\"val\">$REDIR1</span><span class=\"val\">https://203.0.113.7/pages/oauth/cb2?env=test&amp;v=2</span>" "<span class=\"val\">$INIT</span>" \
          '<span class="val">203.0.113.7</span>' '（北京时间）' "<code>$D_API_HOST</code> 和 <code>$D_APP_HOST</code>"; do
   grep -qF -- "$s" "$PAGE/index.html" || miss="$miss [$s]"
@@ -1430,6 +1789,15 @@ mkdir -p "$PP/mismatch"; cp -Rp "$PP/ddcnew" "$PP/mismatch/ddcnew"; rm -rf "$PP/
 ( umask 077; openssl rand -hex 32 | tr -d '\n' > "$PP/mismatch/ddcnew/secrets/tge_rehearsal_client_secret" )
 refuse "a secret file whose sha256 is not SSO_TGE_CLIENT_SECRET_SHA256 (the api would refuse it)" "differs from SSO_TGE_CLIENT_SECRET_SHA256" apply "$PP/pw.nl" \
   PARTNER_ALLOWED_IP=203.0.113.7 NEW_DIR="$PP/mismatch/ddcnew" SRV_DIR="$PP/mismatch/srv"
+# The client id in the env: one the api refuses at boot, and one that is not the recorded REHEARSAL_CLIENT_ID.
+inplace() { local f="$1"; shift; sed "$@" "$f" > "$f.tmp" && cat "$f.tmp" > "$f" && rm -f "$f.tmp"; }   # keeps the file's mode
+mkdir -p "$PP/cidret" "$PP/cidrec"; cp -Rp "$PP/ddcnew" "$PP/cidret/ddcnew"; cp -Rp "$PP/ddcnew" "$PP/cidrec/ddcnew"; rm -rf "$PP/cidret/ddcnew/logs" "$PP/cidrec/ddcnew/logs"
+inplace "$PP/cidret/ddcnew/.env.rehearsal" 's/^SSO_TGE_CLIENT_ID=.*/SSO_TGE_CLIENT_ID="tge-rehearsal"/'
+refuse "SSO_TGE_CLIENT_ID=tge-rehearsal in the env (the api refuses it at boot)" "is tge-rehearsal, which the api refuses at boot" apply "$PP/pw.nl" \
+  PARTNER_ALLOWED_IP=203.0.113.7 NEW_DIR="$PP/cidret/ddcnew" SRV_DIR="$PP/cidret/srv"
+inplace "$PP/cidrec/ddcnew/settings.env" 's/^REHEARSAL_CLIENT_ID=.*/REHEARSAL_CLIENT_ID=lt-other-client/'
+refuse "an env whose SSO_TGE_CLIENT_ID is not the recorded REHEARSAL_CLIENT_ID" "is not the recorded REHEARSAL_CLIENT_ID (lt-other-client)" apply "$PP/pw.nl" \
+  PARTNER_ALLOWED_IP=203.0.113.7 NEW_DIR="$PP/cidrec/ddcnew" SRV_DIR="$PP/cidrec/srv"
 refuse "an image that is not on this host (the script never pulls)" "is not on this host" apply "$PP/pw.nl" PARTNER_ALLOWED_IP=203.0.113.7 PARTNER_CRYPT_IMAGE="ddcnew-absent:x-$RUN_ID"
 refuse "SRV_DIR under /root" "refuses SRV_DIR under /root" status /dev/null SRV_DIR=/root/srv
 RC=0; env DDC_LOCAL_TEST=1 NEW_DIR="$PP/ddcnew" SRV_DIR="$PP/srv/ddcnew" bash "$PKG/50-partner-page.sh" apply extra < "$PP/pw.nl" > "$PP/out" 2>&1 || RC=$?
@@ -1443,7 +1811,7 @@ for c in apply verify; do   # script(1) gives the script a pty as stdin
   [ "$RC" = 1 ] && grep -q 'a terminal is refused' "$PP/out" && ok "refused: $c with a terminal on stdin (typing would echo the password)" || { cat "$PP/out"; bad "$c with a terminal (rc=$RC)"; }
 done
 [ "$(cat "$PAGE/index.html" "$PAGE/secret.json" | shasum -a 256)" = "$before" ] && [ "$(ls -A "$PAGE" | tr '\n' ' ')" = "index.html secret.json " ] \
-  && [ ! -e "$PP/placeholder/srv/partner-info" ] && [ ! -e "$PP/mismatch/srv/partner-info" ] \
+  && [ ! -e "$PP/placeholder/srv/partner-info" ] && [ ! -e "$PP/mismatch/srv/partner-info" ] && [ ! -e "$PP/cidret/srv/partner-info" ] && [ ! -e "$PP/cidrec/srv/partner-info" ] \
   && ok "every refusal left the installed page unchanged and created no other page" || bad "a refusal changed or created page files"
 
 echo "-- status (read-only)"
@@ -1460,7 +1828,7 @@ if docker info >/dev/null 2>&1; then
   if WCID=$(docker run -d "${LT[@]}" --name "$WC" -p 127.0.0.1::80 -v "$W/nginx.conf:/etc/nginx/nginx.conf:ro" -v "$W/sites:/etc/nginx/sites:ro" \
        -v "$PAGE:/srv/ddcnew/partner-info:ro" nginx:stable); then
     WPORT=$(docker port "$WCID" 80/tcp | head -1 | sed 's/.*://'); URL="http://127.0.0.1:$WPORT/partner-info/"
-    for _ in $(seq 1 40); do curl -s -o /dev/null "$URL" && break; sleep 0.25; done
+    end=$(( $(date +%s) + 30 )); while [ "$(date +%s)" -lt "$end" ]; do curl -s -o /dev/null "$URL" && break; sleep 0.25; done
     curl -s -D "$W/h-page" -o "$W/page.html" "$URL" || true; curl -s -D "$W/h-json" -o "$W/secret.json" "${URL}secret.json" || true
     miss=""
     for h in 'Cache-Control: no-store' 'X-Robots-Tag: noindex, nofollow' 'Referrer-Policy: no-referrer' 'X-Frame-Options: DENY' 'X-Content-Type-Options: nosniff' "Content-Security-Policy: $CSP"; do
@@ -1483,8 +1851,8 @@ if docker info >/dev/null 2>&1; then
       && ok "status: a file that differs from what nginx serves is named (WARN), the matching one still passes" || { sed 's/^/    /' "$PP/out"; bad "status mismatch case (rc=$RC)"; }
     PWM="$T/playwright"
     if npm install --prefix "$PWM" --no-audit --no-fund --no-save --prefer-offline --loglevel=error "playwright-core@$PW_VERSION" > "$PP/npm.out" 2>&1; then
-      printf '{"issuer":"https://%s","client_id":"tge-rehearsal","redirects":["%s","%s"],"initiate":"%s","ips":["203.0.113.7"]}\n' \
-        "$D_API_HOST" "$REDIR1" "$REDIR2" "$INIT" > "$PP/expect.json"
+      printf '{"issuer":"https://%s","client_id":"%s","redirects":["%s","%s"],"initiate":"%s","ips":["203.0.113.7"]}\n' \
+        "$D_API_HOST" "$CID" "$REDIR1" "$REDIR2" "$INIT" > "$PP/expect.json"
       if NODE_PATH="$PWM/node_modules" timeout 300 node "$PKG/test/helpers/partner-browser.js" "$URL" "$SECF" "$PP/pw" "$PP/pw-wrong" "$PP/expect.json" "$PP/shots" > "$PP/browser.out" 2>&1; then
         sed 's/^/  /' "$PP/browser.out"; ok "headless Chromium: a wrong password shows the error, the right one reveals exactly the dummy secret; copy, hide; no other origin; without JavaScript no field and no request with the password (screenshots: $PP/shots)"
       else sed 's/^/  /' "$PP/browser.out"; bad "headless Chromium test"; fi
@@ -1504,26 +1872,7 @@ left=$(docker ps -aq --filter "label=ddcnew-localtest=$RUN_ID" --filter name=ddc
 [ "$left" = 0 ] && ok "no throwaway crypt container of this run left (docker run --rm; counted by this run's label)" || bad "$left ddcnew-partner-crypt-* container(s) of this run left"
 
 # ---------------------------------------------------------------------------
-echo; echo "== cleanup: only what this run created (label ddcnew-localtest=$RUN_ID); nothing is selected by name"
-if docker info >/dev/null 2>&1; then
-  for id in $(docker ps -aq --filter "label=ddcnew-localtest=$RUN_ID"); do
-    n=$(docker inspect --format '{{.Name}}' "$id" 2>/dev/null || echo "$id")
-    docker rm -fv "$id" >/dev/null 2>&1 && echo "removed leftover container of this run: ${n#/}"
-  done
-  if [ "${KEEP_TEST_IMAGES:-0}" != 1 ]; then
-    # Images this run built carry its label (docker build --label); nothing else does.
-    for ref in $(docker image ls --filter "label=ddcnew-localtest=$RUN_ID" --format '{{.Repository}}:{{.Tag}}' | grep -v '<none>' || true); do
-      docker image rm "$ref" >/dev/null 2>&1 && echo "removed image built by this run: $ref"
-    done
-    for id in $(docker image ls -q --filter "label=ddcnew-localtest=$RUN_ID" | LC_ALL=C sort -u); do docker image rm "$id" >/dev/null 2>&1 && echo "removed untagged image built by this run: $id"; done
-  else echo "KEEP_TEST_IMAGES=1: the images this run built are kept (label ddcnew-localtest=$RUN_ID)"; fi
-  c_left=$(docker ps -aq --filter "label=ddcnew-localtest=$RUN_ID" | grep -c . || true)
-  i_left=$(docker image ls -q --filter "label=ddcnew-localtest=$RUN_ID" | grep -c . || true)
-  [ "$c_left" = 0 ] && ok "this run's containers left: 0; its images left: $i_left" || bad "$c_left container(s) of this run left"
-  now=$(docker ps -aq --no-trunc 2>/dev/null | LC_ALL=C sort || true)
-  gone=$(LC_ALL=C comm -23 <(printf '%s\n' "$PRE_CONTAINERS" | grep . || true) <(printf '%s\n' "$now" | grep . || true) | grep -c . || true)
-  echo "containers that existed before this run: $(printf '%s\n' "$PRE_CONTAINERS" | grep -c . || true), gone now: $gone (this run removes only containers with its own label, all created after it started)"
-fi
+cleanup_run
 
 echo; echo "== summary: fails=$fails"
 [ "$fails" = 0 ]

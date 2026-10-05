@@ -14,11 +14,17 @@
 #           ONLY ITS OWN FILES: apply refuses to create or overwrite anything at those names (sites-available/<host>,
 #           its .new temporary, sites-enabled/<host>) that this script did not write: a file without the marker line,
 #           or a link that is not its own. On 10-05 Race's rehearsal vhosts sit at the default names. With
-#           TAKE_OVER_VHOSTS=yes (only after Sloan and Race agree) apply first backs those entries up to
-#           /root/ddcnew/vhost-takeover/<ts>-<pid>/ (copies, link targets and a MANIFEST with their sha256), then
-#           replaces them; `restore` puts them back. If nginx -t then fails, they are put back at once. Only a
-#           rehearsal vhost of exactly that host can be taken over (its only server_name is the host, and it proxies to
-#           no old-stack port); anything else stays refused, flag or not.
+#           TAKE_OVER_VHOSTS=yes (only after Sloan and Race agree) apply first checks that this stack answers on its
+#           own ports (api 401 on 127.0.0.1:API_PORT, the web's build marker on 127.0.0.1:WEB_PORT: 40-up.sh runs
+#           first), then backs those entries up to /root/ddcnew/vhost-takeover/<ts>-<pid>/ (copies, link targets and
+#           a MANIFEST with their sha256, written as MANIFEST.part and renamed only when complete), then replaces them.
+#           Only the other party's rehearsal vhost of exactly that host can be taken over: its only server_name is the
+#           host and every proxy_pass goes to a host port a ddc-mainnet-* container binds; anything else (a static
+#           site, another stack's vhost, a second name) stays refused, flag or not. From the moment the first entry is
+#           removed until every check below has passed, ANY failure (a command, a stop, a signal) puts the backed-up
+#           entries back at once (marked RESTORED) and reloads nginx if apply had; if that cannot finish, the script
+#           says to run undo, then restore. After the reload, the Host-header checks (common.sh host_checks) run
+#           through the new vhosts whenever this stack answers (always so after a take-over).
 #           apply also refuses when another file that nginx loads declares one of the two hosts as a server_name
 #           (nginx would answer from only one of them), and when API_PORT or WEB_PORT is held by anything other than
 #           this stack's own container (common.sh port_check).
@@ -26,10 +32,12 @@
 #           changes. A failed nginx -t removes the new files again.
 #   undo    removes this script's own files and links at the two names, never anyone else's (listed, left in place);
 #           nginx -t and reload only if something was removed.
-#   restore [<backup name>]   the undo of a take-over: removes this script's entries at the backed-up names and puts the
-#           backed-up files and links of the latest (or the named) backup back, after checking them against the
-#           MANIFEST; refuses if anything this script did not write sits at those names now. nginx -t, reload. The
-#           backup stays, with a RESTORED mark (a second restore of it is refused).
+#   restore [<backup name>]   the undo of a take-over: sets this script's entries at the backed-up names aside (to
+#           /root/ddcnew/vhost-restore-hold/), puts the backed-up files and links of the latest (or the named) complete
+#           backup back after checking them against the MANIFEST, then nginx -t and reload. If nginx -t fails, the
+#           restored entries go again and this script's come back: the names never end up with neither. Refuses if
+#           anything this script did not write sits at those names now. The backup stays, with a RESTORED mark (a
+#           second restore of it is refused).
 #   status  read-only.
 #   apply, undo and restore take the run lock /root/ddcnew/.lock and log to /root/ddcnew/logs/ (common.sh run_begin).
 # PASS CRITERION THAT STOPS THE SCRIPT: every other host nginx serves (the production api/app/business/admin hosts and
@@ -118,40 +126,52 @@ remove_entries() { # <host...> ; removes OURS (links first)
 # ---------------------------------------------------------------------------
 # Take-over backup and restore
 # ---------------------------------------------------------------------------
-# Only a rehearsal vhost of exactly <host> may be taken over: its only server_name is <host> and it proxies to no port of
-# the old stack (a link counts by the file it leads to; a dangling link serves nothing). Anything else at our names (a
-# typo in API_HOST pointing at another site, say) stays refused even with TAKE_OVER_VHOSTS=yes.
-TAKEOVER_WHY=""
+# Only the other party's rehearsal vhost of exactly <host> may be taken over: its only server_name is <host>, it has at
+# least one proxy_pass, and every proxy_pass goes to a local host port that a ddc-mainnet-* container binds (common.sh
+# mainnet_ports, running or stopped). A static site (no proxy_pass: docs.datadance.ai, say), a vhost of another stack,
+# one that also serves other names, or a link that leads nowhere stays refused even with TAKE_OVER_VHOSTS=yes; so no
+# name the file serves can leave the before/after check of the other hosts. A link counts by the file it leads to.
+TAKEOVER_WHY=""; MAINNET_PORTS=""
 takeover_ok() { # <path> <host>
-  local f names port
-  if [ -L "$1" ]; then f=$(resolve_path "$1"); [ -e "$f" ] || return 0; else f="$1"; fi
+  local f names ups u port
+  if [ -L "$1" ]; then f=$(resolve_path "$1"); [ -e "$f" ] || { TAKEOVER_WHY="it is a link that leads nowhere"; return 1; }; else f="$1"; fi
   [ -f "$f" ] || { TAKEOVER_WHY="it is not a file"; return 1; }
   names=$(server_names_in "$f" | LC_ALL=C sort -u | tr '\n' ' ')
   [ "$names" = "$2 " ] || { TAKEOVER_WHY="it declares server_name ${names:-(none) }instead of only $2"; return 1; }
-  for port in $OLD_PORTS; do
-    if grep -qE "proxy_pass[[:space:]]+https?://(localhost|127\.0\.0\.1):$port([/;]|$)" "$f"; then TAKEOVER_WHY="it proxies to the old stack's port $port"; return 1; fi
+  ups=$(sed -e 's/#.*//' -- "$f" | grep -oE 'proxy_pass[[:space:]]+[^;[:space:]]+' | awk '{print $2}' || true)
+  [ -n "$ups" ] || { TAKEOVER_WHY="it proxies to nothing (a static site, not a rehearsal stack)"; return 1; }
+  [ -n "$MAINNET_PORTS" ] || { TAKEOVER_WHY="no ${MAINNET_CTR_PREFIX}* container binds a host port, so its upstream cannot be shown to be the other party's rehearsal"; return 1; }
+  for u in $ups; do
+    port=$(printf '%s' "$u" | sed -nE 's#^https?://(localhost|127\.0\.0\.1):([0-9]+)(/.*)?$#\2#p')
+    [ -n "$port" ] || { TAKEOVER_WHY="it proxies to $u, not to a local port"; return 1; }
+    case " $MAINNET_PORTS " in *" $port "*) ;; *) TAKEOVER_WHY="it proxies to port $port, which no ${MAINNET_CTR_PREFIX}* container binds (they bind: $MAINNET_PORTS)"; return 1;; esac
   done
 }
 TAKEOVER_DIR=""
+# The backup is written to MANIFEST.part and renamed to MANIFEST only once every entry is in it: restore, undo and
+# 99-teardown.sh only ever see complete backups (a directory without MANIFEST is an interrupted backup, and nothing was
+# taken over from it; apply removes it when it fails).
 takeover_backup() { # FOREIGN -> $TAKEOVER_DIR: copies of the files, the targets of the links, MANIFEST
   local e k n p h tgt
   TAKEOVER_DIR="$TAKEOVER_ROOT/$(date +%Y%m%d-%H%M%S)-$$"
   guard_write_path "$TAKEOVER_DIR"
   ( umask 077; install -d -m 700 "$TAKEOVER_ROOT" "$TAKEOVER_DIR" "$TAKEOVER_DIR/avail" "$TAKEOVER_DIR/enabled" ) || die "cannot create $TAKEOVER_DIR"
-  ( umask 077; : > "$TAKEOVER_DIR/MANIFEST" ) || die "cannot create $TAKEOVER_DIR/MANIFEST"
+  ( umask 077; : > "$TAKEOVER_DIR/MANIFEST.part" ) || die "cannot create $TAKEOVER_DIR/MANIFEST.part"
   for e in "${FOREIGN[@]}"; do
     k=${e% *}; n=${e#* }; p=$(entry_path "$k" "$n")
     if [ -L "$p" ]; then
       tgt=$(readlink -- "$p")
       case "$tgt" in ''|*[[:space:]]*) die "cannot back up $p: its link target is empty or contains a blank";; esac
-      printf 'link %s %s %s\n' "$k" "$n" "$tgt" >> "$TAKEOVER_DIR/MANIFEST"
+      printf 'link %s %s %s\n' "$k" "$n" "$tgt" >> "$TAKEOVER_DIR/MANIFEST.part"
     elif [ -f "$p" ]; then
       cp -p -- "$p" "$TAKEOVER_DIR/$k/$n" || die "cannot copy $p into the backup"
       h=$(sha256 < "$p")
       [ "$(sha256 < "$TAKEOVER_DIR/$k/$n")" = "$h" ] || die "the backup copy of $p differs from it"
-      printf 'file %s %s %s\n' "$k" "$n" "$h" >> "$TAKEOVER_DIR/MANIFEST"
+      printf 'file %s %s %s\n' "$k" "$n" "$h" >> "$TAKEOVER_DIR/MANIFEST.part"
     else die "cannot take over $p: $(describe "$p") (only a file or a symlink)"; fi
   done
+  [ "$(grep -c . "$TAKEOVER_DIR/MANIFEST.part")" = "${#FOREIGN[@]}" ] || die "the backup lists $(grep -c . "$TAKEOVER_DIR/MANIFEST.part") of ${#FOREIGN[@]} entries"
+  mv -f -- "$TAKEOVER_DIR/MANIFEST.part" "$TAKEOVER_DIR/MANIFEST" || die "cannot complete the backup's MANIFEST"
   say "take-over backup: $TAKEOVER_DIR ($(grep -c . "$TAKEOVER_DIR/MANIFEST") entries; MANIFEST with sha256 and link targets)"
 }
 MANIFEST_HOSTS=""
@@ -176,14 +196,19 @@ manifest_check() { # <backup dir>: every line well-formed, every copy matches it
   [ -n "$MANIFEST_HOSTS" ] || die "MANIFEST of $d is empty"
 }
 RESTORED=()
-put_back() { # <backup dir>: the MANIFEST entries back in place (the caller made sure nothing is there)
+put_back() { # <backup dir>: the MANIFEST entries back in place. An entry that is still there exactly as backed up is
+  # left as it is (a take-over that stopped half way); anything else at the path stops it.
   local d="$1" t k n x p
   RESTORED=()
   while read -r t k n x; do
     p=$(entry_path "$k" "$n")
     # shellcheck disable=SC2086  # MANIFEST_HOSTS is a list of validated host names
     guard_entry_path "$p" $MANIFEST_HOSTS
-    if [ -e "$p" ] || [ -L "$p" ]; then die "put back: $p exists"; fi
+    if [ -e "$p" ] || [ -L "$p" ]; then
+      if [ "$t" = file ] && [ -f "$p" ] && [ ! -L "$p" ] && [ "$(sha256 < "$p")" = "$x" ]; then say "still in place: $p"; continue; fi
+      if [ "$t" = link ] && [ -L "$p" ] && [ "$(readlink -- "$p")" = "$x" ]; then say "still in place: $p"; continue; fi
+      die "put back: $p exists and is not the backed-up entry"
+    fi
     if [ "$t" = file ]; then
       cp -p -- "$d/$k/$n" "$p" || die "cannot put $p back"
       [ "$(sha256 < "$p")" = "$x" ] || die "$p differs from the backup after putting it back"
@@ -191,7 +216,8 @@ put_back() { # <backup dir>: the MANIFEST entries back in place (the caller made
     RESTORED+=("$p"); say "put back $p ($t)"
   done < "$d/MANIFEST"
 }
-latest_backup() { find "$TAKEOVER_ROOT" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sed 's#.*/##' | { grep -E '^[0-9]{8}-[0-9]{6}-[0-9]+$' || true; } | LC_ALL=C sort | tail -n 1; }
+# The complete backups (a MANIFEST), newest last.
+latest_backup() { local d; for d in "$TAKEOVER_ROOT"/*/; do if [ -f "$d/MANIFEST" ]; then basename "$d"; fi; done 2>/dev/null | { grep -E '^[0-9]{8}-[0-9]{6}-[0-9]+$' || true; } | LC_ALL=C sort | tail -n 1; }
 unrestored_backups() { local d; for d in "$TAKEOVER_ROOT"/*/; do if [ -f "$d/MANIFEST" ] && [ ! -e "$d/RESTORED" ]; then basename "$d"; fi; done; }
 
 # ---------------------------------------------------------------------------
@@ -273,6 +299,50 @@ codes_after() { # <message when they changed>
   die "$1"
 }
 
+# ---------------------------------------------------------------------------
+# A take-over that does not complete puts the other party's entries back (E1): from the moment the first of them is
+# removed until apply has passed every check, any exit that is not the successful end (a failing command, die, a
+# signal) runs takeover_rollback. It removes this package's entries at the two names, puts the backup back (marking it
+# RESTORED), runs nginx -t and reloads if apply had reloaded. If that fails, it says to run undo, then restore.
+# ---------------------------------------------------------------------------
+TAKEN=0; RELOADED=0
+takeover_rollback() {
+  local rc=$? ok=1
+  trap - EXIT HUP INT TERM
+  [ "$TAKEN" = 1 ] || exit "$rc"
+  set +e
+  printf 'FAIL the take-over did not complete: putting the taken-over entries back from %s\n' "$TAKEOVER_DIR" >&2
+  scan_ours "$API_HOST" "$APP_HOST"
+  ( remove_entries "$API_HOST" "$APP_HOST" ) || ok=0
+  if [ "$ok" = 1 ] && ( manifest_check "$TAKEOVER_DIR" && put_back "$TAKEOVER_DIR" ); then
+    ( umask 077; date '+restored %Y-%m-%d %H:%M:%S %Z by the rollback of a failed apply' > "$TAKEOVER_DIR/RESTORED" )
+    if nginx -t 2>/dev/null; then
+      if [ "$RELOADED" = 1 ]; then systemctl reload nginx && say "rolled back: the other party's entries are back and nginx is reloaded with them"
+      else say "rolled back: the other party's entries are back; nginx was not reloaded, so it never served this package's"; fi
+    else
+      printf 'FAIL nginx -t fails even with the other party'"'"'s entries back: check nginx by hand now (nginx -t)\n' >&2
+    fi
+  else
+    printf 'FAIL could not put the taken-over entries back: run ./30-nginx.sh undo, then ./30-nginx.sh restore %s\n' "$(basename "$TAKEOVER_DIR")" >&2
+  fi
+  exit "$rc"
+}
+# restore keeps this package's entries aside until the restored ones pass nginx -t and the reload (E3): if they do not,
+# the restored entries go again and this package's come back, so the names never end up with neither.
+HOLD=""; HELD=(); RESTORING=0
+restore_rollback() {
+  local rc=$? e k n
+  trap - EXIT HUP INT TERM
+  [ "$RESTORING" = 1 ] || exit "$rc"
+  set +e
+  printf 'FAIL the restore did not complete: removing the restored entries and putting this package'"'"'s back from %s\n' "$HOLD" >&2
+  for e in ${RESTORED[@]+"${RESTORED[@]}"}; do rm -f -- "$e"; done
+  for e in ${HELD[@]+"${HELD[@]}"}; do k=${e% *}; n=${e#* }; mv -f -- "$HOLD/$k/$n" "$(entry_path "$k" "$n")" && say "put back $(entry_path "$k" "$n") (this package's)"; done
+  if nginx -t 2>/dev/null; then say "this package's entries are back; nginx was not reloaded, so it never served the restored ones"
+  else printf 'FAIL nginx -t fails with this package'"'"'s entries back too: check nginx by hand now (nginx -t); the backup is unchanged\n' >&2; fi
+  exit "$rc"
+}
+
 case "$cmd" in
   apply)
     nginx -t 2>/dev/null || die "nginx -t fails BEFORE any change; not touching nginx"
@@ -287,11 +357,13 @@ case "$cmd" in
     if [ "${#FOREIGN[@]}" -gt 0 ]; then
       for e in "${FOREIGN[@]}"; do p=$(entry_path "${e% *}" "${e#* }"); say "  not written by this package: $p ($(describe "$p"))"; done
       [ "$TAKE_OVER_VHOSTS" = yes ] || die "refusing: ${#FOREIGN[@]} vhost entry(s) at the names $API_HOST / $APP_HOST were not written by this package (listed above; on 10-05 Race's rehearsal vhosts have the default names), and this script never overwrites them. Either choose other names (API_HOST=... APP_HOST=..., with their DNS records), or, once Sloan and Race agree that this stack takes the names over, re-run with TAKE_OVER_VHOSTS=yes: the entries are backed up first, and ./30-nginx.sh restore puts them back"
+      MAINNET_PORTS=$(mainnet_ports)
+      say "host ports bound by ${MAINNET_CTR_PREFIX}* containers: ${MAINNET_PORTS:-none}"
       for e in "${FOREIGN[@]}"; do
         p=$(entry_path "${e% *}" "${e#* }"); h=${e#* }; h=${h%.new}
-        takeover_ok "$p" "$h" || die "refusing to take over $p: $TAKEOVER_WHY. TAKE_OVER_VHOSTS takes over only a rehearsal vhost of exactly that host: check API_HOST / APP_HOST"
+        takeover_ok "$p" "$h" || die "refusing to take over $p: $TAKEOVER_WHY. TAKE_OVER_VHOSTS takes over only the other party's rehearsal vhost of exactly that host: check API_HOST / APP_HOST"
       done
-      pass "TAKE_OVER_VHOSTS=yes: each of the ${#FOREIGN[@]} entries is a rehearsal vhost of exactly its host (one server_name, no old-stack upstream)"
+      pass "TAKE_OVER_VHOSTS=yes: each of the ${#FOREIGN[@]} entries is a rehearsal vhost of exactly its host whose every upstream is a ${MAINNET_CTR_PREFIX}* port ($MAINNET_PORTS)"
     else pass "nothing at these names that this package did not write"; fi
     c=$(for h in "$API_HOST" "$APP_HOST"; do server_name_users "$h" "$API_LNK" "$APP_LNK" | sed "s|^|$h declared by |"; done)
     [ -z "$c" ] || { printf '%s\n' "$c" | sed 's/^/  /'; die "refusing: another file that nginx loads declares $API_HOST or $APP_HOST as a server_name (listed above), so nginx would answer from only one of them. Its owner removes or renames it first (TAKE_OVER_VHOSTS covers only the entries at our names)"; }
@@ -302,9 +374,15 @@ case "$cmd" in
     settings_record
 
     if [ "${#FOREIGN[@]}" -gt 0 ]; then
+      # The other party's hosts are only ever pointed at a stack that has booted (40-up.sh first).
+      stack_answers || die "refusing TAKE_OVER_VHOSTS=yes until this stack answers on its own ports: $STACK_WHY. Run 40-up.sh first (APPROVAL.md section 9, outcome A): the other party's hosts must never point at a stack that has not booted"
+      pass "this stack answers: api 401 on 127.0.0.1:$API_PORT/partner/tge/me, web build marker for https://$API_HOST/api on 127.0.0.1:$WEB_PORT"
       step "take-over (TAKE_OVER_VHOSTS=yes): back up, then replace"
+      trap 'rm -rf -- "$TAKEOVER_DIR"' EXIT   # an interrupted backup goes; nothing was taken over from it
       takeover_backup
       for e in "${FOREIGN[@]}"; do p=$(entry_path "${e% *}" "${e#* }"); old_files_forget "$p"; done
+      trap takeover_rollback EXIT; trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM
+      TAKEN=1
       for e in "${FOREIGN[@]}"; do p=$(entry_path "${e% *}" "${e#* }"); rm -f -- "$p"; say "taken over: $p (backed up)"; done
     fi
     step "install"
@@ -317,24 +395,29 @@ case "$cmd" in
     [ "$(vhost_state avail "$API_HOST")$(vhost_state avail "$APP_HOST")$(vhost_state enabled "$API_HOST")$(vhost_state enabled "$APP_HOST")" = oursoursoursours ] \
       || die "after the install the four entries are not this script's own files and links"
     install -d -m 700 "$NEW_DIR/logs"
+    if [ "$TAKEN" = 1 ]; then UNDO_MSG="the take-over is rolled back now, the other party's entries go back from the backup (if that fails: ./30-nginx.sh undo, then ./30-nginx.sh restore)"
+    else UNDO_MSG="run ./30-nginx.sh undo now"; fi
     if ! nginx -t 2>"$NEW_DIR/logs/nginx-t.out"; then
       tail -3 "$NEW_DIR/logs/nginx-t.out" | redact
-      scan_ours "$API_HOST" "$APP_HOST"; remove_entries "$API_HOST" "$APP_HOST"
-      if [ -n "$TAKEOVER_DIR" ]; then
-        manifest_check "$TAKEOVER_DIR"; put_back "$TAKEOVER_DIR"
-        ( umask 077; date '+restored %Y-%m-%d %H:%M:%S %Z by the rollback of a failed apply' > "$TAKEOVER_DIR/RESTORED" ) || true
-        say "the taken-over entries are back in place from $TAKEOVER_DIR"
+      if [ "$TAKEN" = 0 ]; then
+        scan_ours "$API_HOST" "$APP_HOST"; remove_entries "$API_HOST" "$APP_HOST"
+        nginx -t 2>/dev/null && say "rolled back: the new files removed, nginx -t passes again (nothing was reloaded)"
       fi
-      nginx -t 2>/dev/null && say "rolled back: nginx -t passes again (nothing was reloaded)"
       die "nginx -t failed with the new vhosts"
     fi
     pass "nginx -t ok"
-    systemctl reload nginx; sleep 1
+    systemctl reload nginx; RELOADED=1; sleep 1
     pass "nginx reloaded"
     grep -nE 'server_name|listen|proxy_pass|alias' "$API_DST" "$APP_DST"
-    codes_after "status codes of other hosts changed after the reload — run ./30-nginx.sh undo now"
-    say "$API_HOST /partner/tge/me=$(host_code "$API_HOST" /partner/tge/me) (502 until 40-up.sh, then 401)  $APP_HOST /=$(host_code "$APP_HOST" /) (502 until 40-up.sh)"
+    codes_after "status codes of other hosts changed after the reload — $UNDO_MSG"
+    # The Host-header checks need this stack running: always so after a take-over (checked before it), otherwise 40-up.sh
+    # runs them when it starts the stack after this.
+    if stack_answers; then
+      step "Host-header checks through the host nginx"
+      ( host_checks ) || die "the Host-header checks failed after the reload — $UNDO_MSG"
+    else say "$API_HOST /partner/tge/me=$(host_code "$API_HOST" /partner/tge/me), $APP_HOST /=$(host_code "$APP_HOST" /): this stack does not answer yet ($STACK_WHY), so 40-up.sh runs the Host-header checks when it starts it"; fi
     old_snapshot_assert
+    if [ "$TAKEN" = 1 ]; then TAKEN=0; trap - EXIT HUP INT TERM; pass "take-over complete: $API_HOST and $APP_HOST now serve this stack (./30-nginx.sh undo, then ./30-nginx.sh restore, puts the other party's back)"; fi
     ;;
   undo)
     old_snapshot_begin
@@ -374,15 +457,25 @@ case "$cmd" in
     fi
     # shellcheck disable=SC2086
     scan_ours $MANIFEST_HOSTS
-    # shellcheck disable=SC2086
-    remove_entries $MANIFEST_HOSTS
+    # This package's entries are set aside, not deleted, until the restored ones pass nginx -t and the reload.
+    HOLD="$NEW_DIR/vhost-restore-hold/$(date +%Y%m%d-%H%M%S)-$$"
+    guard_write_path "$HOLD"
+    ( umask 077; install -d -m 700 "$NEW_DIR/vhost-restore-hold" "$HOLD" "$HOLD/avail" "$HOLD/enabled" ) || die "cannot create $HOLD"
+    trap restore_rollback EXIT; trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM
+    RESTORING=1
+    for e in ${OURS[@]+"${OURS[@]}"}; do
+      p=$(entry_path "${e% *}" "${e#* }")
+      # shellcheck disable=SC2086  # validated host names
+      guard_entry_path "$p" $MANIFEST_HOSTS
+      mv -f -- "$p" "$HOLD/${e% *}/${e#* }" || die "cannot set $p aside"
+      HELD+=("$e"); say "set aside $p (this package's, until the restore passes)"
+    done
     put_back "$TAKEOVER_DIR"
-    old_files_adopt "${RESTORED[@]}"
-    if ! nginx -t 2>/dev/null; then
-      for p in "${RESTORED[@]}"; do rm -f -- "$p"; done
-      die "nginx -t fails with the restored entries: they are removed again and nginx was not reloaded (it still runs its previous configuration); check by hand"
-    fi
+    old_files_adopt ${RESTORED[@]+"${RESTORED[@]}"}
+    nginx -t 2>/dev/null || die "nginx -t fails with the restored entries: they go again and this package's come back; nginx was not reloaded. Check the backup's entries by hand"
     systemctl reload nginx; sleep 1
+    RESTORING=0; trap - EXIT HUP INT TERM
+    rm -rf -- "$HOLD"
     ( umask 077; date '+restored %Y-%m-%d %H:%M:%S %Z' > "$TAKEOVER_DIR/RESTORED" ) || die "cannot mark $TAKEOVER_DIR as restored"
     pass "restored ${#RESTORED[@]} entries from $TAKEOVER_DIR (the backup stays, marked RESTORED), nginx reloaded"
     codes_after "status codes of other hosts changed after the reload — check the old stack now"

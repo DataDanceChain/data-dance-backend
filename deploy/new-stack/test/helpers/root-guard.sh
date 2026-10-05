@@ -25,6 +25,7 @@ TARGETS="/root/ddcnew /root/ddcnew/deploy /root/ddcnew/src /root/ddcnew/src/back
  /root/ddcnew/.env.rehearsal /root/ddcnew/.env.db /root/ddcnew/secrets /root/ddcnew/compose.yaml /root/ddcnew/.env.api
  /root/ddcnew/.env.api.new /root/ddcnew/pgdata /root/backup/pg /root/backup/ddc-pgdump.sh /root/backup/disk-need.txt /etc/cron.d/ddc-pgdump
  /root/ddcnew/settings.env /root/ddcnew/nginx-render /root/ddcnew/nginx-render/$A /root/ddcnew/vhost-takeover /root/ddcnew/vhost-takeover/20261005-120000-1
+ /root/ddcnew/vhost-restore-hold /root/ddcnew/vhost-restore-hold/20261005-120000-1
  /etc/nginx/sites-available/$A /etc/nginx/sites-available/$P /etc/nginx/sites-available/$A.new /etc/nginx/sites-available/$P.new
  /etc/nginx/sites-enabled/$A /etc/nginx/sites-enabled/$P
  /srv/ddcnew /srv/ddcnew/partner-info /srv/ddcnew/partner-info/index.html /srv/ddcnew/partner-info/secret.json
@@ -86,6 +87,7 @@ out=$( (require_server && echo REQ-OK) 2>&1 ); [ "$out" = REQ-OK ] && ok "requir
 for o in "DDC_PROC=/tmp/fakeproc|DDC_PROC override" "DDC_MEMINFO=/tmp/m|DDC_MEMINFO override" "BUILD_DISK_FLOOR_MB=1000|BUILD_DISK_FLOOR_MB may only be raised" \
          "BUILD_MEM_FLOOR_MB=500|BUILD_MEM_FLOOR_MB may only be raised" "NEW_DIR=/tmp/x|NEW_DIR override" "DDC_LOCAL_TEST=1|refused when running as root" \
          "SRV_DIR=/tmp/x|SRV_DIR override" "MAINNET_DIR=/tmp/x|MAINNET_DIR override" "NGINX_CONFD=/tmp/x|NGINX_* overrides" "NGINX_LOCAL_URL=http://x|NGINX_* overrides" \
+         "NGINX_LOCAL_TLS_PORT=8443|NGINX_* overrides" \
          "API_HOST=api.datadance.ai|is a production host" "APP_HOST=app.example.com|is not a host name of the form" "API_PORT=10000|is a port of the old stack" \
          "DB_PORT=99999|use a port from 1024 to 65535" "TAKE_OVER_VHOSTS=1|TAKE_OVER_VHOSTS must be yes"; do
   kv="${o%%|*}"; want="${o#*|}"
@@ -98,6 +100,9 @@ out=$( (export API_HOST=api-coexist.datadance.ai APP_HOST=app-coexist.datadance.
 mkdir -p /root/ddcnew; printf 'API_HOST=%s\nAPP_HOST=%s\nAPI_PORT=10020\nWEB_PORT=9021\nDB_PORT=15434\n' "$A" "$P" > /root/ddcnew/settings.env
 out=$( (export API_HOST=api-coexist.datadance.ai; . "$PKG/common.sh"; require_server && echo REQ-OK) 2>&1 )
 case "$out" in *"differs from API_HOST=$A recorded in /root/ddcnew/settings.env"*) ok "as root, an override that differs from the recorded settings stops require_server";; *) bad "settings conflict as root: $out";; esac
+printf 'API_HOST=%s\nAPP_HOST=%s\nAPI_PORT=10020\nWEB_PORT=9021\n' "$A" "$P" > /root/ddcnew/settings.env
+out=$( (. "$PKG/common.sh"; require_server && echo REQ-OK) 2>&1 )
+case "$out" in *"holds DB_PORT 0 times"*) ok "as root, a partial settings record (DB_PORT missing) stops require_server";; *) bad "partial record as root: $out";; esac
 rm -f /root/ddcnew/settings.env
 # 50-partner-page.sh as root (the server's mode): refusals that come before any secret is read
 pp() { # <expected text> <command> [VAR=value...]: stdin /dev/null

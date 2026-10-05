@@ -27,8 +27,14 @@ Override them per call (`./remote.sh run <script> API_HOST=<host> ...`); the fir
 `/root/ddcnew/settings.env`, later scripts use the record and stop on a different override, and `99-teardown.sh`
 removes it. Race's own rehearsal (containers `ddc-mainnet-*`, `/root/ddc-mainnet`, his vhosts) is only read and
 fingerprinted like the old stack: `30-nginx.sh` never overwrites a vhost it did not write unless
-`TAKE_OVER_VHOSTS=yes` is passed after Sloan and Race agree (it backs the entries up first; `restore` puts them back).
-Which stack serves the rehearsal hosts, and the commands for either outcome: [APPROVAL.md](APPROVAL.md) section 9.
+`TAKE_OVER_VHOSTS=yes` is passed after Sloan and Race agree. Even then it takes over only entries that proxy to a
+`ddc-mainnet-*` port, only after this stack answers on its own ports (`40-up.sh` first), it backs the entries up first,
+puts them back on any failure after removing them, and `restore` puts them back later. Which stack serves the rehearsal
+hosts, and the commands for either outcome: [APPROVAL.md](APPROVAL.md) section 9.
+
+`20-env.sh` needs `REHEARSAL_CLIENT_ID=<the partner's client id>` on its first run (there is no default; the api
+refuses `tge` and `tge-rehearsal` at boot, and anything outside `[A-Za-z0-9._-]{1,64}`). The run records it in
+`/root/ddcnew/settings.env`; later runs reuse it and stop on a different value.
 
 ## Files
 
@@ -50,11 +56,13 @@ Which stack serves the rehearsal hosts, and the commands for either outcome: [AP
 
     bash test/run-local-tests.sh <new-scratch-dir>
 
-Needs Docker Desktop, shellcheck 0.11, GNU coreutils (`grealpath`, `timeout`) and, for the partner page's browser test,
-npm (it installs playwright-core 1.60.0 into the scratch directory and uses the local Playwright Chromium). Every
-container and image a run creates carries the label `ddcnew-localtest=<run id>` (new for each run); the cleanup at the
-end removes, and the counts count, only what carries that label, and an image only when this run built it, so other
-sessions' containers are never touched. The run must end with
+Needs Docker Desktop, shellcheck 0.11, GNU coreutils (`grealpath`, `timeout`), node with the backend's `node_modules`
+(`npm ci` at the repository root: section 3a boots this checkout's `src/server.js`) and, for the partner page's browser
+test, npm (it installs playwright-core 1.60.0 into the scratch directory and uses the local Playwright Chromium). Every
+container and image a run creates carries the label `ddcnew-localtest=<run id>` (new for each run); the cleanup (an
+exit trap) removes, and the counts count, only what carries that label, and an image only when this run built it, so
+other sessions' containers are never touched, and two runs can go side by side. A failing check prints a `FAIL` line
+and the run goes on. The run must end with
 `summary: fails=0`. The SSH tests run on scratch copies of the scripts with a test `local.env` that points at a
 throwaway loopback sshd, and the real 1Password CLI is never called. Section 13 scans every committable file of this
 package for server addresses, 1Password references or ids, hashes or keys, statements about a server's security state

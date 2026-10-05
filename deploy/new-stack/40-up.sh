@@ -25,7 +25,11 @@
 #   that the running api sees the mounted throwaway apn_key.p8 and signerKey.pem.
 # OLD APP SWITCHES (backend PR #38): when the image prints the "Old App update answer (426 APP_UPDATE_REQUIRED)" line,
 #   count=1, first8=<the old WEB3AUTH_CLIENT_ID's first 8 characters> and LOGIN_MISSING_IDTOKEN_MEANS_OLD_APP=on must be in
-#   it, or the script STOPS; an image without #38 prints no such line, and the script says that the two are inert.
+#   it, or the script STOPS. 10-build.sh records whether the backend commit contains PR #38's commit (OLD_APP_SWITCHES in
+#   /root/ddcnew/.env, an ancestor check); when it does, a missing line STOPS too.
+# HOST-HEADER CHECKS (step 7): only when this package's vhosts serve API_HOST and APP_HOST. Before 30-nginx.sh apply has
+#   written them (outcome A runs 40-up.sh first, then the take-over), step 7 says it is deferred, and 30-nginx.sh apply
+#   runs the same checks (common.sh host_checks) right after its reload.
 # MONEY PATH: every field of the "Partner SSO money-path assertions OK" line (nodeEnv, allowedVerifiers=5,
 #   issuer=https://<API_HOST>, consentOrigin=https://<APP_HOST>, web3authVerify, legacyFallback, jwksPinMode,
 #   jwksPins=<served>, sessionSecretSeparate=true) must match
@@ -55,6 +59,9 @@ run_begin 40-up "$@"
 settings_say
 for f in .env .env.rehearsal .env.db keys_fixed/apn_key.p8 keys_fixed/signerKey.pem keys_fixed/signerCert.pem keys_fixed/wwdr.pem assets/passes; do [ -e "$NEW_DIR/$f" ] || die "$NEW_DIR/$f missing (run 10-build.sh and 20-env.sh first)"; done
 API_IMAGE=$(env_get_simple API_IMAGE "$NEW_DIR/.env"); INFRA_ONLY=$(infra_only_value)
+# Whether the backend commit contains PR #38's old-App line (10-build.sh, an ancestor check of OLD_APP_COMMIT).
+OLD_APP_SWITCHES=$(env_get_simple OLD_APP_SWITCHES "$NEW_DIR/.env")
+case "$OLD_APP_SWITCHES" in 0|1) ;; *) die "OLD_APP_SWITCHES in $NEW_DIR/.env is '${OLD_APP_SWITCHES}', not 0 or 1: re-run 10-build.sh (it records whether the backend commit contains PR #38)";; esac
 case "$API_IMAGE" in
   ddcnew/backend:*-infra) [ "$INFRA_ONLY" = 1 ] || die "$API_IMAGE is an infra-only tag but INFRA_ONLY=${INFRA_ONLY:-unset}";;
   ddcnew/backend:*) [ "$INFRA_ONLY" = 0 ] || die "INFRA_ONLY=${INFRA_ONLY:-unset} does not match $API_IMAGE (expected 0)";;
@@ -152,8 +159,8 @@ LOG=$(dc logs --no-color --since "$API_STARTED" api 2>&1)
 printf '%s\n' "$LOG" | grep -E 'Partner SSO (enabled|disabled)' | tail -1 | sed 's/^[^|]*| //'
 line=$(printf '%s\n' "$LOG" | grep 'Partner SSO money-path assertions OK' | tail -1 | sed 's/^[^|]*| //' || true)
 [ -n "$line" ] && { say "$line"; pass "startup log has 'Partner SSO money-path assertions OK'"; } || { printf '%s\n' "$LOG" | grep -iE 'error|invalid|refus' | grep -viE 'postgres(ql)?://|secret|password|token' | tail -10; printf '%s\n' "$LOG" | sed 's/^[^|]*| //' | grep -E '^ - (SSO_|WEB3AUTH_|NODE_ENV|PUBLIC_BASE_URL|APP_PUBLIC_URL)' | tail -20; die "no money-path assertion line in the api log"; }
-money_path_fields_check "$line" "$(cnt "$served")"   # dies on any missing or different field (APPROVAL row 11)
-old_app_line_check "$LOG" "$(env_get_simple WEB3AUTH_RETIRED_CLIENT_IDS "$NEW_DIR/.env.api" | cut -c1-8)"   # PR #38 images only
+money_path_fields_check "$line" "$(cnt "$served")"   # dies on any missing or different field (APPROVAL section 4, row 10)
+old_app_line_check "$LOG" "$(env_get_simple WEB3AUTH_RETIRED_CLIENT_IDS "$NEW_DIR/.env.api" | cut -c1-8)" "$OLD_APP_SWITCHES"
 
 step "6. running api: JWKS pins, APNs key and pass signer"
 pinned=$(dc exec -T api node -e 'console.log(String(process.env.WEB3AUTH_JWKS_PINNED_THUMBPRINTS||"").split(",").map(s=>s.trim()).filter(Boolean).join("\n"))' | LC_ALL=C sort -u)
@@ -164,12 +171,11 @@ csk=$(dc exec -T api sh -c 'sha256sum /app/keys_fixed/signerKey.pem' | cut -c1-6
 [ "$csk" = "$(sha256 < "$NEW_DIR/keys_fixed/signerKey.pem")" ] && pass "api sees the throwaway signerKey.pem from the mount (not the production pass-signing key)" || die "api's /app/keys_fixed/signerKey.pem is not the mounted throwaway key"
 
 step "7. local checks through host nginx (Host headers $API_HOST and $APP_HOST)"
-body=$(curl -s -m 10 -H "Host: $API_HOST" "$NGINX_LOCAL_URL/partner/tge/me" || true)
-c=$(host_code "$API_HOST" /partner/tge/me); ct=$(curl -s -o /dev/null -m 10 -w '%{content_type}' -H "Host: $API_HOST" "$NGINX_LOCAL_URL/partner/tge/me" || true)
-say "$API_HOST /partner/tge/me -> $c $ct body_keys=$(printf '%s' "$body" | python3 -c 'import json,sys; print(",".join(sorted(json.load(sys.stdin).keys())))' 2>/dev/null || echo non-json)"
-[ "$c" = 401 ] && case "$ct" in application/json*) true;; *) false;; esac && pass "$API_HOST answers 401 JSON" || die "$API_HOST check failed ($c $ct)"
-curl -s -m 10 -H "Host: $APP_HOST" "$NGINX_LOCAL_URL/ddc-build.json" | web_marker_check && pass "$APP_HOST serves the tge mainnet build for https://$API_HOST/api" || die "$APP_HOST build marker check failed"
-say "$APP_HOST / -> $(host_code "$APP_HOST" /)  /downloads/ -> $(host_code "$APP_HOST" /downloads/) (host nginx, same as app)  direct 127.0.0.1:$WEB_PORT -> $(curl -s -o /dev/null -m 5 -w '%{http_code}' "http://127.0.0.1:$WEB_PORT/" || true)"
+if vhosts_ours; then
+  host_checks
+else
+  say "DEFERRED: the vhost entries at $API_HOST / $APP_HOST are not this package's yet (sites-available: $(vhost_state avail "$API_HOST") / $(vhost_state avail "$APP_HOST")), so the host nginx does not route these hosts to this stack. 30-nginx.sh apply runs these checks right after it has written them (outcome A: TAKE_OVER_VHOSTS=yes, APPROVAL.md section 9)"
+fi
 
 step "8. old stack untouched"
 OLD_AFTER=$(host_codes "${OTHER_HOSTS[@]}")

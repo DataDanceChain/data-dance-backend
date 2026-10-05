@@ -39,8 +39,10 @@ PROTECTED_DIRS="/root/ddc /root/ddc-backend /root/deploy-src /opt/ddc $MAINNET_D
 NGINX_AVAIL="${NGINX_AVAIL:-/etc/nginx/sites-available}"
 NGINX_ENABLED="${NGINX_ENABLED:-/etc/nginx/sites-enabled}"
 NGINX_CONFD="${NGINX_CONFD:-/etc/nginx/conf.d}"
-# The host nginx as the scripts' local checks reach it (Host header checks).
+# The host nginx as the scripts' local checks reach it (Host header checks): http on NGINX_LOCAL_URL, and https with SNI
+# on 127.0.0.1:NGINX_LOCAL_TLS_PORT whenever something listens there (host_codes).
 NGINX_LOCAL_URL="${NGINX_LOCAL_URL:-http://127.0.0.1}"
+NGINX_LOCAL_TLS_PORT="${NGINX_LOCAL_TLS_PORT:-443}"
 # The production hosts that every nginx reload must leave answering exactly as before.
 PROD_HOSTS="api.datadance.ai app.datadance.ai business.datadance.ai admin.datadance.ai"
 # First line of every vhost file 30-nginx.sh writes. A file without it at one of our names is someone else's: the scripts
@@ -68,6 +70,14 @@ done
 unset _n _d
 SETTINGS_FILE="$NEW_DIR/settings.env"
 SETTINGS_SOURCE="defaults"
+# The rehearsal SSO client id (20-env.sh writes it as SSO_TGE_CLIENT_ID): REQUIRED, no default. Since backend fd2d4e9 the
+# api refuses to boot with tge or tge-rehearsal (src/constants/partnerClient.js RETIRED_PARTNER_CLIENT_IDS) or with an id
+# that is not [A-Za-z0-9._-]{1,64}; client_id_check applies the same rule. 20-env.sh takes it from REHEARSAL_CLIENT_ID=
+# on its first run, records it in settings.env when the run passes, and reuses the record afterwards (an override that
+# differs from the record stops, like the other settings).
+OVR_REHEARSAL_CLIENT_ID="${REHEARSAL_CLIENT_ID:-}"
+REHEARSAL_CLIENT_ID=""
+CLIENT_ID_SOURCE=""
 # yes = 30-nginx.sh apply may replace vhost files at our names that this package did not write, after backing them up.
 # Only after Sloan and Race agree (APPROVAL.md section 9).
 TAKE_OVER_VHOSTS="${TAKE_OVER_VHOSTS:-no}"
@@ -103,7 +113,7 @@ require_server() {
   [ "$MAINNET_DIR" = /root/ddc-mainnet ] || die "MAINNET_DIR override is only allowed with DDC_LOCAL_TEST=1"
   [ "$BACKUP_DIR" = /root/backup ] && [ "$SWITCH_DIR" = /root/mainnet-switch ] || die "BACKUP_DIR / SWITCH_DIR overrides are only allowed with DDC_LOCAL_TEST=1"
   [ "$NGINX_AVAIL" = /etc/nginx/sites-available ] && [ "$NGINX_ENABLED" = /etc/nginx/sites-enabled ] && [ "$NGINX_CONFD" = /etc/nginx/conf.d ] \
-    && [ "$NGINX_LOCAL_URL" = http://127.0.0.1 ] || die "NGINX_* overrides are only allowed with DDC_LOCAL_TEST=1"
+    && [ "$NGINX_LOCAL_URL" = http://127.0.0.1 ] && [ "$NGINX_LOCAL_TLS_PORT" = 443 ] || die "NGINX_* overrides are only allowed with DDC_LOCAL_TEST=1"
   [ "$DDC_MEMINFO" = /proc/meminfo ] || die "DDC_MEMINFO override is only allowed with DDC_LOCAL_TEST=1"
   [ "$DDC_PROC" = /proc ] || die "DDC_PROC override is only allowed with DDC_LOCAL_TEST=1"
   case "$BUILD_MEM_FLOOR_MB" in ''|*[!0-9]*) die "BUILD_MEM_FLOOR_MB must be a number";; esac
@@ -141,17 +151,29 @@ check_settings() {
   done
   case "$TAKE_OVER_VHOSTS" in yes|no) ;; *) die "TAKE_OVER_VHOSTS must be yes (only after Sloan and Race agreed) or left unset";; esac
 }
-# NAME's value in the record (empty when the file or the name is missing). Only NAME=value lines of the five names.
-settings_recorded() { [ -f "$SETTINGS_FILE" ] && sed -n "s/^$1=//p" "$SETTINGS_FILE" | tail -n 1 || true; }
+# The record is written whole and then renamed (settings_write), so it always holds each of the five settings exactly once,
+# and REHEARSAL_CLIENT_ID at most once (20-env.sh adds it). Anything else (an empty or partial record, a repeated or
+# unknown name, a stray character) was edited or damaged: every script stops on it rather than guess.
+settings_record_check() {
+  local n c
+  [ -f "$SETTINGS_FILE" ] && [ ! -L "$SETTINGS_FILE" ] || die "$SETTINGS_FILE is not a regular file"
+  ! grep -qvE '^(API_HOST|APP_HOST|API_PORT|WEB_PORT|DB_PORT|REHEARSAL_CLIENT_ID)=[A-Za-z0-9._-]+$' "$SETTINGS_FILE" \
+    || die "$SETTINGS_FILE has a line that is not API_HOST, APP_HOST, API_PORT, WEB_PORT, DB_PORT or REHEARSAL_CLIENT_ID=<value>"
+  for n in $SETTINGS_NAMES; do
+    c=$(grep -c "^$n=" "$SETTINGS_FILE" || true)
+    [ "$c" = 1 ] || die "$SETTINGS_FILE holds $n $c times: the record must hold each of API_HOST, APP_HOST, API_PORT, WEB_PORT and DB_PORT exactly once. It is only ever written whole, so an empty or partial record was edited or damaged: repair it by hand from what the stack runs with (docker ps, the vhost files), or remove it if nothing of the stack exists"
+  done
+  c=$(grep -c '^REHEARSAL_CLIENT_ID=' "$SETTINGS_FILE" || true)
+  [ "$c" -le 1 ] || die "$SETTINGS_FILE holds REHEARSAL_CLIENT_ID $c times (at most once)"
+}
+# NAME's value in the record (empty when the file or the name is missing; the record holds each name at most once).
+settings_recorded() { [ -f "$SETTINGS_FILE" ] && sed -n "s/^$1=//p" "$SETTINGS_FILE" || true; }
 # The effective settings: an override, else the recorded value, else the default. An override that differs from the
 # recorded value stops the script (the stack runs with the recorded one; 99-teardown.sh first to change it).
 settings_resolve() {
   local n ov rec d src_o="" src_r=""
   SETTINGS_FILE="$NEW_DIR/settings.env"
-  if [ -e "$SETTINGS_FILE" ] || [ -L "$SETTINGS_FILE" ]; then
-    [ -f "$SETTINGS_FILE" ] && [ ! -L "$SETTINGS_FILE" ] || die "$SETTINGS_FILE is not a regular file"
-    ! grep -qvE '^(API_HOST|APP_HOST|API_PORT|WEB_PORT|DB_PORT)=[A-Za-z0-9.-]+$' "$SETTINGS_FILE" || die "$SETTINGS_FILE has a line that is not API_HOST/APP_HOST/API_PORT/WEB_PORT/DB_PORT=<value>"
-  fi
+  if [ -e "$SETTINGS_FILE" ] || [ -L "$SETTINGS_FILE" ]; then settings_record_check; fi
   for n in $SETTINGS_NAMES; do
     ov="OVR_$n"; ov="${!ov}"; d="DEFAULT_$n"; d="${!d}"; rec=$(settings_recorded "$n")
     if [ -n "$ov" ]; then
@@ -166,22 +188,62 @@ settings_resolve() {
   check_settings
 }
 settings_say() { say "settings: API_HOST=$API_HOST APP_HOST=$APP_HOST API_PORT=$API_PORT WEB_PORT=$WEB_PORT DB_PORT=$DB_PORT ($SETTINGS_SOURCE)"; }
-# Write runs record the settings once (a later run with other values stops in settings_resolve).
-settings_record() {
+# The record, written whole to a temporary file and renamed (never edited in place): the five settings, and
+# REHEARSAL_CLIENT_ID when <client id> is given (only 20-env.sh gives it, once every check of its run passed).
+settings_write() { # [client id]
   local n
-  [ ! -f "$SETTINGS_FILE" ] || return 0
   guard_write_path "$SETTINGS_FILE"
-  ( umask 077; for n in $SETTINGS_NAMES; do printf '%s=%s\n' "$n" "${!n}"; done > "$SETTINGS_FILE.tmp" ) && mv -f "$SETTINGS_FILE.tmp" "$SETTINGS_FILE" \
-    || die "cannot write $SETTINGS_FILE"
+  ( umask 077
+    { for n in $SETTINGS_NAMES; do printf '%s=%s\n' "$n" "${!n}"; done
+      if [ -n "${1:-}" ]; then printf 'REHEARSAL_CLIENT_ID=%s\n' "$1"; fi; } > "$SETTINGS_FILE.tmp" ) \
+    && mv -f "$SETTINGS_FILE.tmp" "$SETTINGS_FILE" || die "cannot write $SETTINGS_FILE"
+  settings_record_check
+}
+# Write runs record the settings once (a later run with other values stops in settings_resolve). Never the client id.
+settings_record() {
+  [ ! -f "$SETTINGS_FILE" ] || return 0
+  settings_write
   say "settings recorded in $SETTINGS_FILE: later scripts use these values (99-teardown.sh removes the record)"
 }
 settings_forget() {
   [ -e "$SETTINGS_FILE" ] || return 0
   guard_write_path "$SETTINGS_FILE"
-  rm -f -- "$SETTINGS_FILE" && say "settings record $SETTINGS_FILE removed: the next run may choose other hosts or ports"
+  rm -f -- "$SETTINGS_FILE" && say "settings record $SETTINGS_FILE removed: the next run may choose other hosts, ports and client id"
+}
+
+# The rehearsal client id (see the settings block): the backend's own rule, and where 20-env.sh takes the value from.
+client_id_check() { # <id>
+  local re='^[A-Za-z0-9._-]{1,64}$'
+  [[ "$1" =~ $re ]] || die "REHEARSAL_CLIENT_ID must match [A-Za-z0-9._-]{1,64} (the api refuses any other client id at boot)"
+  case "$1" in tge|tge-rehearsal) die "REHEARSAL_CLIENT_ID=$1 is retired: since backend fd2d4e9 the api refuses tge and tge-rehearsal at boot; use the partner's client id";; esac
+}
+client_id_resolve() {
+  local rec
+  rec=$(settings_recorded REHEARSAL_CLIENT_ID)
+  if [ -n "$OVR_REHEARSAL_CLIENT_ID" ]; then
+    client_id_check "$OVR_REHEARSAL_CLIENT_ID"
+    [ -z "$rec" ] || [ "$rec" = "$OVR_REHEARSAL_CLIENT_ID" ] || die "REHEARSAL_CLIENT_ID=$OVR_REHEARSAL_CLIENT_ID differs from REHEARSAL_CLIENT_ID=$rec recorded in $SETTINGS_FILE (the rehearsal client was set up with it): drop the override, or run 99-teardown.sh first (it removes the record) to change it"
+    REHEARSAL_CLIENT_ID="$OVR_REHEARSAL_CLIENT_ID"; CLIENT_ID_SOURCE=override
+  elif [ -n "$rec" ]; then
+    client_id_check "$rec"; REHEARSAL_CLIENT_ID="$rec"; CLIENT_ID_SOURCE="recorded in $SETTINGS_FILE"
+  else
+    die "REHEARSAL_CLIENT_ID=<the partner's client id> is required, and has no default: pass it on this call (./remote.sh run 20-env.sh REHEARSAL_CLIENT_ID=<id>); a run that passes records it, and later runs reuse it. The api refuses tge and tge-rehearsal (backend fd2d4e9)"
+  fi
+}
+# 20-env.sh, once every check passed: the client id joins the record (written whole again).
+client_id_record() {
+  [ -z "$(settings_recorded REHEARSAL_CLIENT_ID)" ] || return 0
+  settings_write "$REHEARSAL_CLIENT_ID"
+  say "REHEARSAL_CLIENT_ID=$REHEARSAL_CLIENT_ID recorded in $SETTINGS_FILE: later runs reuse it"
 }
 # KEY=value lines of the effective settings (remote.sh preflight prepends them to the piped 00-preflight.sh).
 settings_env_lines() { local n; check_settings; for n in $SETTINGS_NAMES; do printf '%s=%s\n' "$n" "${!n}"; done; }
+# remote.sh run, before it connects: the settings and the client id given as overrides, checked with the rules the
+# server applies (check_settings, client_id_check). The server checks them again, with its record.
+remote_overrides_check() {
+  check_settings
+  if [ -n "$OVR_REHEARSAL_CLIENT_ID" ]; then client_id_check "$OVR_REHEARSAL_CLIENT_ID"; fi
+}
 
 sha256() { if command -v sha256sum >/dev/null; then sha256sum | cut -c1-64; else shasum -a 256 | cut -c1-64; fi; }
 
@@ -470,10 +532,59 @@ other_hosts() { # [excluded host...]
   done
 }
 host_code() { curl -s -o /dev/null -m 10 -w '%{http_code}' -H "Host: $1" "$NGINX_LOCAL_URL$2" || true; }
-host_codes() { # <host...>: "host=code ..." for GET /
-  local h out=""
-  for h in "$@"; do out="$out$h=$(host_code "$h" /) "; done
+# https with SNI on the local listener (-k: the status code is all that is read, never a body or a secret).
+host_code_tls() { curl -sk -o /dev/null -m 10 -w '%{http_code}' --resolve "$1:$NGINX_LOCAL_TLS_PORT:127.0.0.1" "https://$1:$NGINX_LOCAL_TLS_PORT$2" || true; }
+# Whether the host nginx serves https here: something listens on the TLS port. Checked once per call of host_codes.
+tls_served() { port_in_use "$NGINX_LOCAL_TLS_PORT"; }
+host_codes() { # <host...>: "host=<http code>" for GET /, or "host=<http code>/<https code>" when 443 is served
+  local h out="" tls=0
+  if tls_served; then tls=1; fi
+  for h in "$@"; do
+    if [ "$tls" = 1 ]; then out="$out$h=$(host_code "$h" /)/$(host_code_tls "$h" /) "; else out="$out$h=$(host_code "$h" /) "; fi
+  done
   printf '%s' "${out% }"
+}
+
+# ---------------------------------------------------------------------------
+# This stack, and its vhosts, as the host nginx serves them (30-nginx.sh, 40-up.sh).
+# ---------------------------------------------------------------------------
+# Every host port bound by a container named ddc-mainnet-* (Race's rehearsal), running or stopped: the only upstreams a
+# vhost may have for TAKE_OVER_VHOSTS to take it over (30-nginx.sh takeover_ok).
+mainnet_ports() {
+  local c
+  for c in $(docker ps -a --format '{{.Names}}' 2>/dev/null | { grep -E "^$MAINNET_CTR_PREFIX" || true; }); do
+    docker inspect --format '{{range $p, $b := .HostConfig.PortBindings}}{{range $b}}{{.HostPort}} {{end}}{{end}}' "$c" 2>/dev/null || true
+  done | tr ' ' '\n' | { grep -E '^[0-9]+$' || true; } | LC_ALL=C sort -un | tr '\n' ' ' | sed 's/ $//'
+}
+# The stack answers on its own ports: the api's partner endpoint 401 on 127.0.0.1:API_PORT, and the web's build marker
+# for https://<API_HOST>/api on 127.0.0.1:WEB_PORT. Sets STACK_WHY when it does not.
+STACK_WHY=""
+stack_answers() {
+  local c
+  c=$(curl -s -o /dev/null -m 5 -w '%{http_code}' "http://127.0.0.1:$API_PORT/partner/tge/me" || true)
+  [ "$c" = 401 ] || { STACK_WHY="api on 127.0.0.1:$API_PORT answers ${c:-nothing} for /partner/tge/me, not 401"; return 1; }
+  curl -s -m 5 "http://127.0.0.1:$WEB_PORT/ddc-build.json" 2>/dev/null | web_marker_check >/dev/null 2>&1 \
+    || { STACK_WHY="web on 127.0.0.1:$WEB_PORT does not serve the build marker for https://$API_HOST/api"; return 1; }
+}
+# Whether this package wrote both hosts' vhost entries (file and link): only then does the host nginx route
+# <API_HOST> and <APP_HOST> to this stack, so only then do the Host-header checks below test it.
+vhosts_ours() {
+  local h
+  for h in "$API_HOST" "$APP_HOST"; do
+    [ "$(vhost_state avail "$h")" = ours ] && [ "$(vhost_state enabled "$h")" = ours ] || return 1
+  done
+}
+# The Host-header checks through the host nginx (40-up.sh step 7, and 30-nginx.sh apply when it writes the vhosts of a
+# stack that is already up): <API_HOST>/partner/tge/me answers 401 JSON, <APP_HOST>/ddc-build.json is the tge mainnet
+# build for https://<API_HOST>/api. Dies on any difference.
+host_checks() {
+  local body c ct
+  body=$(curl -s -m 10 -H "Host: $API_HOST" "$NGINX_LOCAL_URL/partner/tge/me" || true)
+  c=$(host_code "$API_HOST" /partner/tge/me); ct=$(curl -s -o /dev/null -m 10 -w '%{content_type}' -H "Host: $API_HOST" "$NGINX_LOCAL_URL/partner/tge/me" || true)
+  say "$API_HOST /partner/tge/me -> $c $ct body_keys=$(printf '%s' "$body" | python3 -c 'import json,sys; print(",".join(sorted(json.load(sys.stdin).keys())))' 2>/dev/null || echo non-json)"
+  [ "$c" = 401 ] && case "$ct" in application/json*) true;; *) false;; esac && pass "$API_HOST answers 401 JSON" || die "$API_HOST check failed ($c $ct)"
+  curl -s -m 10 -H "Host: $APP_HOST" "$NGINX_LOCAL_URL/ddc-build.json" | web_marker_check && pass "$APP_HOST serves the tge mainnet build for https://$API_HOST/api" || die "$APP_HOST build marker check failed"
+  say "$APP_HOST / -> $(host_code "$APP_HOST" /)  /downloads/ -> $(host_code "$APP_HOST" /downloads/) (host nginx, same as app)  direct 127.0.0.1:$WEB_PORT -> $(curl -s -o /dev/null -m 5 -w '%{http_code}' "http://127.0.0.1:$WEB_PORT/" || true)"
 }
 
 # MemAvailable in MB; empty output when the file cannot be read.
@@ -682,6 +793,25 @@ rehearsal_pass_signer() {
   pass "keys_fixed/signerKey.pem and signerCert.pem are a throwaway pair (differ from production; cert matches key), mode $(stat -c %a "$sk" 2>/dev/null || stat -f %Lp "$sk")"
 }
 
+# Backend PR #38's commit that added the old-App startup line (describeOldAppSwitches, 2026-10-05). 10-build.sh records
+# whether the backend commit contains it (OLD_APP_SWITCHES); 40-up.sh then requires the line (old_app_line_check).
+OLD_APP_COMMIT=42005bebf9d4812ea272e3610b350e4fde99613e
+# old_app_switches <git dir> <repository URL> <sha>: prints 1 when <sha> contains OLD_APP_COMMIT, 0 when it does not;
+# fails (prints nothing) when that cannot be told. <git dir> holds <sha> (a depth-1 fetch is enough); the history since
+# 2026-10-01 that leads to <sha> is fetched into it (shallow), and the answer is an ancestor check on that history. When
+# git fetches nothing (no commit since 2026-10-01 leads to <sha>, or the fetch failed), only a commit dated before
+# 2026-10-01 is known not to contain a commit of 2026-10-05.
+old_app_switches() {
+  local d
+  if git -C "$1" fetch -q --shallow-since=2026-10-01 "$2" "$3" 2>/dev/null; then
+    if git -C "$1" cat-file -e "$OLD_APP_COMMIT^{commit}" 2>/dev/null && git -C "$1" merge-base --is-ancestor "$OLD_APP_COMMIT" "$3"; then echo 1
+    else echo 0; fi
+  else
+    d=$(git -C "$1" log -1 --format=%cI "$3" 2>/dev/null) && [ -n "$d" ] && [[ "$d" < 2026-10-01 ]] || return 1
+    echo 0
+  fi
+}
+
 # ---------------------------------------------------------------------------
 # Infra-only images (10-build.sh --infra-only): the backend image lacks the production-only code.
 # ---------------------------------------------------------------------------
@@ -778,16 +908,21 @@ old_app_env_check() {
 # 40-up.sh step 5, backend PR #38 (head 42005be): the api prints one startup line with the old-App switches,
 #   "Old App update answer (426 APP_UPDATE_REQUIRED): WEB3AUTH_RETIRED_CLIENT_IDS count=1 first8=<8 chars>
 #    LOGIN_MISSING_IDTOKEN_MEANS_OLD_APP=on" (src/services/web3authIdentity.js describeOldAppSwitches).
-#   old_app_line_check <api log since start> <expected first8>
+#   old_app_line_check <api log since start> <expected first8> <required>
 # When the line is there, count=1, first8=<the old WEB3AUTH_CLIENT_ID's first 8 characters> and =on must be exact tokens
-# or the script STOPS; an image without #38 does not print it, and then the two names are inert (said, not failed).
-old_app_line_check() {
+# or the script STOPS. <required> is OLD_APP_SWITCHES from /root/ddcnew/.env: 10-build.sh sets it to 1 when the
+# backend commit has PR #38's commit (OLD_APP_COMMIT, an ancestor check); then a missing line STOPS too. With 0 the
+# two names are inert in that image (said, not failed).
+old_app_line_check() { # <api log> <expected first8> <required: 1 when the backend commit contains PR #38, else 0>
   local line tokens want missing=""
   line=$(printf '%s\n' "$1" | grep 'Old App update answer (426 APP_UPDATE_REQUIRED):' | tail -n 1 | sed 's/^[^|]*| //' || true)
   if [ -z "$line" ]; then
-    say "old-App switches: no 'Old App update answer' line in the api log: this image does not have backend PR #38, so WEB3AUTH_RETIRED_CLIENT_IDS and LOGIN_MISSING_IDTOKEN_MEANS_OLD_APP are inert (not checked)"
+    [ "${3:-0}" != 1 ] || die "the api log has no 'Old App update answer' line, but the backend commit contains PR #38 (OLD_APP_SWITCHES=1 in .env, from 10-build.sh): the image does not run the code it was built from, or the api did not boot through src/server.js"
+    say "old-App switches: no 'Old App update answer' line in the api log, and the backend commit does not contain PR #38 (OLD_APP_SWITCHES=0): WEB3AUTH_RETIRED_CLIENT_IDS and LOGIN_MISSING_IDTOKEN_MEANS_OLD_APP are inert (not checked)"
     return 0
   fi
+  [ "${3:-0}" = 1 ] || warn "the backend commit does not contain PR #38's commit (OLD_APP_SWITCHES=0), but the api prints its line: checked anyway"
+
   say "$line"
   tokens=$(printf '%s\n' "${line#*:}" | tr ' ' '\n')
   for want in "count=1" "first8=$2" "LOGIN_MISSING_IDTOKEN_MEANS_OLD_APP=on"; do
