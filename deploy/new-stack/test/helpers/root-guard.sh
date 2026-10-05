@@ -8,7 +8,7 @@ set -u
 PKG="$1"
 fails=0; ok() { echo "PASS $*"; }; bad() { echo "FAIL $*"; fails=$((fails+1)); }
 [ "$(id -u)" = 0 ] || { echo "FAIL root-guard.sh must run as root"; exit 1; }
-unset DDC_LOCAL_TEST NEW_DIR OLD_ENV BACKUP_DIR DDC_PROC DDC_MEMINFO
+unset DDC_LOCAL_TEST NEW_DIR OLD_ENV BACKUP_DIR DDC_PROC DDC_MEMINFO SRV_DIR PARTNER_CRYPT_IMAGE PARTNER_ALLOWED_IP
 mkdir -p /root/ddc-backend/keys_fixed /root/ddc /opt/ddc /root/deploy-src /etc/nginx/sites-available /etc/nginx/sites-enabled /etc/cron.d /stub
 echo A=1 > /root/ddc-backend/backend.env; echo key > /root/ddc-backend/keys_fixed/apn_key.p8
 for v in api.datadance.co app.datadance.co; do echo 'server {}' > "/etc/nginx/sites-available/$v"; ln -sfn "../sites-available/$v" "/etc/nginx/sites-enabled/$v"; done
@@ -23,7 +23,9 @@ TARGETS="/root/ddcnew /root/ddcnew/deploy /root/ddcnew/src /root/ddcnew/src/back
  /root/ddcnew/.env.rehearsal /root/ddcnew/.env.db /root/ddcnew/secrets /root/ddcnew/compose.yaml /root/ddcnew/.env.api
  /root/ddcnew/.env.api.new /root/ddcnew/pgdata /root/backup/pg /root/backup/ddc-pgdump.sh /root/backup/disk-need.txt /etc/cron.d/ddc-pgdump
  /etc/nginx/sites-available/tge-api.datadance.ai /etc/nginx/sites-available/tge-app.datadance.ai
- /etc/nginx/sites-enabled/tge-api.datadance.ai /etc/nginx/sites-enabled/tge-app.datadance.ai"
+ /etc/nginx/sites-enabled/tge-api.datadance.ai /etc/nginx/sites-enabled/tge-app.datadance.ai
+ /srv/ddcnew /srv/ddcnew/partner-info /srv/ddcnew/partner-info/index.html /srv/ddcnew/partner-info/secret.json
+ /srv/ddcnew/partner-info/.index.html.new /srv/ddcnew/partner-info/.secret.json.new"
 allowed() { # <label>
   local p out n=0
   for p in $TARGETS; do
@@ -40,7 +42,8 @@ for f in .lock keys_fixed/apn_key.p8 .env .env.rehearsal .env.db compose.yaml .e
 for f in /root/backup/ddc-pgdump.sh /root/backup/disk-need.txt /etc/cron.d/ddc-pgdump /etc/nginx/sites-available/tge-api.datadance.ai /etc/nginx/sites-available/tge-app.datadance.ai; do echo x > "$f"; done
 ln -sfn /etc/nginx/sites-available/tge-api.datadance.ai /etc/nginx/sites-enabled/tge-api.datadance.ai
 ln -sfn ../sites-available/tge-app.datadance.ai /etc/nginx/sites-enabled/tge-app.datadance.ai
-allowed "re-run: existing files and directories, in-tree symlinks (src/frontend-current, sites-enabled/tge-*)"
+mkdir -p /srv/ddcnew/partner-info; echo x > /srv/ddcnew/partner-info/index.html; echo x > /srv/ddcnew/partner-info/secret.json
+allowed "re-run: existing files and directories, in-tree symlinks (src/frontend-current, sites-enabled/tge-*), /srv/ddcnew/partner-info"
 
 refused() { # <label> <path> <expected text>
   local out
@@ -60,19 +63,45 @@ ln -sfn ../sites-available/api.datadance.co /etc/nginx/sites-enabled/tge-api.dat
 refused "tge-api link that points at the old api vhost" /etc/nginx/sites-enabled/tge-api.datadance.ai "not a new-stack path"
 ln -sfn /etc/nginx/sites-available/tge-api.datadance.ai /etc/nginx/sites-enabled/tge-api.datadance.ai
 for p in /etc/nginx/sites-available/api.datadance.co /etc/nginx/sites-enabled/app.datadance.co /etc/nginx/sites-available/tge-api.datadance.ai.evil \
-         /etc/nginx/nginx.conf /etc/cron.d/other /root/.bashrc /tmp/x /root/ddcnewx/a /opt/ddc/x /root/deploy-src/x; do
+         /etc/nginx/nginx.conf /etc/cron.d/other /root/.bashrc /tmp/x /root/ddcnewx/a /opt/ddc/x /root/deploy-src/x \
+         /srv/other/index.html /srv/ddcnewx/a /srv/ddcnew/../www/x; do
   case "$p" in /opt/ddc/*|/root/deploy-src/*) want="belongs to the old stack";; *) want="not a new-stack path";; esac
   refused "outside the allowlist" "$p" "$want"
 done
+ln -sfn /root/ddc-backend /srv/ddcnew/evil
+refused "symlink from /srv/ddcnew into /root/ddc-backend" /srv/ddcnew/evil/backend.env "belongs to the old stack (/root/ddc-backend)"
+rm -f /srv/ddcnew/evil
 
 # require_server as root, with the defaults and with overrides that only the local test may use
 out=$( (require_server && echo REQ-OK) 2>&1 ); [ "$out" = REQ-OK ] && ok "require_server passes as root with the defaults" || bad "require_server: $out"
 for o in "DDC_PROC=/tmp/fakeproc|DDC_PROC override" "DDC_MEMINFO=/tmp/m|DDC_MEMINFO override" "BUILD_DISK_FLOOR_MB=1000|BUILD_DISK_FLOOR_MB may only be raised" \
-         "BUILD_MEM_FLOOR_MB=500|BUILD_MEM_FLOOR_MB may only be raised" "NEW_DIR=/tmp/x|NEW_DIR override" "DDC_LOCAL_TEST=1|refused when running as root"; do
+         "BUILD_MEM_FLOOR_MB=500|BUILD_MEM_FLOOR_MB may only be raised" "NEW_DIR=/tmp/x|NEW_DIR override" "DDC_LOCAL_TEST=1|refused when running as root" \
+         "SRV_DIR=/tmp/x|SRV_DIR override"; do
   kv="${o%%|*}"; want="${o#*|}"
   out=$( (export "${kv?}"; . "$PKG/common.sh"; require_server && echo REQ-OK) 2>&1 )
   case "$out" in *"$want"*) ok "require_server refuses $kv as root";; *) bad "require_server with $kv: $out";; esac
 done
+
+# 50-partner-page.sh as root (the server's mode): refusals that come before any secret is read
+pp() { # <expected text> <command> [VAR=value...]: stdin /dev/null
+  local want="$1" c="$2" out rc=0; shift 2
+  out=$(env "$@" bash "$PKG/50-partner-page.sh" "$c" < /dev/null 2>&1) || rc=$?
+  case "$rc:$out" in 0:*) bad "50-partner-page.sh $c ($*) passed: $out";; *"$want"*) ok "50-partner-page.sh $c as root ($*) refused: $(printf '%s\n' "$out" | grep '^FAIL' | head -1 | cut -c1-110)";;
+    *) bad "50-partner-page.sh $c ($*): unexpected: $out";; esac
+}
+pp "PARTNER_CRYPT_IMAGE override is only allowed with DDC_LOCAL_TEST=1" status PARTNER_CRYPT_IMAGE=node:22-alpine
+pp "PARTNER_ALLOWED_IP=<the partner server's address> is required" apply
+pp "is not an IPv4 or IPv6 address" apply PARTNER_ALLOWED_IP=203.0.113.300
+pp "SRV_DIR override is only allowed" apply SRV_DIR=/var/www PARTNER_ALLOWED_IP=203.0.113.7
+rm -rf /srv/ddcnew/partner-info; mkdir -p /root/ddcnew/evilpage; ln -sfn /root/ddcnew/evilpage /srv/ddcnew/partner-info
+pp "the page must not live under /root" apply PARTNER_ALLOWED_IP=203.0.113.7
+rm -f /srv/ddcnew/partner-info; mkdir -p /srv/elsewhere; ln -sfn /srv/elsewhere /srv/ddcnew/partner-info
+pp "is a symbolic link" apply PARTNER_ALLOWED_IP=203.0.113.7
+rm -f /srv/ddcnew/partner-info; mkdir -p /srv/ddcnew/partner-info
+pp "no page password on stdin" apply PARTNER_ALLOWED_IP=203.0.113.7
+log=$(ls /root/ddcnew/logs/*-50-partner-page-apply-*.log 2>/dev/null | tail -1)
+[ -n "$log" ] && [ "$(stat -c %a "$log")" = 600 ] && grep -q 'FAIL no page password on stdin' "$log" \
+  && ok "the refused apply ran under the run lock and left its server-side log (600)" || bad "50-partner-page.sh apply log (log=$log)"
 
 # run_begin: one write run at a time, server-side log (600), lock inherited by a child write script only
 mkdir -p /t

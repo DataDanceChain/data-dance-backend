@@ -7,6 +7,9 @@
 #           the tge-app copy keeps the http-level `map $http_upgrade $connection_upgrade` block that app.datadance.co
 #           also defines: nginx 1.18 (Ubuntu 22.04) and 1.30 accept the identical duplicate map, tested locally),
 #           links both into sites-enabled, nginx -t, systemctl reload nginx.
+#           The tge-app copy (only it) also gets one block, right after its server_name line: `location ^~
+#           /partner-info/`, the partner info page that 50-partner-page.sh writes to /srv/ddcnew/partner-info/
+#           (static files, no-store, noindex, no referrer, no framing, a strict Content-Security-Policy).
 #           The existing vhost files are only read (and their sha256 compared before/after, with the old
 #           containers, by old_snapshot_begin/assert). A failed nginx -t removes the two new files again.
 #   undo    removes exactly those two links and two files, nginx -t, reload.
@@ -40,6 +43,31 @@ remove_ours() {
   rm -f "$API_LNK" "$APP_LNK" "$API_DST" "$APP_DST" "$API_DST.new" "$APP_DST.new"
 }
 
+# The partner info page (50-partner-page.sh), served by the host nginx from /srv/ddcnew/partner-info/ (www-data cannot
+# traverse /root). ^~ keeps any regex location of the copied vhost away from these files. Both paths end in a slash, so
+# the alias cannot be walked out of. The page needs only itself: inline CSS and JS, ./secret.json, no external origin.
+PARTNER_LOCATION='location ^~ /partner-info/ {
+    alias /srv/ddcnew/partner-info/;
+    index index.html;
+    add_header Cache-Control "no-store" always;
+    add_header X-Robots-Tag "noindex, nofollow" always;
+    add_header Referrer-Policy "no-referrer" always;
+    add_header X-Frame-Options "DENY" always;
+    add_header Content-Security-Policy "default-src '"'self'"'; script-src '"'self' 'unsafe-inline'"'; style-src '"'self' 'unsafe-inline'"' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src '"'self'"'; img-src '"'self'"' data:; frame-ancestors '"'none'"'" always;
+}'
+# stdin -> stdout: the block inserted once, right after the line `server_name <tge-app host>;`, with that line's indent.
+add_partner_location() {
+  PARTNER_LOC="$PARTNER_LOCATION" awk -v want="server_name $TGE_APP_HOST;" '
+    { print }
+    !done && index($0, want) > 0 {
+      match($0, /^[ \t]*/); ind = substr($0, 1, RLENGTH)
+      print ""
+      n = split(ENVIRON["PARTNER_LOC"], L, "\n")
+      for (i = 1; i <= n; i++) print ind L[i]
+      done = 1
+    }'
+}
+
 # render <api-src> <app-src> <api-out> <app-out>: build both copies and check them (no nginx calls).
 render() {
     [ "$(cnt '^[[:space:]]*server_name api\.datadance\.ai;' "$1")" = 1 ] || die "api vhost: expected exactly one 'server_name api.datadance.ai;'"
@@ -51,7 +79,7 @@ render() {
     say "api vhost CORS: lines with \$http_origin=$(cnt 'Access-Control-Allow-Origin.*\$http_origin' "$1"), hard-coded origins=0 -> no CORS change needed"
 
     sed -e "s#server_name api\.datadance\.ai;#server_name $TGE_API_HOST;#" -e 's#localhost:10000;#localhost:10010;#' "$1" > "$3"
-    sed -e "s#server_name app\.datadance\.ai;#server_name $TGE_APP_HOST;#" -e 's#localhost:9001;#localhost:9011;#' "$2" > "$4"
+    sed -e "s#server_name app\.datadance\.ai;#server_name $TGE_APP_HOST;#" -e 's#localhost:9001;#localhost:9011;#' "$2" | add_partner_location > "$4"
 
     [ "$(cnt "server_name $TGE_API_HOST;" "$3")" = 1 ] && [ "$(cnt 'server_name' "$3")" = 1 ] || die "tge-api copy: server_name check failed"
     [ "$(cnt 'localhost:10010;' "$3")" = 1 ] && [ "$(cnt '10000' "$3")" = 0 ] || die "tge-api copy: upstream check failed"
@@ -59,6 +87,12 @@ render() {
     [ "$(cnt 'localhost:9011;' "$4")" = 1 ] && [ "$(cnt '9001' "$4")" = 0 ] || die "tge-app copy: upstream check failed"
     [ "$(cnt '\$connection_upgrade' "$4")" -ge 1 ] || die "tge-app copy lost the Connection header"
     [ "$(cnt 'location \^~ /downloads/' "$4")" = 1 ] && [ "$(cnt 'location \^~ /architecture/' "$4")" = 1 ] || die "tge-app copy lost /downloads/ or /architecture/"
+    [ "$(cnt 'partner-info' "$3")" = 0 ] || die "tge-api copy: it must not serve /partner-info/"
+    [ "$(cnt 'location \^~ /partner-info/ [{]' "$4")" = 1 ] && [ "$(cnt 'partner-info' "$4")" = 2 ] || die "tge-app copy: expected exactly one /partner-info/ location"
+    got=$(awk '!on && /location \^~ \/partner-info\/ [{]/ { on = 1; match($0, /^[ \t]*/); ind = RLENGTH }
+               on { print substr($0, ind + 1); if ($0 ~ /^[ \t]*}[ \t]*$/) exit }' "$4")
+    [ "$got" = "$PARTNER_LOCATION" ] || die "tge-app copy: the /partner-info/ location is not exactly the block in 30-nginx.sh"
+    say "tge-app copy: /partner-info/ location added after its server_name line ($(printf '%s\n' "$PARTNER_LOCATION" | grep -c 'add_header') headers)"
     say "diff api.datadance.co -> $TGE_API_HOST:"; diff "$1" "$3" | grep '^[<>]' | redact || true
     say "diff app.datadance.co -> $TGE_APP_HOST:"; diff "$2" "$4" | grep '^[<>]' | redact || true
 
@@ -116,7 +150,7 @@ case "$cmd" in
     ;;
   status)
     ls -l "$API_LNK" "$APP_LNK" "$API_DST" "$APP_DST" 2>&1 | awk '{print $NF, $(NF-1), $(NF-2)}'
-    [ -f "$API_DST" ] && grep -nE 'server_name|proxy_pass' "$API_DST" "$APP_DST" || true
+    [ -f "$API_DST" ] && grep -nE 'server_name|proxy_pass|partner-info' "$API_DST" "$APP_DST" || true
     say "old: $(old_codes)"
     ;;
   *) die "usage: $0 apply | undo | status | render (local test)";;

@@ -6,7 +6,8 @@ the current findings about it, its measurements and the commands of the hardenin
 runbook**; this file describes the scripts only.
 
 **In scope:** P1 backup, P2 disk cleanup, and a new stack `ddcnew` running on an **empty** rehearsal database behind
-`tge-api.datadance.ai` and `tge-app.datadance.ai`.
+`tge-api.datadance.ai` and `tge-app.datadance.ai`, with the password-protected partner info page for the TGE partner
+(section 8).
 **Out of scope, each with its own approval:** the disk expansion, the hardening gate (section 7), copying production
 data into the new stack, and the cutover. Section 7 lists what must be done **before any production data lands on the
 new stack**.
@@ -28,6 +29,7 @@ new stack**.
 | K | The gate in section 7, each item with its own approval, **before any production data is restored**. | Sloan | data step |
 | L | Apple Wallet pass signing in the rehearsal. **Default: no production key.** The rehearsal gets a throwaway RSA key and a self-signed `signerCert.pem` (`10-build.sh`), so pass creation fails or yields a pass Wallet rejects; boot is unaffected. Real pass signing in the rehearsal needs an approval and a script change (`40-up.sh` refuses the production files). The cutover copies the production `signerKey.pem`, `signerCert.pem` and `apn_key.p8` under its own approval. | Sloan | nothing (default holds) |
 | M | `P1_USERS_MIN` for `p1-backup.sh verify`: the minimum number of users in a complete dump. It is a production figure, so it is in the private runbook, not here. | Sloan | P1 verify |
+| N | Partner info page (section 8): the page password, created once in 1Password; the partner server's address (`PARTNER_ALLOWED_IP`, also in the WAF rule of item F); the partner's callback and start-login addresses in `20-env.sh`. Sloan shares the page password with the partner. | Sloan | `50-partner-page.sh` |
 
 ## 2. Decisions taken in this package
 
@@ -127,14 +129,17 @@ new stack**.
   throwaway APNs key: **no production private key**. Campaign covers and passes are **copies** under
   `/root/ddcnew/assets`. The old directories are only read. There are no source mounts.
 - **nginx:** both tge vhosts are plain `sed` copies of the api and app vhosts with only `server_name` and the upstream
-  port changed. The CORS lines are copied unchanged; `30-nginx.sh` refuses to render when the api vhost sets a literal
-  `Access-Control-Allow-Origin` origin (the copy would then need the tge-app origin added by hand). `tge-app` keeps
+  port changed; the tge-app copy alone also gets the `location ^~ /partner-info/` block of the partner info page
+  (section 8), right after its `server_name` line. The CORS lines are copied unchanged; `30-nginx.sh` refuses to render
+  when the api vhost sets a literal `Access-Control-Allow-Origin` origin (the copy would then need the tge-app origin
+  added by hand). `tge-app` keeps
   `/downloads/` and `/architecture/` (served by the host nginx from `/opt/ddc`) and the duplicated
   `map $connection_upgrade` block, which passes `nginx -t` on nginx 1.18 and stable.
 - **Rehearsal TGE client:** `tge-rehearsal`. The secret is generated on the server and its plaintext is kept only in
   `/root/ddcnew/secrets/tge_rehearsal_client_secret`. `SSO_TGE_REDIRECT_URIS` defaults to
   `https://tge-rehearsal.invalid/oauth/callback`, a placeholder that passes the boot check and never resolves. Re-run
-  `20-env.sh` with `REHEARSAL_REDIRECT_URIS=...` once the partner's test site is known.
+  `20-env.sh` with `REHEARSAL_REDIRECT_URIS=...` once the partner's test site is known. The partner receives the secret
+  through the partner info page (section 8), where it is only ciphertext.
 - **Web3Auth verifier names:** Google is documented. The other three are the expected names and are confirmed from real
   tokens during the rehearsal; re-run with `W3A_EMAIL=... W3A_APPLE=... W3A_X=...`.
 
@@ -181,16 +186,17 @@ connection ends only the local ssh; the script runs to its end and keeps writing
 log's file name (that one is the parent shell); for `10-build.sh` the TERM trap stops the docker build first. Only one
 write script runs at a time (`flock` on `/root/ddcnew/.lock`); a second one stops at once and names the running one.
 **Every write path fingerprints the old stack at start and end**: `p1-backup.sh` dump / verify / install-cron /
-uninstall-cron, `p2-disk.sh apply`, `10-build.sh`, `20-env.sh`, `30-nginx.sh apply/undo`, `40-up.sh` and
+uninstall-cron, `p2-disk.sh apply`, `10-build.sh`, `20-env.sh`, `30-nginx.sh apply/undo`, `40-up.sh`, `50-partner-page.sh apply/remove` and
 `99-teardown.sh`. The fingerprint covers the old containers plus the sha256 of `backend.env`, every file in
 `overlays/`, both compose files and every old vhost file except `tge-*`. The script FAILs loudly if anything changed and
 tells the operator a teammate may have changed it (paths and 12-character hashes only). Read-only calls (`preflight`,
-`p2-disk.sh preview/expand-check`, `p1-backup.sh status`, `30-nginx.sh status`) do not fingerprint.
+`p2-disk.sh preview/expand-check`, `p1-backup.sh status`, `30-nginx.sh status`, `50-partner-page.sh status`) do not
+fingerprint.
 
 | # | Command | Changes on the server | Pass criteria | Time | Undo |
 |---|---|---|---|---|---|
 | 0 | `./remote.sh preflight` | nothing | `PREFLIGHT PASS`; ports 10010/15433/9011 free; 6 old containers Up; disk layout and old-file fingerprints printed; `cgroup_driver=... cgroup_version=...` and `buildx_driver=docker` printed; `keys_fixed/apn_key.p8 identical to the git-tree copy:` printed with yes or no (reported, not judged here; the private runbook says what follows from it) | 2 min | - |
-| 1 | `./remote.sh upload` | creates `/root/ddcnew/deploy` (700) with the scripts and `compose.yaml` | `files=10` (tar sent with `COPYFILE_DISABLE=1 --no-mac-metadata --no-xattrs`, extracted with `--no-same-owner`) | 1 min | `rm -rf /root/ddcnew/deploy` |
+| 1 | `./remote.sh upload` | creates `/root/ddcnew/deploy` (700) with the scripts, `compose.yaml` and `partner-info/index.html` | `files=12` (tar sent with `COPYFILE_DISABLE=1 --no-mac-metadata --no-xattrs`, extracted with `--no-same-owner`) | 1 min | `rm -rf /root/ddcnew/deploy` |
 | 2 | `./remote.sh run p1-backup.sh dump pre-refresh` | `/root/backup/pg/ddc-pre-refresh-<ts>.dump` (+ .sha256), 600; read-only `pg_dump` of `ddc` | `PASS dump ... mode=600`; refuses unless free disk > db size + 2G; a failed dump removes its `.part` | 5-10 min | `rm` the dump |
 | 3 | `./remote.sh run p1-backup.sh verify P1_USERS_MIN=<n>` (`<n>` from the private runbook) | throwaway `ddcnew-restore-test-20261004` (`--network none`, 1.5 GB), removed with its volume | refuses without a valid `P1_USERS_MIN` and below 6G free disk; sha256 match; `pg_restore --list` exit 0 with toc > 0; `pg_restore exit=0`; restored users >= `P1_USERS_MIN`; container removed. **Stops** on a failing or empty `pg_restore --list` and on a restored user count that is not a number or below `P1_USERS_MIN`; only a count above the live one is a warning (users deleted since the dump) | 15-25 min | none left behind |
 | 4 | `./remote.sh run p1-backup.sh install-cron` | `/root/backup/ddc-pgdump.sh`, `/etc/cron.d/ddc-pgdump` (03:15 CST, keeps 7 days of `ddc-daily-*`) | syntax ok (`bash -n` runs **before** the cron entry is written; a failure removes the script and writes no entry); installed; next day `p1-backup.sh status` shows an `ok` line | 1 min | `p1-backup.sh uninstall-cron` |
@@ -199,9 +205,10 @@ tells the operator a teammate may have changed it (paths and 12-character hashes
 | 7 | `./remote.sh pack-web $FE_SHA`, then `upload-web $FE_SHA` | `/root/ddcnew/src/ddc-frontend-<sha>.tar.gz` (+ .sha256) | `sha256sum -c: OK` | 3 min | `rm` the tarball |
 | 8 | `./remote.sh run 10-build.sh $BE_SHA $FE_SHA --overlays-reconciled` (or `--infra-only`) | clean clone; images `ddcnew/backend:<sha12>[-infra]`, `ddcnew/web:tge-<sha12>`; `wwdr.pem` copy, throwaway pass signer and throwaway `apn_key.p8` (400); `assets/campaigns`, `assets/passes`; `/root/ddcnew/.env` | >= 12G free before the backend build, >= 7G before the web build, MemAvailable >= 3000 MB before each; watchdog never fires; `BuildKit step processes given oom_score_adj=1000: <n >= 1>` for each build and no `WARN watchdog: no BuildKit step process was marked` (unless every step came from the cache); 0 `.env*` in the image; PR #25/#27 present; build marker `mode=tge ... w3aClientId=BBpkxUTUr... chainId=44508`; no devnet client id in `/var/www`; `signerKey.pem and signerCert.pem are a throwaway pair`; `apn_key.p8 is a throwaway key`; old stack unchanged | 30-45 min | `99-teardown.sh --remove-images` |
 | 9 | `./remote.sh run 20-env.sh` | `/root/ddcnew/secrets/*` (generated once), `.env.rehearsal`, `.env.db` (600) | `db_target=db:5432/ddc_rehearsal schema=public`; JWT differs from old; SSO secret differs from JWT; TGE hash = sha256(secret file); client id = the frontend's `.env.tge` (BBpkxUTUr...); `DISBURSEMENT_PAUSED` 1, `BSC_PAYOUT_PRIVATE_KEY` 0; **no private-key / mnemonic name left**; `BACKEND_WALLET_PRIVATE_KEY` and `CHAIN_SIGNER_PRIVATE_KEY` absent; blanked list printed; `every name with a value is classified`; `no copied value carries a URL credential, a PEM key block or a 32-byte hex key`; kept values byte-identical; `.env.rehearsal installed ... after every check passed`; old stack unchanged | 1 min | `rm` the env files (secrets only before pgdata exists) |
-| 10 | `./remote.sh run 30-nginx.sh apply` | two vhost files + links `tge-*.datadance.ai`; `nginx -t`; reload | diff shows only `server_name` and port lines; `nginx -t ok`; old vhost codes unchanged (if not, the script prints the integrity check and **stops**: `run ./30-nginx.sh undo now`); old stack unchanged; tge codes 502 | 2 min | `30-nginx.sh undo` |
+| 10 | `./remote.sh run 30-nginx.sh apply` | two vhost files + links `tge-*.datadance.ai`; `nginx -t`; reload | diff shows only `server_name` and port lines, plus the `/partner-info/` location block in tge-app (section 8); `nginx -t ok`; old vhost codes unchanged (if not, the script prints the integrity check and **stops**: `run ./30-nginx.sh undo now`); old stack unchanged; tge codes 502 | 2 min | `30-nginx.sh undo` |
 | 11 | `./remote.sh run 40-up.sh` (add `JWKS_NEW_PINS_VERIFIED=...` only if it asks) | `compose.yaml`, `.env.api` (with today's pins), `pgdata/`, empty `ddc_rehearsal` + migrated schema, containers `ddcnew-{db,api,web}-1` | INFRA banner if `-infra`; `apn_key.p8`, `signerKey.pem`, `signerCert.pem` differ from production; pins: `configured_and_served >= 1`, `.env.api = .env.rehearsal except the pins`; db healthy; `db_target` exact; `migrate status: Database schema is up to date`; log line `Partner SSO money-path assertions OK` with all 9 exact fields (any miss stops the script) and `publicClientRegistration=closed`; running api carries exactly the written pins, the throwaway `apn_key.p8` and the throwaway `signerKey.pem`; `/partner/tge/me` -> 401 JSON; `/ddc-build.json` -> tge/mainnet; old vhost codes unchanged (else it **stops**); old stack unchanged; `REHEARSAL_DB` only `ddc_rehearsal` or `ddc_rehearsal2` | 5-10 min | `99-teardown.sh` |
 | 12 | External: from a team address open `https://tge-api.datadance.ai/partner/tge/me` (401) and `https://tge-app.datadance.ai/ddc-build.json`; from any other address expect the WAF block | - | runbook pass criteria | 5 min | - |
+| 13 | Partner info page: the commands of section 8 (`op read ... \| DDC_APPROVED=yes ./remote.sh run 50-partner-page.sh apply PARTNER_ALLOWED_IP=<ip>`, then `verify` and `status`) | `/srv/ddcnew/partner-info/` (`index.html`, `secret.json`) | section 8 | 10 min | `50-partner-page.sh remove` |
 
 Total wall clock is about 2-2.5 h of execution plus the external waits (D-H).
 
@@ -229,8 +236,9 @@ Consequences the data step (separate approval) must honour:
 
 ## 5. Safety rules built into every script
 
-- **Allowed writes:** only `/root/ddcnew`, `/root/backup`, `/root/mainnet-switch`, the two `tge-*` vhost files and
-  links, and `/etc/cron.d/ddc-pgdump`. `/root/ddc`, `/root/ddc-backend`, `/root/deploy-src` and `/opt/ddc` are refused,
+- **Allowed writes:** only `/root/ddcnew`, `/root/backup`, `/root/mainnet-switch`, `/srv/ddcnew` (the partner info
+  page, which nginx must read: www-data cannot traverse `/root`), the two `tge-*` vhost files and links, and
+  `/etc/cron.d/ddc-pgdump`. `/root/ddc`, `/root/ddc-backend`, `/root/deploy-src` and `/opt/ddc` are refused,
   except for reading `backend.env` and the key files (to prove the rehearsal ones differ) and copying `wwdr.pem`,
   campaign covers and passes from them. `guard_write_path` resolves every target with GNU `realpath -m` (symlinks
   followed, `..` applied after them).
@@ -255,9 +263,11 @@ Consequences the data step (separate approval) must honour:
   old-stack migrations.
 - **remote.sh overrides (allowlist):** `run` passes only `REHEARSAL_DB`, `REHEARSAL_REDIRECT_URIS`,
   `REHEARSAL_INITIATE_LOGIN_URI`, `OAUTH_PUBLIC_REGISTRATION`, `W3A_GOOGLE/EMAIL/APPLE/X`, `JWKS_NEW_PINS_VERIFIED`,
-  `BUILD_MEM_FLOOR_MB` and `P1_USERS_MIN` to the server; every other `NAME=value` (`PATH`, `BASH_ENV`, `LD_PRELOAD`,
-  `DDC_LOCAL_TEST`, `NEW_DIR`, `BACKUP_DIR`, ...) is refused before connecting. On the server, `common.sh
-  require_server` refuses again the overrides of `NEW_DIR`, `OLD_ENV`, `OLD_BACKEND_DIR`, `OLD_APP_DIR`, `BACKUP_DIR`,
+  `BUILD_MEM_FLOOR_MB`, `P1_USERS_MIN` and `PARTNER_ALLOWED_IP` to the server; every other `NAME=value` (`PATH`,
+  `BASH_ENV`, `LD_PRELOAD`, `DDC_LOCAL_TEST`, `NEW_DIR`, `SRV_DIR`, `BACKUP_DIR`, ...) is refused before connecting.
+  `run` forwards its stdin to the remote script untouched (`op` never reads it) and refuses a terminal on stdin for
+  `50-partner-page.sh apply` and `verify`. On the server, `common.sh
+  require_server` refuses again the overrides of `NEW_DIR`, `SRV_DIR`, `OLD_ENV`, `OLD_BACKEND_DIR`, `OLD_APP_DIR`, `BACKUP_DIR`,
   `SWITCH_DIR`, `NGINX_AVAIL`, `NGINX_ENABLED`, `DDC_MEMINFO`, `DDC_PROC` and `BUILD_WATCH_INTERVAL`, and allows
   `BUILD_MEM_FLOOR_MB` (>= 1000) and `BUILD_DISK_FLOOR_MB` (>= 3072) only upwards; `DDC_LOCAL_TEST=1` is refused as root.
 - **SSH logins (`sshpw.sh`, used by `remote.sh` and `survey/ro-ssh.sh`):** the login and the 1Password reference come
@@ -278,8 +288,8 @@ Consequences the data step (separate approval) must honour:
 ## 6. Local tests
 
 `bash test/run-local-tests.sh <new-scratch-dir>` runs on the Mac and touches no server (Docker Desktop, shellcheck 0.11
-and GNU coreutils needed; throwaway containers and images are named `*-20261004` and removed at the end, and no existing
-container is touched). It must end with `summary: fails=0`. It covers:
+and GNU coreutils needed; throwaway containers and images are named `*-<DDC_TEST_SUFFIX>`, by default `*-20261005`, and
+removed at the end, and no existing container is touched). It must end with `summary: fails=0`. It covers:
 - `bash -n` and `shellcheck -x -S warning` on every script; `docker compose config` (ports loopback-only, memory limits).
 - `20-env.sh` twice on a synthetic old env (multi-line quoted values, comments, `export`, duplicates, inline comments,
   signing keys and a mnemonic): idempotent, no secret in the output or the server-side log, compose's own parser
@@ -295,9 +305,22 @@ container is touched). It must end with `summary: fails=0`. It covers:
 - The SSH login guard against a throwaway loopback sshd, using scratch copies with a test `local.env`; `local.env`
   refusals (missing, placeholders, empty, wrong shape) with stub `op` and `ssh` that record every call; the preflight's
   git-tree hash; `00-preflight.sh` as root in a throwaway container.
-- Root mode in ubuntu:22.04: the write guard, `require_server`, the run lock and the server-side log.
+- Root mode in ubuntu:22.04: the write guard (`/srv/ddcnew` included), `require_server`, the run lock and the
+  server-side log, and `50-partner-page.sh`'s refusals as root (page directory under `/root` or a symlink, overrides).
 - `p1-backup.sh verify` stop cases (synthetic counts) and the `99-teardown.sh` label fallback.
 - Section 13: `test/helpers/public-repo-scan.sh` on every committable file of the package, with a negative control.
+- Section 14, the partner info page: `50-partner-page.sh` on a `20-env.sh` output (its generated secret) with dummy
+  32-character page passwords: `apply` writes the two files (modes, `secret.json` fields, a new salt and IV per run),
+  `verify` gives `match=yes`, and `match=no` for a wrong password; the refusals (empty, short, blank-ended or CRLF
+  password, a terminal on stdin, `bash -x`, a missing or malformed `PARTNER_ALLOWED_IP`, the `.invalid` placeholder, a
+  secret that does not match `SSO_TGE_CLIENT_SECRET_SHA256`, a missing image) change nothing; neither value appears in
+  the files, the output, the server-side logs or anything `ps` shows (arguments and environment, sampled during the
+  runs, with the throwaway container's configuration). Then nginx:stable serves the page with the rendered tge-app
+  vhost (headers checked) and headless Chromium (playwright-core 1.60.0, `test/helpers/partner-browser.js`) checks
+  the filled values, a wrong password (error), the right one (exactly the secret), copy, hide, an unreachable
+  `secret.json`, phone width in dark mode, and that the page requests nothing from another origin. In 10c-10e:
+  the piped password reaches the remote script through the real ssh, `op` reads none of it, a terminal is refused,
+  and `upload` ships the new files.
 
 ## 7. Gate: prerequisites before ANY production data lands on the new stack
 
@@ -314,3 +337,86 @@ evidence before the data step is approved. The commands and pass criteria of G3 
 | G6 | Encrypted off-site backups running (design in the private runbook) | one encrypted daily dump off the host and a restore drill from it passed |
 | G7 | The data-step script follows section 4.1 | dropdb/createdb, `./public` mount and seeding, `refuse_if_infra_only` first |
 | G8 | Decide how the rehearsal treats sensitive columns in the restored data (private runbook) | an audit note on the reconciled commit |
+
+## 8. Partner info page (`50-partner-page.sh`)
+
+One page that gives the TGE partner everything needed to integrate DDC login with the test environment:
+`https://tge-app.datadance.ai/partner-info/`. Only the addresses that the WAF rule of item F admits can open it (the
+team's and the partner server's).
+
+**What it shows** (Chinese; light and dark; phone width): the values for the partner's config file (`issuer`,
+`client_id`, `client_secret`, `redirect_uri`); the registered callback and start-login addresses; the allow-listed
+address; the endpoints (discovery, `/oauth/authorize`, `/oauth/token`, `/oauth/revoke`,
+`/.well-known/oauth-protected-resource/partner/tge`, `/partner/tge/me`, `/partner/tge/status`); the rules (PKCE S256;
+`state` of 22 to 512 characters; `redirect_uri` byte for byte as registered, also at the token endpoint; scopes
+`tge:identity tge:status`; `client_secret_basic` or `client_secret_post`; the code exchange on the partner's server; a
+code is single-use and valid for 60 seconds, the whole login request for 10 minutes; a reused code also revokes the
+token it gave); and production (issuer `https://api.datadance.ai`, separate credentials, a domain with a public
+certificate, no IP address). The code lifetime is the backend's `PARTNER_CODE_TTL_MS` (60 s); 10 minutes is the consent
+window, `PARTNER_REQUEST_TTL_MS`. The template `partner-info/index.html` holds no secret and no partner value: `apply`
+fills in the values from `/root/ddcnew/.env.rehearsal` and `PARTNER_ALLOWED_IP`, HTML-escaped.
+
+**Encryption.** `client_secret` is on the page only as `secret.json` = `{"v":1,"kdf":"PBKDF2-SHA256","iter":600000,
+"salt":..,"iv":..,"ct":..}` (base64). Key: PBKDF2-SHA256 of the page password with a random 16-byte salt, 600,000
+iterations, 256 bits. Cipher: AES-256-GCM with a random 12-byte IV; `ct` ends with the 16-byte tag. Every `apply` draws a
+new salt and IV. The page fetches `./secret.json` (`cache: 'no-store'`) and decrypts it with WebCrypto in the reader's
+browser; nothing is sent back. A wrong password shows 密码不正确，请检查后重试。 and nothing else. On the server the
+encryption runs in a throwaway container of the ddcnew backend image (`docker run --rm -i --network none --pull never`,
+read-only, no capabilities, user nobody, no log driver): the password and the secret reach node on stdin only, never as
+an argument or an environment variable, and node decrypts its result once more before anything is installed. The secret
+must hash to `SSO_TGE_CLIENT_SECRET_SHA256`, so the page never shows a secret the api refuses. Git and the server never
+hold the page password; the server holds the secret only where `20-env.sh` generated it.
+
+**Files and nginx.** `/srv/ddcnew/partner-info/index.html` and `secret.json`, which nginx reads
+(`chmod 644 index.html secret.json`; ciphertext only), in directories with mode 755: www-data cannot traverse `/root`,
+and the page is never under `/root/ddc*` or `/opt/ddc`. `30-nginx.sh` gives the tge-app vhost (not the tge-api one)
+`location ^~ /partner-info/` with `alias /srv/ddcnew/partner-info/`, `index index.html` and the headers
+`Cache-Control: no-store`, `X-Robots-Tag: noindex, nofollow`, `Referrer-Policy: no-referrer`, `X-Frame-Options: DENY`
+and `Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'
+https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self'; img-src 'self' data:;
+frame-ancestors 'none'`. The page loads nothing from another origin: system fonts, inline CSS and JS (the policy allows
+Google Fonts; the page does not use them, so it depends on no third party).
+
+**The page password is created in, and read from, 1Password only.** Once, by Sloan:
+
+```bash
+op item create --category=password --title='TGE 对接页密码（测试环境）' --generate-password='32,letters,digits'
+# optional: --vault '<vault>'. The output gives the item's ID; the reference is op://<vault>/<item ID>/password
+# (or, in the 1Password app, the password field's "Copy Secret Reference").
+```
+
+It is never typed into a terminal, passed as an argument, written to a file or set as an environment variable: `op read`
+pipes it into `remote.sh`, which forwards its stdin to the script through ssh (the login's own `op read` calls take
+`/dev/null` as stdin, so they cannot swallow it). `remote.sh` refuses `apply` and `verify` when stdin is a terminal. The
+script refuses a password shorter than 24 characters, one with a blank at either end or a non-printable character, and
+any run with xtrace. Sloan shares the password with the partner.
+
+**Steps** (from the Mac in `deploy/new-stack/`, each with Sloan's approval):
+
+| # | Command | Changes on the server | Pass criteria | Undo |
+|---|---|---|---|---|
+| P1 | `DDC_APPROVED=yes ./remote.sh upload` | this package's scripts and `partner-info/index.html` in `/root/ddcnew/deploy` | `files=12` | `rm -rf /root/ddcnew/deploy` |
+| P2 | Only while the rehearsal env still has the `.invalid` placeholder (P4 says so): `DDC_APPROVED=yes ./remote.sh run 20-env.sh REHEARSAL_REDIRECT_URIS=<partner callback> REHEARSAL_INITIATE_LOGIN_URI=<partner start-login URL>`, then `DDC_APPROVED=yes ./remote.sh run 40-up.sh` | `.env.rehearsal`; the api runs with it | section 4, steps 9 and 11 | as there |
+| P3 | `DDC_APPROVED=yes ./remote.sh run 30-nginx.sh apply` | both tge vhosts written again, tge-app now with `/partner-info/`; nginx reload | section 4, step 10; the printed diff adds the location to tge-app only | `./remote.sh run 30-nginx.sh undo` (approved) |
+| P4 | `op read "op://<vault>/<item>/password" \| DDC_APPROVED=yes ./remote.sh run 50-partner-page.sh apply PARTNER_ALLOWED_IP=<partner server IP>` | `/srv/ddcnew/partner-info/index.html` and `secret.json`; one throwaway container, removed | `PASS sha256(secrets/tge_rehearsal_client_secret) = SSO_TGE_CLIENT_SECRET_SHA256`, `PASS secret.json: v=1 kdf=PBKDF2-SHA256 iter=600000 ...`, the two paths with their mode and sha256, old stack unchanged | `50-partner-page.sh remove` |
+| P5 | `op read "op://<vault>/<item>/password" \| DDC_APPROVED=yes ./remote.sh run 50-partner-page.sh verify` | nothing but its log | `match=yes` | - |
+| P6 | `./remote.sh run 50-partner-page.sh status` (read-only) | nothing | both files with the sha256 that P4 printed; `/partner-info/ location count=1`; local nginx answers 200 for both | - |
+| P7 | From a team address: open `https://tge-app.datadance.ai/partner-info/`, enter the password from 1Password, see the secret, press 隐藏 | - | the page decrypts; the browser's network panel lists `tge-app.datadance.ai` only (a script the CDN might inject is blocked by the CSP) | - |
+
+**After the joint test, rotate both.** New client secret: in an approved login,
+`rm /root/ddcnew/secrets/tge_rehearsal_client_secret`, then `20-env.sh` (it generates a new one) and `40-up.sh`. New
+page password: `op item edit <item ID> --generate-password='32,letters,digits'`. Then P4 to P6 again, or `remove` when
+the page is no longer needed.
+
+**Undo:** `DDC_APPROVED=yes ./remote.sh run 50-partner-page.sh remove` deletes `/srv/ddcnew/partner-info` (and
+`/srv/ddcnew` when it is then empty). `99-teardown.sh` removes the vhost, so the page is no longer served, but not these
+files.
+
+**Risks.**
+- The page password is shared by Sloan, outside these scripts. Anyone who can reach the page (the team's addresses and
+  the partner server's, through the WAF rule) and has the password sees the client secret.
+- `secret.json` can be downloaded by anyone who can reach the page. Each offline guess costs 600,000 PBKDF2 iterations,
+  which protects only a random password: use the generator (32 letters and digits); the script checks the length, not
+  the randomness.
+- Both are test-environment credentials: rotate the client secret and the page password after the joint test.
+- If the CDN injects a script into pages (an analytics beacon, for example), the CSP blocks it: check once in P7.

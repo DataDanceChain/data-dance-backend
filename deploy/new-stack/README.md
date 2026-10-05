@@ -1,7 +1,8 @@
 # deploy/new-stack
 
 Operator scripts that build DataDance's new production stack (compose project `ddcnew`: api, db, web) next to the
-live stack on the production host, plus the P1 database backups and the P2 disk cleanup. An operator runs them by hand
+live stack on the production host, plus the P1 database backups, the P2 disk cleanup and the password-protected
+partner info page for the TGE partner (test environment). An operator runs them by hand
 from a Mac through `remote.sh`. **No CI job and no deploy runs them**, and nothing in the backend application uses them.
 
 - What each step changes on the server, its pass criteria and its undo: [APPROVAL.md](APPROVAL.md).
@@ -14,7 +15,7 @@ from a Mac through `remote.sh`. **No CI job and no deploy runs them**, and nothi
    `local.env` is gitignored. `remote.sh` and `survey/ro-ssh.sh` refuse to connect, and do not ask 1Password, while it
    is missing, a value is empty, a value is still `CHANGE_ME`, or a value has the wrong shape.
 2. Read-only calls need no flag: `./remote.sh preflight`, `./remote.sh run p2-disk.sh preview` (or `expand-check`),
-   `./remote.sh run p1-backup.sh status`, `./remote.sh run 30-nginx.sh status`.
+   `./remote.sh run p1-backup.sh status`, `./remote.sh run 30-nginx.sh status`, `./remote.sh run 50-partner-page.sh status`.
 3. **Every call that writes to the server needs Sloan's approval**, given per call as `DDC_APPROVED=yes`; `remote.sh`
    refuses a write call without it. The order of the steps is in [APPROVAL.md](APPROVAL.md) section 4.
 
@@ -28,6 +29,7 @@ from a Mac through `remote.sh`. **No CI job and no deploy runs them**, and nothi
 | `00-preflight.sh` | read-only checks on the server |
 | `p1-backup.sh`, `p2-disk.sh` | P1 backups (dump, verify, nightly cron) and P2 disk cleanup and expansion check |
 | `10-build.sh`, `20-env.sh`, `30-nginx.sh`, `40-up.sh`, `compose.yaml` | build, rehearsal env, nginx vhosts and start of `ddcnew` |
+| `50-partner-page.sh`, `partner-info/index.html` | the partner info page: the template, filled and published to `/srv/ddcnew/partner-info/` with client_secret as AES-256-GCM ciphertext; the page password comes from 1Password on stdin ([APPROVAL.md](APPROVAL.md) section 8) |
 | `99-teardown.sh` | removes the new stack only (the undo) |
 | `common.sh` | shared guards: write allowlist, old-stack fingerprint, run lock, build watchdog |
 | `survey/` | read-only survey scripts and the read-only SSH runner; their outputs never go into the repository |
@@ -37,8 +39,10 @@ from a Mac through `remote.sh`. **No CI job and no deploy runs them**, and nothi
 
     bash test/run-local-tests.sh <new-scratch-dir>
 
-Needs Docker Desktop, shellcheck 0.11 and GNU coreutils (`grealpath`, `timeout`). Throwaway containers and images are
-named `*-20261004` and removed at the end; existing containers are never touched. The run must end with
+Needs Docker Desktop, shellcheck 0.11, GNU coreutils (`grealpath`, `timeout`) and, for the partner page's browser test,
+npm (it installs playwright-core 1.60.0 into the scratch directory and uses the local Playwright Chromium). Throwaway
+containers and images are named `*-<DDC_TEST_SUFFIX>` (default `*-20261005`) and removed at the end; existing
+containers are never touched. The run must end with
 `summary: fails=0`. The SSH tests run on scratch copies of the scripts with a test `local.env` that points at a
 throwaway loopback sshd, and the real 1Password CLI is never called. Section 13 scans every committable file of this
 package for server addresses, 1Password references or ids, hashes or keys, statements about a server's security state

@@ -1,8 +1,9 @@
 # shellcheck shell=bash disable=SC2034
 # common.sh - shared constants and guards for the ddcnew (new production stack) scripts.
-# Sourced by p1-backup.sh, p2-disk.sh, 10-build.sh, 20-env.sh, 30-nginx.sh, 40-up.sh, 99-teardown.sh.
+# Sourced by p1-backup.sh, p2-disk.sh, 10-build.sh, 20-env.sh, 30-nginx.sh, 40-up.sh, 50-partner-page.sh, 99-teardown.sh.
 # Every write path (p1-backup.sh dump/verify/install-cron/uninstall-cron, p2-disk.sh apply, 10-build.sh, 20-env.sh,
-# 30-nginx.sh apply/undo, 40-up.sh, 99-teardown.sh) calls old_snapshot_begin at start and old_snapshot_assert at end.
+# 30-nginx.sh apply/undo, 40-up.sh, 50-partner-page.sh apply/remove, 99-teardown.sh) calls old_snapshot_begin at start
+# and old_snapshot_assert at end.
 # Every write run also calls run_begin (one write run at a time, server-side copy of its output).
 # CHANGES ON THE SERVER: nothing by itself (definitions only).
 # Portable to bash 3.2 (the local test sources it on macOS): no associative arrays; awk programs run on mawk 1.3.4
@@ -15,6 +16,8 @@ export LC_ALL=C
 # Constants (paths may be overridden ONLY for the local test, see require_server)
 # ---------------------------------------------------------------------------
 NEW_DIR="${NEW_DIR:-/root/ddcnew}"
+# Files the host nginx serves (www-data cannot traverse /root): the partner info page (50-partner-page.sh).
+SRV_DIR="${SRV_DIR:-/srv/ddcnew}"
 BACKUP_DIR="${BACKUP_DIR:-/root/backup}"
 SWITCH_DIR="${SWITCH_DIR:-/root/mainnet-switch}"
 OLD_BACKEND_DIR="${OLD_BACKEND_DIR:-/root/ddc-backend}"
@@ -52,10 +55,12 @@ require_server() {
   if ddc_local_test; then
     [ "$(id -u)" != 0 ] || die "DDC_LOCAL_TEST=1 is refused when running as root"
     case "$NEW_DIR" in /root*) die "DDC_LOCAL_TEST=1 refuses NEW_DIR under /root";; esac
+    case "$SRV_DIR" in /root*) die "DDC_LOCAL_TEST=1 refuses SRV_DIR under /root";; esac
     return 0
   fi
   [ "$(id -u)" = 0 ] || die "run as root on the server"
   [ "$NEW_DIR" = /root/ddcnew ] || die "NEW_DIR override is only allowed with DDC_LOCAL_TEST=1"
+  [ "$SRV_DIR" = /srv/ddcnew ] || die "SRV_DIR override is only allowed with DDC_LOCAL_TEST=1"
   [ "$OLD_ENV" = /root/ddc-backend/backend.env ] || die "OLD_ENV override is only allowed with DDC_LOCAL_TEST=1"
   [ "$OLD_BACKEND_DIR" = /root/ddc-backend ] && [ "$OLD_APP_DIR" = /root/ddc ] || die "OLD_BACKEND_DIR / OLD_APP_DIR overrides are only allowed with DDC_LOCAL_TEST=1"
   [ "$BACKUP_DIR" = /root/backup ] && [ "$SWITCH_DIR" = /root/mainnet-switch ] || die "BACKUP_DIR / SWITCH_DIR overrides are only allowed with DDC_LOCAL_TEST=1"
@@ -90,7 +95,7 @@ guard_write_path() {
   done
   if ddc_local_test; then return 0; fi
   case "$r/" in
-    /root/ddcnew/*|/root/backup/*|/root/mainnet-switch/*) return 0;;
+    /root/ddcnew/*|/root/backup/*|/root/mainnet-switch/*|/srv/ddcnew/*) return 0;;
     "$NGINX_AVAIL/$TGE_API_HOST/"|"$NGINX_AVAIL/$TGE_APP_HOST/"|"$NGINX_ENABLED/$TGE_API_HOST/"|"$NGINX_ENABLED/$TGE_APP_HOST/") return 0;;
     /etc/cron.d/ddc-pgdump/) return 0;;
   esac

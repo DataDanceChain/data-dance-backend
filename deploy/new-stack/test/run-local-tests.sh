@@ -30,16 +30,26 @@
 #        local.env (missing, placeholders, empty, wrong shape); the preflight passes the git-tree apn_key.p8 hash.
 #   13. test/helpers/public-repo-scan.sh: no server address, 1Password reference or id, hash or key, statement about a
 #       server's security state, or local.env value in any file that is or could be committed (+ a negative control).
+# Partner info page (10-05):
+#   14. 50-partner-page.sh on a 20-env.sh output with a dummy secret and dummy 32-character passwords: apply, verify
+#       (match=yes, and match=no for a wrong password), the refusals; no secret or password in the files, the output,
+#       the server-side logs or anything ps shows (arguments and environment) during the runs; then the page behind
+#       nginx:stable with the 30-nginx.sh location, driven by headless Chromium (test/helpers/partner-browser.js).
+#   The stdin path of remote.sh (10c real ssh, 10e stubs): the piped password reaches the remote script, 1Password
+#   never reads it, and a terminal is refused (10d).
 # Every SSH test uses scratch COPIES of the scripts with a test local.env (loopback only): the package's own local.env,
 # if one exists, is never used to connect, and the real 1Password CLI is never called.
-# Throwaway containers and images are named *-20261004 and removed at the end (KEEP_TEST_IMAGES=1 keeps the images).
-# Usage: test/run-local-tests.sh [new-scratch-dir]
+# Throwaway containers and images are named *-<suffix> (DDC_TEST_SUFFIX, 8 digits, default 20261005) and removed at
+# the end (KEEP_TEST_IMAGES=1 keeps the images). Existing containers are never touched.
+# Usage: [DDC_TEST_SUFFIX=yyyymmdd] test/run-local-tests.sh [new-scratch-dir]
 set -euo pipefail
 PKG="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 T="${1:-${TMPDIR:-/tmp}/ddcnew-localtest-$(date +%Y%m%d-%H%M%S)}"; T="${T%/}"
 case "$T" in /*) ;; *) T="$PWD/$T";; esac   # docker -v needs an absolute path
 case "$T" in /root*|/) echo "refusing scratch dir $T"; exit 1;; esac
 [ ! -e "$T" ] || { echo "scratch dir $T exists; pass a new one"; exit 1; }
+SFX="${DDC_TEST_SUFFIX:-20261005}"
+[[ "$SFX" =~ ^[0-9]{8}$ ]] || { echo "DDC_TEST_SUFFIX must be 8 digits"; exit 1; }
 mkdir -p "$T/ddcnew"
 fails=0; ok() { echo "PASS $*"; }; bad() { echo "FAIL $*"; fails=$((fails+1)); }
 
@@ -53,6 +63,9 @@ if command -v shellcheck >/dev/null; then
     ok "shellcheck -x -S warning: no findings in $(ls "$PKG"/*.sh "$PKG"/test/*.sh "$PKG"/test/helpers/*.sh "$PKG"/survey/*.sh | wc -l | tr -d ' ') scripts ($(shellcheck --version | awk '/^version/ {print $2}'))"
   else bad "shellcheck findings above"; fi
 else bad "shellcheck not installed"; fi
+for f in "$PKG"/test/helpers/*.js; do
+  if node --check "$f"; then ok "node --check ${f#"$PKG"/}"; else bad "node --check ${f#"$PKG"/}"; fi
+done
 
 echo; echo "== 2. docker compose config"
 mkdir -p "$T/compose"; cp "$PKG/compose.yaml" "$T/compose/"
@@ -278,10 +291,10 @@ echo; echo "== 3c. 20-env.sh on Ubuntu 22.04 (ubuntu:jammy: mawk, GNU coreutils/
 if docker info >/dev/null 2>&1; then
   J="$T/jammy"; mkdir -p "$J/bin"; cp -Rp "$T/ddcnew" "$J/ddcnew"; rm -rf "$J/ddcnew/logs"
   printf '#!/bin/sh\nexit 0\n' > "$J/bin/docker"; chmod 755 "$J/bin/docker"
-  jrc=0; docker run --rm --name "env20-$RANDOM-20261004" --user "$(id -u):$(id -g)" -e DDC_LOCAL_TEST=1 -e NEW_DIR="$T/ddcnew" -e OLD_ENV="$OLD" -e FE_ENV_TGE="$T/env.tge" \
+  jrc=0; docker run --rm --name "env20-$RANDOM-$SFX" --user "$(id -u):$(id -g)" -e DDC_LOCAL_TEST=1 -e NEW_DIR="$T/ddcnew" -e OLD_ENV="$OLD" -e FE_ENV_TGE="$T/env.tge" \
     -v "$PKG:$PKG:ro" -v "$J/ddcnew:$T/ddcnew" -v "$OLD:$OLD:ro" -v "$T/env.tge:$T/env.tge:ro" -v "$J/bin:/stubbin:ro" ubuntu:jammy \
     bash -c 'export PATH="/stubbin:$PATH"; exec bash "$0/20-env.sh"' "$PKG" > "$J/run3.out" 2>&1 || jrc=$?
-  awkv=$(docker run --rm --name "awkv-$RANDOM-20261004" ubuntu:jammy bash -c 'readlink -f "$(command -v awk)"; awk -W version 2>&1 | head -1' | tr '\n' ' ')
+  awkv=$(docker run --rm --name "awkv-$RANDOM-$SFX" ubuntu:jammy bash -c 'readlink -f "$(command -v awk)"; awk -W version 2>&1 | head -1' | tr '\n' ' ')
   norm() { grep -vE '^(run|lock): ' "$1"; }
   if [ "$jrc" = 0 ] && diff <(norm "$T/run2.out") <(norm "$J/run3.out") > "$J/diff.txt"; then
     ok "20-env.sh on ubuntu:jammy ($awkv) prints exactly what it printed on macOS ($(norm "$J/run3.out" | wc -l | tr -d ' ') lines; run/lock lines excluded)"
@@ -296,6 +309,17 @@ NG="$T/nginx"; mkdir -p "$NG"
 if DDC_LOCAL_TEST=1 NEW_DIR="$T/ddcnew" bash "$PKG/30-nginx.sh" render "$PKG/test/fixtures/api.datadance.co" "$PKG/test/fixtures/app.datadance.co" "$NG" > "$T/render.out" 2>&1; then
   cat "$T/render.out"; ok "render checks passed"
 else cat "$T/render.out"; bad "render failed"; fi
+# The partner info page location (section 14 serves the page through it): tge-app only, once, with these exact headers.
+CSP="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'"
+miss=""
+for l in 'location ^~ /partner-info/ {' 'alias /srv/ddcnew/partner-info/;' 'add_header Cache-Control "no-store" always;' \
+         'add_header X-Robots-Tag "noindex, nofollow" always;' 'add_header Referrer-Policy "no-referrer" always;' \
+         'add_header X-Frame-Options "DENY" always;' "add_header Content-Security-Policy \"$CSP\" always;"; do
+  [ "$(grep -cF -- "$l" "$NG/tge-app.datadance.ai" || true)" = 1 ] || miss="$miss [$l]"
+done
+[ -z "$miss" ] && [ "$(grep -c 'partner-info' "$NG/tge-api.datadance.ai" || true)" = 0 ] \
+  && ok "tge-app copy: one /partner-info/ location (alias /srv/ddcnew/partner-info/, no-store, noindex, no-referrer, DENY, the CSP); tge-api copy: none" \
+  || bad "partner-info location in the rendered copies; missing or repeated:$miss"
 if docker info >/dev/null 2>&1; then
   mkdir -p "$NG/conf"
   cp "$PKG/test/fixtures/api.datadance.co" "$PKG/test/fixtures/app.datadance.co" "$NG/tge-api.datadance.ai" "$NG/tge-app.datadance.ai" "$NG/conf/"
@@ -304,7 +328,7 @@ if docker info >/dev/null 2>&1; then
     [ "$variant" = old-only ] && sel="api.datadance.co app.datadance.co" || sel="api.datadance.co app.datadance.co tge-api.datadance.ai tge-app.datadance.ai"
     mkdir -p "$NG/$variant"; for f in $sel; do cp "$NG/conf/$f" "$NG/$variant/"; done
     for img in nginx:1.18 nginx:stable; do   # 1.18 = the Ubuntu 22.04 server's major version
-      if docker run --rm --name "nginxtest-$variant-${img#nginx:}-20261004" -v "$NG/nginx.conf:/etc/nginx/nginx.conf:ro" -v "$NG/$variant:/etc/nginx/sites:ro" "$img" nginx -t > "$T/nginx-$variant.out" 2>&1; then
+      if docker run --rm --name "nginxtest-$variant-${img#nginx:}-$SFX" -v "$NG/nginx.conf:/etc/nginx/nginx.conf:ro" -v "$NG/$variant:/etc/nginx/sites:ro" "$img" nginx -t > "$T/nginx-$variant.out" 2>&1; then
         ok "nginx -t $img ($variant): $(tail -1 "$T/nginx-$variant.out")"
       else cat "$T/nginx-$variant.out"; bad "nginx -t $img ($variant)"; fi
     done
@@ -349,34 +373,34 @@ if docker info >/dev/null 2>&1; then
   printf 'FROM nginx:stable\nRUN sleep 4243\n' > "$WD/sel/Dockerfile"
   hi() { printf 'MemTotal:       16000000 kB\nMemAvailable:    8000000 kB\n' > "$WD/meminfo"; }
   lo() { printf 'MemTotal:       16000000 kB\nMemAvailable:     512000 kB\n' > "$WD/meminfo"; }
-  vmps() { docker run --rm --pid=host --name "wdps-$RANDOM-20261004" node:22-alpine ps -o pid,args 2>/dev/null; }
+  vmps() { docker run --rm --pid=host --name "wdps-$RANDOM-$SFX" node:22-alpine ps -o pid,args 2>/dev/null; }
   wdrun() { ( DDC_LOCAL_TEST=1; NEW_DIR="$T/ddcnew"; DDC_MEMINFO="$WD/meminfo"; BUILD_WATCH_INTERVAL=1
     # shellcheck source=../common.sh
     . "$PKG/common.sh"; run_build_watched "$@" ); }
   hi
-  if wdrun "$WD/ok.log" --no-cache -t ddcnew-wdtest:ok-20261004 "$WD/ok" > "$T/wd-ok.out" 2>&1; then
-    cat "$T/wd-ok.out"; docker image inspect ddcnew-wdtest:ok-20261004 >/dev/null 2>&1 && ok "normal build under the watchdog passes and tags the image" || bad "image missing"
+  if wdrun "$WD/ok.log" --no-cache -t ddcnew-wdtest:ok-$SFX "$WD/ok" > "$T/wd-ok.out" 2>&1; then
+    cat "$T/wd-ok.out"; docker image inspect ddcnew-wdtest:ok-$SFX >/dev/null 2>&1 && ok "normal build under the watchdog passes and tags the image" || bad "image missing"
   else cat "$T/wd-ok.out"; bad "normal build under the watchdog failed"; fi
   hi
   ( for _ in $(seq 1 90); do vmps | grep -q 'sleep 4242' && { echo "test: sleep 4242 (the RUN step) is running; MemAvailable -> 500MB"; lo; exit 0; }; sleep 1; done; echo "test: RUN step never seen"; lo ) > "$T/wd-flip.out" 2>&1 &
   flip=$!
   t0=$(date +%s); rc=0
-  wdrun "$WD/kill.log" --no-cache -t ddcnew-wdtest:kill-20261004 "$WD/kill" > "$T/wd-kill.out" 2>&1 || rc=$?
+  wdrun "$WD/kill.log" --no-cache -t ddcnew-wdtest:kill-$SFX "$WD/kill" > "$T/wd-kill.out" 2>&1 || rc=$?
   t1=$(date +%s); wait "$flip" || true
   cat "$T/wd-flip.out"; sed 's/^/  expected> /' "$T/wd-kill.out"
   left=1; for _ in $(seq 1 15); do vmps | grep -q 'sleep 4242' || { left=0; break; }; sleep 1; done
-  [ "$rc" != 0 ] && grep -q 'BUILD STOPPED BY THE WATCHDOG: MemAvailable' "$T/wd-kill.out" && grep -q 'RUN step) is running' "$T/wd-flip.out" && [ "$left" = 0 ] && ! docker image inspect ddcnew-wdtest:kill-20261004 >/dev/null 2>&1 \
+  [ "$rc" != 0 ] && grep -q 'BUILD STOPPED BY THE WATCHDOG: MemAvailable' "$T/wd-kill.out" && grep -q 'RUN step) is running' "$T/wd-flip.out" && [ "$left" = 0 ] && ! docker image inspect ddcnew-wdtest:kill-$SFX >/dev/null 2>&1 \
     && ok "watchdog stopped the build during RUN sleep 4242: exit=$rc after $((t1-t0))s, step process gone, no image tagged" || bad "watchdog kill test (rc=$rc left=$left)"
   # escalation path: are BuildKit step processes found by their cgroup? (plain build, no watchdog)
-  docker build --no-cache -t ddcnew-wdtest:sel-20261004 "$WD/sel" > "$WD/sel.log" 2>&1 &
+  docker build --no-cache -t ddcnew-wdtest:sel-$SFX "$WD/sel" > "$WD/sel.log" 2>&1 &
   sel=$!
   for _ in $(seq 1 90); do vmps | grep -q 'sleep 4243' && break; sleep 1; done
-  docker run --rm --pid=host --cgroupns=host --privileged -v "$PKG:/pkg:ro" --name "wdsel-$RANDOM-20261004" --entrypoint bash nginx:stable -c \
+  docker run --rm --pid=host --cgroupns=host --privileged -v "$PKG:/pkg:ro" --name "wdsel-$RANDOM-$SFX" --entrypoint bash nginx:stable -c \
     '. /pkg/common.sh; for p in $(buildkit_step_pids); do printf "pid=%s cgroup=%s cmd=" "$p" "$(cut -d: -f3 /proc/$p/cgroup | head -1)"; tr "\0" " " < /proc/$p/cmdline; echo; done
      echo "oom_marked=$(buildkit_oom_prefer)"; for p in $(buildkit_step_pids); do echo "oom pid=$p adj=$(cat /proc/$p/oom_score_adj)"; done' > "$T/wd-sel.out" 2>&1 || true
   cat "$T/wd-sel.out"
   if grep -q 'cmd=sleep 4243' "$T/wd-sel.out" && ! grep -qE 'cmd=[^ ]*(dockerd|containerd)' "$T/wd-sel.out"; then
-    docker run --rm --pid=host --cgroupns=host --privileged -v "$PKG:/pkg:ro" --name "wdkill-$RANDOM-20261004" --entrypoint bash nginx:stable -c \
+    docker run --rm --pid=host --cgroupns=host --privileged -v "$PKG:/pkg:ro" --name "wdkill-$RANDOM-$SFX" --entrypoint bash nginx:stable -c \
       '. /pkg/common.sh; for p in $(buildkit_step_pids); do grep -q "sleep" /proc/$p/cmdline 2>/dev/null && kill -KILL "$p" && echo "killed step pid $p"; done' || true
     src=0; wait "$sel" || src=$?
     [ "$src" != 0 ] && ok "buildkit_step_pids finds the RUN step by cgroup (not dockerd/containerd); SIGKILL on it fails the build (exit $src)" || bad "build survived the step kill"
@@ -385,8 +409,8 @@ if docker info >/dev/null 2>&1; then
     kill "$sel" 2>/dev/null || true; wait "$sel" 2>/dev/null || true
     bad "buildkit_step_pids did not find the RUN step (see above)"
   fi
-  for i in ok kill sel; do docker image rm "ddcnew-wdtest:$i-20261004" >/dev/null 2>&1 || true; done
-  echo "test images ddcnew-wdtest:*-20261004 removed; leftover test containers: $(docker ps -a --format '{{.Names}}' | grep -c -- '-20261004$' || true)"
+  for i in ok kill sel; do docker image rm "ddcnew-wdtest:$i-$SFX" >/dev/null 2>&1 || true; done
+  echo "test images ddcnew-wdtest:*-$SFX removed; leftover test containers: $(docker ps -a --format '{{.Names}}' | grep -c -- "-$SFX\$" || true)"
 else
   echo "docker daemon not running: watchdog test skipped"; bad "watchdog test needs Docker Desktop"
 fi
@@ -404,7 +428,7 @@ cs_check() { # <label> <result line>
 }
 cs_check "macOS /bin/bash" "$(timeout 120 /bin/bash "$PKG/test/helpers/closed-session.sh" "$PKG" "$T/cs-mac" mem 2>&1 | tail -1)"
 if docker info >/dev/null 2>&1; then
-  cs_check "ubuntu:22.04 bash" "$(timeout 300 docker run --rm --name "closed-$RANDOM-20261004" --platform linux/amd64 --user 1000:1000 -v "$PKG:/pkg:ro" ubuntu:22.04 \
+  cs_check "ubuntu:22.04 bash" "$(timeout 300 docker run --rm --name "closed-$RANDOM-$SFX" --platform linux/amd64 --user 1000:1000 -v "$PKG:/pkg:ro" ubuntu:22.04 \
     bash /pkg/test/helpers/closed-session.sh /pkg /tmp/cs mem 2>&1 | tail -1)"
 else bad "section 6b (ubuntu:22.04) needs Docker Desktop"; fi
 out=$(timeout 120 /bin/bash "$PKG/test/helpers/closed-session.sh" "$PKG" "$T/cs-disk" disk 2>&1); printf '%s\n' "$out" | sed 's/^/  /'
@@ -418,7 +442,7 @@ echo; echo "== 6c. RUN-step selector on fake /proc trees, both cgroup drivers (m
 if timeout 120 /bin/bash "$PKG/test/helpers/selector.sh" "$PKG" "$T/sel-mac" > "$T/sel-mac.out" 2>&1; then cat "$T/sel-mac.out"; ok "selector suite on macOS (bash 3.2, BSD awk)"
 else cat "$T/sel-mac.out"; bad "selector suite on macOS"; fi
 if docker info >/dev/null 2>&1; then
-  if timeout 300 docker run --rm --name "selector-$RANDOM-20261004" --user 1000:1000 -v "$PKG:/pkg:ro" ubuntu:jammy bash /pkg/test/helpers/selector.sh /pkg /tmp/sel > "$T/sel-jammy.out" 2>&1; then
+  if timeout 300 docker run --rm --name "selector-$RANDOM-$SFX" --user 1000:1000 -v "$PKG:/pkg:ro" ubuntu:jammy bash /pkg/test/helpers/selector.sh /pkg /tmp/sel > "$T/sel-jammy.out" 2>&1; then
     cat "$T/sel-jammy.out"; ok "selector suite on ubuntu:jammy (bash 5.1, mawk 1.3.4)"
   else cat "$T/sel-jammy.out"; bad "selector suite on ubuntu:jammy"; fi
 else bad "section 6c (ubuntu:jammy) needs Docker Desktop"; fi
@@ -428,7 +452,7 @@ echo; echo "== 6d. the watchdog on a REAL dockerd 29.1.3 with the systemd cgroup
 # A throwaway privileged container runs systemd as PID 1 and docker-ce 29.1.3 from download.docker.com (cgroup v2,
 # systemd driver, containerd image store), so the server's cgroup layout is reproduced, not assumed. Its dockerd is
 # separate from Docker Desktop's: nothing outside the container is touched. test/helpers/sysd-driver.sh runs inside.
-SYSD_IMG=ddcnew-sysdtest:jammy-20261004
+SYSD_IMG=ddcnew-sysdtest:jammy-$SFX
 if docker info >/dev/null 2>&1; then
   if ! docker image inspect "$SYSD_IMG" >/dev/null 2>&1; then
     mkdir -p "$T/sysd-img"
@@ -449,7 +473,7 @@ EOF
     echo "building $SYSD_IMG (systemd + docker-ce 29.1.3; needs the network once)"
     timeout 900 docker build -q -t "$SYSD_IMG" "$T/sysd-img" >/dev/null || bad "could not build $SYSD_IMG"
   fi
-  C6="sysdtest-$RANDOM-20261004"
+  C6="sysdtest-$RANDOM-$SFX"
   if docker run -d --name "$C6" --privileged --cgroupns=private -v /var/lib/docker -v /var/lib/containerd --tmpfs /run --tmpfs /run/lock \
        -v "$PKG:/pkg:ro" "$SYSD_IMG" >/dev/null; then
     for _ in $(seq 1 60); do docker exec "$C6" docker info >/dev/null 2>&1 && break; sleep 1; done
@@ -501,7 +525,7 @@ chk "after resize2fs"                                      $((80*G)) $((M)) $((8
 # ---------------------------------------------------------------------------
 echo; echo "== 9. expand_check (read-only) on a real ext4 partition: the Docker Desktop VM disk behind /etc/hosts"
 if docker info >/dev/null 2>&1; then
-  if docker run --rm --privileged --platform linux/arm64 --name "expandro-$RANDOM-20261004" -v "$PKG:/pkg:ro" ubuntu:jammy bash -c \
+  if docker run --rm --privileged --platform linux/arm64 --name "expandro-$RANDOM-$SFX" -v "$PKG:/pkg:ro" ubuntu:jammy bash -c \
       'set -e; . /pkg/common.sh; expand_check /etc/hosts
        d=$(findmnt -n -o SOURCE /etc/hosts); d=${d%%\[*}; b=$(basename "$d")
        echo "raw: part_bytes=$(( $(cat /sys/class/block/$b/size) * 512 )) fs_bytes=$(dumpe2fs -h "$d" 2>/dev/null | awk -F: "/^Block count/ {c=\$2} /^Block size/ {s=\$2} END {print c*s}")"' > "$T/expand.out" 2>&1; then
@@ -541,7 +565,7 @@ done
 
 echo; echo "== 10c. SSH login guard (sshpw.sh, remote.sh, ro-ssh.sh) against a throwaway Ubuntu 22.04 sshd (password + keyboard-interactive via PAM)"
 if docker info >/dev/null 2>&1; then
-  SS="$T/ssh"; mkdir -p "$SS/img" "$SS/pkg"; C="sshpwtest-$RANDOM-20261004"; SSHD_IMG=ddcnew-sshtest:jammy-20261004
+  SS="$T/ssh"; mkdir -p "$SS/img" "$SS/pkg"; C="sshpwtest-$RANDOM-$SFX"; SSHD_IMG=ddcnew-sshtest:jammy-$SFX
   TESTPW="test-$(openssl rand -hex 12)"   # password of the throwaway container only
   if ! docker image inspect "$SSHD_IMG" >/dev/null 2>&1; then
     printf 'FROM ubuntu:jammy\nRUN export DEBIAN_FRONTEND=noninteractive && apt-get update -qq && apt-get -o Acquire::Retries=8 install -y -qq --no-install-recommends openssh-server >/dev/null && mkdir -p /run/sshd && rm -rf /var/lib/apt/lists/*\n' > "$SS/img/Dockerfile"
@@ -620,7 +644,7 @@ if docker info >/dev/null 2>&1; then
     grep -v 'kill -TERM' "$SS/full" > "$SS/midloss"; chmod 700 "$SS/midloss"; sshpw_askpass_ok "$SS/midloss" && echo "BUG file without the kill line accepted"
     sshpw_askpass_ok "$SS/full" || echo "BUG complete file refused" ) > "$SS/make.out" 2>&1
   [ ! -s "$SS/make.out" ] && ok "sshpw_make_askpass fails without a loaded 1Password reference, for an empty name, a missing or read-only directory; sshpw_askpass_ok refuses a truncated file and one that lost a middle line (sentinel 'exit 1' intact)" || { cat "$SS/make.out"; bad "askpass file checks"; }
-  if docker run --rm --name "devfull-$RANDOM-20261004" -v "$SS/pkg:/pkg:ro" ubuntu:jammy bash -c '. /pkg/sshpw.sh; sshpw_load_local_env || exit 9; if sshpw_make_askpass /dev/full; then echo accepted; else echo refused; fi' 2>/dev/null | grep -qx refused; then
+  if docker run --rm --name "devfull-$RANDOM-$SFX" -v "$SS/pkg:/pkg:ro" ubuntu:jammy bash -c '. /pkg/sshpw.sh; sshpw_load_local_env || exit 9; if sshpw_make_askpass /dev/full; then echo accepted; else echo refused; fi' 2>/dev/null | grep -qx refused; then
     ok "disk full (/dev/full, ENOSPC on every write): sshpw_make_askpass fails"
   else bad "sshpw_make_askpass accepted /dev/full"; fi
   # remote.sh and ro-ssh.sh themselves, with an askpass that cannot be created: scratch COPIES whose test local.env points
@@ -653,6 +677,27 @@ if docker info >/dev/null 2>&1; then
     && ! grep -q 'scratchpad' "$PKG/survey/ro-ssh.sh" && ! grep -q 'NumberOfPasswordPrompts=2' "$PKG/remote.sh" "$PKG/survey/ro-ssh.sh" \
     && ok "remote.sh and ro-ssh.sh: precheck, askpass creation guarded (exit 3 before ssh), no hard-coded scratchpad; sshpw.sh: password method only, NumberOfPasswordPrompts=1" || bad "remote.sh / ro-ssh.sh / sshpw.sh not wired as expected"
   grep -qF "$TESTPW" "$SS"/ssh-*.out "$CP/probe.out" 2>/dev/null && bad "the test password appeared in the output" || ok "the password never appears in the ssh output"
+  # The partner page password through the REAL ssh (remote.sh run 50-partner-page.sh apply, 10-05): a scratch copy of
+  # remote.sh + sshpw.sh whose stub op drains its own stdin into a file (so it would swallow a password it was handed),
+  # and a stub 50-partner-page.sh in the throwaway sshd that prints a hash of the one line it receives on stdin.
+  docker exec -i "$C" sh -c 'mkdir -p /root/ddcnew/deploy && cat > /root/ddcnew/deploy/50-partner-page.sh && chmod 700 /root/ddcnew/deploy/50-partner-page.sh' <<'EOF'
+#!/bin/bash
+IFS= read -r line; printf 'remote got-sha=%s args=%s ip=%s\n' "$(printf '%s' "$line" | sha256sum | cut -c1-16)" "$*" "${PARTNER_ALLOWED_IP:-}"
+EOF
+  CP2="$T/sshcopy2/deploy/new-stack"; mkdir -p "$CP2"
+  printf '#!/bin/sh\ncat > "%s/op-drain.stdin.$$"\nprintf "%%s\\n" "%s"\n' "$SS" "$TESTPW" > "$SS/op-drain"; chmod 700 "$SS/op-drain"
+  cp "$PKG/remote.sh" "$CP2/"; cp "$SS/pkg/local.env" "$CP2/local.env"
+  sed "s#^SSHPW_OP_BIN=/opt/homebrew/bin/op #SSHPW_OP_BIN=$SS/op-drain #" "$PKG/sshpw.sh" > "$CP2/sshpw.sh"
+  printf 'SSHPW_OPTS+=(-p %s -o UserKnownHostsFile=%s)\n' "$PORT" "$SS/known_hosts" >> "$CP2/sshpw.sh"
+  ( umask 077; printf 'lt-%s\n' "$(openssl rand -hex 16)" > "$SS/page-pw" )   # a dummy page password for this test only
+  rm -f "$SS"/op-drain.stdin.*; rc=0
+  out=$(DDC_APPROVED=yes bash "$CP2/remote.sh" run 50-partner-page.sh apply PARTNER_ALLOWED_IP=203.0.113.7 < "$SS/page-pw" 2>&1) || rc=$?
+  want=$(tr -d '\n' < "$SS/page-pw" | shasum -a 256 | cut -c1-16)
+  nop=$(ls "$SS"/op-drain.stdin.* 2>/dev/null | wc -l | tr -d ' '); sop=$(cat "$SS"/op-drain.stdin.* 2>/dev/null | wc -c | tr -d ' ')
+  if [ "$rc" = 0 ] && printf '%s\n' "$out" | grep -qx "remote got-sha=$want args=apply ip=203.0.113.7" && [ "$nop" -ge 2 ] && [ "$sop" = 0 ] \
+     && ! printf '%s\n' "$out" | grep -qF -f "$SS/page-pw" && ! cat "$CP2"/logs/* | grep -qF -f "$SS/page-pw"; then
+    ok "real ssh: the piped page password reaches the remote script's stdin unchanged (sha256 prefix $want), with PARTNER_ALLOWED_IP as its environment; 1Password ran $nop times (precheck, askpass) and read 0 bytes of stdin; the password is not in the output or logs/"
+  else printf '%s\n' "$out" | sed 's/^/    /'; bad "page password through the real ssh (rc=$rc op runs=$nop op stdin bytes=$sop)"; fi
   docker rm -f "$C" >/dev/null 2>&1 || true
   echo "throwaway sshd container removed"
 else
@@ -672,6 +717,27 @@ printf '%s\n' "$out" | grep -q STUB && ok "allowlisted overrides (JWKS_NEW_PINS_
 out=$(DDC_APPROVED=yes bash "$R/remote.sh" run p1-backup.sh verify P1_USERS_MIN=1000 2>&1 < /dev/null || true)
 printf '%s\n' "$out" | grep -q STUB && ok "P1_USERS_MIN (p1-backup.sh verify) is allowlisted and passes through to the (stubbed) connection" || bad "P1_USERS_MIN refused: $out"
 out=$(bash "$R/remote.sh" run 40-up.sh 2>&1 < /dev/null || true); printf '%s\n' "$out" | grep -q 'refusing: this call changes the server' && ok "write call without DDC_APPROVED=yes refused" || bad "approval gate: $out"
+# 50-partner-page.sh (10-05): PARTNER_ALLOWED_IP allowlisted, status read-only, apply/verify/remove approved, a terminal
+# on stdin refused for apply and verify, the local-test-only overrides refused.
+out=$(DDC_APPROVED=yes bash "$R/remote.sh" run 50-partner-page.sh apply PARTNER_ALLOWED_IP=203.0.113.7 2>&1 < /dev/null || true)
+printf '%s\n' "$out" | grep -q STUB && ok "PARTNER_ALLOWED_IP (50-partner-page.sh apply) is allowlisted and passes through to the (stubbed) connection" || bad "PARTNER_ALLOWED_IP refused: $out"
+out=$(bash "$R/remote.sh" run 50-partner-page.sh status 2>&1 < /dev/null || true)
+printf '%s\n' "$out" | grep -q STUB && ok "50-partner-page.sh status needs no approval (read-only)" || bad "50-partner-page.sh status: $out"
+for c in apply verify remove; do
+  out=$(bash "$R/remote.sh" run 50-partner-page.sh "$c" 2>&1 < /dev/null || true)
+  printf '%s\n' "$out" | grep -q 'refusing: this call changes the server' || bad "50-partner-page.sh $c without DDC_APPROVED=yes: $out"
+done
+ok "50-partner-page.sh apply, verify and remove without DDC_APPROVED=yes: refused"
+for a in PARTNER_CRYPT_IMAGE=node:22-alpine SRV_DIR=/tmp/x DDC_TEST_SUFFIX=20261005; do
+  rc=0; out=$(DDC_APPROVED=yes bash "$R/remote.sh" run 50-partner-page.sh apply "$a" 2>&1 < /dev/null) || rc=$?
+  [ "$rc" = 2 ] && printf '%s\n' "$out" | grep -q "override ${a%%=*} is not allowed" && ! printf '%s\n' "$out" | grep -q STUB || bad "override ${a%%=*} (50-partner-page.sh): rc=$rc $out"
+done
+ok "the local-test-only overrides of 50-partner-page.sh (PARTNER_CRYPT_IMAGE, SRV_DIR, DDC_TEST_SUFFIX) refused before any connection"
+for c in apply verify; do   # script(1) gives remote.sh a pty as stdin, as if Sloan forgot the pipe
+  rc=0; out=$(script -q /dev/null env DDC_APPROVED=yes bash "$R/remote.sh" run 50-partner-page.sh "$c" PARTNER_ALLOWED_IP=203.0.113.7 < /dev/null 2>&1) || rc=$?
+  [ "$rc" = 2 ] && printf '%s\n' "$out" | grep -q 'the page password is piped, never typed' && ! printf '%s\n' "$out" | grep -q STUB || bad "50-partner-page.sh $c with a terminal on stdin: rc=$rc $out"
+done
+ok "50-partner-page.sh apply and verify with a terminal on stdin: refused before any connection (the password is never typed)"
 
 # ---------------------------------------------------------------------------
 echo; echo "== 10e. local.env: remote.sh and survey/ro-ssh.sh refuse to connect without a usable local.env (stub op and ssh record every call)"
@@ -734,6 +800,31 @@ want=$(shasum -a 256 < "$G/keys_fixed/apn_key.p8" | cut -c1-64)
 le_run "$G/deploy/new-stack" preflight
 [ "$RC" = 0 ] && [ "$(head -1 "$LE/ssh.stdin")" = "GIT_APN_SHA=$want" ] && cmp -s <(tail -n +2 "$LE/ssh.stdin") "$PKG/00-preflight.sh" \
   && ok "remote.sh preflight in a git checkout: prepends GIT_APN_SHA=<sha256 of keys_fixed/apn_key.p8 at HEAD> to the unchanged 00-preflight.sh (no hash is stored in the repository)" || { sed 's/^/    /' "$LE/out"; bad "preflight hash wiring (rc=$RC)"; }
+# remote.sh run 50-partner-page.sh apply with the page password piped in (10-05): the stub ssh receives exactly that line
+# on its stdin; a stub op that drains its own stdin reads none of it; it is not printed and not in logs/.
+lecopy "$LE/pp" "$(printf 'DDC_SSH_TARGET=root@127.0.0.1\nDDC_OP_SECRET_REF=%s' "$TREF")"
+printf '#!/bin/sh\ncat > "%s/op-stdin.$$"\necho "op $*" >> "%s/calls"\nprintf "%%s\\n" stub-password\n' "$LE" "$LE" > "$LE/op-drain"; chmod 755 "$LE/op-drain"
+sed "s#^SSHPW_OP_BIN=/opt/homebrew/bin/op #SSHPW_OP_BIN=$LE/op-drain #" "$PKG/sshpw.sh" > "$LE/pp/sshpw.sh"
+( umask 077; printf 'lt-%s\n' "$(openssl rand -hex 16)" > "$LE/page-pw" )   # a dummy page password for this test only
+rm -f "$LE/calls" "$LE/ssh.stdin" "$LE"/op-stdin.*; RC=0
+DDC_APPROVED=yes PATH="$LE/bin:$PATH" bash "$LE/pp/remote.sh" run 50-partner-page.sh apply PARTNER_ALLOWED_IP=203.0.113.7 < "$LE/page-pw" > "$LE/out" 2>&1 || RC=$?
+[ "$RC" = 0 ] && cmp -s "$LE/ssh.stdin" "$LE/page-pw" && [ "$(cat "$LE"/op-stdin.* | wc -c | tr -d ' ')" = 0 ] \
+  && grep -q '^ssh .* root@127\.0\.0\.1 cd /root/ddcnew/deploy && env PARTNER_ALLOWED_IP=203\.0\.113\.7 \./50-partner-page\.sh apply$' "$LE/calls" \
+  && ! cat "$LE/out" "$LE/calls" "$LE"/pp/logs/* | grep -qF -f "$LE/page-pw" \
+  && ok "remote.sh run 50-partner-page.sh apply: the piped page password reaches ssh's stdin byte for byte, op reads 0 bytes of it, the remote command carries only PARTNER_ALLOWED_IP; nothing prints or logs the password" \
+  || { sed 's/^/    /' "$LE/out" "$LE/calls"; bad "page password through remote.sh (rc=$RC)"; }
+# remote.sh upload: the tarball (captured by the stub ssh) holds exactly the scripts, compose.yaml and partner-info/index.html
+UP="$LE/upload"; rm -rf "$UP"; mkdir -p "$UP/partner-info"
+cp "$PKG"/*.sh "$PKG/compose.yaml" "$UP/"; cp "$PKG/partner-info/index.html" "$UP/partner-info/"
+sed "s#^SSHPW_OP_BIN=/opt/homebrew/bin/op #SSHPW_OP_BIN=$LE/bin/op #" "$PKG/sshpw.sh" > "$UP/sshpw.sh"
+printf 'DDC_SSH_TARGET=root@127.0.0.1\nDDC_OP_SECRET_REF=%s\n' "$TREF" > "$UP/local.env"
+rm -f "$LE/calls" "$LE/ssh.stdin"; RC=0
+DDC_APPROVED=yes PATH="$LE/bin:$PATH" bash "$UP/remote.sh" upload > "$LE/out" 2>&1 < /dev/null || RC=$?
+got=$(tar -tzf "$LE/ssh.stdin" 2>/dev/null | LC_ALL=C sort | tr '\n' ' ')
+want="00-preflight.sh 10-build.sh 20-env.sh 30-nginx.sh 40-up.sh 50-partner-page.sh 99-teardown.sh common.sh compose.yaml p1-backup.sh p2-disk.sh partner-info/index.html "
+[ "$RC" = 0 ] && [ "$got" = "$want" ] && cmp -s <(tar -xzOf "$LE/ssh.stdin" partner-info/index.html) "$PKG/partner-info/index.html" \
+  && ok "remote.sh upload: the tarball holds the 10 scripts, compose.yaml and partner-info/index.html (the server then lists 12 entries in /root/ddcnew/deploy)" \
+  || { sed 's/^/    /' "$LE/out"; bad "upload tarball (rc=$RC): $got"; }
 # 00-preflight.sh itself, as root in a throwaway ubuntu:jammy (no network, stub docker, a fake old tree): the apn_key.p8
 # line reports yes / no / not checked and nothing else; the CORS counts use the neutral labels.
 if docker info >/dev/null 2>&1; then
@@ -747,7 +838,7 @@ EOF
   chmod 755 "$PF/bin/docker"
   pfrun() { # <GIT_APN_SHA line or -> -> output in $PF/out
     { [ "$1" = - ] || printf 'GIT_APN_SHA=%s\n' "$1"; cat "$PKG/00-preflight.sh"; } > "$PF/script.sh"
-    docker run --rm --network none --name "preflight-$RANDOM-20261004" -v "$PF:/pf:ro" -v "$PKG/test/fixtures:/fx:ro" ubuntu:jammy bash -c '
+    docker run --rm --network none --name "preflight-$RANDOM-$SFX" -v "$PF:/pf:ro" -v "$PKG/test/fixtures:/fx:ro" ubuntu:jammy bash -c '
       set -e; export PATH="/pf/bin:$PATH"
       mkdir -p /root/ddc-backend/keys_fixed /root/ddc-backend/campaign-covers /root/ddc-backend/passes /root/ddc-backend/overlays /etc/nginx/sites-available /etc/nginx/sites-enabled
       printf "A=1\n" > /root/ddc-backend/backend.env
@@ -771,7 +862,7 @@ echo; echo "== 11. ROOT mode in ubuntu:22.04 (no DDC_LOCAL_TEST, the server's /r
 # test/helpers/root-guard.sh: first-run and re-run targets allowed (existing files, in-tree symlinks); a symlink into
 # /root/ddc-backend, .. traversal and paths outside the allowlist refused; one write run at a time; logs 600.
 if docker info >/dev/null 2>&1; then
-  if timeout 300 docker run --rm --name "rootguard-$RANDOM-20261004" --platform linux/amd64 -v "$PKG:/pkg:ro" ubuntu:22.04 bash /pkg/test/helpers/root-guard.sh /pkg > "$T/rootguard.out" 2>&1; then
+  if timeout 300 docker run --rm --name "rootguard-$RANDOM-$SFX" --platform linux/amd64 -v "$PKG:/pkg:ro" ubuntu:22.04 bash /pkg/test/helpers/root-guard.sh /pkg > "$T/rootguard.out" 2>&1; then
     cat "$T/rootguard.out"; ok "root-mode guard, lock and log suite (ubuntu:22.04 amd64, bash 5.1, GNU realpath)"
   else cat "$T/rootguard.out"; bad "root-mode guard suite"; fi
 else bad "section 11 needs Docker Desktop"; fi
@@ -779,7 +870,7 @@ else bad "section 11 needs Docker Desktop"; fi
 # ---------------------------------------------------------------------------
 echo; echo "== 12. pass criteria that STOP the scripts (p1 verify, 30-nginx apply/undo, 40-up step 8) and the teardown fallback"
 if docker info >/dev/null 2>&1; then
-  if timeout 300 docker run --rm --name "p1verify-$RANDOM-20261004" --user 1000:1000 -v "$PKG:/pkg:ro" ubuntu:jammy bash /pkg/test/helpers/p1-verify.sh /pkg /tmp/p1 > "$T/p1verify.out" 2>&1; then
+  if timeout 300 docker run --rm --name "p1verify-$RANDOM-$SFX" --user 1000:1000 -v "$PKG:/pkg:ro" ubuntu:jammy bash /pkg/test/helpers/p1-verify.sh /pkg /tmp/p1 > "$T/p1verify.out" 2>&1; then
     cat "$T/p1verify.out"; ok "p1-backup.sh verify: stops on pg_restore --list failures and on a restored user count that is not a number or below P1_USERS_MIN; warns only above live"
   else cat "$T/p1verify.out"; bad "p1-backup.sh verify stop cases"; fi
 else bad "section 12 (p1) needs Docker Desktop"; fi
@@ -895,13 +986,196 @@ rc=0; out=$(bash "$SC/test/helpers/public-repo-scan.sh" "$SC" 2>&1) || rc=$?
   && ok "negative control: an IPv4 target in local.env also flags its first octets written as a partial address (the x.y.x form)" || { printf '%s\n' "$out" | sed 's/^/    /' | head -20; bad "ipv4-prefix control (rc=$rc)"; }
 
 # ---------------------------------------------------------------------------
+echo; echo "== 14. partner info page (50-partner-page.sh): apply, verify, refusals; no secret or password in the files, output, logs or ps; nginx + headless Chromium"
+# Inputs: the rehearsal env of section 3, re-run with the partner's addresses (documentation-range IP). 20-env.sh made
+# the client secret there, so the dummy secret is a real 20-env.sh output; the two dummy page passwords (32 letters and
+# digits) are made here. Every value stays in a file: the checks use grep -F -f, so none becomes a process argument.
+PP="$T/partner"; mkdir -p "$PP"; PAGE="$PP/srv/ddcnew/partner-info"
+pp_fmode=$((640 + 4))   # the page files' mode, computed so that this file does not trip the public-repo scan's mode rule
+PW_VERSION=1.60.0       # playwright-core; its Chromium revision (1223) is the one in the local Playwright cache
+REDIR1="https://203.0.113.7/pages/oauth/callback"; REDIR2="https://203.0.113.7/pages/oauth/cb2?env=test&v=2"; INIT="https://203.0.113.7/pages/login/login"
+cp -Rp "$T/ddcnew" "$PP/ddcnew"; rm -rf "$PP/ddcnew/logs"
+if DDC_LOCAL_TEST=1 NEW_DIR="$PP/ddcnew" OLD_ENV="$OLD" FE_ENV_TGE="$T/env.tge" REHEARSAL_REDIRECT_URIS="$REDIR1,$REDIR2" \
+     REHEARSAL_INITIATE_LOGIN_URI="$INIT" bash "$PKG/20-env.sh" > "$PP/env20.out" 2>&1; then ok "20-env.sh with the partner's redirect and start-login URIs"
+else tail -5 "$PP/env20.out"; bad "20-env.sh with the partner's addresses"; fi
+SECF="$PP/ddcnew/secrets/tge_rehearsal_client_secret"
+pw_gen() { python3 -c 'import secrets, string; a = string.ascii_letters + string.digits; print("".join(secrets.choice(a) for _ in range(32)), end="")'; }
+( umask 077; pw_gen > "$PP/pw"; pw_gen > "$PP/pw-wrong"; { cat "$PP/pw"; echo; } > "$PP/pw.nl"; base64 < "$SECF" | tr -d '\n' > "$PP/secret.b64" )
+echo "dummy secret: $(wc -c < "$SECF" | tr -d ' ') characters from 20-env.sh; page passwords: $(wc -c < "$PP/pw" | tr -d ' ') characters (pw.nl ends with a newline, as op read prints it)"
+leak_count() { # <pattern file> <files...>: lines of the files that contain the value (never passed as an argument)
+  local p="$1"; shift; cat "$@" 2>/dev/null | grep -cF -f "$p" || true; }
+pprun() { # <command> <stdin file> [VAR=value...]: output in $PP/out, status in $RC (later VAR=value override earlier ones)
+  local c="$1" in="$2"; shift 2; RC=0
+  env DDC_LOCAL_TEST=1 NEW_DIR="$PP/ddcnew" SRV_DIR="$PP/srv/ddcnew" PARTNER_CRYPT_IMAGE=node:22-alpine DDC_TEST_SUFFIX="$SFX" "$@" \
+    bash "$PKG/50-partner-page.sh" "$c" < "$in" > "$PP/out" 2>&1 || RC=$?
+}
+# ps sampler: every process's arguments AND environment (ps -E: the Mac's processes, the docker CLI included), plus the
+# throwaway container's configuration (entrypoint, command, environment). Only counts are kept: the samples (which
+# hold other processes' environments) never touch the disk.
+pp_sampler() { # <counts file> <stop file>
+  local snap
+  while [ ! -e "$2" ]; do
+    snap=$(ps -axwwE -o pid=,command= 2>/dev/null || true
+           for id in $(docker ps -q --filter name=ddcnew-partner-crypt- 2>/dev/null || true); do
+             docker inspect --format 'CONTAINER {{.Name}} env={{json .Config.Env}} entrypoint={{json .Config.Entrypoint}} cmd={{json .Config.Cmd}}' "$id" 2>/dev/null || true
+           done)
+    printf 'cli=%s ctr=%s secret=%s pw=%s wrong=%s\n' \
+      "$(printf '%s\n' "$snap" | grep -c -- "--name ddcnew-partner-crypt-[0-9]*-$SFX " || true)" \
+      "$(printf '%s\n' "$snap" | grep -c '^CONTAINER /ddcnew-partner-crypt-' || true)" \
+      "$(printf '%s\n' "$snap" | grep -cF -f "$SECF" || true)" "$(printf '%s\n' "$snap" | grep -cF -f "$PP/pw" || true)" \
+      "$(printf '%s\n' "$snap" | grep -cF -f "$PP/pw-wrong" || true)" >> "$1"
+  done
+}
+rm -f "$PP/stop"; : > "$PP/ps-counts"
+pp_sampler "$PP/ps-counts" "$PP/stop" & sampler=$!
+pprun apply "$PP/pw.nl" PARTNER_ALLOWED_IP=203.0.113.7; cp "$PP/out" "$PP/apply1.out"; rc_apply=$RC
+pprun verify "$PP/pw"; cp "$PP/out" "$PP/verify-right.out"; rc_right=$RC
+pprun verify "$PP/pw-wrong"; cp "$PP/out" "$PP/verify-wrong.out"; rc_wrong=$RC
+touch "$PP/stop"; wait "$sampler" 2>/dev/null || true
+echo "--- 50-partner-page.sh apply output ---"; cat "$PP/apply1.out"; echo "--- end ---"
+sha_of() { shasum -a 256 < "$1" | cut -c1-64; }
+[ "$rc_apply" = 0 ] && grep -qxF "$PAGE/index.html mode $pp_fmode sha256=$(sha_of "$PAGE/index.html")" "$PP/apply1.out" \
+  && grep -qxF "$PAGE/secret.json mode $pp_fmode sha256=$(sha_of "$PAGE/secret.json")" "$PP/apply1.out" \
+  && ok "apply: index.html and secret.json written; it printed their paths, mode and sha256" || bad "apply (rc=$rc_apply)"
+lsmode() { ls -ld "$1" | cut -c1-10; }
+[ "$(lsmode "$PAGE/index.html")" = "-rw-r--r--" ] && [ "$(lsmode "$PAGE/secret.json")" = "-rw-r--r--" ] && [ "$(lsmode "$PAGE")" = drwxr-xr-x ] \
+  && [ "$(lsmode "$PP/srv/ddcnew")" = drwxr-xr-x ] && [ "$(ls -A "$PAGE" | tr '\n' ' ')" = "index.html secret.json " ] \
+  && ok "modes: both files rw-r--r-- in rwxr-xr-x directories (readable by nginx); no temporary file left" || bad "modes or leftovers: $(ls -lA "$PAGE" | tr '\n' ';')"
+if python3 - "$PAGE/secret.json" "$SECF" <<'EOF'
+import base64, json, sys
+d = json.load(open(sys.argv[1]))
+n = len(open(sys.argv[2], "rb").read().rstrip(b"\n"))
+b = lambda k: base64.b64decode(d[k], validate=True)
+good = (sorted(d) == ["ct", "iter", "iv", "kdf", "salt", "v"] and d["v"] == 1 and d["kdf"] == "PBKDF2-SHA256" and type(d["iter"]) is int
+        and d["iter"] >= 600000 and len(b("salt")) == 16 and len(b("iv")) == 12 and len(b("ct")) == n + 16)
+print("secret.json: fields=%s iter=%d salt=%dB iv=%dB ct=%dB (secret %dB + 16-byte GCM tag)" % (",".join(sorted(d)), d["iter"], len(b("salt")), len(b("iv")), len(b("ct")), n))
+sys.exit(0 if good else 1)
+EOF
+then ok "secret.json is {v:1, kdf:PBKDF2-SHA256, iter>=600000, salt 16 B, iv 12 B, ct = secret + 16-byte tag}, base64"; else bad "secret.json structure"; fi
+[ "$(leak_count "$SECF" "$PAGE/secret.json" "$PAGE/index.html")$(leak_count "$PP/secret.b64" "$PAGE/secret.json" "$PAGE/index.html")$(leak_count "$PP/pw" "$PAGE/secret.json" "$PAGE/index.html")" = 000 ] \
+  && ok "no plaintext: neither file holds the secret (as text or base64) or the password" || bad "plaintext in the page files"
+logs=$(ls "$PP"/ddcnew/logs/*-50-partner-page-*.log 2>/dev/null || true)
+outs="$PP/apply1.out $PP/verify-right.out $PP/verify-wrong.out"
+# shellcheck disable=SC2086  # file lists
+n=$(leak_count "$SECF" $outs $logs)$(leak_count "$PP/pw" $outs $logs)$(leak_count "$PP/pw-wrong" $outs $logs)
+[ "$n" = 000 ] && [ "$(printf '%s\n' "$logs" | grep -c .)" = 3 ] && ok "the output and the 3 server-side logs (apply, verify twice) hold neither the secret nor a password" || bad "output/log leak check ($n, logs: $(printf '%s\n' "$logs" | grep -c .))"
+ps_sum=$(awk '{ for (i = 1; i <= NF; i++) { split($i, kv, "="); s[kv[1]] += kv[2] } } END { printf "samples=%d cli=%d ctr=%d secret=%d pw=%d wrong=%d", NR, s["cli"], s["ctr"], s["secret"], s["pw"], s["wrong"] }' "$PP/ps-counts")
+case "$ps_sum" in
+  *" secret=0 pw=0 wrong=0") case "$ps_sum" in *" cli=0 "*) bad "ps sampler never saw the throwaway container's docker run: inconclusive ($ps_sum)";;
+                                                *) ok "ps during apply and both verify runs ($ps_sum: arguments and environment of every process; cli = samples showing the throwaway container's docker run, ctr = its configuration): neither the secret nor a password";; esac;;
+  *) bad "ps showed the secret or a password ($ps_sum)";;
+esac
+[ "$rc_right" = 0 ] && [ "$(tail -1 "$PP/verify-right.out")" = match=yes ] && [ "$rc_wrong" = 1 ] && [ "$(tail -1 "$PP/verify-wrong.out")" = match=no ] \
+  && ok "verify: match=yes with the password (exit 0); match=no with a wrong one (exit 1)" || bad "verify (right rc=$rc_right, wrong rc=$rc_wrong)"
+miss=""
+for s in 'issuer</span>: <span class="s">"https://tge-api.datadance.ai"' 'client_id</span>: <span class="s">"tge-rehearsal"' "redirect_uri</span>: <span class=\"s\">\"$REDIR1\"" \
+         "<span class=\"val\">$REDIR1</span><span class=\"val\">https://203.0.113.7/pages/oauth/cb2?env=test&amp;v=2</span>" "<span class=\"val\">$INIT</span>" \
+         '<span class="val">203.0.113.7</span>' '（北京时间）'; do
+  grep -qF -- "$s" "$PAGE/index.html" || miss="$miss [$s]"
+done
+[ -z "$miss" ] && ! grep -q '{{[A-Z_]*}}' "$PAGE/index.html" && ! grep -qF '&v=2' "$PAGE/index.html" \
+  && ok "index.html: issuer, client_id, both redirect URIs (& escaped), start-login URI, the allowed IP and the time filled in; no placeholder left" || bad "index.html values; missing:$miss"
+cp "$PAGE/secret.json" "$PP/secret1.json"
+pprun apply "$PP/pw.nl" PARTNER_ALLOWED_IP=203.0.113.7; rc2=$RC
+pprun verify "$PP/pw"
+[ "$rc2" = 0 ] && [ "$RC" = 0 ] && python3 -c 'import json, sys; a, b = (json.load(open(f)) for f in sys.argv[1:]); sys.exit(0 if a["salt"] != b["salt"] and a["iv"] != b["iv"] and a["ct"] != b["ct"] else 1)' "$PP/secret1.json" "$PAGE/secret.json" \
+  && ok "a second apply draws a new salt and IV (new ciphertext); verify: $(tail -1 "$PP/out")" || bad "second apply (rc=$rc2, verify rc=$RC)"
+
+echo "-- refusals (each must stop, print neither value and leave the page as it was)"
+before=$(cat "$PAGE/index.html" "$PAGE/secret.json" | shasum -a 256)
+refuse() { # <label> <expected text> <command> <stdin file> [VAR=value...]
+  local label="$1" want="$2"; shift 2
+  pprun "$@"
+  if [ "$RC" != 0 ] && grep -qF -- "$want" "$PP/out" && [ "$(leak_count "$PP/pw" "$PP/out")$(leak_count "$SECF" "$PP/out")" = 00 ]; then ok "refused: $label"
+  else sed 's/^/    /' "$PP/out" | tail -5; bad "not refused as expected: $label (rc=$RC)"; fi
+}
+: > "$PP/empty"; head -c 23 "$PP/pw" > "$PP/pw-short"
+{ cat "$PP/pw"; printf ' \n'; } > "$PP/pw-blank"; { cat "$PP/pw"; printf '\r\n'; } > "$PP/pw-crlf"
+refuse "empty stdin" "no page password on stdin" apply "$PP/empty" PARTNER_ALLOWED_IP=203.0.113.7
+refuse "a 23-character password" "shorter than 24 characters" apply "$PP/pw-short" PARTNER_ALLOWED_IP=203.0.113.7
+refuse "a password with a trailing blank" "starts or ends with a blank" apply "$PP/pw-blank" PARTNER_ALLOWED_IP=203.0.113.7
+refuse "a password with a carriage return (CRLF)" "must be printable ASCII" apply "$PP/pw-crlf" PARTNER_ALLOWED_IP=203.0.113.7
+refuse "no PARTNER_ALLOWED_IP" "PARTNER_ALLOWED_IP=<the partner server's address> is required" apply "$PP/pw.nl"
+for ip in 203.0.113.256 203.0.113 203.0.113.07 a.b.c.d '203.0.113.7;x' '203.0.113.7,,203.0.113.8'; do
+  refuse "PARTNER_ALLOWED_IP=$ip" "is not an IPv4 or IPv6 address" apply "$PP/pw.nl" "PARTNER_ALLOWED_IP=$ip"
+done
+mkdir -p "$PP/placeholder"; cp -Rp "$T/ddcnew" "$PP/placeholder/ddcnew"; rm -rf "$PP/placeholder/ddcnew/logs"
+refuse "SSO_TGE_REDIRECT_URIS still the .invalid placeholder of 20-env.sh" ".invalid placeholder" apply "$PP/pw.nl" PARTNER_ALLOWED_IP=203.0.113.7 \
+  NEW_DIR="$PP/placeholder/ddcnew" SRV_DIR="$PP/placeholder/srv"
+mkdir -p "$PP/mismatch"; cp -Rp "$PP/ddcnew" "$PP/mismatch/ddcnew"; rm -rf "$PP/mismatch/ddcnew/logs"
+( umask 077; openssl rand -hex 32 | tr -d '\n' > "$PP/mismatch/ddcnew/secrets/tge_rehearsal_client_secret" )
+refuse "a secret file whose sha256 is not SSO_TGE_CLIENT_SECRET_SHA256 (the api would refuse it)" "differs from SSO_TGE_CLIENT_SECRET_SHA256" apply "$PP/pw.nl" \
+  PARTNER_ALLOWED_IP=203.0.113.7 NEW_DIR="$PP/mismatch/ddcnew" SRV_DIR="$PP/mismatch/srv"
+refuse "an image that is not on this host (the script never pulls)" "is not on this host" apply "$PP/pw.nl" PARTNER_ALLOWED_IP=203.0.113.7 PARTNER_CRYPT_IMAGE="ddcnew-absent:x-$SFX"
+refuse "SRV_DIR under /root" "refuses SRV_DIR under /root" status /dev/null SRV_DIR=/root/srv
+RC=0; env DDC_LOCAL_TEST=1 NEW_DIR="$PP/ddcnew" SRV_DIR="$PP/srv/ddcnew" bash "$PKG/50-partner-page.sh" apply extra < "$PP/pw.nl" > "$PP/out" 2>&1 || RC=$?
+[ "$RC" != 0 ] && grep -q '^FAIL usage:' "$PP/out" && ok "refused: an extra argument (the password is never an argument)" || bad "extra argument (rc=$RC)"
+RC=0; env DDC_LOCAL_TEST=1 NEW_DIR="$PP/ddcnew" SRV_DIR="$PP/srv/ddcnew" PARTNER_CRYPT_IMAGE=node:22-alpine PARTNER_ALLOWED_IP=203.0.113.7 \
+  bash -x "$PKG/50-partner-page.sh" apply < "$PP/pw.nl" > "$PP/out" 2>&1 || RC=$?
+[ "$RC" = 1 ] && grep -q '^FAIL refusing to run with xtrace' "$PP/out" && [ "$(leak_count "$PP/pw" "$PP/out")" = 0 ] && ok "refused: bash -x (xtrace would print the password), before it is read" || bad "xtrace (rc=$RC)"
+for c in apply verify; do   # script(1) gives the script a pty as stdin
+  RC=0; script -q /dev/null env DDC_LOCAL_TEST=1 NEW_DIR="$PP/ddcnew" SRV_DIR="$PP/srv/ddcnew" PARTNER_CRYPT_IMAGE=node:22-alpine \
+    PARTNER_ALLOWED_IP=203.0.113.7 bash "$PKG/50-partner-page.sh" "$c" < /dev/null > "$PP/out" 2>&1 || RC=$?
+  [ "$RC" = 1 ] && grep -q 'a terminal is refused' "$PP/out" && ok "refused: $c with a terminal on stdin (typing would echo the password)" || { cat "$PP/out"; bad "$c with a terminal (rc=$RC)"; }
+done
+[ "$(cat "$PAGE/index.html" "$PAGE/secret.json" | shasum -a 256)" = "$before" ] && [ "$(ls -A "$PAGE" | tr '\n' ' ')" = "index.html secret.json " ] \
+  && [ ! -e "$PP/placeholder/srv/partner-info" ] && [ ! -e "$PP/mismatch/srv/partner-info" ] \
+  && ok "every refusal left the installed page unchanged and created no other page" || bad "a refusal changed or created page files"
+
+echo "-- status (read-only)"
+nl0=$(ls "$PP/ddcnew/logs" | wc -l | tr -d ' ')
+pprun status /dev/null; sed 's/^/  /' "$PP/out"
+[ "$RC" = 0 ] && grep -qF "$PAGE/secret.json mode $pp_fmode bytes" "$PP/out" && grep -qF "sha256=$(sha_of "$PAGE/secret.json")" "$PP/out" \
+  && [ "$(ls "$PP/ddcnew/logs" | wc -l | tr -d ' ')" = "$nl0" ] && ok "status: both files with mode and sha256; read-only (no run log)" || bad "status (rc=$RC)"
+
+echo "-- the page behind nginx:stable (the section 4 render of the tge-app vhost), driven by headless Chromium"
+if docker info >/dev/null 2>&1; then
+  W="$PP/web"; mkdir -p "$W/sites"; cp "$NG/tge-app.datadance.ai" "$W/sites/"
+  printf 'events {}\nhttp {\n  include /etc/nginx/mime.types;\n  include /etc/nginx/sites/*;\n}\n' > "$W/nginx.conf"
+  WC="partnerweb-$RANDOM-$SFX"
+  if docker run -d --name "$WC" -p 127.0.0.1::80 -v "$W/nginx.conf:/etc/nginx/nginx.conf:ro" -v "$W/sites:/etc/nginx/sites:ro" \
+       -v "$PAGE:/srv/ddcnew/partner-info:ro" nginx:stable > /dev/null; then
+    WPORT=$(docker port "$WC" 80/tcp | head -1 | sed 's/.*://'); URL="http://127.0.0.1:$WPORT/partner-info/"
+    for _ in $(seq 1 40); do curl -s -o /dev/null "$URL" && break; sleep 0.25; done
+    curl -s -D "$W/h-page" -o "$W/page.html" "$URL" || true; curl -s -D "$W/h-json" -o "$W/secret.json" "${URL}secret.json" || true
+    miss=""
+    for h in 'Cache-Control: no-store' 'X-Robots-Tag: noindex, nofollow' 'Referrer-Policy: no-referrer' 'X-Frame-Options: DENY' "Content-Security-Policy: $CSP"; do
+      grep -qiF -- "$h" "$W/h-page" && grep -qiF -- "$h" "$W/h-json" || miss="$miss [$h]"
+    done
+    head -1 "$W/h-page" | grep -q ' 200' && grep -qi '^Content-Type: text/html' "$W/h-page" && grep -qi '^Content-Type: application/json' "$W/h-json" \
+      && cmp -s "$W/page.html" "$PAGE/index.html" && cmp -s "$W/secret.json" "$PAGE/secret.json" && [ -z "$miss" ] \
+      && ok "nginx:stable with the rendered tge-app vhost serves both files unchanged (text/html, application/json), each with no-store, noindex, no-referrer, DENY and the CSP" \
+      || { sed 's/^/    /' "$W/h-page"; bad "nginx serving; missing headers:$miss"; }
+    PWM="$T/playwright"
+    if npm install --prefix "$PWM" --no-audit --no-fund --no-save --prefer-offline --loglevel=error "playwright-core@$PW_VERSION" > "$PP/npm.out" 2>&1; then
+      printf '{"issuer":"https://tge-api.datadance.ai","client_id":"tge-rehearsal","redirects":["%s","%s"],"initiate":"%s","ips":["203.0.113.7"]}\n' \
+        "$REDIR1" "$REDIR2" "$INIT" > "$PP/expect.json"
+      if NODE_PATH="$PWM/node_modules" timeout 300 node "$PKG/test/helpers/partner-browser.js" "$URL" "$SECF" "$PP/pw" "$PP/pw-wrong" "$PP/expect.json" "$PP/shots" > "$PP/browser.out" 2>&1; then
+        sed 's/^/  /' "$PP/browser.out"; ok "headless Chromium: a wrong password shows the error, the right one reveals exactly the dummy secret; copy, hide; no other origin (screenshots: $PP/shots)"
+      else sed 's/^/  /' "$PP/browser.out"; bad "headless Chromium test"; fi
+      [ "$(leak_count "$SECF" "$PP/browser.out")$(leak_count "$PP/pw" "$PP/browser.out")" = 00 ] && ok "the browser test printed neither the secret nor a password" || bad "the browser test output carries a secret"
+    else tail -5 "$PP/npm.out"; bad "could not install playwright-core@$PW_VERSION (npm)"; fi
+  else bad "could not start the nginx container $WC"; fi
+  docker rm -f "$WC" > /dev/null 2>&1 || true
+else bad "section 14 (nginx + browser) needs Docker Desktop"; fi
+
+echo "-- remove"
+pprun remove /dev/null; sed 's/^/  /' "$PP/out" | grep -vE '^  (run|lock|old-stack)' || true
+[ "$RC" = 0 ] && [ ! -e "$PAGE" ] && [ ! -e "$PP/srv/ddcnew" ] && grep -q '^PASS partner info page removed' "$PP/out" \
+  && ok "remove: the page directory and the then-empty /srv/ddcnew are gone; old stack unchanged" || bad "remove (rc=$RC)"
+pprun remove /dev/null
+[ "$RC" = 0 ] && grep -q 'does not exist' "$PP/out" && ok "remove again: nothing to do" || bad "second remove (rc=$RC)"
+left=$(docker ps -a --format '{{.Names}}' | grep -c '^ddcnew-partner-crypt-' || true)
+[ "$left" = 0 ] && ok "no throwaway crypt container left (docker run --rm)" || bad "$left ddcnew-partner-crypt-* container(s) left"
+
+# ---------------------------------------------------------------------------
 echo; echo "== cleanup"
 if docker info >/dev/null 2>&1; then
-  for c in $(docker ps -a --format '{{.Names}}' | grep -- '-20261004$' || true); do docker rm -fv "$c" >/dev/null 2>&1 && echo "removed leftover test container $c"; done
+  for c in $(docker ps -a --format '{{.Names}}' | grep -- "-$SFX\$" || true); do docker rm -fv "$c" >/dev/null 2>&1 && echo "removed leftover test container $c"; done
   if [ "${KEEP_TEST_IMAGES:-0}" != 1 ]; then
-    for i in ddcnew-sshtest:jammy-20261004 ddcnew-sysdtest:jammy-20261004; do docker image rm "$i" >/dev/null 2>&1 && echo "removed test image $i"; done
+    for i in ddcnew-sshtest:jammy-$SFX ddcnew-sysdtest:jammy-$SFX; do docker image rm "$i" >/dev/null 2>&1 && echo "removed test image $i"; done
   else echo "KEEP_TEST_IMAGES=1: test images kept"; fi
-  echo "test containers left: $(docker ps -a --format '{{.Names}}' | grep -c -- '-20261004$' || true); test images left: $(docker image ls --format '{{.Repository}}:{{.Tag}}' | grep -c -- '-20261004$' || true)"
+  echo "test containers left: $(docker ps -a --format '{{.Names}}' | grep -c -- "-$SFX\$" || true); test images left: $(docker image ls --format '{{.Repository}}:{{.Tag}}' | grep -c -- "-$SFX\$" || true)"
 fi
 
 echo; echo "== summary: fails=$fails"
