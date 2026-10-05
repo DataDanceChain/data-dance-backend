@@ -29,12 +29,14 @@ const WALLET_RE = /^0x[a-fA-F0-9]{40}$/;
 
 /**
  * Shown as is by the old store Apps (iOS 2.0.1 / 2.0.2, Android 1.0.2): they do not know the code
- * and display `message`, so it is one string in both languages. It must never contain
- * "incomplete", "不完整", "email is required", "邮箱是必需的" or "new user registration": on a
- * `status: 'fail'` body those words send the old Apps to /complete-profile instead.
+ * and display `message`, so it is one string in both languages. The Chinese half is Traditional
+ * (the Apps' Chinese locale is zh-TW) and repeats the Apps' own update screen (frontend
+ * `appVersionGate.body`). It must never contain "incomplete", "不完整", "email is required",
+ * "邮箱是必需的" or "new user registration": on a `status: 'fail'` body those words send the old
+ * Apps to /complete-profile instead.
  */
 const APP_UPDATE_REQUIRED_MESSAGE =
-  '此 App 版本已不再支持，请更新到最新版本。This App version is no longer supported. Please update to the latest version.';
+  '這個版本的 DataDance 已停止支援。請安裝最新版本，繼續使用你的帳戶。This App version is no longer supported. Please update to the latest version.';
 
 /**
  * 426 APP_UPDATE_REQUIRED. Only ever sent IN PLACE OF a refusal (IDTOKEN_AUDIENCE for a retired

@@ -239,7 +239,8 @@ function assertAppUpdateRequired(res, { ios = IOS_URL, android = ANDROID_URL } =
   assert.deepEqual(res.body.update, { ios, android });
   const { message } = res.body;
   assert.match(message, /[一-鿿]/, 'the message has a Chinese part');
-  assert.ok(message.includes('请更新到最新版本'), message);
+  assert.ok(message.includes('這個版本的 DataDance 已停止支援。請安裝最新版本，繼續使用你的帳戶。'), message);
+  assert.doesNotMatch(message, /[请这个账续装户]/, 'the Chinese half is Traditional (zh-TW), as in the Apps');
   assert.ok(message.includes('This App version is no longer supported. Please update to the latest version.'), message);
   for (const word of COMPLETE_PROFILE_TRIGGERS) {
     assert.ok(!message.includes(word), `"${word}" would send an old App to /complete-profile instead of showing the message`);
