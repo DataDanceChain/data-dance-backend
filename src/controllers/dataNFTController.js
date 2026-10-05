@@ -1,6 +1,6 @@
 const { PrismaClient } = require('@prisma/client');
 const prisma = new PrismaClient();
-const commerceService = require('../services/commerceService');
+const { purchasePublishedPack } = require('../services/packPurchase');
 const { filterLicensableRecords, assertPackHasLicensableRecords } = require('../services/dataLicenceConsent');
 const { BUYER_LICENCE_VERSION, BUYER_LICENCE_TERMS, licenceTerms, hasAcceptedBuyerLicence } = require('../constants/buyerLicence');
 const { stampBuyerLicence } = require('../services/buyerLicence');
@@ -439,190 +439,20 @@ const unpublishDataNFT = async (req, res) => {
 // Purchase a DataNFT
 const purchaseDataNFT = async (req, res) => {
   try {
-    console.log('=== Starting DataNFT Purchase Process ===');
-    const { id } = req.params;
-    const buyerId = req.user.id;
-    const quantity = Math.max(1, Number(req.body.quantity) || 1);
-    
-    console.log('Initial request data:', {
-      nftId: id,
-      buyerId: buyerId,
-      user: req.user,
-      quantity
+    const result = await purchasePublishedPack({
+      buyerId: req.user.id,
+      dataNFTId: req.params.id,
+      quantity: req.body.quantity,
     });
-
-    const dataNFT = await prisma.dataNFT.findUnique({
-      where: { id },
-      include: {
-        merchant: true
-      }
-    });
-
-    console.log('Found DataNFT:', {
-      id: dataNFT?.id,
-      name: dataNFT?.name,
-      merchantId: dataNFT?.merchantId,
-      isPublished: dataNFT?.isPublished,
-      price: dataNFT?.price
-    });
-
-    if (!dataNFT) {
-      console.log('Error: DataNFT not found');
-      return res.status(404).json({ error: 'DataNFT not found' });
-    }
-
-    if (!dataNFT.isPublished) {
-      console.log('Error: DataNFT is not published');
-      return res.status(400).json({ error: 'DataNFT is not published' });
-    }
-
-    const licence = await assertPackHasLicensableRecords(dataNFT);
-    if (!licence.ok) {
-      console.log('Purchase blocked: pack has no licensable records', {
-        nftId: id,
-        dataSource: dataNFT.dataSource,
-      });
-      return res.status(403).json({
-        status: 'fail',
-        code: 'subject_consent_required',
-        error: SUBJECT_CONSENT_ERROR,
-      });
-    }
-
-    if (dataNFT.merchantId === buyerId) {
-      console.log('Error: Attempting to purchase own DataNFT', {
-        merchantId: dataNFT.merchantId,
-        buyerId: buyerId
-      });
-      return res.status(403).json({ error: 'Cannot purchase your own DataNFT' });
-    }
-
-    // 获取用户已购买次数（仅用于记录）
-    const purchaseCount = await prisma.dataNFTPurchase.count({
-      where: {
-        dataNFTId: id,
-        buyerId: buyerId
-      }
-    });
-
-    console.log('Current purchase count:', purchaseCount);
-
-    const totalAmount = dataNFT.price * quantity;
-    const buyer = await prisma.user.findUnique({
-      where: { id: buyerId },
-      select: {
-        id: true,
-        email: true,
-        isOrganization: true,
-        userType: true
-      }
-    });
-    const isOrgBuyer = Boolean(buyer && (buyer.isOrganization || buyer.userType === 'organization'));
-    if (!isOrgBuyer) {
-      return res.status(403).json({
-        status: 'fail',
-        code: 'org_buyer_required',
-        error: 'Only a merchant account can buy a dataset licence.',
-        message: 'Only a merchant account can buy a dataset licence.',
-      });
-    }
-    const [depositSum, withdrawSum] = await Promise.all([
-      prisma.organizationTransaction.aggregate({
-        _sum: { amount: true },
-        where: { userId: buyerId, type: 'DEPOSIT', status: 'COMPLETED' }
-      }),
-      prisma.organizationTransaction.aggregate({
-        _sum: { amount: true },
-        where: { userId: buyerId, type: 'WITHDRAW', status: 'COMPLETED' }
-      })
-    ]);
-    const balance = (depositSum._sum.amount || 0) - (withdrawSum._sum.amount || 0);
-    if (balance < totalAmount) {
-      return res.status(400).json({ error: 'Insufficient balance to complete this purchase.' });
-    }
-
-    const result = await prisma.$transaction(async (tx) => {
-      const purchase = await tx.dataNFTPurchase.create({
-        data: {
-          dataNFTId: id,
-          buyerId,
-          quantity
-        },
-        include: {
-          dataNFT: {
-            include: {
-              snapshots: true,
-              tags: true
-            }
-          }
-        }
-      });
-
-      await tx.organizationTransaction.create({
-        data: {
-          amount: totalAmount,
-          type: 'DEPOSIT',
-          status: 'COMPLETED',
-          description: `DataNFT sale: ${dataNFT.name} (Purchase #${purchaseCount + 1}, quantity: ${quantity})`,
-          userId: dataNFT.merchantId,
-          metadata: {
-            dataNFTId: dataNFT.id,
-            buyerId,
-            purchaseCount: purchaseCount + 1,
-            quantity
-          }
-        }
-      });
-
-      const buyerTransaction = await tx.organizationTransaction.create({
-        data: {
-          amount: totalAmount,
-          type: 'WITHDRAW',
-          status: 'COMPLETED',
-          description: `Purchase DataNFT: ${dataNFT.name} (Purchase #${purchaseCount + 1}, quantity: ${quantity})`,
-          userId: buyerId,
-          metadata: {
-            dataNFTId: dataNFT.id,
-            merchantId: dataNFT.merchantId,
-            purchaseCount: purchaseCount + 1,
-            quantity
-          }
-        }
-      });
-
-      const commerce = await commerceService.createOrderFromPurchase(tx, {
-        buyerId,
-        sellerId: dataNFT.merchantId,
-        dataNFT,
-        purchase,
-        quantity,
-        totalAmount,
-        paidFromBalance: true,
-        organizationTransactionId: buyerTransaction.id,
-      });
-
-      return { purchase, commerce };
-    });
-
-    const commerceAttest = require('../services/commerceAttest');
-    const attestation = result.commerce?.order?.id
-      ? await commerceAttest.attestPaidOrderSafe(result.commerce.order.id)
-      : null;
-    const publicView = commerceAttest.publicAttestation(attestation || result.commerce?.order);
-    const order = result.commerce.order
-      ? { ...commerceAttest.omitAttestationPayload(result.commerce.order), ...publicView }
-      : result.commerce.order;
-
-    console.log('=== Purchase Process Completed ===');
     res.status(201).json({
       ...result.purchase,
-      purchaseCount: purchaseCount + 1,
-      quantity,
-      order,
-      invoice: result.commerce.invoice,
-      payment: result.commerce.payment,
-      attestation: publicView,
-      status: 'success'
+      purchaseCount: result.purchaseCount,
+      quantity: result.quantity,
+      order: result.order,
+      invoice: result.invoice,
+      payment: result.payment,
+      attestation: result.attestation,
+      status: 'success',
     });
   } catch (error) {
     if (error.statusCode && error.statusCode < 500) {

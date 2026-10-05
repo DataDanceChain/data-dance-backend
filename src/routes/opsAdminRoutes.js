@@ -10,6 +10,7 @@ const {
   exportPoints,
 } = require('../controllers/opsAdminController');
 const opsCommerce = require('../controllers/opsCommerceController');
+const opsDemands = require('../controllers/opsDemandController');
 const disbursement = require('../controllers/disbursementController');
 const {
   listPrivacyRequests,
@@ -61,6 +62,12 @@ mount('post', '/campaigns/:id/applications/:appId', opsCampaigns.resolveApplicat
 mount('get', '/campaigns/:id/raffle', opsCampaigns.raffleState);
 mount('post', '/campaigns/:id/raffle/draw', opsCampaigns.drawRaffle);
 mount('post', '/campaigns/:id/raffle/wins/:winId/fulfill', opsCampaigns.fulfillRaffleWin);
+mount('get', '/demands', opsDemands.list);
+mount('get', '/demands/:id', opsDemands.get);
+mount('post', '/demands/:id/quote', opsDemands.quote);
+mount('post', '/demands/:id/decline', opsDemands.decline);
+mount('post', '/demands/:id/assemble', opsDemands.assemble);
+mount('post', '/demands/:id/fulfill', opsDemands.fulfill);
 mount('get', '/overview', opsCommerce.overview);
 mount('get', '/payments', opsCommerce.listPayments);
 mount('post', '/payments/:id/confirm', opsCommerce.confirmPayment);

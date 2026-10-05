@@ -1,152 +1,168 @@
-const { PrismaClient } = require('@prisma/client');
+const { Prisma, PrismaClient } = require('@prisma/client');
 const prisma = new PrismaClient();
 
-// 获取市场 NFT 数据资产列表
-exports.getMarketList = async (req, res) => {
+const LIST_PAGE_DEFAULT = 24;
+const LIST_PAGE_MAX = 60;
+
+const listSelect = {
+  id: true,
+  name: true,
+  description: true,
+  price: true,
+  image: true,
+  dataSource: true,
+  merchant: { select: { id: true, name: true, avatar: true } },
+  tags: { select: { id: true, name: true } },
+};
+
+function toCard(nft, size) {
+  return {
+    id: nft.id,
+    title: nft.name,
+    coverImage: nft.image,
+    owner: nft.merchant?.name,
+    ownerId: nft.merchant?.id,
+    ownerAvatar: nft.merchant?.avatar,
+    size,
+    price: nft.price,
+    description: nft.description,
+    tags: (nft.tags || []).map((tag) => ({ id: tag.id, name: tag.name })),
+  };
+}
+
+function searchScore(nft, query) {
+  const s = query.toLowerCase();
+  let score = 0;
+  if (nft.name?.toLowerCase().includes(s)) score += 3;
+  if (nft.merchant?.name?.toLowerCase().includes(s)) score += 2;
+  if (nft.description?.toLowerCase().includes(s)) score += 1;
+  if (nft.tags?.some((tag) => tag.name?.toLowerCase().includes(s))) score += 0.5;
+  return score;
+}
+
+async function sizesById(ids) {
+  const sizes = new Map();
+  if (!ids.length) return sizes;
+
+  const uploadRows = await prisma.$queryRaw`
+    SELECT id, COALESCE(("dataRecords"->>'recordCount')::int, 0) AS size
+    FROM "DataNFT"
+    WHERE id IN (${Prisma.join(ids)})
+      AND "dataSource" = 'upload'
+  `;
+  for (const row of uploadRows) {
+    sizes.set(row.id, Number(row.size) || 0);
+  }
+
+  for (const id of ids) {
+    if (!sizes.has(id)) sizes.set(id, 0);
+  }
+  return sizes;
+}
+
+function publishedWhere(tag, search) {
+  const where = { isPublished: true };
+  if (tag) where.tags = { some: { name: tag } };
+  if (search) {
+    where.OR = [
+      { name: { contains: search, mode: 'insensitive' } },
+      { description: { contains: search, mode: 'insensitive' } },
+      { merchant: { name: { contains: search, mode: 'insensitive' } } },
+      { tags: { some: { name: { contains: search, mode: 'insensitive' } } } },
+    ];
+  }
+  return where;
+}
+
+exports.getMarketTags = async (req, res) => {
   try {
-    const { tag, search } = req.query;
-    const where = {
-      isPublished: true
-    };
-    if (tag) {
-      where.tags = { some: { name: tag } };
-    }
-    if (search) {
-      where.OR = [
-        { name: { contains: search, mode: 'insensitive' } },
-        { description: { contains: search, mode: 'insensitive' } },
-        { merchant: { name: { contains: search, mode: 'insensitive' } } },
-        { tags: { some: { name: { contains: search, mode: 'insensitive' } } } }
-      ];
-    }
-    const dataNFTs = await prisma.dataNFT.findMany({
-      where,
-      include: {
-        merchant: true,
-        tags: true,
-        snapshots: {
-          include: {
-            activity: true
-          }
-        }
-      },
-      orderBy: search ? undefined : { createdAt: 'desc' }
+    const tags = await prisma.tag.findMany({
+      where: { dataNFTs: { some: { isPublished: true } } },
+      select: { id: true, name: true },
+      orderBy: { name: 'asc' },
     });
-    let data = dataNFTs.map(nft => {
-      // 计算 size：根据 dataSource 类型使用不同的计算方式
-      let size = 0;
-      if (nft.dataSource === 'upload' && nft.dataRecords) {
-        // 直接上传的数据包：从 dataRecords 计算
-        const dataRecords = typeof nft.dataRecords === 'string' 
-          ? JSON.parse(nft.dataRecords) 
-          : nft.dataRecords;
-        size = dataRecords.recordCount || 0;
-      } else {
-        // 活动数据：从 snapshots 计算
-      const userIds = nft.snapshots.map(s => s.userId).filter(Boolean);
-        size = new Set(userIds).size;
-      }
-      
-      // 计算关联度分数
-      let score = 0;
-      if (search) {
-        const s = search.toLowerCase();
-        if (nft.name?.toLowerCase().includes(s)) score += 3;
-        if (nft.merchant?.name?.toLowerCase().includes(s)) score += 2;
-        if (nft.description?.toLowerCase().includes(s)) score += 1;
-        if (nft.tags?.some(t => t.name?.toLowerCase().includes(s))) score += 0.5;
-      }
-      return {
-        id: nft.id,
-        title: nft.name,
-        coverImage: nft.image,
-        owner: nft.merchant?.name,
-        ownerId: nft.merchant?.id,
-        ownerAvatar: nft.merchant?.avatar,
-        size,
-        price: nft.price,
-        description: nft.description,
-        tags: nft.tags.map(t => ({
-          id: t.id,
-          name: t.name
-        })),
-        _score: score
-      };
-    });
-    if (search) {
-      data = data.sort((a, b) => b._score - a._score);
-    }
-    // 移除 _score 字段
-    data = data.map(({ _score, ...rest }) => rest);
-    res.status(200).json({ status: 'success', data });
+    res.status(200).json({ status: 'success', data: tags });
   } catch (error) {
     res.status(500).json({ status: 'error', message: 'Server error', error: error.message });
   }
 };
 
-// 获取市场 NFT 数据资产详情
+// Catalog list: never load dataRecords or snapshots. Those blobs make the old list slow.
+exports.getMarketList = async (req, res) => {
+  try {
+    const tag = typeof req.query.tag === 'string' ? req.query.tag.trim() : '';
+    const search = typeof req.query.search === 'string' ? req.query.search.trim() : '';
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const limit = Math.min(LIST_PAGE_MAX, Math.max(1, parseInt(req.query.limit, 10) || LIST_PAGE_DEFAULT));
+    const where = publishedWhere(tag, search);
+
+    const total = await prisma.dataNFT.count({ where });
+    let rows;
+    if (search) {
+      const matched = await prisma.dataNFT.findMany({
+        where,
+        select: listSelect,
+      });
+      matched.sort((a, b) => searchScore(b, search) - searchScore(a, search) || b.price - a.price);
+      rows = matched.slice((page - 1) * limit, page * limit);
+    } else {
+      rows = await prisma.dataNFT.findMany({
+        where,
+        select: listSelect,
+        orderBy: [{ price: 'desc' }, { name: 'asc' }],
+        skip: (page - 1) * limit,
+        take: limit,
+      });
+    }
+
+    const sizes = await sizesById(rows.map((row) => row.id));
+    const data = rows.map((row) => toCard(row, sizes.get(row.id) || 0));
+    res.status(200).json({
+      status: 'success',
+      data,
+      page,
+      limit,
+      total,
+      hasMore: page * limit < total,
+    });
+  } catch (error) {
+    res.status(500).json({ status: 'error', message: 'Server error', error: error.message });
+  }
+};
+
 exports.getMarketDetail = async (req, res) => {
   try {
     const { id } = req.params;
     const dataNFT = await prisma.dataNFT.findUnique({
       where: { id },
-      include: { 
-        merchant: true, 
-        tags: true,
-        snapshots: {
-          include: {
-            activity: true
-          }
-        }
-      }
+      select: {
+        ...listSelect,
+        isPublished: true,
+      },
     });
     if (!dataNFT || !dataNFT.isPublished) {
       return res.status(404).json({ status: 'fail', message: 'NFT Data not found or not for sale' });
     }
-    // 统计销量和收入
-    const sales = await prisma.dataNFTPurchase.aggregate({
-      _count: { id: true },
-      where: { dataNFTId: id }
-    });
-    // 计算实际数据量：根据 dataSource 类型使用不同的计算方式
-    let size = 0;
-    if (dataNFT.dataSource === 'upload' && dataNFT.dataRecords) {
-      // 直接上传的数据包：从 dataRecords 计算
-      const dataRecords = typeof dataNFT.dataRecords === 'string' 
-        ? JSON.parse(dataNFT.dataRecords) 
-        : dataNFT.dataRecords;
-      size = dataRecords.recordCount || 0;
-    } else {
-      // 活动数据：从 snapshots 计算
-    const userIds = dataNFT.snapshots.map(s => s.userId).filter(Boolean);
-      size = new Set(userIds).size;
-    }
+    const [sales, sizes] = await Promise.all([
+      prisma.dataNFTPurchase.aggregate({
+        _count: { id: true },
+        where: { dataNFTId: id },
+      }),
+      sizesById([id]),
+    ]);
     res.status(200).json({
       status: 'success',
       data: {
-        id: dataNFT.id,
-        title: dataNFT.name,
-        coverImage: dataNFT.image,
-        owner: dataNFT.merchant?.name,
-        ownerId: dataNFT.merchant?.id,
-        ownerAvatar: dataNFT.merchant?.avatar,
-        size,
-        price: dataNFT.price,
-        description: dataNFT.description,
-        tags: dataNFT.tags.map(t => ({
-          id: t.id,
-          name: t.name
-        })),
+        ...toCard(dataNFT, sizes.get(id) || 0),
         sales: sales._count.id || 0,
-        revenue: sales._count.id * dataNFT.price || 0
-      }
+        revenue: (sales._count.id || 0) * dataNFT.price || 0,
+      },
     });
   } catch (error) {
     res.status(500).json({ status: 'error', message: 'Server error', error: error.message });
   }
 };
 
-// 购买市场 NFT 数据资产
 exports.purchaseMarketNFT = async (req, res) => {
   try {
     const { id } = req.params;
@@ -155,26 +171,17 @@ exports.purchaseMarketNFT = async (req, res) => {
     if (!dataNFT || !dataNFT.isPublished) {
       return res.status(404).json({ status: 'fail', message: 'NFT Data not found or not for sale' });
     }
-    // 不能购买自己发售的
     if (dataNFT.merchantId === buyerId) {
       return res.status(403).json({ status: 'fail', message: 'Cannot purchase your own NFT Data' });
     }
-    // 检查是否已购买
     const existingPurchase = await prisma.dataNFTPurchase.findFirst({
-      where: {
-        dataNFTId: id,
-        buyerId
-      }
+      where: { dataNFTId: id, buyerId },
     });
     if (existingPurchase) {
       return res.status(400).json({ status: 'fail', message: 'Already purchased this NFT Data' });
     }
-    // 创建购买记录
     const purchase = await prisma.dataNFTPurchase.create({
-      data: {
-        dataNFTId: id,
-        buyerId
-      }
+      data: { dataNFTId: id, buyerId },
     });
     res.status(200).json({
       status: 'success',
@@ -183,36 +190,29 @@ exports.purchaseMarketNFT = async (req, res) => {
         orderId: purchase.id,
         nftId: id,
         price: dataNFT.price,
-        purchasedAt: purchase.createdAt
-      }
+        purchasedAt: purchase.createdAt,
+      },
     });
   } catch (error) {
     res.status(500).json({ status: 'error', message: 'Server error', error: error.message });
   }
 };
 
-// 获取我购买的 NFT 数据资产
 exports.getMyPurchases = async (req, res) => {
   try {
     const buyerId = req.user.id;
     const purchases = await prisma.dataNFTPurchase.findMany({
       where: { buyerId },
-      include: { 
-        dataNFT: { 
-          include: { 
-            merchant: true 
-          } 
-        } 
-      },
-      orderBy: { createdAt: 'desc' }
+      include: { dataNFT: { include: { merchant: true } } },
+      orderBy: { createdAt: 'desc' },
     });
-    const data = purchases.map(p => ({
+    const data = purchases.map((p) => ({
       orderId: p.id,
       nftId: p.dataNFTId,
       title: p.dataNFT.name,
       coverImage: p.dataNFT.image,
       price: p.dataNFT.price,
-      purchasedAt: p.createdAt
+      purchasedAt: p.createdAt,
     }));
     res.status(200).json({ status: 'success', data });
   } catch (error) {
@@ -220,23 +220,22 @@ exports.getMyPurchases = async (req, res) => {
   }
 };
 
-// 获取我发售的 NFT 数据资产及销售情况
 exports.getMySales = async (req, res) => {
   try {
     const merchantId = req.user.id;
     const dataNFTs = await prisma.dataNFT.findMany({
       where: { merchantId, isPublished: true },
-      include: { purchases: true }
+      include: { purchases: true },
     });
-    const data = dataNFTs.map(nft => ({
+    const data = dataNFTs.map((nft) => ({
       nftId: nft.id,
       title: nft.name,
       coverImage: nft.image,
       sales: nft.purchases.length,
-      revenue: nft.purchases.length * nft.price
+      revenue: nft.purchases.length * nft.price,
     }));
     res.status(200).json({ status: 'success', data });
   } catch (error) {
     res.status(500).json({ status: 'error', message: 'Server error', error: error.message });
   }
-}; 
+};
