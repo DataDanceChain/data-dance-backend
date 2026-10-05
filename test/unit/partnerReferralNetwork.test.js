@@ -107,9 +107,10 @@ describe('GET /partner/tge/referral-network', () => {
 
   it('the scope is advertised, echoed by /oauth/token and shown on consent as `referral_network`', async () => {
     const meta = await request(server).get('/.well-known/oauth-authorization-server');
-    assert.ok(meta.body.scopes_supported.includes('tge:referral_network'));
-    const { tokenScope, scopeItems } = await mintToken('tge:identity tge:referral_network');
-    assert.equal(tokenScope, 'tge:identity tge:referral_network');
+    // Canonical names since the tge:* -> sso:* rename (the old names stay accepted as aliases).
+    assert.ok(meta.body.scopes_supported.includes('sso:referral_network'));
+    const { tokenScope, scopeItems } = await mintToken('sso:identity sso:referral_network');
+    assert.equal(tokenScope, 'sso:identity sso:referral_network');
     assert.deepEqual(scopeItems, ['identity', 'referral_network']);
   });
 
