@@ -9,7 +9,7 @@
 #           that app.datadance.co also defines (nginx 1.18 and 1.30 accept the identical duplicate map, tested
 #           locally) and, only it, gets one block right after its server_name line: `location ^~ /partner-info/`, the
 #           partner info page that 50-partner-page.sh writes to /srv/ddcnew/partner-info/ (static files, no-store,
-#           noindex, no referrer, no framing, a strict Content-Security-Policy). Links both into sites-enabled,
+#           noindex, no referrer, no framing, nosniff, a strict Content-Security-Policy). Links both into sites-enabled,
 #           nginx -t, systemctl reload nginx.
 #           ONLY ITS OWN FILES: apply refuses to create or overwrite anything at those names (sites-available/<host>,
 #           its .new temporary, sites-enabled/<host>) that this script did not write: a file without the marker line,
@@ -199,7 +199,8 @@ unrestored_backups() { local d; for d in "$TAKEOVER_ROOT"/*/; do if [ -f "$d/MAN
 # ---------------------------------------------------------------------------
 # The partner info page (50-partner-page.sh), served by the host nginx from /srv/ddcnew/partner-info/ (www-data cannot
 # traverse /root). ^~ keeps any regex location of the copied vhost away from these files. Both paths end in a slash, so
-# the alias cannot be walked out of. The page needs only itself: inline CSS and JS, ./secret.json, no external origin.
+# the alias cannot be walked out of. The page needs only itself: inline CSS and JS, ./secret.json, no other origin, no
+# form submission (form-action 'none') and no <base> (base-uri 'none').
 PARTNER_LOCATION='location ^~ /partner-info/ {
     alias /srv/ddcnew/partner-info/;
     index index.html;
@@ -207,7 +208,8 @@ PARTNER_LOCATION='location ^~ /partner-info/ {
     add_header X-Robots-Tag "noindex, nofollow" always;
     add_header Referrer-Policy "no-referrer" always;
     add_header X-Frame-Options "DENY" always;
-    add_header Content-Security-Policy "default-src '"'self'"'; script-src '"'self' 'unsafe-inline'"'; style-src '"'self' 'unsafe-inline'"' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src '"'self'"'; img-src '"'self'"' data:; frame-ancestors '"'none'"'" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Content-Security-Policy "default-src '"'self'"'; script-src '"'self' 'unsafe-inline'"'; style-src '"'self' 'unsafe-inline'"'; connect-src '"'self'"'; img-src '"'self'"' data:; frame-ancestors '"'none'"'; form-action '"'none'"'; base-uri '"'none'"'" always;
 }'
 # stdin -> stdout: the block inserted once, right after the line `server_name <APP_HOST>;`, with that line's indent.
 add_partner_location() {

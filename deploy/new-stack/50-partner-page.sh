@@ -3,7 +3,8 @@
 # nginx at https://<APP_HOST>/partner-info/ (the app vhost that 30-nginx.sh writes aliases that path to
 # /srv/ddcnew/partner-info/; APP_HOST and API_HOST are the settings in common.sh). The page shows what the partner needs
 # to integrate DDC login with the test environment. client_secret is on it only as ciphertext, decrypted in the reader's
-# browser with the page password.
+# browser with the page password. Without JavaScript the page shows no password field at all, and the field it shows
+# with JavaScript has no name and sits in no form: a native submit cannot send it (the CSP adds form-action 'none').
 #
 # CHANGES ON THE SERVER
 #   apply   /srv/ddcnew/ and /srv/ddcnew/partner-info/ (directories, chmod 755: nginx runs as www-data and cannot
@@ -14,19 +15,21 @@
 #                          password with PBKDF2-SHA256 (600000 iterations, random 16-byte salt); random 12-byte IV;
 #                          the 16-byte tag is appended to ct. Every apply draws a new salt and IV.
 #           The encryption runs in one throwaway container of the ddcnew backend image (node; docker run --rm -i
-#           --network none --pull never, read-only, no capabilities, user nobody, no log driver). The password and the
-#           secret reach it on stdin only. Before anything is installed, it decrypts its own output with a second key
-#           derivation and compares.
+#           --network none --pull never, read-only, no capabilities, user nobody, no log driver, no core dumps). The
+#           password and the secret reach it on stdin only. Before anything is installed, it decrypts its own output
+#           with a second key derivation and compares.
 #   verify  decrypts secret.json with the password from stdin in a throwaway container and compares the sha256 of the
 #           result with the sha256 of the secret file: prints match=yes or match=no (exit 0 or 1). Writes only its log.
 #   remove  deletes /srv/ddcnew/partner-info, and /srv/ddcnew when it is then empty.
 #   status  read-only: the two files (mode, size, sha256), the app vhost's /partner-info/ location, and what the local
-#           nginx answers for /partner-info/ and /partner-info/secret.json.
+#           nginx answers for /partner-info/ and /partner-info/secret.json: the status code and whether the sha256 of
+#           the served body equals the file's.
 #   apply, verify and remove take the run lock and log to /root/ddcnew/logs/ (common.sh run_begin); apply and remove
 #   fingerprint the old stack at start and end (common.sh old_snapshot_*).
 # INPUTS
-#   The page password: STDIN ONLY, one line, never an argument or an environment variable: 24 to 256 printable ASCII
-#     characters, no blank at either end. It lives only in 1Password (APPROVAL.md section 8):
+#   The page password: STDIN ONLY, one line, never an argument or an environment variable: exactly 32 letters and
+#     digits, the shape of the 1Password generator (--generate-password='32,letters,digits'). It lives only in
+#     1Password (APPROVAL.md section 8):
 #       op read "op://<vault>/<item>/password" | DDC_APPROVED=yes ./remote.sh run 50-partner-page.sh apply PARTNER_ALLOWED_IP=<ip>
 #     A terminal on stdin is refused (typing would echo it), and so is xtrace (bash -x would print it).
 #   /root/ddcnew/secrets/tge_rehearsal_client_secret (20-env.sh): the secret. Its sha256 must equal
@@ -98,15 +101,15 @@ valid_ipv4() {
   done
 }
 valid_ipv6() { [[ "$1" =~ $re_v6 ]] && [[ "$1" == *:*:* ]]; }
-ALLOWED_IPS=""
+ALLOWED_IPS=()
 parse_ips() {
-  local ip n=0
+  local ip
   [ -n "${PARTNER_ALLOWED_IP:-}" ] || die "PARTNER_ALLOWED_IP=<the partner server's address> is required: ./remote.sh run 50-partner-page.sh apply PARTNER_ALLOWED_IP=..."
   while IFS= read -r ip; do
     valid_ipv4 "$ip" || valid_ipv6 "$ip" || die "PARTNER_ALLOWED_IP: '$ip' is not an IPv4 or IPv6 address"
-    ALLOWED_IPS="$ALLOWED_IPS $ip"; n=$((n + 1))
+    ALLOWED_IPS+=("$ip")
   done < <(split_commas "$PARTNER_ALLOWED_IP")
-  [ "$n" -ge 1 ] && [ "$n" -le 8 ] || die "PARTNER_ALLOWED_IP: give 1 to 8 comma-separated addresses"
+  [ "${#ALLOWED_IPS[@]}" -ge 1 ] && [ "${#ALLOWED_IPS[@]}" -le 8 ] || die "PARTNER_ALLOWED_IP: give 1 to 8 comma-separated addresses"
 }
 
 # ---------------------------------------------------------------------------
@@ -116,15 +119,14 @@ PW=""; SECRET=""
 # One line from stdin, then stdin is closed for everything after it. The value is kept in a shell variable only (not
 # exported), so no child process gets it in its arguments or environment.
 read_password() {
-  local line="" rc=0 re_pw='^[[:print:]]+$'
+  local line="" rc=0 re_pw='^[A-Za-z0-9]{32}$'
   IFS= read -r -t 120 line || rc=$?
   exec </dev/null
   [ "$rc" -le 128 ] || die "timed out waiting for the page password on stdin"
   [ -n "$line" ] || die "no page password on stdin: pipe it from 1Password (APPROVAL.md section 8)"
-  [ "${#line}" -ge 24 ] || die "the page password is shorter than 24 characters: generate it in 1Password (32 letters and digits)"
-  [ "${#line}" -le 256 ] || die "the page password is longer than 256 characters"
-  [[ "$line" =~ $re_pw ]] || die "the page password must be printable ASCII (no control or non-ASCII character)"
-  case "$line" in " "*|*" ") die "the page password starts or ends with a blank";; esac
+  # The shape of the 1Password generator's output (32 letters and digits, about 190 bits): the offline guessing cost of
+  # secret.json rests on it. Neither the length nor any character is printed.
+  [[ "$line" =~ $re_pw ]] || die "the page password must be exactly 32 letters and digits, as the 1Password generator makes it (--generate-password='32,letters,digits'); no blank, symbol or line ending inside"
   PW="$line"
 }
 read_secret() {
@@ -141,7 +143,7 @@ secret_matches_env() {
   [ "$(printf '%s' "$SECRET" | sha256)" = "$want" ] || die "sha256 of $SEC_FILE differs from SSO_TGE_CLIENT_SECRET_SHA256 in $ENV_FILE: the api would refuse the secret this page shows (re-run 20-env.sh, then 40-up.sh)"
   pass "sha256(secrets/tge_rehearsal_client_secret) = SSO_TGE_CLIENT_SECRET_SHA256 in $(basename "$ENV_FILE")"
 }
-ISSUER=""; CLIENT_ID=""; REDIRECTS=""; INITIATE=""
+ISSUER=""; CLIENT_ID=""; REDIRECTS=(); INITIATE=""
 check_url() { # <name> <url>
   local h
   [[ "$2" =~ $re_url ]] || die "$1 in $ENV_FILE holds a value that is not an https URL of the expected shape"
@@ -149,7 +151,7 @@ check_url() { # <name> <url>
   case "$h" in *.invalid|*.invalid.) die "$1 in $ENV_FILE is still the .invalid placeholder: re-run 20-env.sh with REHEARSAL_REDIRECT_URIS (and REHEARSAL_INITIATE_LOGIN_URI) set to the partner's addresses, then 40-up.sh";; esac
 }
 read_env() {
-  local raw u n=0
+  local raw u
   [ -f "$ENV_FILE" ] || die "$ENV_FILE missing: run 20-env.sh first"
   ISSUER=$(env_get_simple PUBLIC_BASE_URL "$ENV_FILE")
   [ "$ISSUER" = "https://$API_HOST" ] || die "PUBLIC_BASE_URL in $ENV_FILE is not https://$API_HOST (API_HOST): this page is for the rehearsal stack's test environment only"
@@ -160,13 +162,13 @@ read_env() {
     u="${u#"${u%%[![:space:]]*}"}"; u="${u%"${u##*[![:space:]]}"}"   # trimmed, as the api reads the list
     [ -n "$u" ] || continue
     check_url SSO_TGE_REDIRECT_URIS "$u"
-    REDIRECTS="$REDIRECTS $u"; n=$((n + 1))
+    REDIRECTS+=("$u")
   done < <(split_commas "$raw")
-  [ "$n" -ge 1 ] || die "SSO_TGE_REDIRECT_URIS in $ENV_FILE is empty"
+  [ "${#REDIRECTS[@]}" -ge 1 ] || die "SSO_TGE_REDIRECT_URIS in $ENV_FILE is empty"
   INITIATE=$(env_get_simple SSO_TGE_INITIATE_LOGIN_URI "$ENV_FILE")
   if [ -n "$INITIATE" ]; then check_url SSO_TGE_INITIATE_LOGIN_URI "$INITIATE"
   else warn "SSO_TGE_INITIATE_LOGIN_URI is empty: the page shows it as not registered (the browser flow works; the App hand-off answers client_disabled)"; fi
-  say "values: issuer, client_id, $n redirect URI(s), initiate-login URI $([ -n "$INITIATE" ] && echo set || echo empty), $(set -- $ALLOWED_IPS; echo $#) allowed address(es)"
+  say "values: issuer, client_id, ${#REDIRECTS[@]} redirect URI(s), initiate-login URI $([ -n "$INITIATE" ] && echo set || echo empty), ${#ALLOWED_IPS[@]} allowed address(es)"
 }
 IMG=""
 pick_image() {
@@ -177,7 +179,7 @@ pick_image() {
     [[ "$IMG" =~ $re_img ]] || die "API_IMAGE in $NEW_DIR/.env is not a ddcnew/backend:<sha12> tag"
   fi
   docker image inspect "$IMG" >/dev/null 2>&1 || die "image $IMG is not on this host (the encryption never pulls an image)"
-  say "throwaway container $CRYPT_NAME from $IMG: --rm -i --network none --pull never --read-only --cap-drop ALL --user 65534:65534"
+  say "throwaway container $CRYPT_NAME from $IMG: --rm -i --network none --pull never --read-only --cap-drop ALL --user 65534:65534 --ulimit core=0"
 }
 
 # ---------------------------------------------------------------------------
@@ -217,7 +219,7 @@ function gcmDecrypt(key, iv, ct) {
   return Buffer.concat([d.update(ct.subarray(0, ct.length - 16)), d.final()]);
 }
 function encrypt(lines, iter) {
-  if (lines.length !== 2 || lines[0].length < 24 || lines[1].length < 16) fail('input');
+  if (lines.length !== 2 || lines[0].length !== 32 || lines[1].length < 16) fail('input');
   if (!Number.isInteger(iter) || iter < 600000) fail('iterations');
   const pw = lines[0], pt = lines[1];
   const salt = c.randomBytes(16), iv = c.randomBytes(12);
@@ -254,8 +256,9 @@ function verify(lines) {
 }
 JS
 crypt() { # <encrypt <iterations> | verify>; stdin -> stdout. Nothing secret in the arguments or the environment.
+  # --ulimit core=0: a crash of node never writes the password or the secret into a core file.
   docker run --rm -i --network none --pull never --name "$CRYPT_NAME" --read-only --cap-drop ALL \
-    --security-opt no-new-privileges --user 65534:65534 --memory 256m --pids-limit 64 --log-driver none \
+    --security-opt no-new-privileges --user 65534:65534 --memory 256m --pids-limit 64 --ulimit core=0 --log-driver none \
     --entrypoint node "$IMG" -e "$CRYPT_JS" "$@"
 }
 
@@ -264,15 +267,13 @@ crypt() { # <encrypt <iterations> | verify>; stdin -> stdout. Nothing secret in 
 # ---------------------------------------------------------------------------
 vals_html() { local v; for v in "$@"; do printf '<span class="val">%s</span>' "$(html "$v")"; done; }
 fill_template() { # -> stdout: the template with every {{NAME}} replaced by its literal (already escaped) value
-  local k keys="ISSUER CLIENT_ID REDIRECT_URI REDIRECT_URIS_HTML INITIATE_LOGIN_HTML ALLOWED_IPS_HTML GENERATED_AT" first init
+  local k keys="ISSUER CLIENT_ID REDIRECT_URI REDIRECT_URIS_HTML INITIATE_LOGIN_HTML ALLOWED_IPS_HTML GENERATED_AT API_HOST APP_HOST" init
   for k in $keys; do grep -qF "{{$k}}" "$TEMPLATE" || die "the template lacks {{$k}}"; done
-  # shellcheck disable=SC2086  # the lists are space-separated on purpose (no value contains a blank)
-  first=$(set -- $REDIRECTS; printf '%s' "$1")
   if [ -n "$INITIATE" ]; then init=$(vals_html "$INITIATE")
   else init='<span class="val none">未登记：从 DataDance App 发起的登录暂不可用；浏览器里直接登录不受影响</span>'; fi
-  # shellcheck disable=SC2086
-  PP_KEYS="$keys" PP_ISSUER="$(html "$ISSUER")" PP_CLIENT_ID="$(html "$CLIENT_ID")" PP_REDIRECT_URI="$(html "$first")" \
-  PP_REDIRECT_URIS_HTML="$(vals_html $REDIRECTS)" PP_INITIATE_LOGIN_HTML="$init" PP_ALLOWED_IPS_HTML="$(vals_html $ALLOWED_IPS)" \
+  PP_KEYS="$keys" PP_ISSUER="$(html "$ISSUER")" PP_CLIENT_ID="$(html "$CLIENT_ID")" PP_REDIRECT_URI="$(html "${REDIRECTS[0]}")" \
+  PP_REDIRECT_URIS_HTML="$(vals_html "${REDIRECTS[@]}")" PP_INITIATE_LOGIN_HTML="$init" PP_ALLOWED_IPS_HTML="$(vals_html "${ALLOWED_IPS[@]}")" \
+  PP_API_HOST="$(html "$API_HOST")" PP_APP_HOST="$(html "$APP_HOST")" \
   PP_GENERATED_AT="$(TZ=UTC-8 date '+%Y-%m-%d %H:%M')（北京时间）" awk '
     function repl(s, from, to,    out, i) {
       out = ""
@@ -366,7 +367,15 @@ case "$cmd" in
     v="$NGINX_AVAIL/$APP_HOST"
     if [ -f "$v" ]; then say "$v: /partner-info/ location count=$(grep -c 'location \^~ /partner-info/' "$v" || true) (1 once 30-nginx.sh apply has run with this package)"
     else say "$v: absent (30-nginx.sh apply)"; fi
-    pcode() { curl -s -o /dev/null -m 10 -w '%{http_code}' -H "Host: $APP_HOST" "$NGINX_LOCAL_URL$1" || true; }
-    say "local nginx: /partner-info/ -> $(pcode /partner-info/), /partner-info/secret.json -> $(pcode /partner-info/secret.json) (200 and 200 when served)"
+    # What the local nginx serves for each file, compared with the file itself (sha256 of the body; nothing printed but
+    # the code and the verdict). Read-only: the bodies stay in this shell.
+    for pair in "/partner-info/:index.html" "/partner-info/secret.json:secret.json"; do
+      u=${pair%%:*}; f=${pair#*:}
+      code=$(curl -s -o /dev/null -m 10 -w '%{http_code}' -H "Host: $APP_HOST" "$NGINX_LOCAL_URL$u" || true)
+      served=$( { curl -s -m 10 -H "Host: $APP_HOST" "$NGINX_LOCAL_URL$u" || true; } | sha256)
+      if [ -f "$PAGE_DIR/$f" ] && [ "$code" = 200 ] && [ "$served" = "$(sha256 < "$PAGE_DIR/$f")" ]; then
+        pass "local nginx: $u -> 200, served body = $f (sha256 ${served:0:12})"
+      else warn "local nginx: $u -> ${code:-none}, served body sha256 ${served:0:12} is not the sha256 of $PAGE_DIR/$f ($( [ -f "$PAGE_DIR/$f" ] && sha256 < "$PAGE_DIR/$f" | cut -c1-12 || echo absent))"; fi
+    done
     ;;
 esac

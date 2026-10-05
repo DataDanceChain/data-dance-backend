@@ -3,7 +3,9 @@
      placeholder below (an upper-case NAME in double curly braces) is filled on the server from /root/ddcnew/.env.rehearsal
      and PARTNER_ALLOWED_IP, HTML-escaped. client_secret is never in this file: the page fetches ./secret.json (AES-256-GCM
      ciphertext, key from PBKDF2-SHA256) and decrypts it in the browser with the password the reader types. No external
-     request: system fonts only, inline CSS and JS. -->
+     request: system fonts only, inline CSS and JS. The password field has no name and sits in no form, and the unlock
+     box is hidden until the script shows it: without JavaScript there is nothing to submit, and no native submit can
+     send the password anywhere (nginx adds form-action 'none' to the CSP as well). -->
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
@@ -74,7 +76,7 @@ header{display:grid;gap:12px}
 .copy.done{color:var(--code-key);border-color:var(--code-key)}
 #secret-row.open{background:rgba(127,209,220,.10)}
 
-/* unlock form for client_secret */
+/* unlock box for client_secret (not a form: see the comment at the top) */
 .unlock{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:14px 16px;display:grid;gap:10px}
 .unlock label{font-weight:650}
 .unlock .field{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px}
@@ -155,19 +157,19 @@ footer{font-size:13px;color:var(--muted);border-top:1px solid var(--line);paddin
     <div class="file"># 与你们配置模板的字段一一对应</div>
     <div class="row"><div class="line"><span class="k">issuer</span>: <span class="s">"{{ISSUER}}"</span> <span class="c"># 无结尾斜杠</span></div><div class="acts"><button type="button" class="copy" data-copy="{{ISSUER}}">复制</button></div></div>
     <div class="row"><div class="line"><span class="k">client_id</span>: <span class="s">"{{CLIENT_ID}}"</span></div><div class="acts"><button type="button" class="copy" data-copy="{{CLIENT_ID}}">复制</button></div></div>
-    <div class="row" id="secret-row"><div class="line"><span class="k">client_secret</span>: <span class="s" id="secret-value">"••••••••••••••••"</span> <span class="c" id="secret-note"># 在下方输入密码后显示</span></div><div class="acts" id="secret-acts" hidden><button type="button" class="copy" id="secret-copy">复制</button><button type="button" class="copy" id="secret-hide">隐藏</button></div></div>
+    <div class="row" id="secret-row"><div class="line"><span class="k">client_secret</span>: <span class="s" id="secret-value" translate="no">"••••••••••••••••"</span> <span class="c" id="secret-note"># 在下方输入密码后显示</span></div><div class="acts" id="secret-acts" hidden><button type="button" class="copy" id="secret-copy">复制</button><button type="button" class="copy" id="secret-hide">隐藏</button></div></div>
     <div class="row"><div class="line"><span class="k">redirect_uri</span>: <span class="s">"{{REDIRECT_URI}}"</span> <span class="c"># 已登记，须逐字节一致</span></div><div class="acts"><button type="button" class="copy" data-copy="{{REDIRECT_URI}}">复制</button></div></div>
   </div>
 
-  <form class="unlock" id="unlock" autocomplete="off" novalidate>
-    <label for="unlock-pw">查看 client_secret</label>
+  <div class="unlock" id="unlock" role="group" aria-labelledby="unlock-label" hidden>
+    <label for="unlock-pw" id="unlock-label">查看 client_secret</label>
     <div class="field">
-      <input id="unlock-pw" name="unlock-pw" type="password" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="输入 DataDance 提供的密码" aria-describedby="unlock-msg unlock-help">
-      <button type="submit" id="unlock-btn">解密查看</button>
+      <input id="unlock-pw" type="password" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="输入 DataDance 提供的密码" aria-describedby="unlock-msg unlock-help">
+      <button type="button" id="unlock-btn">解密查看</button>
     </div>
     <p class="msg" id="unlock-msg" role="status" aria-live="polite"></p>
     <p class="note" id="unlock-help">密码由 DataDance 另行提供。解密在你的浏览器里完成，密码不会发送到任何服务器。</p>
-  </form>
+  </div>
   <noscript><p class="msg bad">查看 client_secret 需要开启 JavaScript。</p></noscript>
   <p class="note">client_secret 只放你们服务端的配置，不进前端代码，不进日志，也不要转发到聊天群里。</p>
 </section>
@@ -179,7 +181,7 @@ footer{font-size:13px;color:var(--muted);border-top:1px solid var(--line);paddin
     <div><dt>登录发起地址</dt><dd>{{INITIATE_LOGIN_HTML}}<span class="sub">用户在 DataDance App 里点活动卡片时，会被带到这个地址，由你们发起 DDC 登录</span></dd></div>
     <div><dt>白名单 IP</dt><dd>{{ALLOWED_IPS_HTML}}<span class="sub">测试环境只对白名单开放；你们服务器换码时的出口地址须在其中</span></dd></div>
   </dl>
-  <p class="note">测试同学的浏览器会访问 <code>tge-api.datadance.ai</code> 和 <code>tge-app.datadance.ai</code> 两个域名；如果测试用的网络不在上面的白名单里，请把它的公网 IP 告诉我们。</p>
+  <p class="note">测试同学的浏览器会访问 <code>{{API_HOST}}</code> 和 <code>{{APP_HOST}}</code> 两个域名；如果测试用的网络不在上面的白名单里，请把它的公网 IP 告诉我们。</p>
 </section>
 
 <section id="endpoints" aria-labelledby="h-endpoints">
@@ -245,7 +247,7 @@ footer{font-size:13px;color:var(--muted);border-top:1px solid var(--line);paddin
   'use strict';
   // secret.json = {v:1, kdf:"PBKDF2-SHA256", iter, salt, iv, ct}, base64. AES-256-GCM, 16-byte tag at the end of ct.
   var MIN_ITER = 600000, MAX_ITER = 10000000, MASK = '"••••••••••••••••"', NOTE = '# 在下方输入密码后显示';
-  var form = document.getElementById('unlock');
+  var box = document.getElementById('unlock');
   var input = document.getElementById('unlock-pw');
   var btn = document.getElementById('unlock-btn');
   var msg = document.getElementById('unlock-msg');
@@ -294,7 +296,7 @@ footer{font-size:13px;color:var(--muted);border-top:1px solid var(--line);paddin
     note.textContent = '';
     acts.hidden = false;
     row.classList.add('open');
-    form.hidden = true;
+    box.hidden = true;
     copyBtn.focus();
   }
   function hide() {
@@ -303,7 +305,7 @@ footer{font-size:13px;color:var(--muted);border-top:1px solid var(--line);paddin
     note.textContent = NOTE;
     acts.hidden = true;
     row.classList.remove('open');
-    form.hidden = false;
+    box.hidden = false;
     say('', '');
     input.value = '';
     input.focus();
@@ -316,10 +318,11 @@ footer{font-size:13px;color:var(--muted);border-top:1px solid var(--line);paddin
     context: '浏览器不允许在当前地址解密：请用 https 地址打开本页。'
   };
   var supported = window.isSecureContext && window.crypto && crypto.subtle && window.TextEncoder && window.fetch;
+  box.hidden = false;   // shown by this script only: without JavaScript there is no field to fill in
   if (!supported) { say(MESSAGES.context, 'bad'); btn.disabled = true; input.disabled = true; }
 
-  form.addEventListener('submit', async function (ev) {
-    ev.preventDefault();
+  // No form: the button and the Enter key run this; nothing is ever submitted or sent.
+  async function unlock() {
     if (!supported || btn.disabled) return;
     var password = input.value.replace(/^\s+|\s+$/g, '');
     if (!password) { say(MESSAGES.empty, 'bad'); input.focus(); return; }
@@ -335,6 +338,10 @@ footer{font-size:13px;color:var(--muted);border-top:1px solid var(--line);paddin
       password = null;
       btn.disabled = false; btn.textContent = '解密查看';
     }
+  }
+  btn.addEventListener('click', unlock);
+  input.addEventListener('keydown', function (ev) {
+    if (ev.key === 'Enter' && !ev.isComposing) { ev.preventDefault(); unlock(); }
   });
 
   function flash(button, text) {

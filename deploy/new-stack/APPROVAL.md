@@ -396,29 +396,36 @@ code is single-use and valid for 60 seconds, the whole login request for 10 minu
 token it gave); and production (issuer `https://api.datadance.ai`, separate credentials, a domain with a public
 certificate, no IP address). The code lifetime is the backend's `PARTNER_CODE_TTL_MS` (60 s); 10 minutes is the consent
 window, `PARTNER_REQUEST_TTL_MS`. The template `partner-info/index.html` holds no secret and no partner value: `apply`
-fills in the values from `/root/ddcnew/.env.rehearsal` and `PARTNER_ALLOWED_IP`, HTML-escaped. The issuer must be
-`https://<API_HOST>`.
+fills in the values from `/root/ddcnew/.env.rehearsal`, `PARTNER_ALLOWED_IP` and the two hosts, HTML-escaped. The issuer
+must be `https://<API_HOST>`.
 
 **Encryption.** `client_secret` is on the page only as `secret.json` = `{"v":1,"kdf":"PBKDF2-SHA256","iter":600000,
 "salt":..,"iv":..,"ct":..}` (base64). Key: PBKDF2-SHA256 of the page password with a random 16-byte salt, 600,000
 iterations, 256 bits. Cipher: AES-256-GCM with a random 12-byte IV; `ct` ends with the 16-byte tag. Every `apply` draws a
 new salt and IV. The page fetches `./secret.json` (`cache: 'no-store'`) and decrypts it with WebCrypto in the reader's
-browser; nothing is sent back. A wrong password shows 密码不正确，请检查后重试。 and nothing else. On the server the
-encryption runs in a throwaway container of the ddcnew backend image (`docker run --rm -i --network none --pull never`,
-read-only, no capabilities, user nobody, no log driver): the password and the secret reach node on stdin only, never as
-an argument or an environment variable, and node decrypts its result once more before anything is installed. The secret
+browser; nothing is sent back. A wrong password shows 密码不正确，请检查后重试。 and nothing else. The decrypted secret's
+element carries `translate="no"`, so a browser's page translation never sends it out. On the server the encryption runs
+in a throwaway container of the ddcnew backend image (`docker run --rm -i --network none --pull never`, read-only, no
+capabilities, user nobody, no log driver, `--ulimit core=0` so no core file can hold either value): the password and
+the secret reach node on stdin only, never as an argument or an environment variable, and node decrypts its result once
+more before anything is installed. The secret
 must hash to `SSO_TGE_CLIENT_SECRET_SHA256`, so the page never shows a secret the api refuses. Git and the server never
 hold the page password; the server holds the secret only where `20-env.sh` generated it.
+
+**The password never leaves by a form.** The password field has no `name` and sits in no `<form>` (so there is no
+method or action to fall back on), the button is `type="button"`, and the unlock box is `hidden` in the HTML: only the
+page's script shows it. Without JavaScript the reader sees no field, only 查看 client_secret 需要开启 JavaScript。, and
+the CSP's `form-action 'none'` would block a form submission even if one were injected. The local test proves it in
+headless Chromium with JavaScript disabled (section 6).
 
 **Files and nginx.** `/srv/ddcnew/partner-info/index.html` and `secret.json`, which nginx reads
 (`chmod 644 index.html secret.json`; ciphertext only), in directories with mode 755: www-data cannot traverse `/root`,
 and the page is never under `/root/ddc*` or `/opt/ddc`. `30-nginx.sh` gives the app vhost (not the api one)
 `location ^~ /partner-info/` with `alias /srv/ddcnew/partner-info/`, `index index.html` and the headers
-`Cache-Control: no-store`, `X-Robots-Tag: noindex, nofollow`, `Referrer-Policy: no-referrer`, `X-Frame-Options: DENY`
-and `Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'
-https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self'; img-src 'self' data:;
-frame-ancestors 'none'`. The page loads nothing from another origin: system fonts, inline CSS and JS (the policy allows
-Google Fonts; the page does not use them, so it depends on no third party).
+`Cache-Control: no-store`, `X-Robots-Tag: noindex, nofollow`, `Referrer-Policy: no-referrer`, `X-Frame-Options: DENY`,
+`X-Content-Type-Options: nosniff` and `Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline';
+style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'; form-action 'none';
+base-uri 'none'`. The page loads nothing from another origin: system fonts, inline CSS and JS.
 
 **The page password is created in, and read from, 1Password only.** Once, by Sloan:
 
@@ -431,8 +438,9 @@ op item create --category=password --title='TGE 对接页密码（测试环境�
 It is never typed into a terminal, passed as an argument, written to a file or set as an environment variable: `op read`
 pipes it into `remote.sh`, which forwards its stdin to the script through ssh (the login's own `op read` calls take
 `/dev/null` as stdin, so they cannot swallow it). `remote.sh` refuses `apply` and `verify` when stdin is a terminal. The
-script refuses a password shorter than 24 characters, one with a blank at either end or a non-printable character, and
-any run with xtrace. Sloan shares the password with the partner.
+script accepts exactly the generator's shape, 32 letters and digits (anything else, a blank or a line-ending character
+included, is refused without printing it), and refuses any run with xtrace. Sloan shares the password with the
+partner.
 
 **Steps** (from the Mac in `deploy/new-stack/`, each with Sloan's approval):
 
@@ -443,7 +451,7 @@ any run with xtrace. Sloan shares the password with the partner.
 | P3 | `DDC_APPROVED=yes ./remote.sh run 30-nginx.sh apply` (with section 9's flag or overrides) | both vhosts written again, the app one with `/partner-info/`; nginx reload | section 4, step 10; the printed diff adds the location to the app copy only | `./remote.sh run 30-nginx.sh undo` (approved) |
 | P4 | `op read "op://<vault>/<item>/password" \| DDC_APPROVED=yes ./remote.sh run 50-partner-page.sh apply PARTNER_ALLOWED_IP=<partner server IP>` | `/srv/ddcnew/partner-info/index.html` and `secret.json`; one throwaway container, removed | `PASS sha256(secrets/tge_rehearsal_client_secret) = SSO_TGE_CLIENT_SECRET_SHA256`, `PASS secret.json: v=1 kdf=PBKDF2-SHA256 iter=600000 ...`, the two paths with their mode and sha256, old stack unchanged | `50-partner-page.sh remove` |
 | P5 | `op read "op://<vault>/<item>/password" \| DDC_APPROVED=yes ./remote.sh run 50-partner-page.sh verify` | nothing but its log | `match=yes` | - |
-| P6 | `./remote.sh run 50-partner-page.sh status` (read-only) | nothing | both files with the sha256 that P4 printed; `/partner-info/ location count=1`; local nginx answers 200 for both | - |
+| P6 | `./remote.sh run 50-partner-page.sh status` (read-only) | nothing | both files with the sha256 that P4 printed; `/partner-info/ location count=1`; `PASS local nginx: /partner-info/ -> 200, served body = index.html` and the same for `secret.json` (the sha256 of what nginx serves equals the file's) | - |
 | P7 | From a team address: open `https://<APP_HOST>/partner-info/`, enter the password from 1Password, see the secret, press 隐藏 | - | the page decrypts; the browser's network panel lists `<APP_HOST>` only (a script the CDN might inject is blocked by the CSP) | - |
 
 **After the joint test, rotate both.** New client secret: in an approved login,
@@ -459,7 +467,7 @@ files.
 - The page password is shared by Sloan, outside these scripts. Anyone who can reach the page (the team's addresses and
   the partner server's, through the WAF rule) and has the password sees the client secret.
 - `secret.json` can be downloaded by anyone who can reach the page. Each offline guess costs 600,000 PBKDF2 iterations,
-  which protects only a random password: use the generator (32 letters and digits); the script checks the length, not
+  which protects only a random password: use the generator (32 letters and digits); the script checks that shape, not
   the randomness.
 - Both are test-environment credentials: rotate the client secret and the page password after the joint test.
 - If the CDN injects a script into pages (an analytics beacon, for example), the CSP blocks it: check once in P7.
