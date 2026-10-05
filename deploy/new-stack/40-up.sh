@@ -23,6 +23,9 @@
 #   stack's own container (a re-run); anything else listening on it stops the script before a container starts.
 # KEYS: refuses to start if keys_fixed/apn_key.p8, signerKey.pem or signerCert.pem equals the production file, and checks
 #   that the running api sees the mounted throwaway apn_key.p8 and signerKey.pem.
+# OLD APP SWITCHES (backend PR #38): when the image prints the "Old App update answer (426 APP_UPDATE_REQUIRED)" line,
+#   count=1, first8=<the old WEB3AUTH_CLIENT_ID's first 8 characters> and LOGIN_MISSING_IDTOKEN_MEANS_OLD_APP=on must be in
+#   it, or the script STOPS; an image without #38 prints no such line, and the script says that the two are inert.
 # MONEY PATH: every field of the "Partner SSO money-path assertions OK" line (nodeEnv, allowedVerifiers=5,
 #   issuer=https://<API_HOST>, consentOrigin=https://<APP_HOST>, web3authVerify, legacyFallback, jwksPinMode,
 #   jwksPins=<served>, sessionSecretSeparate=true) must match
@@ -150,6 +153,7 @@ printf '%s\n' "$LOG" | grep -E 'Partner SSO (enabled|disabled)' | tail -1 | sed 
 line=$(printf '%s\n' "$LOG" | grep 'Partner SSO money-path assertions OK' | tail -1 | sed 's/^[^|]*| //' || true)
 [ -n "$line" ] && { say "$line"; pass "startup log has 'Partner SSO money-path assertions OK'"; } || { printf '%s\n' "$LOG" | grep -iE 'error|invalid|refus' | grep -viE 'postgres(ql)?://|secret|password|token' | tail -10; printf '%s\n' "$LOG" | sed 's/^[^|]*| //' | grep -E '^ - (SSO_|WEB3AUTH_|NODE_ENV|PUBLIC_BASE_URL|APP_PUBLIC_URL)' | tail -20; die "no money-path assertion line in the api log"; }
 money_path_fields_check "$line" "$(cnt "$served")"   # dies on any missing or different field (APPROVAL row 11)
+old_app_line_check "$LOG" "$(env_get_simple WEB3AUTH_RETIRED_CLIENT_IDS "$NEW_DIR/.env.api" | cut -c1-8)"   # PR #38 images only
 
 step "6. running api: JWKS pins, APNs key and pass signer"
 pinned=$(dc exec -T api node -e 'console.log(String(process.env.WEB3AUTH_JWKS_PINNED_THUMBPRINTS||"").split(",").map(s=>s.trim()).filter(Boolean).join("\n"))' | LC_ALL=C sort -u)

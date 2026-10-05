@@ -752,6 +752,51 @@ money_path_fields_check() {
   else warn "publicClientRegistration is not closed (OAUTH_PUBLIC_REGISTRATION_ENABLED, runbook 5.2: Sloan to confirm)"; fi
 }
 
+# Backend PR #38's boot checks on the old-App settings (src/services/web3authIdentity.js assertBootConfig and
+# assertRetiredClientIdsConfig, head 42005be), run by 20-env.sh on the file it writes so that a bad value stops before
+# the api would refuse to boot:
+#   old_app_env_check <WEB3AUTH_RETIRED_CLIENT_IDS> <WEB3AUTH_CLIENT_ID> <WEB3AUTH_EXTERNAL_AUDIENCE> <LOGIN_MISSING_IDTOKEN_MEANS_OLD_APP>
+# LOGIN_MISSING_IDTOKEN_MEANS_OLD_APP must be on or off; no WEB3AUTH_RETIRED_CLIENT_IDS entry (comma-separated, trimmed,
+# empty ones dropped, as the backend's csv()) may equal WEB3AUTH_CLIENT_ID or a WEB3AUTH_EXTERNAL_AUDIENCE entry: a
+# retired client id must not be an accepted ID token audience. Positions, not values, in the messages. Sets
+# OLD_APP_RETIRED_COUNT.
+OLD_APP_RETIRED_COUNT=0
+csv_items() { printf '%s' "$1" | tr ',' '\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | { grep . || true; }; }
+old_app_env_check() {
+  local i=0 e x
+  case "$4" in on|off) ;; *) die "LOGIN_MISSING_IDTOKEN_MEANS_OLD_APP must be on or off (backend PR #38 stops the boot on anything else)";; esac
+  while IFS= read -r e; do
+    i=$((i + 1))
+    [ "$e" != "$2" ] || die "WEB3AUTH_RETIRED_CLIENT_IDS entry #$i equals WEB3AUTH_CLIENT_ID: a retired client id must not be an accepted ID token audience"
+    while IFS= read -r x; do
+      [ "$e" != "$x" ] || die "WEB3AUTH_RETIRED_CLIENT_IDS entry #$i equals a WEB3AUTH_EXTERNAL_AUDIENCE entry: a retired client id must not be an accepted ID token audience"
+    done < <(csv_items "$3")
+  done < <(csv_items "$1")
+  OLD_APP_RETIRED_COUNT=$i
+}
+
+# 40-up.sh step 5, backend PR #38 (head 42005be): the api prints one startup line with the old-App switches,
+#   "Old App update answer (426 APP_UPDATE_REQUIRED): WEB3AUTH_RETIRED_CLIENT_IDS count=1 first8=<8 chars>
+#    LOGIN_MISSING_IDTOKEN_MEANS_OLD_APP=on" (src/services/web3authIdentity.js describeOldAppSwitches).
+#   old_app_line_check <api log since start> <expected first8>
+# When the line is there, count=1, first8=<the old WEB3AUTH_CLIENT_ID's first 8 characters> and =on must be exact tokens
+# or the script STOPS; an image without #38 does not print it, and then the two names are inert (said, not failed).
+old_app_line_check() {
+  local line tokens want missing=""
+  line=$(printf '%s\n' "$1" | grep 'Old App update answer (426 APP_UPDATE_REQUIRED):' | tail -n 1 | sed 's/^[^|]*| //' || true)
+  if [ -z "$line" ]; then
+    say "old-App switches: no 'Old App update answer' line in the api log: this image does not have backend PR #38, so WEB3AUTH_RETIRED_CLIENT_IDS and LOGIN_MISSING_IDTOKEN_MEANS_OLD_APP are inert (not checked)"
+    return 0
+  fi
+  say "$line"
+  tokens=$(printf '%s\n' "${line#*:}" | tr ' ' '\n')
+  for want in "count=1" "first8=$2" "LOGIN_MISSING_IDTOKEN_MEANS_OLD_APP=on"; do
+    printf '%s\n' "$tokens" | grep -qxF -- "$want" || missing="$missing $want"
+  done
+  [ -z "$missing" ] || die "the api's 'Old App update answer' line (backend PR #38 is in this image) lacks:$missing"
+  pass "old-App switches (backend PR #38 in this image): WEB3AUTH_RETIRED_CLIENT_IDS count=1 first8=$2 LOGIN_MISSING_IDTOKEN_MEANS_OLD_APP=on"
+}
+
 # ---------------------------------------------------------------------------
 # The web build for the rehearsal API (10-build.sh, 40-up.sh). The frontend compiles its tge API in:
 # src/config/environment.ts API_BASE_URLS.tge, https://api-rehearsal.datadance.ai/api since frontend a3ee809
