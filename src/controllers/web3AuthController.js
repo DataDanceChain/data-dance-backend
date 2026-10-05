@@ -10,6 +10,7 @@ const {
   normalizeReferralCampaignInput,
 } = require('../constants/referralCampaigns');
 const { assertReferralCampaignUsable } = require('../utils/stayBonus');
+const { getVersionPolicy } = require('../constants/appVersionPolicy');
 const {
   verifyIdToken,
   extractIdentity,
@@ -17,12 +18,42 @@ const {
   resolveUser,
   getVerifyMode,
   getAllowLegacyFallback,
+  getMissingIdTokenMeansOldApp,
+  isRetiredClientIdToken,
   Web3AuthIdentityError,
 } = require('../services/web3authIdentity');
 
 const logger = createLogger('web3AuthController');
 
 const WALLET_RE = /^0x[a-fA-F0-9]{40}$/;
+
+/**
+ * Shown as is by the old store Apps (iOS 2.0.1 / 2.0.2, Android 1.0.2): they do not know the code
+ * and display `message`, so it is one string in both languages. It must never contain
+ * "incomplete", "不完整", "email is required", "邮箱是必需的" or "new user registration": on a
+ * `status: 'fail'` body those words send the old Apps to /complete-profile instead.
+ */
+const APP_UPDATE_REQUIRED_MESSAGE =
+  '此 App 版本已不再支持，请更新到最新版本。This App version is no longer supported. Please update to the latest version.';
+
+/**
+ * 426 APP_UPDATE_REQUIRED. Only ever sent IN PLACE OF a refusal (IDTOKEN_AUDIENCE for a retired
+ * client id, IDTOKEN_REQUIRED under LOGIN_MISSING_IDTOKEN_MEANS_OLD_APP=on), before any account is
+ * looked up: no session, no read or write of an account. The body keeps the endpoint's error shape
+ * (`status`, `code`, `message`); the update links are the ones GET /api/app/version-policy serves.
+ * Logged with codes only, never anything from the token.
+ */
+function sendAppUpdateRequired(res, { replaced, mode }) {
+  const { ios, android } = getVersionPolicy();
+  logger.warn('idtoken_rejected', { code: 'APP_UPDATE_REQUIRED', replaced, mode, outcome: 'refused' });
+  return res.status(426).json({
+    status: 'fail',
+    success: false,
+    code: 'APP_UPDATE_REQUIRED',
+    message: APP_UPDATE_REQUIRED_MESSAGE,
+    update: { ios: ios.storeUrl || null, android: android.downloadUrl || null },
+  });
+}
 
 /** Thrown by helpers to short-circuit the request with an HTTP reply (legacy status codes and bodies). */
 class HttpReply extends Error {
@@ -552,6 +583,12 @@ exports.web3authLogin = async (req, res) => {
           return await verifiedLogin(req, res, ctx);
         } catch (error) {
           if (!(error instanceof Web3AuthIdentityError)) throw error;
+          // The same refusal, in words an old App shows: a token for a retired Web3Auth project
+          // (WEB3AUTH_RETIRED_CLIENT_IDS) cannot log in from any build of that App, so "sign in
+          // again" would be wrong. Its unverified `aud` only picks this answer.
+          if (error.code === 'IDTOKEN_AUDIENCE' && isRetiredClientIdToken(idToken)) {
+            return sendAppUpdateRequired(res, { replaced: error.code, mode });
+          }
           logger.warn('idtoken_rejected', {
             code: error.code,
             reason: error.details && error.details.reason,
@@ -568,6 +605,11 @@ exports.web3authLogin = async (req, res) => {
 
       // No token at all. `enforce` never accepts that; `log` only while the rollout flag is on.
       if (mode === 'enforce' || !getAllowLegacyFallback()) {
+        // Every current App and web build sends an idToken (and stops before calling without
+        // one), so with LOGIN_MISSING_IDTOKEN_MEANS_OLD_APP=on this refusal says "update the App".
+        if (getMissingIdTokenMeansOldApp()) {
+          return sendAppUpdateRequired(res, { replaced: 'IDTOKEN_REQUIRED', mode });
+        }
         logger.warn('idtoken_rejected', {
           code: 'IDTOKEN_REQUIRED',
           reason: 'no_id_token',

@@ -68,6 +68,14 @@ const DEFAULTS = {
   // Google and e-mail passwordless; Apple only releases addresses it verified). Only these may
   // re-bind an account found by its e-mail column; the rest (X) only by their exact verifierId.
   WEB3AUTH_EMAIL_TRUSTED_VERIFIERS: '',
+  // Old App builds after the network switch. Both only change the ANSWER to a login that is
+  // refused anyway (426 APP_UPDATE_REQUIRED instead of the IDTOKEN_* code); neither ever lets one in.
+  // Web3Auth client ids (csv) of retired App builds: a token refused with IDTOKEN_AUDIENCE whose
+  // (unverified) `aud` is one of them came from such a build. Empty = never.
+  WEB3AUTH_RETIRED_CLIENT_IDS: '',
+  // on = a login with no idToken that is refused with IDTOKEN_REQUIRED came from an App build older
+  // than the idToken. Only "on" and "off" are accepted.
+  LOGIN_MISSING_IDTOKEN_MEANS_OLD_APP: 'off',
 };
 
 // Fixed (not env) claim fallbacks for display data. Never identity.
@@ -161,6 +169,10 @@ function loadConfig(env = process.env) {
     networkRebind: envOr(env, 'WEB3AUTH_NETWORK_REBIND').toLowerCase() === 'on',
     rebindVerifiers: csv(envOr(env, 'WEB3AUTH_REBIND_VERIFIERS')),
     emailTrustedVerifiers: csv(envOr(env, 'WEB3AUTH_EMAIL_TRUSTED_VERIFIERS')),
+    // Old App builds: these only pick the message of a refusal (see DEFAULTS).
+    retiredClientIds: csv(envOr(env, 'WEB3AUTH_RETIRED_CLIENT_IDS')),
+    missingIdTokenMeansOldAppRaw: envOr(env, 'LOGIN_MISSING_IDTOKEN_MEANS_OLD_APP').toLowerCase(),
+    missingIdTokenMeansOldApp: envOr(env, 'LOGIN_MISSING_IDTOKEN_MEANS_OLD_APP').toLowerCase() === 'on',
     kinds: {
       social: {
         jwksUrl: envOr(env, 'WEB3AUTH_JWKS_URL'),
@@ -236,6 +248,11 @@ function assertBootConfig(env = process.env) {
     );
   }
   assertRebindConfig(cfg);
+  if (!['on', 'off'].includes(cfg.missingIdTokenMeansOldAppRaw)) {
+    throw new Error(
+      `LOGIN_MISSING_IDTOKEN_MEANS_OLD_APP must be "on" or "off" (got "${cfg.missingIdTokenMeansOldAppRaw}")`
+    );
+  }
   for (const kind of Object.keys(cfg.kinds)) {
     const k = cfg.kinds[kind];
     // eslint-disable-next-line no-new
@@ -388,6 +405,15 @@ function getVerifyMode() {
  */
 function getAllowLegacyFallback() {
   return getConfig().allowLegacyFallback;
+}
+
+/**
+ * LOGIN_MISSING_IDTOKEN_MEANS_OLD_APP: should a login with NO idToken, refused with
+ * IDTOKEN_REQUIRED, be answered 426 APP_UPDATE_REQUIRED instead? Default false. It only changes
+ * the answer to that refusal; it never decides whether the request is refused.
+ */
+function getMissingIdTokenMeansOldApp() {
+  return getConfig().missingIdTokenMeansOldApp;
 }
 
 // ---------------------------------------------------------------------------
@@ -565,6 +591,29 @@ async function verifyIdToken(idToken) {
   const { payload, protectedHeader, key } = verified;
   await assertKeyPinned(cfg, { key, protectedHeader, jwksUrl: k.jwksUrl, kind });
   return { kind, payload, protectedHeader };
+}
+
+/**
+ * Was this token issued to a retired App build, i.e. is its `aud` one of
+ * WEB3AUTH_RETIRED_CLIENT_IDS?
+ *
+ * The `aud` is read WITHOUT verification. Call this only for a token verifyIdToken has already
+ * refused with IDTOKEN_AUDIENCE, and only to choose the words of that refusal: the answer never
+ * grants, links or looks up anything. (jose checks the signature and the issuer before the
+ * audience, so such a token was signed by a Web3Auth key; nothing here relies on that.)
+ * Never throws: a malformed token, or one without a string `aud`, is simply not retired.
+ */
+function isRetiredClientIdToken(idToken) {
+  const retired = getConfig().retiredClientIds;
+  if (!retired.length || typeof idToken !== 'string') return false;
+  let aud;
+  try {
+    aud = jose.decodeJwt(idToken.trim()).aud; // UNVERIFIED: message choice only
+  } catch (err) {
+    return false;
+  }
+  const audiences = Array.isArray(aud) ? aud : [aud];
+  return audiences.some((value) => typeof value === 'string' && retired.includes(value));
 }
 
 // ---------------------------------------------------------------------------
@@ -1213,6 +1262,8 @@ module.exports = {
   resolveUser,
   getVerifyMode,
   getAllowLegacyFallback,
+  getMissingIdTokenMeansOldApp,
+  isRetiredClientIdToken,
   Web3AuthIdentityError,
   EXTERNAL_WALLET_VERIFIER,
   isNetworkRebindOn: () => getConfig().networkRebind,
