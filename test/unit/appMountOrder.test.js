@@ -151,6 +151,12 @@ describe('src/app mount order', () => {
     assert.notEqual(ok.status, 401, 'a user JWT must still be accepted by the crawler routes');
   });
 
+  it('self-serve SSO client registration answers for itself: 403 registration_closed while closed, never a 401 from a router that protects /api', async () => {
+    const res = await request(server).post('/api/developer/sso/clients').send({});
+    assert.equal(res.status, 403, `got ${res.status} ${JSON.stringify(res.body)}`);
+    assert.equal(res.body.error, 'registration_closed');
+  });
+
   it('the App version policy is public: no credential needed, and no router that protects /api answers it first', async () => {
     const res = await request(server).get('/api/app/version-policy');
     assert.equal(res.status, 200, `got ${res.status} ${JSON.stringify(res.body)}`);

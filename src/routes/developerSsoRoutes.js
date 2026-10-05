@@ -1,18 +1,29 @@
 /**
  * Public self-serve registration for a DDC SSO client.
  * POST /api/developer/sso/clients returns the secret once. Nothing here lists existing secrets.
+ * Closed unless SSO_DEVELOPER_REGISTRATION=on (src/constants/developerRegistration.js).
  */
 const express = require('express');
 const { rateLimiters } = require('../middlewares/rateLimitMiddleware');
 const { publicBaseUrl } = require('../constants/lifeContext');
 const { partnerResourceUrl } = require('../constants/partnerClient');
+const { developerRegistrationOpen } = require('../constants/developerRegistration');
 const { createLogger } = require('../utils/logger');
 const { createDeveloperClient, DeveloperClientError } = require('../services/ssoDeveloperClient');
 
 const router = express.Router();
 const logger = createLogger('developerSso');
 
-router.post('/clients', rateLimiters.developerClientCreate, async (req, res) => {
+// First on the route, before the rate limiter and any database access: a closed endpoint writes nothing.
+function registrationOpen(req, res, next) {
+  if (developerRegistrationOpen()) return next();
+  return res.status(403).json({
+    error: 'registration_closed',
+    error_description: 'Self-serve client registration is closed. Contact DataDance to register a client.',
+  });
+}
+
+router.post('/clients', registrationOpen, rateLimiters.developerClientCreate, async (req, res) => {
   try {
     const created = await createDeveloperClient(req.body || {});
     const issuer = publicBaseUrl(req);

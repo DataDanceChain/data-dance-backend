@@ -16,6 +16,7 @@
 const crypto = require('crypto');
 const { getAddress } = require('ethers');
 const { publicBaseUrl } = require('./lifeContext');
+const { readDeveloperRegistration } = require('./developerRegistration');
 
 const PARTNER_KIND = 'partner';
 const PARTNER_REALM = 'ddc-sso';
@@ -678,6 +679,9 @@ function assertFinancialGradeConfig(env = process.env) {
     appPublicUrl: String(env.APP_PUBLIC_URL).trim(),
     sessionSecretSeparate: true,
     publicRegistration: String(env.OAUTH_PUBLIC_REGISTRATION_ENABLED ?? 'true').trim().toLowerCase() !== 'false',
+    // Self-serve SSO client registration (SSO_DEVELOPER_REGISTRATION, default off). server.js refuses
+    // to start on a value that is neither off nor on before it gets here.
+    developerRegistration: readDeveloperRegistration(env).open,
   };
 }
 
