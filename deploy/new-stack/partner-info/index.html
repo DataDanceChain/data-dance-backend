@@ -1,0 +1,367 @@
+<!doctype html>
+<!-- TEMPLATE for 50-partner-page.sh (deploy/new-stack). It holds no secret and no partner-specific value: every
+     placeholder below (an upper-case NAME in double curly braces) is filled on the server from /root/ddcnew/.env.rehearsal
+     and PARTNER_ALLOWED_IP, HTML-escaped. client_secret is never in this file: the page fetches ./secret.json (AES-256-GCM
+     ciphertext, key from PBKDF2-SHA256) and decrypts it in the browser with the password the reader types. No external
+     request: system fonts only, inline CSS and JS. The password field has no name and sits in no form, and the unlock
+     box is hidden until the script shows it: without JavaScript there is nothing to submit, and no native submit can
+     send the password anywhere (nginx adds form-action 'none' to the CSP as well). -->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<meta name="referrer" content="no-referrer">
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="data:,">
+<title>TGE 登录联调 · DataDance</title>
+<style>
+/* One reading column. The partner's own config file, filled in, comes first; everything after it is reference:
+   what we registered for them, the endpoints, the rules, production. */
+:root{
+  --bg:#f3f5f7; --surface:#ffffff; --sunk:#e9edf1; --ink:#14202b; --ink2:#465564; --muted:#6b7988; --line:#d7dee5;
+  --accent:#0f6b7a; --accent-ink:#ffffff; --accent-soft:#dff0f2;
+  --ok:#1d7a4a; --ok-soft:#e1f2e8; --bad:#b4232c; --bad-soft:#fbe7e8;
+  --code-bg:#0f1b26; --code-ink:#d8e4ee; --code-key:#7fd1dc; --code-str:#f2d08a; --code-com:#8796a5; --code-line:rgba(216,228,238,.28);
+  --sans:"PingFang SC","Hiragino Sans GB","Noto Sans SC","Noto Sans CJK SC","Microsoft YaHei",system-ui,-apple-system,"Segoe UI",sans-serif;
+  --mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;
+  color-scheme:light;
+}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
+  --bg:#0e141a; --surface:#151d25; --sunk:#1c2630; --ink:#e4ebf1; --ink2:#a9b6c2; --muted:#8a98a5; --line:#2a3642;
+  --accent:#5cc3cf; --accent-ink:#06222a; --accent-soft:#12303a;
+  --ok:#5fcf93; --ok-soft:#11291d; --bad:#ff8a8f; --bad-soft:#35171a;
+  --code-bg:#0a1118; --code-line:rgba(216,228,238,.22);
+  color-scheme:dark;
+}}
+:root[data-theme="dark"]{
+  --bg:#0e141a; --surface:#151d25; --sunk:#1c2630; --ink:#e4ebf1; --ink2:#a9b6c2; --muted:#8a98a5; --line:#2a3642;
+  --accent:#5cc3cf; --accent-ink:#06222a; --accent-soft:#12303a;
+  --ok:#5fcf93; --ok-soft:#11291d; --bad:#ff8a8f; --bad-soft:#35171a;
+  --code-bg:#0a1118; --code-line:rgba(216,228,238,.22);
+  color-scheme:dark;
+}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+html{-webkit-text-size-adjust:100%;text-size-adjust:100%}
+body{background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:15.5px;line-height:1.7;margin:0;padding:28px 16px 64px}
+.wrap{max-width:780px;margin:0 auto;display:grid;gap:40px}
+h1,h2{margin:0;line-height:1.3;text-wrap:balance}
+h1{font-size:28px;font-weight:800}
+h2{font-size:19px;font-weight:750}
+p{margin:0}
+code,.mono{font-family:var(--mono);font-size:.9em}
+section{display:grid;gap:14px;min-width:0}
+header{display:grid;gap:12px}
+.eyebrow{font-size:12.5px;letter-spacing:.08em;color:var(--muted)}
+.lead{color:var(--ink2);max-width:62ch}
+.chips{display:flex;flex-wrap:wrap;gap:8px}
+.chip{font-size:13px;font-weight:650;padding:3px 10px;border-radius:99px;background:var(--sunk);color:var(--ink2)}
+.chip.ok{background:var(--ok-soft);color:var(--ok)}
+.note{font-size:13.5px;color:var(--muted)}
+
+/* the partner's config file */
+.cfg{background:var(--code-bg);color:var(--code-ink);border-radius:14px;padding:18px 0 14px;display:grid;gap:2px;min-width:0}
+.cfg .file{font-family:var(--mono);font-size:12px;color:var(--code-com);padding:0 18px 8px}
+.row{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:10px;padding:4px 10px 4px 18px}
+.row:hover{background:rgba(127,209,220,.07)}
+.line{font-family:var(--mono);font-size:14px;line-height:1.6;overflow-x:auto;white-space:nowrap;min-width:0;scrollbar-width:thin}
+.k{color:var(--code-key)}
+.s{color:var(--code-str)}
+.c{color:var(--code-com)}
+.acts{display:flex;gap:6px}
+.copy{font:600 12px var(--sans);color:var(--code-ink);background:transparent;border:1px solid var(--code-line);border-radius:7px;padding:3px 10px;cursor:pointer;white-space:nowrap}
+.copy:hover{border-color:var(--code-key);color:var(--code-key)}
+.copy:focus-visible{outline:2px solid var(--code-key);outline-offset:2px}
+.copy.done{color:var(--code-key);border-color:var(--code-key)}
+#secret-row.open{background:rgba(127,209,220,.10)}
+
+/* unlock box for client_secret (not a form: see the comment at the top) */
+.unlock{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:14px 16px;display:grid;gap:10px}
+.unlock label{font-weight:650}
+.unlock .field{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px}
+.unlock input{font:15px var(--mono);color:var(--ink);background:var(--bg);border:1px solid var(--line);border-radius:9px;padding:9px 12px;min-width:0;width:100%}
+.unlock input:focus-visible{outline:2px solid var(--accent);outline-offset:1px;border-color:var(--accent)}
+.unlock button{font:650 14.5px var(--sans);color:var(--accent-ink);background:var(--accent);border:0;border-radius:9px;padding:9px 18px;cursor:pointer;white-space:nowrap}
+.unlock button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.unlock button:disabled{opacity:.6;cursor:progress}
+.msg{font-size:14px;border-radius:8px;padding:8px 12px}
+.msg:empty{display:none}
+.msg.bad{background:var(--bad-soft);color:var(--bad)}
+.msg.ok{background:var(--ok-soft);color:var(--ok)}
+
+/* key/value lists */
+.kv{background:var(--surface);border:1px solid var(--line);border-radius:12px;display:grid;min-width:0;margin:0}
+.kv > div{display:grid;grid-template-columns:9.5em minmax(0,1fr);gap:4px 14px;padding:11px 14px;border-bottom:1px solid var(--line);align-items:baseline}
+.kv > div:last-child{border-bottom:0}
+.kv dt{font-size:13.5px;color:var(--muted);margin:0}
+.kv dd{margin:0;min-width:0;display:grid;gap:3px}
+.kv .val{font-family:var(--mono);font-size:13.5px;overflow-wrap:anywhere}
+.kv .val.none{font-family:var(--sans);color:var(--muted)}
+.kv .sub{font-size:13px;color:var(--ink2)}
+
+/* endpoints */
+.tbl{overflow-x:auto;background:var(--surface);border:1px solid var(--line);border-radius:12px}
+table{border-collapse:collapse;width:100%;min-width:560px;font-size:14px}
+th,td{text-align:left;padding:10px 14px;border-bottom:1px solid var(--line);vertical-align:top;line-height:1.55}
+tr:last-child td{border-bottom:0}
+thead th{font-size:12.5px;color:var(--muted);font-weight:600;background:var(--sunk);letter-spacing:.04em}
+td:first-child{white-space:nowrap}
+td.m{font-family:var(--mono);font-size:13px;white-space:nowrap}
+td.p{font-family:var(--mono);font-size:13px;overflow-wrap:anywhere}
+
+.rules{margin:0;padding-left:1.2em;display:grid;gap:8px;color:var(--ink2)}
+.rules b{color:var(--ink)}
+.ask{background:var(--accent-soft);border-radius:12px;padding:14px 16px;display:grid;gap:8px}
+.ask ol{margin:0;padding-left:1.2em;display:grid;gap:6px}
+footer{font-size:13px;color:var(--muted);border-top:1px solid var(--line);padding-top:16px;display:grid;gap:4px}
+@media (max-width:540px){
+  body{font-size:15px}
+  h1{font-size:24px}
+  .kv > div{grid-template-columns:1fr}
+  .row{grid-template-columns:1fr;gap:4px;padding:6px 14px}
+  .line{white-space:normal;overflow-wrap:anywhere}
+  .acts{justify-content:flex-start}
+  .unlock .field{grid-template-columns:1fr}
+  /* endpoints: one card per row (purpose and method, then the path, then the note) instead of a sideways table */
+  .tbl{overflow-x:visible}
+  .tbl table,.tbl tbody{display:block;min-width:0}
+  .tbl thead{display:none}
+  .tbl tr{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:3px 12px;padding:11px 14px;border-bottom:1px solid var(--line)}
+  .tbl tr:last-child{border-bottom:0}
+  .tbl td{padding:0;border:0}
+  .tbl td:first-child{font-weight:650}
+  .tbl td.m{grid-column:2;grid-row:1;color:var(--muted)}
+  .tbl td.p,.tbl td:last-child{grid-column:1 / -1}
+}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <p class="eyebrow">DATADANCE · DDC 登录 · 测试环境</p>
+  <h1>TGE 登录联调</h1>
+  <p class="lead">TGE 站点接入 DDC 登录（OAuth 2.0 授权码 + PKCE）所需的测试环境参数。client_secret 在本页加密存放，输入密码后才在你的浏览器里解密显示。</p>
+  <div class="chips">
+    <span class="chip ok">回调与登录发起地址已登记</span>
+    <span class="chip">client_secret 需密码查看</span>
+    <span class="chip">仅限测试环境</span>
+  </div>
+</header>
+
+<section id="config" aria-labelledby="h-config">
+  <h2 id="h-config">填进你们的配置</h2>
+  <div class="cfg" role="group" aria-label="配置文件示例">
+    <div class="file"># 与你们配置模板的字段一一对应</div>
+    <div class="row"><div class="line"><span class="k">issuer</span>: <span class="s">"{{ISSUER}}"</span> <span class="c"># 无结尾斜杠</span></div><div class="acts"><button type="button" class="copy" data-copy="{{ISSUER}}">复制</button></div></div>
+    <div class="row"><div class="line"><span class="k">client_id</span>: <span class="s">"{{CLIENT_ID}}"</span></div><div class="acts"><button type="button" class="copy" data-copy="{{CLIENT_ID}}">复制</button></div></div>
+    <div class="row" id="secret-row"><div class="line"><span class="k">client_secret</span>: <span class="s" id="secret-value" translate="no">"••••••••••••••••"</span> <span class="c" id="secret-note"># 在下方输入密码后显示</span></div><div class="acts" id="secret-acts" hidden><button type="button" class="copy" id="secret-copy">复制</button><button type="button" class="copy" id="secret-hide">隐藏</button></div></div>
+    <div class="row"><div class="line"><span class="k">redirect_uri</span>: <span class="s">"{{REDIRECT_URI}}"</span> <span class="c"># 已登记，须逐字节一致</span></div><div class="acts"><button type="button" class="copy" data-copy="{{REDIRECT_URI}}">复制</button></div></div>
+  </div>
+
+  <div class="unlock" id="unlock" role="group" aria-labelledby="unlock-label" hidden>
+    <label for="unlock-pw" id="unlock-label">查看 client_secret</label>
+    <div class="field">
+      <input id="unlock-pw" type="password" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="输入 DataDance 提供的密码" aria-describedby="unlock-msg unlock-help">
+      <button type="button" id="unlock-btn">解密查看</button>
+    </div>
+    <p class="msg" id="unlock-msg" role="status" aria-live="polite"></p>
+    <p class="note" id="unlock-help">密码由 DataDance 另行提供。解密在你的浏览器里完成，密码不会发送到任何服务器。</p>
+  </div>
+  <noscript><p class="msg bad">查看 client_secret 需要开启 JavaScript。</p></noscript>
+  <p class="note">client_secret 只放你们服务端的配置，不进前端代码，不进日志，也不要转发到聊天群里。</p>
+</section>
+
+<section id="registered" aria-labelledby="h-registered">
+  <h2 id="h-registered">我们为你们登记的地址</h2>
+  <dl class="kv">
+    <div><dt>回调地址</dt><dd>{{REDIRECT_URIS_HTML}}<span class="sub">登录、同意后，浏览器带授权码跳回这里</span></dd></div>
+    <div><dt>登录发起地址</dt><dd>{{INITIATE_LOGIN_HTML}}<span class="sub">用户在 DataDance App 里点活动卡片时，会被带到这个地址，由你们发起 DDC 登录</span></dd></div>
+    <div><dt>白名单 IP</dt><dd>{{ALLOWED_IPS_HTML}}<span class="sub">测试环境只对白名单开放；你们服务器换码时的出口地址须在其中</span></dd></div>
+  </dl>
+  <p class="note">测试同学的浏览器会访问 <code>{{API_HOST}}</code> 和 <code>{{APP_HOST}}</code> 两个域名；如果测试用的网络不在上面的白名单里，请把它的公网 IP 告诉我们。</p>
+</section>
+
+<section id="endpoints" aria-labelledby="h-endpoints">
+  <h2 id="h-endpoints">接口</h2>
+  <p class="note">端点以发现文档为准。下表路径都在 <code>{{ISSUER}}</code> 下。</p>
+  <div class="tbl">
+    <table>
+      <thead><tr><th>用途</th><th>方法</th><th>路径</th><th>说明</th></tr></thead>
+      <tbody>
+        <tr><td>发现文档</td><td class="m">GET</td><td class="p">/.well-known/oauth-authorization-server</td><td>授权、令牌、撤销端点和支持的参数</td></tr>
+        <tr><td>授权</td><td class="m">GET</td><td class="p">/oauth/authorize</td><td>浏览器跳转；带 PKCE 与 state</td></tr>
+        <tr><td>换取令牌</td><td class="m">POST</td><td class="p">/oauth/token</td><td>服务端调用；client_secret_basic 或 client_secret_post。access_token 5 分钟有效，不发 refresh_token</td></tr>
+        <tr><td>撤销令牌</td><td class="m">POST</td><td class="p">/oauth/revoke</td><td>用户退出时调用；同样要带客户端认证</td></tr>
+        <tr><td>资源说明</td><td class="m">GET</td><td class="p">/.well-known/oauth-protected-resource/partner/tge</td><td>受保护资源的元数据</td></tr>
+        <tr><td>用户身份</td><td class="m">GET</td><td class="p">/partner/tge/me</td><td>需要 <code>tge:identity</code>；返回用户编号 <code>sub</code>。令牌放在 <code>Authorization: Bearer</code> 头里</td></tr>
+        <tr><td>用户状态</td><td class="m">GET</td><td class="p">/partner/tge/status</td><td>需要 <code>tge:status</code>；账户状态、注册时间、是否已绑定钱包</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section id="rules" aria-labelledby="h-rules">
+  <h2 id="h-rules">要点</h2>
+  <ul class="rules">
+    <li><b>PKCE 必须用 S256。</b>code_verifier 为 43 到 128 个字符（字母、数字和 <code>. _ ~ -</code>），code_challenge 为其 SHA-256 的 base64url，不加填充。</li>
+    <li><b>state 必填，长度 22 到 512。</b>由你们生成并绑定本次浏览器会话；回调回来后先比对 state，再换码。</li>
+    <li><b>scope 用 <code>tge:identity tge:status</code>。</b>不带 scope 时只有 <code>tge:identity</code>，调用 <code>/partner/tge/status</code> 会被拒绝。</li>
+    <li><b>redirect_uri 必须和登记值逐字节相同</b>，包括结尾斜杠和查询参数；换码时也要带同一个 redirect_uri。授权时不一致，返回 HTTP 400 页面，不会跳回你们的地址。</li>
+    <li><b>换码在你们服务器上做。</b>用 client_secret_basic 或 client_secret_post，二选一。授权码只能用一次，60 秒内有效；拿到后立即换码。从跳转授权到用户同意，整个登录请求 10 分钟内有效。</li>
+    <li><b>同一个授权码不要重试。</b>重复使用会被拒绝，并撤销用它换到的令牌。换码请求请设置足够长的超时（建议 10 秒以上）。</li>
+    <li><b>回调参数是 code、state 和 iss。</b>iss 等于上面的 issuer，可用来确认授权方。</li>
+    <li><b>如果你们的测试站用自签证书，</b>测试同学的浏览器需要先信任它的 CA，否则跳回时会被拦下。</li>
+  </ul>
+</section>
+
+<section id="production" aria-labelledby="h-production">
+  <h2 id="h-production">正式环境</h2>
+  <dl class="kv">
+    <div><dt>issuer</dt><dd><span class="val">https://api.datadance.ai</span><span class="sub">测试环境的参数不能用于正式环境</span></dd></div>
+    <div><dt>client_id / secret</dt><dd><span class="sub">另发，与测试环境不同</span></dd></div>
+    <div><dt>回调与登录发起</dt><dd><span class="sub">必须是你们的正式域名，使用公网可信证书，不能用 IP 地址</span></dd></div>
+  </dl>
+  <div class="ask">
+    <b>正式环境上线前请提供</b>
+    <ol>
+      <li>正式回调地址</li>
+      <li>正式登录发起地址</li>
+      <li>TGE 网站的正式域名</li>
+      <li>正式服务器的出口 IP</li>
+    </ol>
+  </div>
+</section>
+
+<footer>
+  <p>DataDance 维护。本页生成于 {{GENERATED_AT}}；测试结束后 client_secret 和查看密码都会更换。</p>
+  <p>有问题请在对接群里找 Sloan。</p>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  'use strict';
+  // secret.json = {v:1, kdf:"PBKDF2-SHA256", iter, salt, iv, ct}, base64. AES-256-GCM, 16-byte tag at the end of ct.
+  var MIN_ITER = 600000, MAX_ITER = 10000000, MASK = '"••••••••••••••••"', NOTE = '# 在下方输入密码后显示';
+  var box = document.getElementById('unlock');
+  var input = document.getElementById('unlock-pw');
+  var btn = document.getElementById('unlock-btn');
+  var msg = document.getElementById('unlock-msg');
+  var row = document.getElementById('secret-row');
+  var value = document.getElementById('secret-value');
+  var note = document.getElementById('secret-note');
+  var acts = document.getElementById('secret-acts');
+  var copyBtn = document.getElementById('secret-copy');
+  var hideBtn = document.getElementById('secret-hide');
+  var secret = null;
+
+  function say(text, kind) { msg.textContent = text; msg.className = 'msg' + (kind ? ' ' + kind : ''); }
+  function Fail(code) { this.code = code; }
+  function bytes(b64) {
+    var bin = atob(b64), out = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+  }
+  function parse(o) {
+    if (!o || o.v !== 1 || o.kdf !== 'PBKDF2-SHA256' || typeof o.iter !== 'number' || o.iter % 1 !== 0 ||
+        o.iter < MIN_ITER || o.iter > MAX_ITER || typeof o.salt !== 'string' || typeof o.iv !== 'string' || typeof o.ct !== 'string') {
+      throw new Fail('format');
+    }
+    var p;
+    try { p = { iter: o.iter, salt: bytes(o.salt), iv: bytes(o.iv), ct: bytes(o.ct) }; } catch (e) { throw new Fail('format'); }
+    if (p.salt.length !== 16 || p.iv.length !== 12 || p.ct.length <= 16) throw new Fail('format');
+    return p;
+  }
+  async function decrypt(password) {
+    var res;
+    try { res = await fetch('./secret.json', { cache: 'no-store', credentials: 'same-origin' }); } catch (e) { throw new Fail('fetch'); }
+    if (!res.ok) throw new Fail('fetch');
+    var obj;
+    try { obj = await res.json(); } catch (e) { throw new Fail('format'); }
+    var p = parse(obj);
+    var base = await crypto.subtle.importKey('raw', new TextEncoder().encode(password), 'PBKDF2', false, ['deriveKey']);
+    var key = await crypto.subtle.deriveKey({ name: 'PBKDF2', salt: p.salt, iterations: p.iter, hash: 'SHA-256' },
+                                            base, { name: 'AES-GCM', length: 256 }, false, ['decrypt']);
+    var plain;
+    try { plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: p.iv, tagLength: 128 }, key, p.ct); } catch (e) { throw new Fail('password'); }
+    try { return new TextDecoder('utf-8', { fatal: true }).decode(plain); } catch (e) { throw new Fail('format'); }
+  }
+  function show(text) {
+    secret = text;
+    value.textContent = '"' + text + '"';
+    note.textContent = '';
+    acts.hidden = false;
+    row.classList.add('open');
+    box.hidden = true;
+    copyBtn.focus();
+  }
+  function hide() {
+    secret = null;
+    value.textContent = MASK;
+    note.textContent = NOTE;
+    acts.hidden = true;
+    row.classList.remove('open');
+    box.hidden = false;
+    say('', '');
+    input.value = '';
+    input.focus();
+  }
+  var MESSAGES = {
+    empty: '请输入密码。',
+    password: '密码不正确，请检查后重试。',
+    fetch: '加密文件读取失败，请刷新页面后重试。',
+    format: '加密文件无法识别，请联系我们。',
+    context: '浏览器不允许在当前地址解密：请用 https 地址打开本页。'
+  };
+  var supported = window.isSecureContext && window.crypto && crypto.subtle && window.TextEncoder && window.fetch;
+  box.hidden = false;   // shown by this script only: without JavaScript there is no field to fill in
+  if (!supported) { say(MESSAGES.context, 'bad'); btn.disabled = true; input.disabled = true; }
+
+  // No form: the button and the Enter key run this; nothing is ever submitted or sent.
+  async function unlock() {
+    if (!supported || btn.disabled) return;
+    var password = input.value.replace(/^\s+|\s+$/g, '');
+    if (!password) { say(MESSAGES.empty, 'bad'); input.focus(); return; }
+    btn.disabled = true; btn.textContent = '解密中…'; say('', '');
+    try {
+      var text = await decrypt(password);
+      input.value = '';
+      show(text);
+    } catch (e) {
+      say(MESSAGES[e instanceof Fail ? e.code : 'format'], 'bad');
+      input.select();
+    } finally {
+      password = null;
+      btn.disabled = false; btn.textContent = '解密查看';
+    }
+  }
+  btn.addEventListener('click', unlock);
+  input.addEventListener('keydown', function (ev) {
+    if (ev.key === 'Enter' && !ev.isComposing) { ev.preventDefault(); unlock(); }
+  });
+
+  function flash(button, text) {
+    button.textContent = text; button.classList.add('done');
+    setTimeout(function () { button.textContent = '复制'; button.classList.remove('done'); }, 1600);
+  }
+  function selectText(el) {
+    var range = document.createRange(); range.selectNodeContents(el);
+    var sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(range);
+  }
+  function copy(button, text, el) {
+    var fallback = function () { if (el) selectText(el); button.textContent = '已选中，请按复制键'; };
+    try { navigator.clipboard.writeText(text).then(function () { flash(button, '已复制'); }, fallback); } catch (e) { fallback(); }
+  }
+  copyBtn.addEventListener('click', function () { if (secret !== null) copy(copyBtn, secret, value); });
+  hideBtn.addEventListener('click', hide);
+  document.querySelectorAll('.copy[data-copy]').forEach(function (b) {
+    b.addEventListener('click', function () { copy(b, b.getAttribute('data-copy'), b.closest('.row').querySelector('.s')); });
+  });
+})();
+</script>
+</body>
+</html>

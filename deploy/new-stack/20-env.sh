@@ -10,6 +10,7 @@
 #                                      a differing previous version is kept as .env.rehearsal.prev (600)
 #   /root/ddcnew/.env.db (600)         POSTGRES_USER / POSTGRES_PASSWORD / POSTGRES_DB for the new Postgres
 #   /root/ddcnew/.lock, /root/ddcnew/logs/<ts>-20-env-<pid>.log (600)   run lock and output copy (names and hashes only)
+#   /root/ddcnew/settings.env          the hosts and ports (common.sh settings), if no earlier script recorded them
 # UNDO
 #   rm -f /root/ddcnew/.env.rehearsal /root/ddcnew/.env.rehearsal.prev /root/ddcnew/.env.db
 #   rm -rf /root/ddcnew/secrets   (only before pgdata/ is initialised: the db password lives in pgdata afterwards)
@@ -31,6 +32,13 @@
 #            value). Every copied value is also refused if it carries user:password@ in a URL, a PEM key block or a
 #            bare 32-byte hex key, whatever its name (round 2 review: HOT_WALLET_PRIVATEKEY, DEPLOYER_PK, APIKEY,
 #            OSS_ACCESSKEYSECRET, REDIS_URL with a password, SENTRY_DSN, SLACK_WEBHOOK_URL used to slip through).
+# HOSTS (settings API_HOST / APP_HOST, common.sh): PUBLIC_BASE_URL = API_BASE_URL = https://<API_HOST> (the issuer the
+#   api announces) and APP_PUBLIC_URL = FRONTEND_URL = https://<APP_HOST> (the consent origin). The written file is
+#   checked for exactly these values before it is installed.
+# OLD APP BUILDS (backend PR #38, read once it merges; inert before): WEB3AUTH_RETIRED_CLIENT_IDS = the old env's
+#   WEB3AUTH_CLIENT_ID (the Sapphire Devnet id being retired; it must look like a Web3Auth client id and differ from the
+#   mainnet id; only its first 8 characters are printed) and LOGIN_MISSING_IDTOKEN_MEANS_OLD_APP=on (PR #38 accepts only
+#   on or off and stops the boot on anything else).
 # OLD-STACK INTEGRITY: containers and old files are fingerprinted at start and end (common.sh old_snapshot_*).
 #
 # Prints: parse statistics, the variable-NAME diff against the old file, the names it set, the db_target line and
@@ -69,9 +77,11 @@ guard_db_name "$REHEARSAL_DB"
 case "$REHEARSAL_DB" in ddc_rehearsal|ddc_rehearsal2) ;; *) die "REHEARSAL_DB must be ddc_rehearsal or ddc_rehearsal2";; esac
 for p in "$OUT" "$OUT_DB" "$SEC"; do guard_write_path "$p"; done
 run_begin 20-env "$@"
+settings_say
 [ -r "$OLD_ENV" ] || die "old env file $OLD_ENV not readable"
 [ -r "$FE_ENV_TGE" ] || die "frontend .env.tge not found at $FE_ENV_TGE (10-build.sh unpacks it)"
 old_snapshot_begin
+settings_record
 
 # ---------------------------------------------------------------------------
 # One parser for every read and the rewrite (mawk, gawk and BSD awk compatible).
@@ -195,6 +205,12 @@ TGE_SECRET_SHA=$(printf '%s' "$(cat "$SEC/tge_rehearsal_client_secret")" | sha25
 W3A_ID=$(getv "$FE_ENV_TGE" VITE_WEB3AUTH_CLIENT_ID)
 [[ "$W3A_ID" =~ ^BBpkxUTUr[A-Za-z0-9_-]{20,}$ ]] || die "VITE_WEB3AUTH_CLIENT_ID in $FE_ENV_TGE is not the mainnet id (BBpkxUTUr...)"
 [ "$(getv "$FE_ENV_TGE" VITE_WEB3AUTH_NETWORK)" = mainnet ] || die "$FE_ENV_TGE is not a mainnet build file"
+# The id the old App builds use: the old env's WEB3AUTH_CLIENT_ID (Sapphire Devnet). A Web3Auth client id is the
+# base64url form of a 65-byte public key: 87 characters starting with B (both public ids measured 10-05).
+RETIRED_ID=$(getv "$OLD_ENV" WEB3AUTH_CLIENT_ID)
+[ -n "$RETIRED_ID" ] || die "WEB3AUTH_RETIRED_CLIENT_IDS: the old env's WEB3AUTH_CLIENT_ID is empty, so the retired (devnet) client id is unknown"
+[ "$RETIRED_ID" != "$W3A_ID" ] || die "WEB3AUTH_RETIRED_CLIENT_IDS: the old env's WEB3AUTH_CLIENT_ID is the new mainnet id ($(printf '%s' "$RETIRED_ID" | cut -c1-8)...): retiring it would tell every current App to update"
+[[ "$RETIRED_ID" =~ ^B[A-Za-z0-9_-]{86}$ ]] || die "WEB3AUTH_RETIRED_CLIENT_IDS: the old env's WEB3AUTH_CLIENT_ID does not look like a Web3Auth client id (87 base64url characters starting with B)"
 
 # ---------------------------------------------------------------------------
 # Values (rehearsal column). Order = output order.
@@ -206,10 +222,10 @@ setv() { # name value
   export "DDCV_$1=$2"; SET_NAMES="$SET_NAMES $1"
 }
 setv DATABASE_URL "postgresql://$DB_USER:$DB_PW@db:5432/$REHEARSAL_DB?schema=public"
-setv PUBLIC_BASE_URL https://tge-api.datadance.ai
-setv APP_PUBLIC_URL https://tge-app.datadance.ai
-setv FRONTEND_URL https://tge-app.datadance.ai
-setv API_BASE_URL https://tge-api.datadance.ai
+setv PUBLIC_BASE_URL "https://$API_HOST"
+setv APP_PUBLIC_URL "https://$APP_HOST"
+setv FRONTEND_URL "https://$APP_HOST"
+setv API_BASE_URL "https://$API_HOST"
 setv JWT_SECRET "$(cat "$SEC/jwt_secret_rehearsal")"
 # 5.1 Web3Auth
 setv WEB3AUTH_CLIENT_ID "$W3A_ID"
@@ -223,6 +239,9 @@ setv WEB3AUTH_JWKS_PIN_MODE enforce
 setv WEB3AUTH_NETWORK_REBIND on
 setv WEB3AUTH_REBIND_VERIFIERS "$W3A_GOOGLE,$W3A_EMAIL,$W3A_APPLE,$W3A_X"
 setv WEB3AUTH_EMAIL_TRUSTED_VERIFIERS "$W3A_GOOGLE,$W3A_EMAIL,$W3A_APPLE"
+# Old App builds after the mainnet switch get "please update" instead of a failed login (backend PR #38).
+setv WEB3AUTH_RETIRED_CLIENT_IDS "$RETIRED_ID"
+setv LOGIN_MISSING_IDTOKEN_MEANS_OLD_APP on
 # 5.2 TGE SSO (rehearsal client)
 setv SSO_TGE_ENABLED true
 setv SSO_ENVIRONMENT prod
@@ -306,7 +325,18 @@ upw="${U#postgresql://*:}"; upw="${upw%%@*}"
 [ "$(getv "$CHK" SSO_SESSION_SECRET | sha256)" != "$(getv "$CHK" JWT_SECRET | sha256)" ] && pass "sha256(SSO_SESSION_SECRET) differs from sha256(JWT_SECRET)" || die "SSO_SESSION_SECRET equals JWT_SECRET"
 [ "$(getv "$CHK" SSO_TGE_CLIENT_SECRET_SHA256)" = "$(printf '%s' "$(cat "$SEC/tge_rehearsal_client_secret")" | sha256)" ] && pass "SSO_TGE_CLIENT_SECRET_SHA256 = sha256(secrets/tge_rehearsal_client_secret)" || die "TGE secret hash mismatch"
 [ "$(getv "$CHK" WEB3AUTH_CLIENT_ID | sha256)" = "$(printf '%s' "$W3A_ID" | sha256)" ] && pass "WEB3AUTH_CLIENT_ID = frontend .env.tge VITE_WEB3AUTH_CLIENT_ID (prefix $(getv "$CHK" WEB3AUTH_CLIENT_ID | cut -c1-9))" || die "client id mismatch"
-say "old WEB3AUTH_CLIENT_ID prefix: $(getv "$OLD_ENV" WEB3AUTH_CLIENT_ID | cut -c1-9)"
+[ "$(getv "$CHK" WEB3AUTH_RETIRED_CLIENT_IDS | sha256)" = "$(getv "$OLD_ENV" WEB3AUTH_CLIENT_ID | sha256)" ] && [ "$(getv "$CHK" WEB3AUTH_RETIRED_CLIENT_IDS)" != "$(getv "$CHK" WEB3AUTH_CLIENT_ID)" ] \
+  && pass "WEB3AUTH_RETIRED_CLIENT_IDS = the old WEB3AUTH_CLIENT_ID ($(getv "$CHK" WEB3AUTH_RETIRED_CLIENT_IDS | cut -c1-8)..., the devnet id being retired), not the mainnet id" || die "WEB3AUTH_RETIRED_CLIENT_IDS check failed"
+# PR #38's boot checks (common.sh old_app_env_check), so that a bad value stops here, before the api would refuse to boot.
+old_app_env_check "$(getv "$CHK" WEB3AUTH_RETIRED_CLIENT_IDS)" "$(getv "$CHK" WEB3AUTH_CLIENT_ID)" "$(getv "$CHK" WEB3AUTH_EXTERNAL_AUDIENCE)" "$(getv "$CHK" LOGIN_MISSING_IDTOKEN_MEANS_OLD_APP)"
+[ "$OLD_APP_RETIRED_COUNT" = 1 ] || die "WEB3AUTH_RETIRED_CLIENT_IDS should hold exactly one id (the old WEB3AUTH_CLIENT_ID), it holds $OLD_APP_RETIRED_COUNT"
+pass "LOGIN_MISSING_IDTOKEN_MEANS_OLD_APP=$(getv "$CHK" LOGIN_MISSING_IDTOKEN_MEANS_OLD_APP); WEB3AUTH_RETIRED_CLIENT_IDS: 1 entry, equal to neither WEB3AUTH_CLIENT_ID nor a WEB3AUTH_EXTERNAL_AUDIENCE entry (backend PR #38's boot checks; read once it merges)"
+# The issuer (PUBLIC_BASE_URL) and the consent origin (APP_PUBLIC_URL) the api announces: the settings' hosts, never production.
+for nv in "PUBLIC_BASE_URL https://$API_HOST" "API_BASE_URL https://$API_HOST" "APP_PUBLIC_URL https://$APP_HOST" "FRONTEND_URL https://$APP_HOST"; do
+  [ "$(getv "$CHK" "${nv% *}")" = "${nv#* }" ] || die "${nv% *} in the new file is not ${nv#* }"
+done
+case " $(getv "$CHK" PUBLIC_BASE_URL) $(getv "$CHK" APP_PUBLIC_URL) " in *" https://api.datadance.ai "*|*" https://app.datadance.ai "*) die "the issuer or the consent origin is a production host";; esac
+pass "issuer PUBLIC_BASE_URL = API_BASE_URL = https://$API_HOST; consent origin APP_PUBLIC_URL = FRONTEND_URL = https://$APP_HOST (API_HOST / APP_HOST)"
 c1=$(grep -c '^DISBURSEMENT_PAUSED="true"$' "$CHK" || true); c2=$(grep -cE '^BSC_PAYOUT_PRIVATE_KEY=' "$CHK" || true)
 [ "$c1" = 1 ] && [ "$c2" = 0 ] && pass "payouts off: DISBURSEMENT_PAUSED=true count=$c1, BSC_PAYOUT_PRIVATE_KEY count=$c2" || die "payout check failed ($c1/$c2)"
 step "rehearsal credential policy (names only)"
