@@ -22,7 +22,7 @@ const SECRET = 'tge-secret-dev';
 const SECRET_HASH = crypto.createHash('sha256').update(SECRET).digest('hex');
 const REDIRECT = 'https://tge.example.com/oauth/callback';
 const ISSUER = 'https://api.test.local';
-const PARTNER_RESOURCE = `${ISSUER}/partner/tge`;
+const PARTNER_RESOURCE = `${ISSUER}/partner/sso`;
 
 Object.assign(process.env, {
   LOG_LEVEL: 'error',
@@ -96,7 +96,7 @@ async function mintCode(scope) {
   return { code: new URL(redirectTo).searchParams.get('code'), verifier };
 }
 
-async function mintToken(scope = 'tge:identity tge:status') {
+async function mintToken(scope = 'sso:identity sso:status') {
   const { code, verifier } = await mintCode(scope);
   const res = await request(app).post('/oauth/token').set('Authorization', basic()).type('form').send({
     grant_type: 'authorization_code', code, code_verifier: verifier, redirect_uri: REDIRECT,
@@ -124,7 +124,7 @@ describe('discovery', () => {
     assert.equal(pr.status, 200);
     assert.equal(pr.body.resource, PARTNER_RESOURCE);
     // SSO_TGE_REFERRAL_BIND is unset here, so the write scope is not offered (decision 30 A).
-    assert.deepEqual(pr.body.scopes_supported, PARTNER_SCOPES.filter((s) => s !== 'tge:referral_bind'));
+    assert.deepEqual(pr.body.scopes_supported, PARTNER_SCOPES.filter((s) => s !== 'sso:referral_bind'));
   });
 
   it('serves the OpenAI domain challenge as the exact token', async () => {
@@ -210,15 +210,15 @@ describe('POST /oauth/token', () => {
   });
 
   it('Basic auth with percent-encoded halves → 200 token, no refresh token, no-store', async () => {
-    const { code, verifier } = await mintCode('tge:identity tge:status');
+    const { code, verifier } = await mintCode('sso:identity sso:status');
     const res = await request(app).post('/oauth/token').set('Authorization', basic()).type('form').send({
       grant_type: 'authorization_code', code, code_verifier: verifier, redirect_uri: REDIRECT,
     });
     assert.equal(res.status, 200, res.text);
-    assert.match(res.body.access_token, /^ddc_tge_/);
+    assert.match(res.body.access_token, /^ddc_sso_/);
     assert.equal(res.body.token_type, 'Bearer');
     assert.equal(res.body.expires_in, 300);
-    assert.equal(res.body.scope, 'tge:identity tge:status');
+    assert.equal(res.body.scope, 'sso:identity sso:status');
     assert.equal('refresh_token' in res.body, false);
     assert.equal(res.headers['cache-control'], 'no-store');
     assert.equal(res.headers.pragma, 'no-cache');
@@ -290,7 +290,7 @@ describe('/partner/tge', () => {
     assert.equal(res.status, 401);
     assert.equal(res.body.error, 'invalid_token');
     assert.match(res.headers['www-authenticate'], /^Bearer realm="ddc-sso", error="invalid_token"/);
-    assert.match(res.headers['www-authenticate'], new RegExp(`resource_metadata="${ISSUER}/.well-known/oauth-protected-resource/partner/tge"`));
+    assert.match(res.headers['www-authenticate'], new RegExp(`resource_metadata="${ISSUER}/.well-known/oauth-protected-resource/partner/sso"`));
     assert.equal(res.headers['cache-control'], 'no-store');
   });
 
@@ -321,6 +321,42 @@ describe('/partner/tge', () => {
     assert.equal(spoof.body.error, 'invalid_request');
   });
 
+  it('/me returns avatar only when the account has a picture URL and the field is frozen', async () => {
+    const saved = process.env.SSO_TGE_STATUS_FIELDS;
+    process.env.SSO_TGE_STATUS_FIELDS = `${saved},avatar`;
+    try {
+      prisma.user.rows[0].avatar = 'https://lh3.googleusercontent.com/a/picture';
+      const present = await request(app).get('/partner/tge/me').set('Authorization', `Bearer ${await mintToken()}`);
+      assert.equal(present.status, 200);
+      assert.equal(present.body.avatar, 'https://lh3.googleusercontent.com/a/picture');
+
+      prisma.user.rows[0].avatar = '/assets/avatars/ada.png';
+      const sitePath = await request(app).get('/partner/tge/me').set('Authorization', `Bearer ${await mintToken()}`);
+      assert.equal(sitePath.body.avatar, `${ISSUER}/assets/avatars/ada.png`);
+
+      prisma.user.rows[0].avatar = '/assets/avatars/default-avatar.png';
+      const placeholder = await request(app).get('/partner/tge/me').set('Authorization', `Bearer ${await mintToken()}`);
+      assert.equal(Object.hasOwn(placeholder.body, 'avatar'), false);
+
+      prisma.user.rows[0].avatar = 'javascript:alert(1)';
+      const script = await request(app).get('/partner/tge/me').set('Authorization', `Bearer ${await mintToken()}`);
+      assert.equal(Object.hasOwn(script.body, 'avatar'), false);
+
+      prisma.user.rows[0].avatar = null;
+      const empty = await request(app).get('/partner/tge/me').set('Authorization', `Bearer ${await mintToken()}`);
+      assert.equal(Object.hasOwn(empty.body, 'avatar'), false);
+    } finally {
+      process.env.SSO_TGE_STATUS_FIELDS = saved;
+    }
+  });
+
+  it('/me omits avatar until SSO_TGE_STATUS_FIELDS lists it', async () => {
+    prisma.user.rows[0].avatar = 'https://lh3.googleusercontent.com/a/picture';
+    const res = await request(app).get('/partner/tge/me').set('Authorization', `Bearer ${await mintToken()}`);
+    assert.equal(res.status, 200);
+    assert.equal(Object.hasOwn(res.body, 'avatar'), false);
+  });
+
   it('/me exposes email_masked once frozen via SSO_TGE_STATUS_FIELDS', async () => {
     const saved = process.env.SSO_TGE_STATUS_FIELDS;
     process.env.SSO_TGE_STATUS_FIELDS = `${saved},email_masked`;
@@ -333,16 +369,16 @@ describe('/partner/tge', () => {
     }
   });
 
-  it('/status requires tge:status (403 insufficient_scope) and returns the flat contract fields', async () => {
-    const identityOnly = await mintToken('tge:identity');
+  it('/status requires sso:status (403 insufficient_scope) and returns the flat contract fields', async () => {
+    const identityOnly = await mintToken('sso:identity');
     const denied = await request(app).get('/partner/tge/status').set('Authorization', `Bearer ${identityOnly}`);
     assert.equal(denied.status, 403);
     assert.equal(denied.body.error, 'insufficient_scope');
     assert.match(denied.headers['www-authenticate'], /error="insufficient_scope"/);
-    assert.match(denied.headers['www-authenticate'], /scope="tge:status"/);
+    assert.match(denied.headers['www-authenticate'], /scope="sso:status"/);
 
     await prisma.dataLicenceConsent.create({ data: { userId: user.id, policyVersion: DATA_LICENCE_POLICY_VERSION, grantedAt: new Date(), withdrawnAt: null } });
-    const token = await mintToken('tge:identity tge:status');
+    const token = await mintToken('sso:identity sso:status');
     const res = await request(app).get('/partner/tge/status').set('Authorization', `Bearer ${token}`);
     assert.equal(res.status, 200, res.text);
     assert.deepEqual(Object.keys(res.body).sort(), ['account_status', 'as_of', 'cache_max_age', 'data_licence_granted', 'registered_at', 'sub', 'wallet_bound']);
@@ -360,7 +396,7 @@ describe('/partner/tge', () => {
     const saved = process.env.SSO_TGE_STATUS_FIELDS;
     process.env.SSO_TGE_STATUS_FIELDS = '';
     try {
-      const token = await mintToken('tge:status');
+      const token = await mintToken('sso:status');
       prisma.user.rows[0].disabledAt = null;
       const res = await request(app).get('/partner/tge/status').set('Authorization', `Bearer ${token}`);
       assert.equal(res.status, 200);
@@ -399,13 +435,13 @@ describe('/partner/tge', () => {
 });
 
 /**
- * Per-field scopes: `tge:email`, `tge:wallet`, `tge:points`, `tge:referral`. Each one is gated
+ * Per-field scopes: `sso:email`, `sso:wallet`, `sso:points`, `sso:referral`. Each one is gated
  * twice — the token must carry the scope AND the environment must have frozen the field — and a
  * closed gate omits the key instead of answering 403 (only the endpoint scopes 403).
  */
 describe('/partner/tge — per-field scopes', () => {
   const ALL_FIELDS = 'registered_at,wallet_bound,data_licence_granted,email,wallet_address,points,referral';
-  const FULL_SCOPE = 'tge:identity tge:status tge:email tge:wallet tge:points tge:referral';
+  const FULL_SCOPE = 'sso:identity sso:status sso:email sso:wallet sso:points sso:referral';
 
   /** SSO_TGE_STATUS_FIELDS is read per request, so a test can freeze/unfreeze around one call. */
   async function withFields(fields, fn) {
@@ -554,11 +590,11 @@ describe('/partner/tge — per-field scopes', () => {
     });
   });
 
-  it('the inviter code follows the referral gates: absent without tge:referral or without the freeze-list entry', async () => {
+  it('the inviter code follows the referral gates: absent without sso:referral or without the freeze-list entry', async () => {
     prisma.user.rows.push({ id: 'upline-1', referralCode: 'ZZ99ZZ' });
     await prisma.referral.create({ data: { inviterId: 'upline-1', inviteeId: user.id, code: 'ZZ99ZZ', campaignSlug: null } });
     await withFields(ALL_FIELDS, async () => {
-      const res = await status(await mintToken('tge:identity tge:status tge:points'));
+      const res = await status(await mintToken('sso:identity sso:status sso:points'));
       assert.equal(res.status, 200, res.text);
       assert.equal('referral' in res.body, false);
       assert.equal(JSON.stringify(res.body).includes('ZZ99ZZ'), false);
@@ -587,16 +623,16 @@ describe('/partner/tge — per-field scopes', () => {
     });
   });
 
-  it('a token with only tge:identity gets none of the new fields, and no 403', async () => {
+  it('a token with only sso:identity gets none of the new fields, and no 403', async () => {
     await withFields(ALL_FIELDS, async () => {
-      const token = await mintToken('tge:identity');
+      const token = await mintToken('sso:identity');
       const res = await me(token);
       assert.equal(res.status, 200, 'a missing OPTIONAL scope is not an error');
       assert.deepEqual(Object.keys(res.body).sort(), ['client_id', 'email_masked', 'expires_at', 'issued_at', 'sub']);
       assert.equal('email' in res.body, false);
       assert.equal('wallet_address' in res.body, false);
 
-      const statusToken = await mintToken('tge:identity tge:status');
+      const statusToken = await mintToken('sso:identity sso:status');
       const st = await status(statusToken);
       assert.equal(st.status, 200);
       assert.equal('points' in st.body, false);
@@ -620,13 +656,13 @@ describe('/partner/tge — per-field scopes', () => {
   });
 
   it('the consent page can render the granted scopes as a list', async () => {
-    const res = await request(app).get('/oauth/authorize').query(authorizeQuery({ scope: 'tge:referral tge:identity tge:email' }));
+    const res = await request(app).get('/oauth/authorize').query(authorizeQuery({ scope: 'sso:referral sso:identity sso:email' }));
     assert.equal(res.status, 302, res.text);
     const id = new URL(res.headers.location).searchParams.get('request');
     const info = await request(app).get(`/api/oauth/requests/${id}`);
     assert.equal(info.status, 200);
-    assert.equal(info.body.data.scope, 'tge:identity tge:email tge:referral');
-    assert.deepEqual(info.body.data.scopeItems, ['identity', 'email', 'referral'], 'stable order, no tge: prefix for the Wallet copy');
+    assert.equal(info.body.data.scope, 'sso:identity sso:email sso:referral');
+    assert.deepEqual(info.body.data.scopeItems, ['identity', 'email', 'referral'], 'stable order, no sso: prefix for the Wallet copy');
   });
 });
 
@@ -811,7 +847,7 @@ describe('request id (item 3)', () => {
 describe('/partner/tge is read-only (item 5)', () => {
   beforeEach(() => clearRateLimitStore());
 
-  async function statusWith(fields, scope = 'tge:identity tge:status tge:referral') {
+  async function statusWith(fields, scope = 'sso:identity sso:status sso:referral') {
     const saved = process.env.SSO_TGE_STATUS_FIELDS;
     process.env.SSO_TGE_STATUS_FIELDS = fields;
     try {
@@ -871,7 +907,7 @@ describe('/partner/tge is read-only (item 5)', () => {
 });
 
 /**
- * Item 6 — `email_masked` is declared under `tge:identity` in the field catalog but was gated on
+ * Item 6 — `email_masked` is declared under `sso:identity` in the field catalog but was gated on
  * the freeze list alone. Today the endpoint scope happens to be the same scope, so the body is
  * unchanged for every real caller; the gate is asserted directly on the body builder, which is
  * where the declaration and the behaviour can drift apart again.
@@ -890,18 +926,18 @@ describe('email_masked honours its declared scope (item 6)', () => {
     }
   }
 
-  it('is declared under tge:identity', () => {
-    assert.equal(catalog.email_masked.scope, 'tge:identity');
+  it('is declared under sso:identity', () => {
+    assert.equal(catalog.email_masked.scope, 'sso:identity');
     assert.equal(catalog.email_masked.presence, 'null');
   });
 
   it('a token without that scope gets null, not the masked address', () => {
-    assert.equal(bodyWithScope('tge:status').email_masked, null);
+    assert.equal(bodyWithScope('sso:status').email_masked, null);
     assert.equal(bodyWithScope('').email_masked, null);
   });
 
   it('a token with it, in an environment that freezes the field, gets the hint', () => {
-    assert.equal(bodyWithScope('tge:identity').email_masked, 's***@example.com');
+    assert.equal(bodyWithScope('sso:identity').email_masked, 's***@example.com');
   });
 
   it('the freeze list is still the second gate', () => {
@@ -909,7 +945,7 @@ describe('email_masked honours its declared scope (item 6)', () => {
     process.env.SSO_TGE_STATUS_FIELDS = 'registered_at';
     try {
       const client = getPartnerClient('tge-test');
-      const body = meBody({ partner: { client, user, token: { clientId: 'tge-test', scope: 'tge:identity', issuedAt: new Date(), expiresAt: new Date() } } });
+      const body = meBody({ partner: { client, user, token: { clientId: 'tge-test', scope: 'sso:identity', issuedAt: new Date(), expiresAt: new Date() } } });
       assert.equal(body.email_masked, null);
     } finally {
       process.env.SSO_TGE_STATUS_FIELDS = saved;
@@ -959,7 +995,7 @@ describe('partner access record (G6)', () => {
   }
 
   it('/me and /status each write one record naming the client, user, endpoint and returned keys', async () => {
-    const token = await mintToken('tge:identity tge:status');
+    const token = await mintToken('sso:identity sso:status');
     let me;
     let st;
     const entries = await capture(async () => {
@@ -974,14 +1010,14 @@ describe('partner access record (G6)', () => {
       assert.equal(entry.clientId, 'tge-test');
       assert.equal(entry.userId, user.id);
       assert.deepEqual(entry.fields, Object.keys(res.body).sort());
-      assert.equal(entry.scope, 'tge:identity tge:status');
+      assert.equal(entry.scope, 'sso:identity sso:status');
       assert.ok(!JSON.stringify(entry).includes(token), 'the access token never reaches the record');
       assert.ok(!JSON.stringify(entry).includes(user.email), 'no field value reaches the record');
     }
   });
 
   it('a refused read writes no access record', async () => {
-    const token = await mintToken('tge:identity');
+    const token = await mintToken('sso:identity');
     const entries = await capture(async () => {
       const st = await request(app).get('/partner/tge/status').set('Authorization', `Bearer ${token}`);
       assert.equal(st.status, 403);

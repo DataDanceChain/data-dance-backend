@@ -1,6 +1,6 @@
 const crypto = require('crypto');
 const prisma = require('../utils/prisma');
-const { PARTNER_TOKEN_PREFIX, PARTNER_ACCESS_TTL_SEC } = require('../constants/partnerClient');
+const { PARTNER_TOKEN_PREFIX, PARTNER_ACCESS_TTL_SEC, isPartnerAccessToken, samePartnerResource } = require('../constants/partnerClient');
 
 const TOKEN_PREFIX = 'ddc_mcp_';
 const PARTNER_SOURCE = 'partner';
@@ -113,10 +113,6 @@ async function findUserByMcpToken(token) {
   return { id: row.user.id, email: row.user.email, tokenId: row.id };
 }
 
-function sameResource(a, b) {
-  return String(a || '').replace(/\/$/, '') === String(b || '').replace(/\/$/, '');
-}
-
 /**
  * Resolves a partner access token for the given audience. Returns null unless the token has
  * the `ddc_tge_` prefix, exists, was issued with source 'partner' for exactly this resource
@@ -126,14 +122,14 @@ function sameResource(a, b) {
  */
 async function findUserByPartnerToken(token, resource) {
   const trimmed = String(token || '').trim();
-  if (!trimmed.startsWith(PARTNER_TOKEN_PREFIX)) return null;
+  if (!isPartnerAccessToken(trimmed)) return null;
   const row = await prisma.mcpToken.findUnique({
     where: { tokenHash: hashToken(trimmed) },
     include: { user: true },
   });
   if (!row?.user) return null;
   if (row.source !== PARTNER_SOURCE) return null;
-  if (!sameResource(row.resource, resource)) return null;
+  if (!samePartnerResource(row.resource, resource)) return null;
   const now = new Date();
   if (!row.expiresAt || row.expiresAt <= now) return null;
   if (!row.lastUsedAt || now.getTime() - new Date(row.lastUsedAt).getTime() > LAST_USED_WRITE_INTERVAL_MS) {

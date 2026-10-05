@@ -112,11 +112,11 @@ describe('readPartnerConfig / getPartnerClient', () => {
     assert.equal(client.tokenEndpointAuthMethod, 'client_secret_basic');
     assert.deepEqual(client.tokenEndpointAuthMethods, ['client_secret_basic', 'client_secret_post']);
     assert.deepEqual(client.scopes, [...PARTNER_SCOPES]);
-    assert.equal(client.defaultScope, 'tge:identity');
+    assert.equal(client.defaultScope, 'sso:identity');
     assert.equal(client.requestTtlMs, 10 * 60 * 1000);
     assert.equal(client.codeTtlMs, 60 * 1000);
     assert.equal(client.accessTtlSec, 300);
-    assert.equal(client.resource, 'https://api.test.local/partner/tge');
+    assert.equal(client.resource, 'https://api.test.local/partner/sso');
   });
 });
 
@@ -132,12 +132,12 @@ describe('partnerResourceUrl / publicBaseUrl', () => {
 
   it('uses PUBLIC_BASE_URL, trailing slash stripped', () => {
     setEnv({ PUBLIC_BASE_URL: 'https://api.test.local/' });
-    assert.equal(partnerResourceUrl(), 'https://api.test.local/partner/tge');
+    assert.equal(partnerResourceUrl(), 'https://api.test.local/partner/sso');
   });
 
   it('ignores Host and X-Forwarded-Host entirely', () => {
     setEnv({ PUBLIC_BASE_URL: 'https://api.test.local' });
-    assert.equal(partnerResourceUrl(forgedHost), 'https://api.test.local/partner/tge');
+    assert.equal(partnerResourceUrl(forgedHost), 'https://api.test.local/partner/sso');
     assert.equal(publicBaseUrl(forgedHost), 'https://api.test.local');
   });
 

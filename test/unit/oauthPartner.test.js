@@ -10,7 +10,7 @@ const SECRET = 'tge-secret-dev';
 const SECRET_HASH = crypto.createHash('sha256').update(SECRET).digest('hex');
 const REDIRECT = 'https://tge.example.com/oauth/callback';
 const ISSUER = 'https://api.test.local';
-const PARTNER_RESOURCE = `${ISSUER}/partner/tge`;
+const PARTNER_RESOURCE = `${ISSUER}/partner/sso`;
 const MCP_RESOURCE = `${ISSUER}/mcp`;
 
 Object.assign(process.env, {
@@ -173,11 +173,12 @@ describe('assertRedirect', () => {
 
 describe('parsePartnerScope', () => {
   it('defaults, canonicalises, dedupes, and refuses openid/unknown', () => {
-    assert.equal(parsePartnerScope(''), 'tge:identity');
-    assert.equal(parsePartnerScope(undefined), 'tge:identity');
-    assert.equal(parsePartnerScope('tge:status tge:identity tge:status'), 'tge:identity tge:status');
-    assert.equal(parsePartnerScope('tge:status+tge:identity'), 'tge:identity tge:status');
-    assert.equal(parsePartnerScope('tge:status'), 'tge:status');
+    assert.equal(parsePartnerScope(''), 'sso:identity');
+    assert.equal(parsePartnerScope(undefined), 'sso:identity');
+    assert.equal(parsePartnerScope('tge:status tge:identity tge:status'), 'sso:identity sso:status');
+    assert.equal(parsePartnerScope('sso:status sso:identity'), 'sso:identity sso:status');
+    assert.equal(parsePartnerScope('tge:status+tge:identity'), 'sso:identity sso:status');
+    assert.equal(parsePartnerScope('tge:status'), 'sso:status');
     assert.throws(() => parsePartnerScope('openid tge:identity'), (e) => e.error === 'invalid_scope' && /openid/.test(e.description));
     assert.throws(() => parsePartnerScope('tge:identity life_capsule'), (e) => e.error === 'invalid_scope');
     assert.throws(() => parsePartnerScope('tge'), (e) => e.error === 'invalid_scope');
@@ -227,7 +228,7 @@ describe('startAuthorization', () => {
     assert.equal(parsed.searchParams.get('request'), row.id);
     assert.equal(row.clientId, 'tge-test');
     assert.equal(row.resource, PARTNER_RESOURCE);
-    assert.equal(row.scope, 'tge:identity');
+    assert.equal(row.scope, 'sso:identity');
     assert.equal(row.state, 'state-with-enough-entropy-1234');
     assert.equal(row.codeChallengeMethod, 'S256');
     const ttl = row.expiresAt.getTime() - before;
@@ -236,7 +237,7 @@ describe('startAuthorization', () => {
 
   it('parses scopes and accepts an explicit matching resource (trailing slash tolerant)', async () => {
     await startAuthorization(req, partnerQuery({ scope: 'tge:status tge:identity', resource: `${PARTNER_RESOURCE}/` }));
-    assert.equal(prisma.oAuthAuthorization.rows[0].scope, 'tge:identity tge:status');
+    assert.equal(prisma.oAuthAuthorization.rows[0].scope, 'sso:identity sso:status');
     assert.equal(prisma.oAuthAuthorization.rows[0].resource, PARTNER_RESOURCE);
   });
 
@@ -608,7 +609,7 @@ describe('decideConsent — one request, one decision (item 4)', () => {
     const token = await exchangeAuthorizationCode(reqWithBasic(), {
       grant_type: 'authorization_code', code, code_verifier: verifier, redirect_uri: REDIRECT,
     });
-    assert.match(token.access_token, /^ddc_tge_/);
+    assert.match(token.access_token, /^ddc_sso_/);
   });
 
   it('the decision consume only matches a request that has neither been finished nor decided', async () => {
@@ -702,15 +703,15 @@ describe('presentedClientCredentials', () => {
 });
 
 describe('exchangeAuthorizationCode (partner)', () => {
-  it('issues a ddc_tge_ token with client_secret_basic (percent-encoded halves), 300 s, no refresh token', async () => {
+  it('issues a ddc_sso_ token with client_secret_basic (percent-encoded halves), 300 s, no refresh token', async () => {
     const { code, verifier, row } = await mintPartnerCode({ scope: 'tge:identity tge:status' });
     const token = await exchangeAuthorizationCode(reqWithBasic(), {
       grant_type: 'authorization_code', code, code_verifier: verifier, redirect_uri: REDIRECT,
     });
-    assert.match(token.access_token, /^ddc_tge_/);
+    assert.match(token.access_token, /^ddc_sso_/);
     assert.equal(token.token_type, 'Bearer');
     assert.equal(token.expires_in, 300);
-    assert.equal(token.scope, 'tge:identity tge:status');
+    assert.equal(token.scope, 'sso:identity sso:status');
     assert.equal(token.resource, PARTNER_RESOURCE);
     assert.equal('refresh_token' in token, false);
     assert.equal(prisma.oAuthRefreshToken.rows.length, 0);
@@ -730,12 +731,12 @@ describe('exchangeAuthorizationCode (partner)', () => {
       grant_type: 'authorization_code', code: a.code, code_verifier: a.verifier, redirect_uri: REDIRECT,
       client_id: 'tge-test', client_secret: SECRET,
     });
-    assert.match(t1.access_token, /^ddc_tge_/);
+    assert.match(t1.access_token, /^ddc_sso_/);
     const b = await mintPartnerCode();
     const t2 = await exchangeAuthorizationCode(reqWithBasic(), {
       grant_type: 'authorization_code', code: b.code, code_verifier: b.verifier, redirect_uri: REDIRECT, client_id: 'tge-test',
     });
-    assert.match(t2.access_token, /^ddc_tge_/);
+    assert.match(t2.access_token, /^ddc_sso_/);
   });
 
   it('401 invalid_client: no credentials, wrong secret, client_id-only, disabled client; code stays unconsumed', async () => {
@@ -832,18 +833,18 @@ describe('partner token matrix (findUserByPartnerToken)', () => {
     return (await exchangeAuthorizationCode(reqWithBasic(), { grant_type: 'authorization_code', code, code_verifier: verifier, redirect_uri: REDIRECT })).access_token;
   }
 
-  it('accepts only ddc_tge_ tokens issued for exactly this resource, unexpired, source partner', async () => {
+  it('accepts only ddc_sso_ tokens issued for exactly this resource, unexpired, source partner', async () => {
     const token = await partnerToken('tge:identity tge:status');
     const ok = await findUserByPartnerToken(token, PARTNER_RESOURCE);
     assert.equal(ok.user.id, user.id);
     assert.equal(ok.token.clientId, 'tge-test');
-    assert.equal(ok.token.scope, 'tge:identity tge:status');
+    assert.equal(ok.token.scope, 'sso:identity sso:status');
     assert.ok(await findUserByPartnerToken(token, `${PARTNER_RESOURCE}/`), 'trailing slash tolerant');
     assert.equal(await findUserByPartnerToken(token, MCP_RESOURCE), null, 'wrong audience');
     assert.equal(await findUserByPartnerToken(token, 'https://other.example/partner/tge'), null, 'wrong origin');
     assert.equal(await findUserByPartnerToken(`ddc_mcp_${token.slice(8)}`, PARTNER_RESOURCE), null, 'mcp prefix');
     assert.equal(await findUserByPartnerToken('', PARTNER_RESOURCE), null);
-    assert.equal(await findUserByPartnerToken('ddc_tge_unknown', PARTNER_RESOURCE), null);
+    assert.equal(await findUserByPartnerToken('ddc_sso_unknown', PARTNER_RESOURCE), null);
   });
 
   it('refuses expired tokens and non-partner rows even with the right prefix', async () => {
@@ -871,7 +872,7 @@ describe('revokeToken', () => {
     return (await exchangeAuthorizationCode(reqWithBasic(), { grant_type: 'authorization_code', code, code_verifier: verifier, redirect_uri: REDIRECT })).access_token;
   }
 
-  it('requires client authentication for ddc_tge_ tokens and revokes on success (RFC 7009)', async () => {
+  it('requires client authentication for ddc_sso_ tokens and revokes on success (RFC 7009)', async () => {
     const token = await partnerToken();
     await rejects(revokeToken(token, { req, body: {} }), { status: 401, error: 'invalid_client' });
     await rejects(revokeToken(token, { req: reqWithBasic('tge-test', 'wrong'), body: {} }), { status: 401, error: 'invalid_client' });
@@ -879,7 +880,7 @@ describe('revokeToken', () => {
     await revokeToken(token, { req: reqWithBasic(), body: {} });
     assert.equal(await findUserByPartnerToken(token, PARTNER_RESOURCE), null);
     await revokeToken(token, { req: reqWithBasic(), body: {} }); // unknown now → silent success
-    await revokeToken('ddc_tge_unknown', { req, body: { client_id: 'tge-test', client_secret: SECRET } });
+    await revokeToken('ddc_sso_unknown', { req, body: { client_id: 'tge-test', client_secret: SECRET } });
   });
 
   it('leaves the MCP revoke path unauthenticated', async () => {
@@ -941,7 +942,7 @@ describe('metadataDocuments', () => {
     assert.equal(as.issuer, ISSUER);
     assert.equal(as.authorization_response_iss_parameter_supported, true);
     assert.deepEqual(as.token_endpoint_auth_methods_supported, ['none', 'client_secret_basic', 'client_secret_post']);
-    assert.ok(as.scopes_supported.includes('tge:identity') && as.scopes_supported.includes('tge:status') && as.scopes_supported.includes('life_capsule'));
+    assert.ok(as.scopes_supported.includes('sso:identity') && as.scopes_supported.includes('sso:status') && as.scopes_supported.includes('life_capsule'));
     assert.deepEqual(as.code_challenge_methods_supported, ['S256']);
     assert.equal(as.resource_indicators_supported, true);
     assert.equal(as.ddc_sso_environment, 'test');
@@ -949,7 +950,7 @@ describe('metadataDocuments', () => {
     assert.deepEqual(partnerResourceDoc.authorization_servers, [ISSUER]);
     assert.deepEqual(partnerResourceDoc.bearer_methods_supported, ['header']);
     // SSO_TGE_REFERRAL_BIND is unset here, so the write scope is not offered (decision 30 A).
-    assert.deepEqual(partnerResourceDoc.scopes_supported, PARTNER_SCOPES.filter((s) => s !== 'tge:referral_bind'));
+    assert.deepEqual(partnerResourceDoc.scopes_supported, PARTNER_SCOPES.filter((s) => s !== 'sso:referral_bind'));
     assert.equal(resourceDoc.resource, MCP_RESOURCE);
   });
 });

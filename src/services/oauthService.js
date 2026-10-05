@@ -5,7 +5,9 @@ const { hashToken, issueMcpToken, issuePartnerToken, findUserByMcpToken } = requ
 const {
   PARTNER_SCOPES,
   PARTNER_DEFAULT_SCOPE,
-  PARTNER_TOKEN_PREFIX,
+  canonicalPartnerScope,
+  samePartnerResource,
+  isPartnerAccessToken,
   getPartnerClient,
   isPartnerClient,
   verifyClientSecret,
@@ -21,6 +23,7 @@ const { normalizeReferralCodeInput, formatReferralCodeForDisplay } = require('..
 const { createLogger } = require('../utils/logger');
 // The write scope's gate (decision 30 A); kept on their own line, apart from the main import.
 const { availablePartnerScopes, referralBindEnabled } = require('../constants/partnerClient');
+const { loadDeveloperPartnerClient } = require('./ssoDeveloperClient');
 
 const logger = createLogger('oauthService');
 
@@ -232,7 +235,7 @@ function issuerFromResource(resource) {
     const url = new URL(resource);
     return `${url.protocol}//${url.host}`;
   } catch {
-    return String(resource || '').replace(/\/(mcp|partner\/tge)\/?$/, '');
+    return String(resource || '').replace(/\/(mcp|partner\/sso|partner\/tge)\/?$/, '');
   }
 }
 
@@ -269,7 +272,7 @@ function metadataDocuments(req) {
   };
   const partnerResourceDoc = {
     resource: partnerResource,
-    resource_name: 'DataDance partner API (TGE)',
+    resource_name: 'DataDance SSO',
     authorization_servers: [issuer],
     bearer_methods_supported: ['header'],
     scopes_supported: availablePartnerScopes(),
@@ -298,12 +301,12 @@ function normalizeScope(value) {
 function parsePartnerScope(value) {
   const requested = String(value || '')
     .split(/[\s+]+/)
-    .map((item) => item.trim())
+    .map((item) => canonicalPartnerScope(item.trim()))
     .filter(Boolean);
   if (!requested.length) return PARTNER_DEFAULT_SCOPE;
   const unknown = requested.filter((item) => !PARTNER_SCOPES.includes(item));
   if (unknown.includes('openid')) {
-    throw new OAuthError(400, 'invalid_scope', 'openid is not available for this client; read identity from /partner/tge/me.');
+    throw new OAuthError(400, 'invalid_scope', 'openid is not available for this client; read identity from /partner/sso/me.');
   }
   if (unknown.length) {
     throw new OAuthError(400, 'invalid_scope', `Unknown scope: ${unknown.join(' ')}.`);
@@ -325,9 +328,9 @@ function parsePartnerScope(value) {
  * whatever order the partner asked in. The copy itself lives in the Wallet.
  */
 function scopeItems(scope, partner) {
-  const granted = new Set(String(scope || '').split(/\s+/).filter(Boolean));
+  const granted = new Set(String(scope || '').split(/\s+/).filter(Boolean).map((item) => canonicalPartnerScope(item)));
   if (!partner) return [...granted];
-  return PARTNER_SCOPES.filter((item) => granted.has(item)).map((item) => item.replace(/^tge:/, ''));
+  return PARTNER_SCOPES.filter((item) => granted.has(item)).map((item) => item.replace(/^(sso|tge):/, ''));
 }
 
 function isAllowedRedirect(uri) {
@@ -412,6 +415,11 @@ async function resolveClient(clientId, req) {
   if (partner) {
     if (!partner.enabled) throw new OAuthError(400, 'unauthorized_client', 'This client is disabled.');
     return partner;
+  }
+  const developer = await loadDeveloperPartnerClient(id, req);
+  if (developer) {
+    if (!developer.enabled) throw new OAuthError(400, 'unauthorized_client', 'This client is disabled.');
+    return developer;
   }
   const stored = await prisma.oAuthClient.findUnique({ where: { clientId: id } });
   if (stored) {
@@ -537,10 +545,18 @@ async function startAuthorization(req, query, res) {
     }
     const expected = partner ? client.resource : mcpEndpointUrl(req);
     const resource = String(query.resource || expected);
-    if (!sameResource(resource, expected)) {
+    const resourceMatches = partner ? samePartnerResource(resource, expected) : sameResource(resource, expected);
+    if (!resourceMatches) {
       throw new OAuthError(400, 'invalid_target', partner ? 'resource must match the partner API.' : 'resource must match the MCP endpoint.');
     }
     const scope = partner ? parsePartnerScope(query.scope) : normalizeScope(query.scope);
+    if (partner) {
+      const allowed = new Set(client.scopes || []);
+      const denied = scope.split(' ').filter(Boolean).filter((item) => !allowed.has(item));
+      if (denied.length) {
+        throw new OAuthError(400, 'invalid_scope', 'This client cannot request that scope.');
+      }
+    }
     // The TGE registration link carries the inviter's code so the Wallet login page can prefill
     // it; format only, no lookup (no code enumeration through /oauth/authorize), partner client
     // only, and NEVER applied automatically — binding still only happens through the normal
@@ -682,7 +698,7 @@ async function decideConsent(user, requestId, allow, ctx = {}) {
   // consent). One rule stays: the switch was turned off after /oauth/authorize → the request ends
   // as invalid_scope (consumed, back to the partner) on ANY Allow, never a token for a write that
   // is not being served.
-  if (partner && String(row.scope || '').split(/\s+/).includes('tge:referral_bind') && !referralBindEnabled()) {
+  if (partner && String(row.scope || '').split(/\s+/).map((item) => canonicalPartnerScope(item)).includes('sso:referral_bind') && !referralBindEnabled()) {
     return finish({ error: 'invalid_scope' });
   }
 
@@ -871,7 +887,7 @@ async function exchangeAuthorizationCode(req, body) {
   if (!verifyS256(verifier, row.codeChallenge)) {
     throw new OAuthError(400, 'invalid_grant', 'PKCE verification failed.');
   }
-  if (body.resource && !sameResource(body.resource, row.resource)) {
+  if (body.resource && !(rowPartner ? samePartnerResource(body.resource, row.resource) : sameResource(body.resource, row.resource))) {
     throw new OAuthError(400, 'invalid_target', 'resource does not match this code.');
   }
 
@@ -979,7 +995,7 @@ async function exchangeRefreshToken(body) {
 async function revokeToken(token, { req, body } = {}) {
   const trimmed = String(token || '').trim();
   if (!trimmed) return;
-  if (trimmed.startsWith(PARTNER_TOKEN_PREFIX)) {
+  if (isPartnerAccessToken(trimmed)) {
     const presented = presentedClientCredentials(req, body || {});
     const client = presented?.clientId ? getPartnerClient(presented.clientId, req) : null;
     if (!client || !presented.clientSecret || !verifyClientSecret(client, presented.clientSecret)) {
