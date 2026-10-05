@@ -505,8 +505,8 @@ Environment (see `env.example`): `SSO_ENVIRONMENT`, `SSO_TGE_ENABLED`, `SSO_TGE_
 `SSO_TGE_SECRET_ROTATION_UNTIL`, `SSO_TGE_REDIRECT_URIS`, `SSO_TGE_INITIATE_LOGIN_URI`,
 `SSO_TGE_STATUS_FIELDS`, `SSO_REQUIRE_VERIFIED_SESSION`, plus `PUBLIC_BASE_URL` (now required
 unconditionally — the issuer is never derived from a request header), `APP_PUBLIC_URL`,
-`WEB3AUTH_ALLOWED_VERIFIERS`, `WEB3AUTH_JWKS_PIN_MODE`, `WEB3AUTH_JWKS_PINNED_THUMBPRINTS` and
-`OAUTH_PUBLIC_REGISTRATION_ENABLED`.
+`WEB3AUTH_ALLOWED_VERIFIERS`, `WEB3AUTH_JWKS_PIN_MODE`, `WEB3AUTH_JWKS_PINNED_THUMBPRINTS`,
+`OAUTH_PUBLIC_REGISTRATION_ENABLED` and `SSO_DEVELOPER_REGISTRATION`.
 
 - `src/server.js` calls `assertPartnerConfig()` at boot and refuses to start with every problem
   listed (missing hash, http redirect URI outside localhost, fragment, unknown status field,
@@ -520,6 +520,22 @@ unconditionally — the issuer is never derived from a request header), `APP_PUB
   switch that off — turn `SSO_TGE_ENABLED` off instead. The boot log prints a summary with no
   secret values (`jwksPinMode=… jwksPins=<count>`, never the pins). See the README section
   "金融级加固：合作方 SSO".
+- **Self-serve client registration** (`POST /api/developer/sso/clients`) is closed unless
+  `SSO_DEVELOPER_REGISTRATION=on`. The default, `off`, also applies when the variable is unset or
+  blank. Closed, the endpoint answers every caller, signed in or not, `403` with
+  `{"error":"registration_closed", "error_description":"Self-serve client registration is closed.
+  Contact DataDance to register a client."}`, before any database access, so nothing is written.
+  Clients registered earlier keep working: sign-in, the token exchange and the partner API do not
+  consult the switch.
+- **Turning it on still requires a signed-in DataDance account.** The route itself checks the
+  user's JWT, as other `/api` routes do. An anonymous caller gets `401` in the usual auth shape;
+  a signed-in account gets `201` with the new client, which records that account as its owner
+  (`ownerUserId`) and `kind` `developer`. A self-serve console must therefore send the
+  user's token (`Authorization: Bearer <DataDance JWT>`). To register a client by hand, set `on`,
+  restart, register while signed in, set `off` and restart again.
+- The value is read once at boot, so a change needs a restart. Any value other than `off` or `on`
+  refuses to start in production; elsewhere it is one warning and reads as `off`. The money-path
+  boot line reports it as `developerRegistration=open|closed`, next to `publicClientRegistration`.
 - Generate a secret: `node scripts/genPartnerSecret.js` (prints once; nothing is written).
 - Rotate: move the current hash to `…_PREVIOUS`, set the new hash, set `…_ROTATION_UNTIL`,
   recreate the container; after the deadline remove the previous hash.

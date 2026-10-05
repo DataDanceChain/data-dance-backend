@@ -30,7 +30,7 @@ const ENV_KEYS = [
   'SSO_SESSION_SECRET', 'JWT_SECRET',
   'PUBLIC_BASE_URL', 'APP_PUBLIC_URL', 'NODE_ENV', 'PORT', 'FRONTEND_URL',
   'WEB3AUTH_VERIFY_MODE', 'WEB3AUTH_ALLOW_LEGACY_FALLBACK', 'WEB3AUTH_CLIENT_ID', 'WEB3AUTH_ALLOWED_VERIFIERS',
-  'OAUTH_PUBLIC_REGISTRATION_ENABLED',
+  'OAUTH_PUBLIC_REGISTRATION_ENABLED', 'SSO_DEVELOPER_REGISTRATION',
 ];
 const saved = {};
 
@@ -480,5 +480,11 @@ describe('assertFinancialGradeConfig (boot, item 8)', () => {
       assertFinancialGradeConfig(hardened({ OAUTH_PUBLIC_REGISTRATION_ENABLED: 'false' })).publicRegistration,
       false
     );
+  });
+
+  it('reports whether self-serve developer registration is open: closed unless SSO_DEVELOPER_REGISTRATION=on', () => {
+    assert.equal(assertFinancialGradeConfig(hardened()).developerRegistration, false);
+    assert.equal(assertFinancialGradeConfig(hardened({ SSO_DEVELOPER_REGISTRATION: 'off' })).developerRegistration, false);
+    assert.equal(assertFinancialGradeConfig(hardened({ SSO_DEVELOPER_REGISTRATION: 'on' })).developerRegistration, true);
   });
 });
