@@ -1,5 +1,9 @@
 # DataDance SSO for the TGE partner — integration guide (backend v0.1)
 
+The public names are `/partner/sso`, scopes `sso:*`, and token prefix `ddc_sso_`. The previous
+`/partner/tge`, `tge:*`, and `ddc_tge_` names still work and mean the same thing. Registered
+client ids `tge` and `tge-rehearsal` also answer to `sso` and `sso-rehearsal`.
+
 Normative contract: `ddc-sso-kit/openapi/ddc-sso-tge-v0.1.yaml`. This document explains how the
 DataDance API implements it and what the partner backend must do. Where this build deviates from
 the contract, the deviation is listed in §12.
@@ -261,15 +265,18 @@ the **scope** the user granted, and DataDance's per-environment freeze list
 
 - for the original candidates (`registered_at`, `wallet_bound`, `data_licence_granted`,
   `email_masked`) — the key is present with value `null`;
-- for the fields added for the campaign (`email`, `wallet_address`, `points`, `referral`) — the
-  key is **absent**, so the partner can tell "this deployment does not serve it" from "DataDance
-  has no value for this user" (which is `null` *inside* a field that is served).
+- for the fields added for the campaign (`email`, `wallet_address`, `points`, `referral`,
+  `avatar`) — the key is **absent**, so the partner can tell "this deployment does not serve it"
+  from "DataDance has no value for this user" (which is `null` *inside* a field that is served).
+  `avatar` is the exception on the second half: a served account with no picture also omits the
+  key. Absence means "do not show a picture", not "look up a placeholder".
 
 | Field | Scope | Endpoint | Source | `null` means | Cache |
 | --- | --- | --- | --- | --- | --- |
 | `sub` | `tge:identity` | both | `User.id` (uuid) — permanent key, the same person across Wallet, Business and this partner | never null | — |
 | `client_id`, `issued_at`, `expires_at` | `tge:identity` | `/me` | the token itself | never null | — |
 | `email_masked` | `tge:identity` | `/me` | `User.email` as `j***@domain.com`; display hint, never an identifier | no real e-mail, **or the token lacks `tge:identity`**, or not frozen | no-store |
+| `avatar` | `tge:identity` | `/me` | `User.avatar` when it is an `http(s)` picture URL, or a site path joined to `PUBLIC_BASE_URL`. The wallet placeholder and non-URL values are not returned | never null — the key is absent when the account has no picture, or the field is not frozen | no-store |
 | `email` | `tge:email` | `/me` | `User.email` when it really is an address — the address a campaign can write to | the account has no e-mail (see below) | no-store |
 | `wallet_address` | `tge:wallet` | `/me` | `User.walletAddress`, EIP-55 checksummed when it parses. **Not** proof of control, **not** permission to sign or transfer (F05) | no wallet bound | no-store |
 | `account_status` | `tge:status` | `/status` | `User.disabledAt` → `active` / `disabled`; `unknown` until the column is deployed | never null | 60 s |
@@ -515,8 +522,8 @@ unconditionally — the issuer is never derived from a request header), `APP_PUB
 - Rotate: move the current hash to `…_PREVIOUS`, set the new hash, set `…_ROTATION_UNTIL`,
   recreate the container; after the deadline remove the previous hash.
 - Freeze a status field: add it to `SSO_TGE_STATUS_FIELDS` and recreate. `email`,
-  `wallet_address`, `points`, `referral` and `referral_network` are **off** until listed, so deploying this change
-  set alone exposes nothing new. Boot refuses an unknown field name.
+  `wallet_address`, `points`, `referral`, `referral_network` and `avatar` are **off** until listed, so deploying this change
+  set alone exposes nothing new. Boot refuses an unknown field name. `avatar` then appears on `/me` only when the account has a picture URL.
 - `SSO_REQUIRE_VERIFIED_SESSION=true` requires the consenting user's DataDance JWT to carry
   `ver >= 2` (issued by the verified Web3Auth login); older sessions get `login_required`.
 - Partner tokens are `McpToken` rows with `source = 'partner'`; they are hidden from the

@@ -370,6 +370,16 @@ const rateLimiters = {
     code: 'RATE_LIMITED'
   }),
 
+  // POST /api/developer/sso/clients — public self-serve partner registration, per IP
+  developerClientCreate: createRateLimiter({
+    name: 'developerClientCreate',
+    windowMs: 60 * 60 * 1000,
+    max: 5,
+    message: 'Too many client registrations from this address. Please wait an hour.',
+    keyGenerator: keyGenerators.ip,
+    errorFormat: 'oauth'
+  }),
+
   // POST /api/sso/ticket/exchange — public, per IP (Phase 3)
   ssoExchange: createRateLimiter({
     name: 'ssoExchange',
