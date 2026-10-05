@@ -18,6 +18,7 @@ const LOCAL_FRONTEND_ORIGINS = Object.freeze([
 /** Deployed first-party front-ends. No loopback, no developer ports. */
 const PUBLIC_ORIGINS = Object.freeze([
   'https://app.datadance.ai',
+  'https://app-rehearsal.datadance.ai',
   'https://business.datadance.ai',
   'https://admin.datadance.ai',
 ]);

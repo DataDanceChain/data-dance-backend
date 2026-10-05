@@ -4,6 +4,7 @@ const { assertPartnerConfig, assertFinancialGradeConfig } = require('./constants
 const { applyPartnerKillSwitch } = require('./services/partnerKillSwitch');
 const { warnIfChainSignerUnavailable } = require('./constants/chainConfig');
 const { initVersionPolicy } = require('./constants/appVersionPolicy');
+const { describeOldAppSwitches } = require('./services/web3authIdentity');
 
 // 加载环境变量
 dotenv.config();
@@ -47,6 +48,11 @@ if (moneyPath.enforced) {
       `consentOrigin=${moneyPath.appPublicUrl} publicClientRegistration=${moneyPath.publicRegistration ? 'open' : 'closed'}`,
   );
 }
+
+// Old App builds after the network switch: the two switches that answer a refused old-App login
+// with 426 APP_UPDATE_REQUIRED. One line to confirm them without sending a login; client-id
+// prefixes only (public).
+console.log(describeOldAppSwitches());
 
 const PORT = process.env.PORT || 3000;
 

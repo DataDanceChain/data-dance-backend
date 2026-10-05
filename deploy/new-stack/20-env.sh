@@ -235,7 +235,7 @@ setv SSO_SESSION_SECRET "$(cat "$SEC/sso_session_secret_rehearsal")"
 setv SSO_TGE_AUTO_APPROVE app,web
 setv SSO_TGE_REFERRAL_BIND true
 setv SSO_TGE_APP_PRESENTATION webview
-setv SSO_TGE_STATUS_FIELDS registered_at,wallet_bound,referral_network,referral
+setv SSO_TGE_STATUS_FIELDS registered_at,wallet_bound,referral_network,referral,avatar
 setv SSO_REQUIRE_VERIFIED_SESSION false
 setv OAUTH_PUBLIC_REGISTRATION_ENABLED "$OAUTH_PUBLIC_REGISTRATION"
 setv DISBURSEMENT_PAUSED true

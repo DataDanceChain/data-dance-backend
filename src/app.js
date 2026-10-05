@@ -214,7 +214,11 @@ app.use('/api/disbursements', disbursementRoutes);
 app.use('/api/demands', demandRoutes);
 app.use('/api/life-context', lifeContextRoutes);
 app.use('/mcp', mcpRoutes);
-app.use('/partner/tge', require('./routes/partnerTgeRoutes'));
+const partnerSsoRoutes = require('./routes/partnerTgeRoutes');
+const developerSsoRoutes = require('./routes/developerSsoRoutes');
+app.use('/partner/sso', partnerSsoRoutes);
+app.use('/partner/tge', partnerSsoRoutes);
+app.use('/api/developer/sso', developerSsoRoutes);
 // DDC NFT Metadata API - 需要后端权限控制
 app.use('/metadata/ddcnft', ddcNFTMetadataRoutes);
 

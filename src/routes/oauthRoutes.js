@@ -217,6 +217,9 @@ router.get('/.well-known/oauth-protected-resource/mcp', (req, res) => {
   res.json(metadataDocuments(req).resourceDoc);
 });
 
+router.get('/.well-known/oauth-protected-resource/partner/sso', (req, res) => {
+  res.json(metadataDocuments(req).partnerResourceDoc);
+});
 router.get('/.well-known/oauth-protected-resource/partner/tge', (req, res) => {
   res.json(metadataDocuments(req).partnerResourceDoc);
 });
