@@ -63,9 +63,15 @@ describe('HOME_CARD ssoClientId (parse)', () => {
   });
 
   it('accepts the production id when that is the configured client', () => {
+    process.env.SSO_TGE_CLIENT_ID = 'sso-rehearsal';
+    const parsed = parseDraft(draft({ ssoClientId: 'sso-rehearsal' }));
+    assert.equal(parsed.data.config.ssoClientId, 'sso-rehearsal');
+  });
+
+  it('rejects the retired client id even when the environment still names it', () => {
     process.env.SSO_TGE_CLIENT_ID = 'tge';
     const parsed = parseDraft(draft({ ssoClientId: 'tge' }));
-    assert.equal(parsed.data.config.ssoClientId, 'tge');
+    assert.match(parsed.error, /no partner SSO client is configured/);
   });
 
   it('keeps an id already stored in config (schedule / go-live re-parse the existing row)', () => {

@@ -85,4 +85,19 @@ mount('get', '/users/:userId/points/history', getUserPointHistory);
 mount('get', '/users/:userId', getUserDetail);
 mount('post', '/users/:userId/points', adjustPoints);
 
+const { grantPlanetManager } = require('../services/ssoDeveloperLive');
+router.post('/sso/planet-manager', async (req, res) => {
+  try {
+    const result = await grantPlanetManager(req.body && req.body.email);
+    return res.json({ status: 'success', data: result });
+  } catch (error) {
+    const status = error.status || 500;
+    if (status >= 500) console.error('Planet manager assignment failed', error && error.message);
+    return res.status(status).json({
+      status: 'fail',
+      message: status >= 500 ? 'Could not assign the manager.' : error.message,
+    });
+  }
+});
+
 module.exports = router;

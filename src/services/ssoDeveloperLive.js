@@ -8,6 +8,25 @@ const prisma = require('../utils/prisma');
 const { publicBaseUrl } = require('../constants/lifeContext');
 
 const SCOPES = ['sso:identity', 'sso:status', 'sso:email', 'sso:wallet'];
+const PARTNER_SCOPES = [
+  ...SCOPES,
+  'sso:points',
+  'sso:referral',
+  'sso:referral_network',
+  'sso:referral_bind',
+];
+const PARTNER_STATUS_FIELDS = [
+  'registered_at',
+  'wallet_bound',
+  'email',
+  'wallet_address',
+  'email_masked',
+  'avatar',
+  'data_licence_granted',
+  'points',
+  'referral',
+  'referral_network',
+];
 const TTL_SEC = 300;
 
 function sha256(value) {
@@ -67,6 +86,18 @@ function cleanRegistration(body) {
   return { name, email, redirectUris };
 }
 
+function cleanRedirects(value) {
+  const list = Array.isArray(value) ? value : [];
+  const redirectUris = [...new Set(list.map((item) => String(item || '').trim()).filter(Boolean))];
+  if (!redirectUris.length || redirectUris.length > 5 || redirectUris.some((uri) => uri.length > 512 || !isAllowedRedirect(uri))) {
+    const error = new Error('Provide 1 to 5 https redirect URIs, or http on localhost.');
+    error.status = 400;
+    error.code = 'invalid_redirect_uri';
+    throw error;
+  }
+  return redirectUris;
+}
+
 async function ensureTable() {
   await prisma.$executeRawUnsafe(`
     CREATE TABLE IF NOT EXISTS "SsoDeveloperClient" (
@@ -77,9 +108,17 @@ async function ensureTable() {
       "secretHash" TEXT NOT NULL,
       "redirectUris" TEXT[],
       "enabled" BOOLEAN NOT NULL DEFAULT true,
+      "kind" TEXT NOT NULL DEFAULT 'developer',
+      "ownerUserId" TEXT,
       "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
     )
   `);
+  await prisma.$executeRawUnsafe(
+    'ALTER TABLE "SsoDeveloperClient" ADD COLUMN IF NOT EXISTS "kind" TEXT NOT NULL DEFAULT \'developer\'',
+  );
+  await prisma.$executeRawUnsafe(
+    'ALTER TABLE "SsoDeveloperClient" ADD COLUMN IF NOT EXISTS "ownerUserId" TEXT',
+  );
   await prisma.$executeRawUnsafe(
     'CREATE INDEX IF NOT EXISTS "SsoDeveloperClient_contactEmail_idx" ON "SsoDeveloperClient"("contactEmail")',
   );
@@ -91,7 +130,7 @@ async function loadDeveloperClient(clientId) {
   let rows;
   try {
     rows = await prisma.$queryRaw`
-      SELECT "clientId", "clientName", "secretHash", enabled, "redirectUris"
+      SELECT "clientId", "clientName", "secretHash", enabled, "redirectUris", kind
       FROM "SsoDeveloperClient"
       WHERE "clientId" = ${id}
       LIMIT 1
@@ -102,21 +141,83 @@ async function loadDeveloperClient(clientId) {
   }
   const row = rows && rows[0];
   if (!row) return null;
+  const firstParty = row.kind === 'partner';
+  const scopes = firstParty
+    ? PARTNER_SCOPES.filter((item) => item !== 'sso:referral_bind' || String(process.env.SSO_TGE_REFERRAL_BIND || '').trim().toLowerCase() === 'true')
+    : SCOPES.slice();
   return {
     developer: true,
+    firstParty,
     kind: 'partner',
     clientId: row.clientId,
     clientName: row.clientName,
     enabled: Boolean(row.enabled),
     secretHash: row.secretHash,
     redirectUris: Array.isArray(row.redirectUris) ? row.redirectUris : [],
-    scopes: SCOPES.slice(),
+    scopes,
+    statusFields: firstParty ? PARTNER_STATUS_FIELDS.slice() : [
+      'registered_at', 'wallet_bound', 'email', 'wallet_address', 'email_masked', 'avatar',
+    ],
     resource: partnerResource(),
   };
 }
 
-async function createDeveloperClient(body) {
-  const { name, email, redirectUris } = cleanRegistration(body || {});
+function failOwner() {
+  const error = new Error('This client is not on this account.');
+  error.status = 404;
+  error.code = 'not_found';
+  throw error;
+}
+
+function scopesFor(kind) {
+  if (kind !== 'partner') return SCOPES.slice();
+  return PARTNER_SCOPES.filter((item) => item !== 'sso:referral_bind' || String(process.env.SSO_TGE_REFERRAL_BIND || '').trim().toLowerCase() === 'true');
+}
+
+function presentClient(row) {
+  const kind = row.kind === 'partner' ? 'partner' : 'developer';
+  return {
+    client_id: row.clientId,
+    client_name: row.clientName,
+    redirect_uris: Array.isArray(row.redirectUris) ? row.redirectUris : [],
+    enabled: Boolean(row.enabled),
+    kind,
+    scopes: scopesFor(kind),
+  };
+}
+
+async function ownedRow(ownerId, clientId) {
+  const id = String(clientId || '').trim();
+  const rows = await prisma.$queryRaw`
+    SELECT "clientId", "clientName", "redirectUris", enabled, kind, "ownerUserId"
+    FROM "SsoDeveloperClient"
+    WHERE "clientId" = ${id} AND "ownerUserId" = ${ownerId}
+    LIMIT 1
+  `;
+  return rows && rows[0];
+}
+
+async function listOwnedClients(ownerId) {
+  await ensureTable();
+  const rows = await prisma.$queryRaw`
+    SELECT "clientId", "clientName", "redirectUris", enabled, kind
+    FROM "SsoDeveloperClient"
+    WHERE "ownerUserId" = ${ownerId}
+    ORDER BY "createdAt" ASC
+  `;
+  return rows.map(presentClient);
+}
+
+async function createDeveloperClient(body, owner) {
+  if (!owner || !owner.id || !owner.email) {
+    const error = new Error('Sign in with DataDance first.');
+    error.status = 401;
+    error.code = 'login_required';
+    throw error;
+  }
+  const cleaned = cleanRegistration({ ...(body || {}), contact_email: owner.email });
+  const { name, redirectUris } = cleaned;
+  const email = String(owner.email).trim().toLowerCase();
   await ensureTable();
   const recent = await prisma.$queryRaw`
     SELECT COUNT(*)::int AS count FROM "SsoDeveloperClient"
@@ -134,14 +235,15 @@ async function createDeveloperClient(body) {
   const arrayLiteral = `{${redirectUris.map((uri) => `"${uri.replace(/"/g, '')}"`).join(',')}}`;
   await prisma.$executeRawUnsafe(
     `INSERT INTO "SsoDeveloperClient"
-      ("id","clientId","clientName","contactEmail","secretHash","redirectUris","enabled")
-     VALUES ($1,$2,$3,$4,$5,$6::text[],true)`,
+      ("id","clientId","clientName","contactEmail","secretHash","redirectUris","enabled","kind","ownerUserId")
+     VALUES ($1,$2,$3,$4,$5,$6::text[],true,'developer',$7)`,
     id,
     clientId,
     name,
     email,
     sha256(clientSecret),
     arrayLiteral,
+    owner.id,
   );
   return {
     clientId,
@@ -154,16 +256,108 @@ async function createDeveloperClient(body) {
   };
 }
 
-function parseScope(value, OAuthError) {
+async function updateOwnedClient(ownerId, body) {
+  await ensureTable();
+  const row = await ownedRow(ownerId, body && body.client_id);
+  if (!row) failOwner();
+  const redirectUris = cleanRedirects(body && body.redirect_uris);
+  const enabled = Boolean(body && body.enabled);
+  const arrayLiteral = `{${redirectUris.map((uri) => `"${uri.replace(/"/g, '')}"`).join(',')}}`;
+  await prisma.$executeRawUnsafe(
+    `UPDATE "SsoDeveloperClient"
+     SET "redirectUris" = $1::text[], enabled = $2
+     WHERE "clientId" = $3 AND "ownerUserId" = $4`,
+    arrayLiteral,
+    enabled,
+    row.clientId,
+    ownerId,
+  );
+  return presentClient({ ...row, redirectUris, enabled });
+}
+
+async function rotateOwnedSecret(ownerId, clientId) {
+  await ensureTable();
+  const row = await ownedRow(ownerId, clientId);
+  if (!row) failOwner();
+  const clientSecret = `ddc_sso_secret_${crypto.randomBytes(32).toString('base64url')}`;
+  await prisma.$executeRaw`
+    UPDATE "SsoDeveloperClient"
+    SET "secretHash" = ${sha256(clientSecret)}
+    WHERE "clientId" = ${row.clientId} AND "ownerUserId" = ${ownerId}
+  `;
+  return { client_id: row.clientId, client_secret: clientSecret };
+}
+
+async function grantPlanetManager(email) {
+  const base = String(process.env.PUBLIC_BASE_URL || '');
+  if (!base.includes('api-rehearsal.datadance.ai')) {
+    const error = new Error('Data Planet is assigned on the mainnet API.');
+    error.status = 409;
+    error.code = 'wrong_network';
+    throw error;
+  }
+  const normalized = String(email || '').trim().toLowerCase();
+  if (normalized.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalized)) {
+    const error = new Error('email is required.');
+    error.status = 400;
+    error.code = 'invalid_request';
+    throw error;
+  }
+  const user = await prisma.user.findFirst({
+    where: { email: { equals: normalized, mode: 'insensitive' } },
+    select: { id: true, email: true, disabledAt: true },
+  });
+  if (!user) {
+    const error = new Error('No mainnet account uses that email. Ask them to sign in on Mainnet first.');
+    error.status = 404;
+    error.code = 'not_found';
+    throw error;
+  }
+  if (user.disabledAt) {
+    const error = new Error('That account is disabled.');
+    error.status = 403;
+    error.code = 'account_disabled';
+    throw error;
+  }
+  await ensureTable();
+  const clientId = 'sso-rehearsal';
+  const existing = await prisma.$queryRaw`
+    SELECT "clientId" FROM "SsoDeveloperClient" WHERE "clientId" = ${clientId} LIMIT 1
+  `;
+  if (!existing.length) {
+    const id = crypto.randomUUID();
+    const secretHash = sha256(crypto.randomBytes(32));
+    await prisma.$executeRawUnsafe(
+      `INSERT INTO "SsoDeveloperClient"
+        ("id","clientId","clientName","contactEmail","secretHash","redirectUris","enabled","kind","ownerUserId")
+       VALUES ($1,$2,'Data Planet',$3,$4,'{}'::text[],false,'partner',$5)`,
+      id,
+      clientId,
+      user.email,
+      secretHash,
+      user.id,
+    );
+  } else {
+    await prisma.$executeRaw`
+      UPDATE "SsoDeveloperClient"
+      SET "ownerUserId" = ${user.id}, kind = 'partner', "contactEmail" = ${user.email}
+      WHERE "clientId" = ${clientId}
+    `;
+  }
+  return { client_id: clientId, email: user.email, user_id: user.id, network: 'mainnet' };
+}
+
+function parseScope(value, allowed, OAuthError) {
   const requested = String(value || '')
     .split(/\s+/)
     .map((item) => item.trim())
     .filter(Boolean);
   const scopes = requested.length ? requested : ['sso:identity'];
-  if (scopes.some((item) => !SCOPES.includes(item))) {
+  const accepted = Array.isArray(allowed) && allowed.length ? allowed : SCOPES;
+  if (scopes.some((item) => !accepted.includes(item))) {
     throw fail(OAuthError, 400, 'invalid_scope', 'This client cannot request that scope.');
   }
-  return SCOPES.filter((item) => scopes.includes(item)).join(' ');
+  return accepted.filter((item) => scopes.includes(item)).join(' ');
 }
 
 async function startDeveloperAuthorization(req, query, client, OAuthError) {
@@ -186,7 +380,7 @@ async function startDeveloperAuthorization(req, query, client, OAuthError) {
   if (resource.replace(/\/$/, '') !== expected.replace(/\/$/, '')) {
     throw fail(OAuthError, 400, 'invalid_target', 'resource must match the partner API.');
   }
-  const scope = parseScope(query.scope, OAuthError);
+  const scope = parseScope(query.scope, client.scopes, OAuthError);
   const row = await prisma.oAuthAuthorization.create({
     data: {
       clientId: client.clientId,
@@ -322,6 +516,10 @@ module.exports = {
   ensureTable,
   loadDeveloperClient,
   createDeveloperClient,
+  listOwnedClients,
+  updateOwnedClient,
+  rotateOwnedSecret,
+  grantPlanetManager,
   startDeveloperAuthorization,
   exchangeDeveloperCode,
   readPartnerMe,

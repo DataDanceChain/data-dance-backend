@@ -1,8 +1,10 @@
 # DataDance SSO for the TGE partner — integration guide (backend v0.1)
 
 The public names are `/partner/sso`, scopes `sso:*`, and token prefix `ddc_sso_`. The previous
-`/partner/tge`, `tge:*`, and `ddc_tge_` names still work and mean the same thing. Registered
-client ids `tge` and `tge-rehearsal` also answer to `sso` and `sso-rehearsal`.
+`/partner/tge`, `tge:*`, and `ddc_tge_` names still work and mean the same thing. Client ids
+`tge` and `tge-rehearsal` are retired and are not accepted. Partners send the registered
+client id (`sso` or `sso-rehearsal`). A first-party partner row keeps Data Planet's scopes;
+a self-serve client does not.
 
 Normative contract: `ddc-sso-kit/openapi/ddc-sso-tge-v0.1.yaml`. This document explains how the
 DataDance API implements it and what the partner backend must do. Where this build deviates from

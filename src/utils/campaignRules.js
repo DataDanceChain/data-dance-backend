@@ -8,7 +8,7 @@ const {
   normalizeCrawlerSource,
 } = require('../constants/crawlerSources');
 const { buildCampaignI18n, firstFilled } = require('./campaignI18n');
-const { readPartnerConfig } = require('../constants/partnerClient');
+const { readPartnerConfig, isRetiredPartnerClientId } = require('../constants/partnerClient');
 
 const TEMPLATES = new Set([
   'HOME_CARD',
@@ -151,8 +151,9 @@ function validateCta(kind, value) {
 /**
  * The partner SSO client an EXTERNAL home card hands the App user off to, so the partner page
  * opens already signed in instead of asking for a second login. Only the one partner client this
- * deployment is configured with (SSO_TGE_CLIENT_ID: "tge" in production, "tge-local" locally) is
- * accepted; the id is public (it is in the partner's authorize URL). Blank → null.
+ * deployment is configured with (SSO_TGE_CLIENT_ID) is accepted. The retired ids "tge" and
+ * "tge-rehearsal" are not client ids. The id is public (it is in the partner's authorize URL).
+ * Blank → null.
  */
 function parseSsoClientId(ctaKind, raw) {
   if (ctaKind !== 'EXTERNAL') return { value: null };
@@ -161,11 +162,12 @@ function parseSsoClientId(ctaKind, raw) {
   // The configured id only (not getPartnerClient): saving a card must not depend on the OAuth
   // issuer URL being set, and the id alone is what the App hands to /sso/app-ticket.
   const configuredId = readPartnerConfig().clientId;
-  if (clientId !== configuredId) {
+  const known = configuredId && !isRetiredPartnerClientId(configuredId) ? configuredId : '';
+  if (!known || isRetiredPartnerClientId(clientId) || clientId !== known) {
     const shown = clientId.slice(0, 64);
     return {
-      error: configuredId
-        ? `Unknown SSO client "${shown}": this server only knows "${configuredId}"`
+      error: known
+        ? `Unknown SSO client "${shown}": this server only knows "${known}"`
         : `Unknown SSO client "${shown}": no partner SSO client is configured on this server`,
     };
   }
