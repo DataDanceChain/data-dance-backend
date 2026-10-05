@@ -1,9 +1,12 @@
 /**
- * Public self-serve registration for a DDC SSO client.
+ * Self-serve registration for a DDC SSO client, by a signed-in DataDance account.
  * POST /api/developer/sso/clients returns the secret once. Nothing here lists existing secrets.
- * Closed unless SSO_DEVELOPER_REGISTRATION=on (src/constants/developerRegistration.js).
+ * Closed unless SSO_DEVELOPER_REGISTRATION=on (src/constants/developerRegistration.js). When it is
+ * on, the route itself still requires a user JWT (`protect`), so its protection does not depend on
+ * where any other router is mounted.
  */
 const express = require('express');
+const { protect } = require('../middlewares/authMiddleware');
 const { rateLimiters } = require('../middlewares/rateLimitMiddleware');
 const { publicBaseUrl } = require('../constants/lifeContext');
 const { partnerResourceUrl } = require('../constants/partnerClient');
@@ -14,7 +17,8 @@ const { createDeveloperClient, DeveloperClientError } = require('../services/sso
 const router = express.Router();
 const logger = createLogger('developerSso');
 
-// First on the route, before the rate limiter and any database access: a closed endpoint writes nothing.
+// First on the route, before the login check, the rate limiter and any database access: a closed
+// endpoint gives everyone the same answer and writes nothing.
 function registrationOpen(req, res, next) {
   if (developerRegistrationOpen()) return next();
   return res.status(403).json({
@@ -23,7 +27,7 @@ function registrationOpen(req, res, next) {
   });
 }
 
-router.post('/clients', registrationOpen, rateLimiters.developerClientCreate, async (req, res) => {
+router.post('/clients', registrationOpen, protect, rateLimiters.developerClientCreate, async (req, res) => {
   try {
     const created = await createDeveloperClient(req.body || {});
     const issuer = publicBaseUrl(req);

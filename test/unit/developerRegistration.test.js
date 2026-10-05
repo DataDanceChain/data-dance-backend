@@ -69,7 +69,15 @@ const registration = (overrides = {}) => ({
   redirect_uris: [PARTNER_REDIRECT],
   ...overrides,
 });
-const register = (body) => request(server).post('/api/developer/sso/clients').send(body);
+const register = (body, authorization) => {
+  const req = request(server).post('/api/developer/sso/clients');
+  if (authorization) req.set('Authorization', authorization);
+  return req.send(body);
+};
+const MEMBER = { id: 'user-dev-1', email: 'member@example.com', isOrganization: false, userType: 'regular', disabledAt: null };
+const signedIn = (id = MEMBER.id) => `Bearer ${jwt.sign({ id, ver: 2 }, process.env.JWT_SECRET, { expiresIn: '5m' })}`;
+// protect's answer to a request without a token, as on every other /api route that requires a login.
+const LOGIN_REQUIRED = { status: 'fail', message: 'Authentication required. Please login first.' };
 
 /** Counts every call into the in-memory Prisma (models, $transaction, $executeRaw) until restored. */
 function watchDatabase() {
@@ -97,6 +105,19 @@ function watchDatabase() {
 }
 
 const storeSnapshot = () => JSON.stringify({ store: prisma.store, raw: prisma.rawStatements });
+
+/** Runs one request and reports its answer, how many database calls it made and whether the store changed. */
+async function observe(send) {
+  const before = storeSnapshot();
+  const db = watchDatabase();
+  let res;
+  try {
+    res = await send();
+  } finally {
+    db.restore();
+  }
+  return { res, dbCalls: db.calls, written: storeSnapshot() !== before };
+}
 
 describe('SSO_DEVELOPER_REGISTRATION is read once, at boot', () => {
   after(() => initDeveloperRegistration({ env: {} }));
@@ -160,45 +181,38 @@ describe('SSO_DEVELOPER_REGISTRATION is read once, at boot', () => {
 });
 
 describe('registration closed (the default)', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     prisma.reset();
     clearRateLimitStore();
     initDeveloperRegistration({ env: {} });
+    await prisma.user.create({ data: { ...MEMBER } });
   });
 
-  it('answers 403 registration_closed and touches no table', async () => {
-    const before = storeSnapshot();
-    const db = watchDatabase();
-    let res;
-    try {
-      res = await register(registration());
-    } finally {
-      db.restore();
-    }
+  it('off + anonymous: 403 registration_closed, no database call, nothing written', async () => {
+    const { res, dbCalls, written } = await observe(() => register(registration()));
     assert.equal(res.status, 403);
     assert.deepEqual(res.body, CLOSED);
-    assert.equal(db.calls, 0, 'no database call at all');
-    assert.equal(storeSnapshot(), before, 'nothing written');
-    assert.equal(prisma.store.ssoDeveloperClient.length, 0);
+    assert.equal(dbCalls, 0, 'no database call at all');
+    assert.equal(written, false, 'nothing written');
   });
 
-  it('answers every request the same way, before validation and before the rate limiter', async () => {
+  it('off + signed-in: 403 registration_closed as well, no database call, nothing written', async () => {
+    const { res, dbCalls, written } = await observe(() => register(registration(), signedIn()));
+    assert.equal(res.status, 403);
+    assert.deepEqual(res.body, CLOSED);
+    assert.equal(dbCalls, 0, 'the switch answers before the login check looks the account up');
+    assert.equal(written, false, 'nothing written');
+  });
+
+  it('answers every request the same way, before validation, the login check and the rate limiter', async () => {
     const bodies = [registration(), {}, registration({ redirect_uris: ['http://example.com/cb'] }), registration({ contact_email: 'x' })];
+    const auths = [undefined, signedIn(), 'Bearer not-a-jwt'];
     // Seven in a row: the per-IP limit is 5 an hour, so a 429 here would mean the limiter ran first.
     for (let i = 0; i < 7; i += 1) {
-      const res = await register(bodies[i % bodies.length]);
+      const res = await register(bodies[i % bodies.length], auths[i % auths.length]);
       assert.equal(res.status, 403, `request ${i + 1}`);
       assert.deepEqual(res.body, CLOSED);
     }
-    assert.equal(prisma.store.ssoDeveloperClient.length, 0);
-  });
-
-  it('a logged-in account is refused as well', async () => {
-    await prisma.user.create({ data: { id: 'user-dev-1', email: 'member@example.com', isOrganization: false, userType: 'regular', disabledAt: null } });
-    const userJwt = jwt.sign({ id: 'user-dev-1', ver: 2 }, process.env.JWT_SECRET, { expiresIn: '5m' });
-    const res = await register(registration()).set('Authorization', `Bearer ${userJwt}`);
-    assert.equal(res.status, 403);
-    assert.deepEqual(res.body, CLOSED);
     assert.equal(prisma.store.ssoDeveloperClient.length, 0);
   });
 
@@ -235,16 +249,43 @@ describe('registration closed (the default)', () => {
   });
 });
 
-describe('registration open (SSO_DEVELOPER_REGISTRATION=on)', () => {
-  beforeEach(() => {
+describe('registration open (SSO_DEVELOPER_REGISTRATION=on): a signed-in account is required', () => {
+  beforeEach(async () => {
     prisma.reset();
     clearRateLimitStore();
     initDeveloperRegistration({ env: { SSO_DEVELOPER_REGISTRATION: 'on' } });
+    await prisma.user.create({ data: { ...MEMBER } });
   });
   after(() => initDeveloperRegistration({ env: {} }));
 
-  it('creates the client as before, with no login needed: the secret once, only its hash stored', async () => {
-    const res = await register(registration({ contact_email: 'Dev@Example.com', redirect_uris: [PARTNER_REDIRECT, PARTNER_REDIRECT] }));
+  it('on + anonymous: 401 in the usual auth shape, no database call, nothing written', async () => {
+    const { res, dbCalls, written } = await observe(() => register(registration()));
+    assert.equal(res.status, 401);
+    assert.deepEqual(res.body, LOGIN_REQUIRED);
+    assert.equal(dbCalls, 0);
+    assert.equal(written, false, 'nothing written');
+  });
+
+  it('on + a token that does not verify: 401, nothing written', async () => {
+    const forged = `Bearer ${jwt.sign({ id: MEMBER.id, ver: 2 }, 'not-the-server-key', { expiresIn: '5m' })}`;
+    for (const authorization of [forged, 'Bearer not-a-jwt']) {
+      const { res, written } = await observe(() => register(registration(), authorization));
+      assert.equal(res.status, 401, authorization.slice(0, 20));
+      assert.equal(res.body.status, 'fail');
+      assert.equal(written, false, 'nothing written');
+    }
+  });
+
+  it('on + a disabled account: 403 ACCOUNT_DISABLED, nothing written', async () => {
+    await prisma.user.update({ where: { id: MEMBER.id }, data: { disabledAt: new Date('2026-10-01T00:00:00Z') } });
+    const { res, written } = await observe(() => register(registration(), signedIn()));
+    assert.equal(res.status, 403);
+    assert.equal(res.body.code, 'ACCOUNT_DISABLED');
+    assert.equal(written, false, 'nothing written');
+  });
+
+  it('on + signed-in: 201 as before, the secret once, only its hash stored', async () => {
+    const res = await register(registration({ contact_email: 'Dev@Example.com', redirect_uris: [PARTNER_REDIRECT, PARTNER_REDIRECT] }), signedIn());
     assert.equal(res.status, 201);
     assert.match(res.body.client_id, /^sso_[A-Za-z0-9_-]+$/);
     assert.match(res.body.client_secret, /^ddc_sso_secret_/);
@@ -272,12 +313,12 @@ describe('registration open (SSO_DEVELOPER_REGISTRATION=on)', () => {
     assert.equal(JSON.stringify(prisma.store).includes(res.body.client_secret), false);
   });
 
-  it('validates and rate-limits as before', async () => {
-    const bad = await register(registration({ redirect_uris: ['http://example.com/cb'] }));
+  it('on + signed-in: validates and rate-limits as before', async () => {
+    const bad = await register(registration({ redirect_uris: ['http://example.com/cb'] }), signedIn());
     assert.equal(bad.status, 400);
     assert.equal(bad.body.error, 'invalid_redirect_uri');
-    for (let i = 0; i < 4; i += 1) assert.equal((await register(registration())).status, 201, `request ${i + 2}`);
-    const limited = await register(registration());
+    for (let i = 0; i < 4; i += 1) assert.equal((await register(registration(), signedIn())).status, 201, `request ${i + 2}`);
+    const limited = await register(registration(), signedIn());
     assert.equal(limited.status, 429);
     assert.equal(limited.body.error, 'slow_down');
     assert.equal(prisma.store.ssoDeveloperClient.length, 4);

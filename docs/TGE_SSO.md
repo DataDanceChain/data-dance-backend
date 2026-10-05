@@ -520,14 +520,19 @@ unconditionally — the issuer is never derived from a request header), `APP_PUB
   "金融级加固：合作方 SSO".
 - **Self-serve client registration** (`POST /api/developer/sso/clients`) is closed unless
   `SSO_DEVELOPER_REGISTRATION=on`. The default, `off`, also applies when the variable is unset or
-  blank. Closed, the endpoint answers `403` with `{"error":"registration_closed",
-  "error_description":"Self-serve client registration is closed. Contact DataDance to register a
-  client."}` before any database access, so nothing is written. Clients registered earlier keep working: sign-in, the token exchange and
-  the partner API do not consult the switch. To register one by hand, set `on`, restart, register,
-  set `off` and restart again. The value is read once at boot, so a change needs a restart. Any
-  value other than `off` or `on` refuses to start in production; elsewhere it is one warning and
-  reads as `off`. The money-path boot line reports it as `developerRegistration=open|closed`, next
-  to `publicClientRegistration`.
+  blank. Closed, the endpoint answers every caller, signed in or not, `403` with
+  `{"error":"registration_closed", "error_description":"Self-serve client registration is closed.
+  Contact DataDance to register a client."}`, before any database access, so nothing is written.
+  Clients registered earlier keep working: sign-in, the token exchange and the partner API do not
+  consult the switch.
+- **Turning it on still requires a signed-in DataDance account.** The route itself checks the
+  user's JWT, as other `/api` routes do. An anonymous caller gets `401` in the usual auth shape;
+  a signed-in account gets `201` with the new client. A self-serve console must therefore send the
+  user's token (`Authorization: Bearer <DataDance JWT>`). To register a client by hand, set `on`,
+  restart, register while signed in, set `off` and restart again.
+- The value is read once at boot, so a change needs a restart. Any value other than `off` or `on`
+  refuses to start in production; elsewhere it is one warning and reads as `off`. The money-path
+  boot line reports it as `developerRegistration=open|closed`, next to `publicClientRegistration`.
 - Generate a secret: `node scripts/genPartnerSecret.js` (prints once; nothing is written).
 - Rotate: move the current hash to `…_PREVIOUS`, set the new hash, set `…_ROTATION_UNTIL`,
   recreate the container; after the deadline remove the previous hash.

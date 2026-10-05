@@ -185,10 +185,11 @@ app.use('/api/campaigns', campaignRoutes);
 // routers below, because crawlerRoutes protects everything that reaches it: mounted after it, this
 // public endpoint would be answered 401. test/unit/appMountOrder.test.js covers it.
 app.use('/api/app', appRoutes);
-// Self-serve SSO client registration is public too, and closed unless SSO_DEVELOPER_REGISTRATION=on.
-// Same reason for mounting it here: behind crawlerRoutes an anonymous caller got 401 instead of the
-// switch's answer, and any logged-in account could register a client. The router claims only
-// /api/developer/sso/*. test/unit/appMountOrder.test.js covers it.
+// Self-serve SSO client registration answers its switch (SSO_DEVELOPER_REGISTRATION) before anything
+// else, so it is mounted here, ahead of crawlerRoutes: closed, every caller gets 403 registration_closed.
+// Open, the route itself requires a signed-in account (`protect`). Before, that requirement came only
+// from crawlerRoutes' blanket login check on everything under /api. The router claims only
+// /api/developer/sso/*. test/unit/appMountOrder.test.js covers both.
 const developerSsoRoutes = require('./routes/developerSsoRoutes');
 app.use('/api/developer/sso', developerSsoRoutes);
 app.use('/api/auth', authRoutes);
