@@ -511,6 +511,31 @@ async function readPartnerMe(token) {
   return body;
 }
 
+async function listSsoClients() {
+  await ensureTable();
+  const rows = await prisma.$queryRaw`
+    SELECT c."clientId", c."clientName", c."contactEmail", c."redirectUris",
+           c.enabled, c.kind, c."ownerUserId", c."createdAt",
+           u.email AS "ownerEmail"
+    FROM "SsoDeveloperClient" c
+    LEFT JOIN "User" u ON u.id = c."ownerUserId"
+    ORDER BY c."createdAt" DESC
+  `;
+  return {
+    issuer: issuer(),
+    clients: rows.map((row) => ({
+      client_id: row.clientId,
+      client_name: row.clientName,
+      contact_email: row.contactEmail,
+      redirect_uris: Array.isArray(row.redirectUris) ? row.redirectUris : [],
+      enabled: Boolean(row.enabled),
+      kind: row.kind === 'partner' ? 'partner' : 'developer',
+      owner_email: row.ownerEmail || null,
+      created_at: row.createdAt,
+    })),
+  };
+}
+
 module.exports = {
   SCOPES,
   ensureTable,
@@ -525,4 +550,5 @@ module.exports = {
   readPartnerMe,
   partnerResource,
   issuer,
+  listSsoClients,
 };

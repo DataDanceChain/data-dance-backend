@@ -85,7 +85,16 @@ mount('get', '/users/:userId/points/history', getUserPointHistory);
 mount('get', '/users/:userId', getUserDetail);
 mount('post', '/users/:userId/points', adjustPoints);
 
-const { grantPlanetManager } = require('../services/ssoDeveloperLive');
+const { grantPlanetManager, listSsoClients } = require('../services/ssoDeveloperLive');
+router.get('/sso/clients', async (req, res) => {
+  try {
+    const result = await listSsoClients();
+    return res.json({ status: 'success', data: result });
+  } catch (error) {
+    console.error('SSO client list failed', error && error.message);
+    return res.status(500).json({ status: 'fail', message: 'Could not list SSO clients.' });
+  }
+});
 router.post('/sso/planet-manager', async (req, res) => {
   try {
     const result = await grantPlanetManager(req.body && req.body.email);
