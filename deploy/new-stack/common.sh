@@ -1,9 +1,11 @@
 # shellcheck shell=bash disable=SC2034
-# common.sh - shared constants and guards for the ddcnew (new production stack) scripts.
+# common.sh - shared constants, settings and guards for the ddcnew (new production stack) scripts.
 # Sourced by p1-backup.sh, p2-disk.sh, 10-build.sh, 20-env.sh, 30-nginx.sh, 40-up.sh, 50-partner-page.sh, 99-teardown.sh.
+# The rehearsal host names and host ports are settings (API_HOST, APP_HOST, API_PORT, WEB_PORT, DB_PORT), defined
+# below and resolved by require_server.
 # Every write path (p1-backup.sh dump/verify/install-cron/uninstall-cron, p2-disk.sh apply, 10-build.sh, 20-env.sh,
-# 30-nginx.sh apply/undo, 40-up.sh, 50-partner-page.sh apply/remove, 99-teardown.sh) calls old_snapshot_begin at start
-# and old_snapshot_assert at end.
+# 30-nginx.sh apply/undo/restore, 40-up.sh, 50-partner-page.sh apply/remove, 99-teardown.sh) calls old_snapshot_begin at
+# start and old_snapshot_assert at end.
 # Every write run also calls run_begin (one write run at a time, server-side copy of its output).
 # CHANGES ON THE SERVER: nothing by itself (definitions only).
 # Portable to bash 3.2 (the local test sources it on macOS): no associative arrays; awk programs run on mawk 1.3.4
@@ -23,18 +25,52 @@ SWITCH_DIR="${SWITCH_DIR:-/root/mainnet-switch}"
 OLD_BACKEND_DIR="${OLD_BACKEND_DIR:-/root/ddc-backend}"
 OLD_APP_DIR="${OLD_APP_DIR:-/root/ddc}"
 OLD_ENV="${OLD_ENV:-$OLD_BACKEND_DIR/backend.env}"
+# Race's own mainnet rehearsal (10-05): containers ddc-mainnet-* and their files in /root/ddc-mainnet. This package only
+# reads them: the directory is write-protected like the old stack's, and both are fingerprinted (old_snapshot_*).
+MAINNET_DIR="${MAINNET_DIR:-/root/ddc-mainnet}"
+MAINNET_CTR_PREFIX=ddc-mainnet-
 PROJECT=ddcnew
 OLD_DB_CTR=ddc-backend-ddc-backend-db-1
 OLD_API_CTR=ddc-backend-ddc-backend-api-1
 OLD_APP_CTR=ddc-ddc-app-1
 OLD_DB_NAME=ddc
-NEW_PORTS="10010 15433 9011"
 OLD_PORTS="10000 9000 9001 9002 9003 15432"
-PROTECTED_DIRS="/root/ddc /root/ddc-backend /root/deploy-src /opt/ddc"
+PROTECTED_DIRS="/root/ddc /root/ddc-backend /root/deploy-src /opt/ddc $MAINNET_DIR"
 NGINX_AVAIL="${NGINX_AVAIL:-/etc/nginx/sites-available}"
 NGINX_ENABLED="${NGINX_ENABLED:-/etc/nginx/sites-enabled}"
-TGE_API_HOST=tge-api.datadance.ai
-TGE_APP_HOST=tge-app.datadance.ai
+NGINX_CONFD="${NGINX_CONFD:-/etc/nginx/conf.d}"
+# The host nginx as the scripts' local checks reach it (Host header checks).
+NGINX_LOCAL_URL="${NGINX_LOCAL_URL:-http://127.0.0.1}"
+# The production hosts that every nginx reload must leave answering exactly as before.
+PROD_HOSTS="api.datadance.ai app.datadance.ai business.datadance.ai admin.datadance.ai"
+# First line of every vhost file 30-nginx.sh writes. A file without it at one of our names is someone else's: the scripts
+# never overwrite or remove it (30-nginx.sh apply stops; TAKE_OVER_VHOSTS=yes backs it up first, see there).
+VHOST_MARKER='# ddcnew-vhost: written by deploy/new-stack/30-nginx.sh, which replaces or removes only files that start with this line.'
+
+# ---------------------------------------------------------------------------
+# Rehearsal host names and host ports: SETTINGS, not constants (10-05: which stack serves the rehearsal hosts is being
+# decided between Sloan and Race). Defined here only. Defaults: the hosts Race named (frontend a3ee809,
+# deploy/tge.env.example) and three ports nothing used on 10-05. Override per call (remote.sh allowlist), e.g.
+# API_HOST=<api host> APP_HOST=<app host>. The first write script records the values in $NEW_DIR/settings.env;
+# every later script uses the recorded values and stops on an override that differs from them, so all the steps (and
+# 99-teardown.sh, which removes the record at its end) agree. require_server validates them (check_settings).
+# ---------------------------------------------------------------------------
+DEFAULT_API_HOST=api-rehearsal.datadance.ai
+DEFAULT_APP_HOST=app-rehearsal.datadance.ai
+DEFAULT_API_PORT=10020
+DEFAULT_WEB_PORT=9021
+DEFAULT_DB_PORT=15434
+SETTINGS_NAMES="API_HOST APP_HOST API_PORT WEB_PORT DB_PORT"
+for _n in $SETTINGS_NAMES; do
+  printf -v "OVR_$_n" '%s' "${!_n:-}"   # the override, if any (empty: none)
+  _d="DEFAULT_$_n"; printf -v "$_n" '%s' "${!_n:-${!_d}}"   # until settings_resolve: override or default
+done
+unset _n _d
+SETTINGS_FILE="$NEW_DIR/settings.env"
+SETTINGS_SOURCE="defaults"
+# yes = 30-nginx.sh apply may replace vhost files at our names that this package did not write, after backing them up.
+# Only after Sloan and Race agree (APPROVAL.md section 9).
+TAKE_OVER_VHOSTS="${TAKE_OVER_VHOSTS:-no}"
 # Memory and disk watchdog for docker builds (no swap on the host; the old Postgres and API share it and its disk).
 DDC_MEMINFO="${DDC_MEMINFO:-/proc/meminfo}"
 DDC_PROC="${DDC_PROC:-/proc}"
@@ -56,6 +92,7 @@ require_server() {
     [ "$(id -u)" != 0 ] || die "DDC_LOCAL_TEST=1 is refused when running as root"
     case "$NEW_DIR" in /root*) die "DDC_LOCAL_TEST=1 refuses NEW_DIR under /root";; esac
     case "$SRV_DIR" in /root*) die "DDC_LOCAL_TEST=1 refuses SRV_DIR under /root";; esac
+    settings_resolve
     return 0
   fi
   [ "$(id -u)" = 0 ] || die "run as root on the server"
@@ -63,8 +100,10 @@ require_server() {
   [ "$SRV_DIR" = /srv/ddcnew ] || die "SRV_DIR override is only allowed with DDC_LOCAL_TEST=1"
   [ "$OLD_ENV" = /root/ddc-backend/backend.env ] || die "OLD_ENV override is only allowed with DDC_LOCAL_TEST=1"
   [ "$OLD_BACKEND_DIR" = /root/ddc-backend ] && [ "$OLD_APP_DIR" = /root/ddc ] || die "OLD_BACKEND_DIR / OLD_APP_DIR overrides are only allowed with DDC_LOCAL_TEST=1"
+  [ "$MAINNET_DIR" = /root/ddc-mainnet ] || die "MAINNET_DIR override is only allowed with DDC_LOCAL_TEST=1"
   [ "$BACKUP_DIR" = /root/backup ] && [ "$SWITCH_DIR" = /root/mainnet-switch ] || die "BACKUP_DIR / SWITCH_DIR overrides are only allowed with DDC_LOCAL_TEST=1"
-  [ "$NGINX_AVAIL" = /etc/nginx/sites-available ] && [ "$NGINX_ENABLED" = /etc/nginx/sites-enabled ] || die "NGINX_* overrides are only allowed with DDC_LOCAL_TEST=1"
+  [ "$NGINX_AVAIL" = /etc/nginx/sites-available ] && [ "$NGINX_ENABLED" = /etc/nginx/sites-enabled ] && [ "$NGINX_CONFD" = /etc/nginx/conf.d ] \
+    && [ "$NGINX_LOCAL_URL" = http://127.0.0.1 ] || die "NGINX_* overrides are only allowed with DDC_LOCAL_TEST=1"
   [ "$DDC_MEMINFO" = /proc/meminfo ] || die "DDC_MEMINFO override is only allowed with DDC_LOCAL_TEST=1"
   [ "$DDC_PROC" = /proc ] || die "DDC_PROC override is only allowed with DDC_LOCAL_TEST=1"
   case "$BUILD_MEM_FLOOR_MB" in ''|*[!0-9]*) die "BUILD_MEM_FLOOR_MB must be a number";; esac
@@ -73,7 +112,76 @@ require_server() {
   [ "$BUILD_DISK_FLOOR_MB" -ge 3072 ] || die "BUILD_DISK_FLOOR_MB may only be raised above 3072 on the server"
   [ "$BUILD_WATCH_INTERVAL" = 2 ] || die "BUILD_WATCH_INTERVAL override is only allowed with DDC_LOCAL_TEST=1"
   command -v docker >/dev/null || die "docker not found"
+  settings_resolve
 }
+
+# ---------------------------------------------------------------------------
+# Settings (see the block at the top): validation, the record in $NEW_DIR/settings.env, the printed line.
+# ---------------------------------------------------------------------------
+# A rehearsal host: one label under datadance.ai (the copied vhosts keep the production TLS setup), lower case, never a
+# production host. A port: 1024-65535, never an old-stack port; the three are distinct.
+check_settings() {
+  local re_host='^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.datadance\.ai$' n v p q
+  for n in API_HOST APP_HOST; do
+    v="${!n}"
+    [[ "$v" =~ $re_host ]] || die "$n='$v' is not a host name of the form <name>.datadance.ai (lower case, one label)"
+    case " $PROD_HOSTS www.datadance.ai " in *" $v "*) die "$n=$v is a production host: the rehearsal never takes it";; esac
+  done
+  [ "$API_HOST" != "$APP_HOST" ] || die "API_HOST and APP_HOST must differ (both are $API_HOST)"
+  for n in API_PORT WEB_PORT DB_PORT; do
+    v="${!n}"
+    case "$v" in ''|*[!0-9]*|0*) die "$n='$v' is not a port number";; esac
+    [ "$v" -ge 1024 ] && [ "$v" -le 65535 ] || die "$n=$v: use a port from 1024 to 65535"
+    case " $OLD_PORTS " in *" $v "*) die "$n=$v is a port of the old stack ($OLD_PORTS)";; esac
+  done
+  for p in "API_PORT $API_PORT" "WEB_PORT $WEB_PORT" "DB_PORT $DB_PORT"; do
+    for q in "API_PORT $API_PORT" "WEB_PORT $WEB_PORT" "DB_PORT $DB_PORT"; do
+      [ "${p% *}" = "${q% *}" ] || [ "${p#* }" != "${q#* }" ] || die "${p% *} and ${q% *} are both ${p#* }: the three ports must differ"
+    done
+  done
+  case "$TAKE_OVER_VHOSTS" in yes|no) ;; *) die "TAKE_OVER_VHOSTS must be yes (only after Sloan and Race agreed) or left unset";; esac
+}
+# NAME's value in the record (empty when the file or the name is missing). Only NAME=value lines of the five names.
+settings_recorded() { [ -f "$SETTINGS_FILE" ] && sed -n "s/^$1=//p" "$SETTINGS_FILE" | tail -n 1 || true; }
+# The effective settings: an override, else the recorded value, else the default. An override that differs from the
+# recorded value stops the script (the stack runs with the recorded one; 99-teardown.sh first to change it).
+settings_resolve() {
+  local n ov rec d src_o="" src_r=""
+  SETTINGS_FILE="$NEW_DIR/settings.env"
+  if [ -e "$SETTINGS_FILE" ] || [ -L "$SETTINGS_FILE" ]; then
+    [ -f "$SETTINGS_FILE" ] && [ ! -L "$SETTINGS_FILE" ] || die "$SETTINGS_FILE is not a regular file"
+    ! grep -qvE '^(API_HOST|APP_HOST|API_PORT|WEB_PORT|DB_PORT)=[A-Za-z0-9.-]+$' "$SETTINGS_FILE" || die "$SETTINGS_FILE has a line that is not API_HOST/APP_HOST/API_PORT/WEB_PORT/DB_PORT=<value>"
+  fi
+  for n in $SETTINGS_NAMES; do
+    ov="OVR_$n"; ov="${!ov}"; d="DEFAULT_$n"; d="${!d}"; rec=$(settings_recorded "$n")
+    if [ -n "$ov" ]; then
+      [ -z "$rec" ] || [ "$ov" = "$rec" ] || die "$n=$ov differs from $n=$rec recorded in $SETTINGS_FILE (the new stack was set up with it): drop the override, or run 99-teardown.sh first (it removes the record) to change it"
+      printf -v "$n" '%s' "$ov"; src_o="$src_o $n"
+    elif [ -n "$rec" ]; then printf -v "$n" '%s' "$rec"; src_r="$src_r $n"
+    else printf -v "$n" '%s' "$d"; fi
+  done
+  SETTINGS_SOURCE="defaults"
+  [ -z "$src_r" ] || SETTINGS_SOURCE="recorded in $SETTINGS_FILE"
+  [ -z "$src_o" ] || SETTINGS_SOURCE="${SETTINGS_SOURCE}; overrides:$src_o"
+  check_settings
+}
+settings_say() { say "settings: API_HOST=$API_HOST APP_HOST=$APP_HOST API_PORT=$API_PORT WEB_PORT=$WEB_PORT DB_PORT=$DB_PORT ($SETTINGS_SOURCE)"; }
+# Write runs record the settings once (a later run with other values stops in settings_resolve).
+settings_record() {
+  local n
+  [ ! -f "$SETTINGS_FILE" ] || return 0
+  guard_write_path "$SETTINGS_FILE"
+  ( umask 077; for n in $SETTINGS_NAMES; do printf '%s=%s\n' "$n" "${!n}"; done > "$SETTINGS_FILE.tmp" ) && mv -f "$SETTINGS_FILE.tmp" "$SETTINGS_FILE" \
+    || die "cannot write $SETTINGS_FILE"
+  say "settings recorded in $SETTINGS_FILE: later scripts use these values (99-teardown.sh removes the record)"
+}
+settings_forget() {
+  [ -e "$SETTINGS_FILE" ] || return 0
+  guard_write_path "$SETTINGS_FILE"
+  rm -f -- "$SETTINGS_FILE" && say "settings record $SETTINGS_FILE removed: the next run may choose other hosts or ports"
+}
+# KEY=value lines of the effective settings (remote.sh preflight prepends them to the piped 00-preflight.sh).
+settings_env_lines() { local n; check_settings; for n in $SETTINGS_NAMES; do printf '%s=%s\n' "$n" "${!n}"; done; }
 
 sha256() { if command -v sha256sum >/dev/null; then sha256sum | cut -c1-64; else shasum -a 256 | cut -c1-64; fi; }
 
@@ -96,7 +204,9 @@ guard_write_path() {
   if ddc_local_test; then return 0; fi
   case "$r/" in
     /root/ddcnew/*|/root/backup/*|/root/mainnet-switch/*|/srv/ddcnew/*) return 0;;
-    "$NGINX_AVAIL/$TGE_API_HOST/"|"$NGINX_AVAIL/$TGE_APP_HOST/"|"$NGINX_ENABLED/$TGE_API_HOST/"|"$NGINX_ENABLED/$TGE_APP_HOST/") return 0;;
+    # the two vhost names of the settings (plus the .new temporaries); 30-nginx.sh also checks who wrote an existing file
+    "$NGINX_AVAIL/$API_HOST/"|"$NGINX_AVAIL/$APP_HOST/"|"$NGINX_AVAIL/$API_HOST.new/"|"$NGINX_AVAIL/$APP_HOST.new/") return 0;;
+    "$NGINX_ENABLED/$API_HOST/"|"$NGINX_ENABLED/$APP_HOST/") return 0;;
     /etc/cron.d/ddc-pgdump/) return 0;;
   esac
   die "refusing to write $r: not a new-stack path"
@@ -175,37 +285,111 @@ env_get_simple() { # NAME FILE
 }
 
 # ---------------------------------------------------------------------------
-# Old-stack integrity: containers AND files, recorded at the start of every write script and compared
-# at the end. Any difference fails loudly. Prints paths and short hashes only, never file contents.
+# Old-stack integrity: containers AND files, recorded at the start of every write script and compared at the end. Any
+# difference fails loudly. Prints paths and short hashes only, never file contents. "Old stack" is everything this
+# package did not create: the live stack, Race's mainnet rehearsal (ddc-mainnet-* containers, /root/ddc-mainnet) and
+# every vhost entry that 30-nginx.sh did not write (Race's at our names included).
 # ---------------------------------------------------------------------------
-# Snapshot of every old-stack container (name, id, state, start time, restart count, restart policy).
+# Snapshot of every ddc-* container: the live stack's and Race's ddc-mainnet-* (name, id, state, start time, restart
+# count, restart policy). This package's containers are ddcnew-*, which ^ddc- does not match.
 old_snapshot() {
   docker ps -a --format '{{.Names}}' | { grep -E '^ddc-' || true; } | sort | while read -r c; do
     docker inspect --format '{{.Name}}|{{.Id}}|{{.State.Status}}|{{.State.StartedAt}}|{{.RestartCount}}|{{.HostConfig.RestartPolicy.Name}}' "$c"
   done
 }
-# The old stack's configuration files: backend.env, every overlay file, both compose files and every
-# vhost file in sites-available except the two tge-* files (and their .new temporaries) this package writes.
+# Who wrote a vhost entry at one of our names: "ours" (a regular file whose first line is $VHOST_MARKER; in
+# sites-enabled, a symlink to such a file of the same name in sites-available), "absent", or "foreign" (anything else:
+# someone else's file or link; 30-nginx.sh never overwrites or removes it unless it is taken over).
+vhost_file_ours() { [ -f "$1" ] && [ ! -L "$1" ] && [ "$(head -n 1 -- "$1" 2>/dev/null)" = "$VHOST_MARKER" ]; }
+vhost_state() { # avail|enabled <entry name>
+  local p
+  case "$1" in avail) p="$NGINX_AVAIL/$2";; enabled) p="$NGINX_ENABLED/$2";; *) die "vhost_state: unknown kind $1";; esac
+  if [ ! -e "$p" ] && [ ! -L "$p" ]; then echo absent
+  elif [ "$1" = avail ] && vhost_file_ours "$p"; then echo ours
+  elif [ "$1" = enabled ] && [ -L "$p" ] && vhost_file_ours "$NGINX_AVAIL/$2" && [ "$(resolve_path "$p")" = "$(resolve_path "$NGINX_AVAIL/$2")" ]; then echo ours
+  else echo foreign; fi
+}
+vhost_ours_entry() { # avail|enabled <entry name>: one of our names (settings), written by 30-nginx.sh
+  case "$1:$2" in
+    avail:"$API_HOST"|avail:"$APP_HOST"|avail:"$API_HOST.new"|avail:"$APP_HOST.new"|enabled:"$API_HOST"|enabled:"$APP_HOST") ;;
+    *) return 1;;
+  esac
+  [ "$(vhost_state "$1" "$2")" = ours ]
+}
+# Race's files: every file and symlink under $MAINNET_DIR except .git/, node_modules/ and the directories a container
+# mounts read-write (data the container writes itself, such as a database directory: fingerprinting it would fail every
+# run). Read only.
+mainnet_rw_mounts() {
+  local id
+  [ -d "$MAINNET_DIR" ] || return 0
+  for id in $(docker ps -aq 2>/dev/null || true); do
+    docker inspect --format '{{range .Mounts}}{{if and (eq .Type "bind") .RW}}{{.Source}}{{"\n"}}{{end}}{{end}}' "$id" 2>/dev/null || true
+  done | awk -v d="$MAINNET_DIR" '$0 == d || index($0, d "/") == 1' | LC_ALL=C sort -u
+}
+mainnet_files() {
+  local skip f m hit
+  if [ ! -d "$MAINNET_DIR" ]; then printf '%s\n' "$MAINNET_DIR/"; return 0; fi
+  skip=$(mainnet_rw_mounts)
+  find "$MAINNET_DIR" \( -name .git -o -name node_modules \) -prune -o ! -type d -print | LC_ALL=C sort | while IFS= read -r f; do
+    hit=0
+    while IFS= read -r m; do [ -n "$m" ] || continue; case "$f/" in "$m"/*) hit=1; break;; esac; done <<EOF
+$skip
+EOF
+    [ "$hit" = 1 ] || printf '%s\n' "$f"
+  done
+}
+# The fingerprinted files: backend.env, every overlay file, both compose files, every entry of sites-available and
+# sites-enabled that 30-nginx.sh did not write, and Race's files (mainnet_files). A missing directory is listed as
+# MISSING (a bare failing find would end the caller silently under pipefail).
 old_files() {
+  local d kind f
   printf '%s\n' "$OLD_ENV" "$OLD_BACKEND_DIR/docker-compose.yaml" "$OLD_APP_DIR/docker-compose.yml"
   if [ -d "$OLD_BACKEND_DIR/overlays" ]; then find "$OLD_BACKEND_DIR/overlays" -type f | LC_ALL=C sort
   else printf '%s\n' "$OLD_BACKEND_DIR/overlays/"; fi
-  # A missing directory is listed as MISSING (a bare failing find would end the caller silently under pipefail).
-  if [ -d "$NGINX_AVAIL" ]; then find "$NGINX_AVAIL" -mindepth 1 -maxdepth 1 ! -type d ! -name "$TGE_API_HOST*" ! -name "$TGE_APP_HOST*" | LC_ALL=C sort
-  else printf '%s\n' "$NGINX_AVAIL/"; fi
+  for kind in avail enabled; do
+    if [ "$kind" = avail ]; then d="$NGINX_AVAIL"; else d="$NGINX_ENABLED"; fi
+    if [ -d "$d" ]; then
+      find "$d" -mindepth 1 -maxdepth 1 ! -type d | LC_ALL=C sort | while IFS= read -r f; do vhost_ours_entry "$kind" "${f##*/}" || printf '%s\n' "$f"; done
+    else printf '%s\n' "$d/"; fi
+  done
+  mainnet_files
+}
+# "<sha256> <path>" (a symlink: the sha256 of its target name followed by the content it leads to), or "MISSING <path>".
+fp_line() {
+  if [ -L "$1" ]; then printf '%s %s\n' "$( { printf 'symlink %s\n' "$(readlink -- "$1")"; cat -- "$1" 2>/dev/null || true; } | sha256)" "$1"
+  elif [ -f "$1" ]; then printf '%s %s\n' "$(sha256 < "$1")" "$1"
+  else printf 'MISSING %s\n' "$1"; fi
 }
 old_files_snapshot() {
   local f
-  old_files | while IFS= read -r f; do
-    if [ -f "$f" ]; then printf '%s %s\n' "$(sha256 < "$f")" "$f"; else printf 'MISSING %s\n' "$f"; fi
-  done
+  old_files | while IFS= read -r f; do fp_line "$f"; done | LC_ALL=C sort -t ' ' -k 2
 }
 OLD_SNAP_BEFORE=""; OLD_FILES_BEFORE=""
 old_snapshot_begin() {
+  local rw
   OLD_SNAP_BEFORE="$(old_snapshot)"
   OLD_FILES_BEFORE="$(old_files_snapshot)"
-  say "old-stack containers: $(printf '%s\n' "$OLD_SNAP_BEFORE" | grep -c . ) (snapshot $(printf '%s' "$OLD_SNAP_BEFORE" | sha256 | cut -c1-12))"
-  say "old-stack files: $(printf '%s\n' "$OLD_FILES_BEFORE" | grep -c . ) (snapshot $(printf '%s' "$OLD_FILES_BEFORE" | sha256 | cut -c1-12); missing=$(printf '%s\n' "$OLD_FILES_BEFORE" | grep -c '^MISSING ' || true))"
+  say "old-stack containers: $(printf '%s\n' "$OLD_SNAP_BEFORE" | grep -c . ), of them ${MAINNET_CTR_PREFIX}*: $(printf '%s\n' "$OLD_SNAP_BEFORE" | grep -c "^/$MAINNET_CTR_PREFIX" || true) (snapshot $(printf '%s' "$OLD_SNAP_BEFORE" | sha256 | cut -c1-12))"
+  say "old-stack files: $(printf '%s\n' "$OLD_FILES_BEFORE" | grep -c . ) (snapshot $(printf '%s' "$OLD_FILES_BEFORE" | sha256 | cut -c1-12); missing=$(printf '%s\n' "$OLD_FILES_BEFORE" | grep -c '^MISSING ' || true); under $MAINNET_DIR: $(printf '%s\n' "$OLD_FILES_BEFORE" | grep -c " $MAINNET_DIR/." || true))"
+  rw=$(mainnet_rw_mounts)
+  [ -z "$rw" ] || say "  not fingerprinted, mounted read-write by a container (data it writes itself): $(printf '%s\n' "$rw" | tr '\n' ' ')"
+}
+# An approved take-over (30-nginx.sh apply with TAKE_OVER_VHOSTS=yes) removes these paths from the start fingerprint,
+# each only if it is still exactly as it was at the start; 30-nginx.sh restore adds the restored ones back.
+old_files_forget() {
+  local p was now
+  for p in "$@"; do
+    was=$(printf '%s\n' "$OLD_FILES_BEFORE" | awk -v p="$p" 'substr($0, index($0, " ") + 1) == p')
+    now=$(fp_line "$p")
+    [ -n "$was" ] && [ "$was" = "$now" ] || die "take-over: $p changed while this script ran (start ${was%% *}, now ${now%% *}): not taking it over"
+    OLD_FILES_BEFORE=$(printf '%s\n' "$OLD_FILES_BEFORE" | awk -v p="$p" 'substr($0, index($0, " ") + 1) != p')
+  done
+}
+old_files_adopt() {
+  local p
+  for p in "$@"; do
+    OLD_FILES_BEFORE=$(printf '%s\n%s\n' "$OLD_FILES_BEFORE" "$(fp_line "$p")" | { grep . || true; } | LC_ALL=C sort -t ' ' -k 2)
+  done
 }
 # Prints "before|after <short hash> <path>" for every line that differs; returns 1 when anything differs.
 old_files_compare() {
@@ -225,7 +409,7 @@ old_snapshot_assert() {
     printf 'FAIL old-stack containers changed during this script (a restart by a teammate, e.g. during the TGE data refresh, also triggers this: check who restarted it before assuming this script did)\n' >&2
     bad=1
   fi
-  if old_files_compare; then pass "old-stack files unchanged ($(printf '%s\n' "$OLD_FILES_BEFORE" | grep -c .) files: backend.env, overlays/*, both compose files, old vhosts)"
+  if old_files_compare; then pass "old-stack files unchanged ($(printf '%s\n' "$OLD_FILES_BEFORE" | grep -c .) entries: backend.env, overlays/*, both compose files, every vhost entry not written by this package, $MAINNET_DIR)"
   else
     printf 'FAIL OLD-STACK FILES CHANGED while this script ran (paths and short sha256 above). This package never writes them,\n' >&2
     printf '     so a teammate may have changed them: ask Race / the team before going on, and do not assume this script did it.\n' >&2
@@ -234,10 +418,63 @@ old_snapshot_assert() {
   [ "$bad" = 0 ] || die "old-stack integrity check failed"
 }
 
-# Compose wrapper for the new stack only.
-dc() { docker compose -p "$PROJECT" --project-directory "$NEW_DIR" -f "$NEW_DIR/compose.yaml" "$@"; }
+# Compose wrapper for the new stack only. The host ports come from the settings (compose.yaml requires all three).
+dc() { API_PORT="$API_PORT" WEB_PORT="$WEB_PORT" DB_PORT="$DB_PORT" docker compose -p "$PROJECT" --project-directory "$NEW_DIR" -f "$NEW_DIR/compose.yaml" "$@"; }
 
 port_in_use() { ss -Htln "sport = :$1" 2>/dev/null | grep -q .; }
+# Names of the containers that publish <port> on the host (empty when none does).
+port_publishers() { docker ps --format '{{.Names}} {{.Ports}}' 2>/dev/null | awk -v p="$1" '{ for (i = 2; i <= NF; i++) if (index($i, ":" p "->") > 0) { print $1; break } }' || true; }
+# A port of the settings is usable when nothing listens on it, or when this stack's own <service> container
+# (ddcnew-<service>-1) is what publishes it (a re-run). Anything else, Race's containers included, stops the script.
+port_check() { # <port> <service: api|web|db> <setting name>
+  local who
+  port_in_use "$1" || return 0
+  who=$(port_publishers "$1" | tr '\n' ' ' | sed 's/ $//')
+  [ "$who" = "$PROJECT-$2-1" ] && return 0
+  die "port $1 ($3) is in use by ${who:-a process that is not a container}: choose another one ($3=<port>, APPROVAL.md section 9)"
+}
+
+# ---------------------------------------------------------------------------
+# What the host nginx loads, and the Host-header checks around a reload (30-nginx.sh, 40-up.sh).
+# ---------------------------------------------------------------------------
+# Every file nginx loads from sites-enabled/ and conf.d/*.conf (symlinks followed by the readers below).
+nginx_loaded_files() {
+  local f
+  for f in "$NGINX_ENABLED"/* "$NGINX_CONFD"/*.conf; do if [ -e "$f" ]; then printf '%s\n' "$f"; fi; done
+}
+# The exact server names a file declares, one per line in lower case (comments removed; a server_name statement may
+# span lines). Wildcard and regex names are left out: an exact name always wins over them in nginx.
+server_names_in() {
+  sed -e 's/#.*//' -- "$1" 2>/dev/null | tr '\n' ' ' | tr ';{}' '\n\n\n' \
+    | awk '{ for (i = 1; i <= NF; i++) if ($i == "server_name") { for (j = i + 1; j <= NF; j++) print tolower($j); break } }' \
+    | tr -d '"' | { grep -vE '^(_|~.*|.*[*].*|[.].*|[$].*)$' || true; }
+}
+# The loaded files (other than <skip paths>) that declare <host> as a server name.
+server_name_users() { # <host> [skip path...]
+  local h="$1" f s skip
+  shift
+  nginx_loaded_files | while IFS= read -r f; do
+    skip=0; for s in "$@"; do [ "$f" != "$s" ] || skip=1; done
+    [ "$skip" = 0 ] || continue
+    if server_names_in "$f" | grep -qxF -- "$h"; then printf '%s\n' "$f"; fi
+  done
+}
+# The hosts whose answers a reload must not change: the production hosts and every exact server name nginx loads
+# (Race's rehearsal hosts included), minus <excluded hosts> (the ones the running script changes on purpose).
+other_hosts() { # [excluded host...]
+  local f x
+  { printf '%s\n' $PROD_HOSTS
+    nginx_loaded_files | while IFS= read -r f; do server_names_in "$f"; done
+  } | { grep -E '^[a-z0-9._-]+$' || true; } | LC_ALL=C sort -u | while IFS= read -r x; do
+    case " $* " in *" $x "*) ;; *) printf '%s\n' "$x";; esac
+  done
+}
+host_code() { curl -s -o /dev/null -m 10 -w '%{http_code}' -H "Host: $1" "$NGINX_LOCAL_URL$2" || true; }
+host_codes() { # <host...>: "host=code ..." for GET /
+  local h out=""
+  for h in "$@"; do out="$out$h=$(host_code "$h" /) "; done
+  printf '%s' "${out% }"
+}
 
 # MemAvailable in MB; empty output when the file cannot be read.
 mem_avail_mb() { awk '/^MemAvailable:/ {print int($2/1024)}' "$DDC_MEMINFO" 2>/dev/null || true; }
@@ -497,20 +734,55 @@ jwks_pins_decide() {
 # which src/constants/partnerClient.js assertFinancialGradeConfig sets to true only after checking that
 # SSO_SESSION_SECRET is set and differs from JWT_SECRET (it throws otherwise).
 #   money_path_fields_check <log line> <expected jwksPins count>
-# Each field must appear as an exact space-separated token (allowedVerifiers=50 or issuer=https://tge-api.x do not
-# pass). Any missing or different field STOPS the script: these are pass criteria, not warnings.
+# Each field must appear as an exact space-separated token (allowedVerifiers=50, or an issuer with anything appended
+# to https://$API_HOST, does not pass). issuer is PUBLIC_BASE_URL and consentOrigin is APP_PUBLIC_URL
+# (partnerClient.js), so they must be https://$API_HOST and https://$APP_HOST of the settings. Any missing or
+# different field STOPS the script: these are pass criteria, not warnings.
 # publicClientRegistration stays a warning while runbook 5.2 is open (Sloan to confirm).
 # ---------------------------------------------------------------------------
 money_path_fields_check() {
   local tokens want missing=""
   tokens=$(printf '%s\n' "$1" | tr ' ' '\n')
-  for want in "nodeEnv=production" "allowedVerifiers=5" "issuer=https://$TGE_API_HOST" "consentOrigin=https://$TGE_APP_HOST" \
+  for want in "nodeEnv=production" "allowedVerifiers=5" "issuer=https://$API_HOST" "consentOrigin=https://$APP_HOST" \
               "web3authVerify=enforce" "legacyFallback=false" "jwksPinMode=enforce" "jwksPins=$2" "sessionSecretSeparate=true"; do
     if printf '%s\n' "$tokens" | grep -qxF -- "$want"; then pass "log: $want"; else missing="$missing $want"; fi
   done
   [ -z "$missing" ] || die "the money-path log line lacks:$missing (exact fields expected; the api is running: ./99-teardown.sh, or fix the env and re-run)"
   if printf '%s\n' "$tokens" | grep -qxF publicClientRegistration=closed; then pass "log: publicClientRegistration=closed"
   else warn "publicClientRegistration is not closed (OAUTH_PUBLIC_REGISTRATION_ENABLED, runbook 5.2: Sloan to confirm)"; fi
+}
+
+# ---------------------------------------------------------------------------
+# The web build for the rehearsal API (10-build.sh, 40-up.sh). The frontend compiles its tge API in:
+# src/config/environment.ts API_BASE_URLS.tge, https://api-rehearsal.datadance.ai/api since frontend a3ee809
+# (2026-10-05). Its dist/ddc-build.json says which one a build got.
+#   fe_api_base_check <frontend tarball>  before any build: the tge entry of the uploaded source must be
+#                                         https://$API_HOST/api (a web image for another API is never built)
+#   web_marker_check < ddc-build.json     the built marker: tge / tge / https://$API_HOST/api / sapphire_mainnet /
+#                                         BBpkxUTUr... / chain 44508; prints the fields
+# ---------------------------------------------------------------------------
+fe_api_base_check() {
+  local got
+  got=$( { tar -xzOf "$1" src/config/environment.ts 2>/dev/null || true; } | sed -n "s/^[[:space:]]*tge:[[:space:]]*'\([^']*\)'.*/\1/p" | head -n 1)
+  if [ -z "$got" ]; then
+    warn "the frontend source has no \"tge: '<url>'\" line in src/config/environment.ts: the API it builds for is checked on the built ddc-build.json only"
+    return 0
+  fi
+  [ "$got" = "https://$API_HOST/api" ] || die "the frontend commit builds its tge web app for $got, not https://$API_HOST/api (API_HOST): pick a frontend commit for this host (since a3ee809: api-rehearsal), or set API_HOST to match"
+  pass "frontend source: API_BASE_URLS.tge = https://$API_HOST/api"
+}
+web_marker_check() {
+  WANT_API="https://$API_HOST/api" python3 -c '
+import json, os, sys
+m = json.load(sys.stdin)
+want = {"mode": "tge", "apiEnv": "tge", "apiBaseUrl": os.environ["WANT_API"], "w3aNetwork": "sapphire_mainnet", "chainId": 44508}
+bad = [k for k, v in want.items() if m.get(k) != v]
+cid = str(m.get("w3aClientId", ""))
+if not cid.startswith("BBpkxUTUr"): bad.append("w3aClientId")
+for k in ["mode", "apiEnv", "apiBaseUrl", "w3aNetwork", "chainId"]: print("marker %s=%s" % (k, m.get(k)))
+print("marker w3aClientId=%s... (len %d)" % (cid[:9], len(cid)))
+sys.exit("FAIL marker fields wrong: " + ",".join(bad) if bad else 0)
+'
 }
 
 # ---------------------------------------------------------------------------

@@ -19,6 +19,17 @@ from a Mac through `remote.sh`. **No CI job and no deploy runs them**, and nothi
 3. **Every call that writes to the server needs Sloan's approval**, given per call as `DDC_APPROVED=yes`; `remote.sh`
    refuses a write call without it. The order of the steps is in [APPROVAL.md](APPROVAL.md) section 4.
 
+## Hosts and ports
+
+The rehearsal hosts and the new stack's host ports are settings in `common.sh`: `API_HOST`, `APP_HOST`, `API_PORT`,
+`WEB_PORT`, `DB_PORT`, by default `api-rehearsal.datadance.ai`, `app-rehearsal.datadance.ai`, 10020, 9021 and 15434.
+Override them per call (`./remote.sh run <script> API_HOST=<host> ...`); the first write script records them in
+`/root/ddcnew/settings.env`, later scripts use the record and stop on a different override, and `99-teardown.sh`
+removes it. Race's own rehearsal (containers `ddc-mainnet-*`, `/root/ddc-mainnet`, his vhosts) is only read and
+fingerprinted like the old stack: `30-nginx.sh` never overwrites a vhost it did not write unless
+`TAKE_OVER_VHOSTS=yes` is passed after Sloan and Race agree (it backs the entries up first; `restore` puts them back).
+Which stack serves the rehearsal hosts, and the commands for either outcome: [APPROVAL.md](APPROVAL.md) section 9.
+
 ## Files
 
 | File | What it is |
@@ -28,10 +39,10 @@ from a Mac through `remote.sh`. **No CI job and no deploy runs them**, and nothi
 | `local.env.example` | template for the untracked `local.env` |
 | `00-preflight.sh` | read-only checks on the server |
 | `p1-backup.sh`, `p2-disk.sh` | P1 backups (dump, verify, nightly cron) and P2 disk cleanup and expansion check |
-| `10-build.sh`, `20-env.sh`, `30-nginx.sh`, `40-up.sh`, `compose.yaml` | build, rehearsal env, nginx vhosts and start of `ddcnew` |
+| `10-build.sh`, `20-env.sh`, `30-nginx.sh`, `40-up.sh`, `compose.yaml` | build, rehearsal env, nginx vhosts (apply, undo, restore after a take-over) and start of `ddcnew` |
 | `50-partner-page.sh`, `partner-info/index.html` | the partner info page: the template, filled and published to `/srv/ddcnew/partner-info/` with client_secret as AES-256-GCM ciphertext; the page password comes from 1Password on stdin ([APPROVAL.md](APPROVAL.md) section 8) |
 | `99-teardown.sh` | removes the new stack only (the undo) |
-| `common.sh` | shared guards: write allowlist, old-stack fingerprint, run lock, build watchdog |
+| `common.sh` | the settings (hosts, ports) and shared guards: write allowlist, old-stack fingerprint, run lock, build watchdog |
 | `survey/` | read-only survey scripts and the read-only SSH runner; their outputs never go into the repository |
 | `test/` | the local test suite (no server access) |
 
@@ -64,5 +75,5 @@ anything changed, and only one write run can happen at a time. What remains:
   the old database during a dump would queue behind its locks and stall production, so agree a no-DDL window with Race.
 - **Image builds:** use CPU and memory on the shared host, which has no swap. The watchdog stops a build below 1000 MB
   of available memory or 3 GB of free disk, and marks the build steps so that the kernel kills them first.
-- **nginx reload:** graceful, but it touches the live nginx. `30-nginx.sh` compares the old vhosts' status codes before
-  and after the reload and stops if any changed.
+- **nginx reload:** graceful, but it touches the live nginx. `30-nginx.sh` compares the status codes of every other host
+  nginx serves (production and Race's) before and after the reload and stops if any changed.

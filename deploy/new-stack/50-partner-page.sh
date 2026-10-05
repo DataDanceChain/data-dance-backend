@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # 50-partner-page.sh - the password-protected info page for the TGE partner (test environment only), served by the host
-# nginx at https://tge-app.datadance.ai/partner-info/ (the tge-app vhost written by 30-nginx.sh aliases that path to
-# /srv/ddcnew/partner-info/). The page shows what the partner needs to integrate DDC login with the test environment.
-# client_secret is on it only as ciphertext, decrypted in the reader's browser with the page password.
+# nginx at https://<APP_HOST>/partner-info/ (the app vhost that 30-nginx.sh writes aliases that path to
+# /srv/ddcnew/partner-info/; APP_HOST and API_HOST are the settings in common.sh). The page shows what the partner needs
+# to integrate DDC login with the test environment. client_secret is on it only as ciphertext, decrypted in the reader's
+# browser with the page password.
 #
 # CHANGES ON THE SERVER
 #   apply   /srv/ddcnew/ and /srv/ddcnew/partner-info/ (directories, chmod 755: nginx runs as www-data and cannot
@@ -19,8 +20,8 @@
 #   verify  decrypts secret.json with the password from stdin in a throwaway container and compares the sha256 of the
 #           result with the sha256 of the secret file: prints match=yes or match=no (exit 0 or 1). Writes only its log.
 #   remove  deletes /srv/ddcnew/partner-info, and /srv/ddcnew when it is then empty.
-#   status  read-only: the two files (mode, size, sha256), the tge-app vhost's /partner-info/ location, and what the
-#           local nginx answers for /partner-info/ and /partner-info/secret.json.
+#   status  read-only: the two files (mode, size, sha256), the app vhost's /partner-info/ location, and what the local
+#           nginx answers for /partner-info/ and /partner-info/secret.json.
 #   apply, verify and remove take the run lock and log to /root/ddcnew/logs/ (common.sh run_begin); apply and remove
 #   fingerprint the old stack at start and end (common.sh old_snapshot_*).
 # INPUTS
@@ -30,17 +31,17 @@
 #     A terminal on stdin is refused (typing would echo it), and so is xtrace (bash -x would print it).
 #   /root/ddcnew/secrets/tge_rehearsal_client_secret (20-env.sh): the secret. Its sha256 must equal
 #     SSO_TGE_CLIENT_SECRET_SHA256 in /root/ddcnew/.env.rehearsal, so the page never hands out a secret the api refuses.
-#   /root/ddcnew/.env.rehearsal: PUBLIC_BASE_URL (the issuer; must be https://tge-api.datadance.ai), SSO_TGE_CLIENT_ID,
+#   /root/ddcnew/.env.rehearsal: PUBLIC_BASE_URL (the issuer; must be https://<API_HOST>), SSO_TGE_CLIENT_ID,
 #     SSO_TGE_REDIRECT_URIS (refused while it is still the .invalid placeholder) and SSO_TGE_INITIATE_LOGIN_URI.
 #   PARTNER_ALLOWED_IP (apply; an allowlisted remote.sh override): the partner address(es) that the Cloudflare rule lets
 #     in, comma-separated IPv4 or IPv6. Partner-specific values never enter this repository.
 #   API_IMAGE in /root/ddcnew/.env (10-build.sh): the ddcnew backend image, which runs node for the encryption.
 # PRINTS: the two paths with their mode and sha256 (and the usual run-lock and old-stack lines). Never the secret, the
 #   password or a value derived from them, except the sha256 of the published ciphertext file.
-# UNDO: ./50-partner-page.sh remove. 99-teardown.sh removes the tge-app vhost (the page is then no longer served) but not
+# UNDO: ./50-partner-page.sh remove. 99-teardown.sh removes the app vhost (the page is then no longer served) but not
 #   these files. Rotate the client secret and the page password after the joint test (APPROVAL.md section 8).
-# Local test only (DDC_LOCAL_TEST=1): NEW_DIR, SRV_DIR, PARTNER_CRYPT_IMAGE (for example node:22-alpine) and
-#   DDC_TEST_SUFFIX (appended to the throwaway container's name).
+# Local test only (DDC_LOCAL_TEST=1): NEW_DIR, SRV_DIR, NGINX_LOCAL_URL, PARTNER_CRYPT_IMAGE (for example
+#   node:22-alpine) and DDC_TEST_SUFFIX (appended to the throwaway container's name).
 set -euo pipefail
 case "$-" in *x*) printf 'FAIL refusing to run with xtrace (set -x / bash -x): it would print the page password\n' >&2; exit 1;; esac
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -151,7 +152,7 @@ read_env() {
   local raw u n=0
   [ -f "$ENV_FILE" ] || die "$ENV_FILE missing: run 20-env.sh first"
   ISSUER=$(env_get_simple PUBLIC_BASE_URL "$ENV_FILE")
-  [ "$ISSUER" = "https://$TGE_API_HOST" ] || die "PUBLIC_BASE_URL in $ENV_FILE is not https://$TGE_API_HOST: this page is for the tge test environment only"
+  [ "$ISSUER" = "https://$API_HOST" ] || die "PUBLIC_BASE_URL in $ENV_FILE is not https://$API_HOST (API_HOST): this page is for the rehearsal stack's test environment only"
   CLIENT_ID=$(env_get_simple SSO_TGE_CLIENT_ID "$ENV_FILE")
   [[ "$CLIENT_ID" =~ $re_client ]] || die "SSO_TGE_CLIENT_ID in $ENV_FILE is missing or not [A-Za-z0-9._-]{1,64}"
   raw=$(env_get_simple SSO_TGE_REDIRECT_URIS "$ENV_FILE")
@@ -297,6 +298,8 @@ case "$cmd" in
   apply|remove) for p in "$SRV_DIR" "$PAGE_DIR" "$PAGE_DIR/index.html" "$PAGE_DIR/secret.json" "$PAGE_DIR/.index.html.new" "$PAGE_DIR/.secret.json.new"; do guard_write_path "$p"; done;;
 esac
 case "$cmd" in apply|verify|remove) run_begin "50-partner-page-$cmd" "$@";; esac
+settings_say
+if [ "$cmd" = apply ]; then settings_record; fi
 
 case "$cmd" in
   apply)
@@ -334,7 +337,7 @@ case "$cmd" in
     for f in index.html secret.json; do say "$PAGE_DIR/$f mode $(fmode "$PAGE_DIR/$f") sha256=$(sha256 < "$PAGE_DIR/$f")"; done
     say "directories: $SRV_DIR mode $(fmode "$SRV_DIR"), $PAGE_DIR mode $(fmode "$PAGE_DIR")"
     old_snapshot_assert
-    say "served at https://$TGE_APP_HOST/partner-info/ once the tge-app vhost has the /partner-info/ location (30-nginx.sh apply); check: ./remote.sh run 50-partner-page.sh status"
+    say "served at https://$APP_HOST/partner-info/ once the app vhost has the /partner-info/ location (30-nginx.sh apply); check: ./remote.sh run 50-partner-page.sh status"
     ;;
   verify)
     read_password
@@ -360,10 +363,10 @@ case "$cmd" in
       if [ -f "$PAGE_DIR/$f" ]; then say "$PAGE_DIR/$f mode $(fmode "$PAGE_DIR/$f") bytes $(wc -c < "$PAGE_DIR/$f" | tr -d ' ') sha256=$(sha256 < "$PAGE_DIR/$f")"
       else say "$PAGE_DIR/$f: absent"; fi
     done
-    v="$NGINX_AVAIL/$TGE_APP_HOST"
+    v="$NGINX_AVAIL/$APP_HOST"
     if [ -f "$v" ]; then say "$v: /partner-info/ location count=$(grep -c 'location \^~ /partner-info/' "$v" || true) (1 once 30-nginx.sh apply has run with this package)"
     else say "$v: absent (30-nginx.sh apply)"; fi
-    pcode() { curl -s -o /dev/null -m 10 -w '%{http_code}' -H "Host: $TGE_APP_HOST" "http://127.0.0.1$1" || true; }
+    pcode() { curl -s -o /dev/null -m 10 -w '%{http_code}' -H "Host: $APP_HOST" "$NGINX_LOCAL_URL$1" || true; }
     say "local nginx: /partner-info/ -> $(pcode /partner-info/), /partner-info/secret.json -> $(pcode /partner-info/secret.json) (200 and 200 when served)"
     ;;
 esac

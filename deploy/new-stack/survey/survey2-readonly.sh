@@ -21,7 +21,7 @@ for c in $(docker ps -a --format '{{.Names}}'); do
     mounts={{range .Mounts}}{{.Source}}->{{.Destination}} {{end}}' "$c"
 done
 section "images"; docker images --format '{{.Repository}}:{{.Tag}}|{{.ID}}|{{.Size}}|{{.CreatedSince}}'
-section "listening TCP ports of interest"; ss -ltnH | awk '{print $4}' | grep -E ':(22|80|443|10000|10010|90[0-9][0-9]|1543[0-9])$' | sort -u
+section "listening TCP ports of interest"; ss -ltnH | awk '{print $4}' | grep -E ':(22|80|443|100[0-9][0-9]|90[0-9][0-9]|1543[0-9])$' | sort -u
 
 section "backend: allow-listed non-secret flags from the container env"
 docker inspect --format '{{range .Config.Env}}{{printf "%q\n" .}}{{end}}' "$API" | grep -E "^\"($FLAGS)=" | tr -d '"'

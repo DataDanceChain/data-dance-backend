@@ -21,6 +21,7 @@
 #                                         files in under its own approval (APPROVAL item L).
 #   /root/ddcnew/assets/campaigns|passes/ COPIES of /root/ddc-backend/campaign-covers and /root/ddc-backend/passes
 #   /root/ddcnew/.env                     compose interpolation only: API_IMAGE, WEB_IMAGE tags and INFRA_ONLY=0|1 (no secrets)
+#   /root/ddcnew/settings.env             the hosts and ports (common.sh settings), if no earlier script recorded them
 #   /root/ddcnew/.lock, /root/ddcnew/logs/<ts>-10-build-<pid>.log (600) and logs/build-*.log: run lock and output copies
 #   The old directories are only read (cp/rsync source); nothing under /root/ddc-backend is written.
 # UNDO
@@ -35,6 +36,10 @@
 #   --infra-only           Build anyway to prove the infrastructure (empty stack). The backend image is tagged
 #                          ddcnew/backend:<sha12>-infra and /root/ddcnew/.env gets INFRA_ONLY=1: 40-up.sh prints a
 #                          banner and every data step refuses (refuse_if_infra_only in common.sh).
+# WEB BUILD FOR API_HOST: the frontend compiles its tge API in (src/config/environment.ts API_BASE_URLS.tge;
+#   https://api-rehearsal.datadance.ai/api since frontend a3ee809). Before any build, the uploaded source must name
+#   https://<API_HOST>/api (common.sh fe_api_base_check); after the web build, ddc-build.json must say apiBaseUrl
+#   https://<API_HOST>/api (web_marker_check). A frontend commit for another host stops the script.
 # MEMORY AND DISK: each docker build runs under a watchdog (common.sh run_build_watched): MemAvailable and the free
 #   space on / are polled every 2 s and the build is killed (client, then any BuildKit RUN-step process) if MemAvailable
 #   falls below 1000 MB or the free disk below 3 GB; the script then fails. RUN-step processes get oom_score_adj=1000 on
@@ -70,9 +75,15 @@ if ddc_local_test && [ "${DDC_ARGS_ONLY:-0}" = 1 ]; then say "args ok: INFRA_ONL
 
 for p in "$NEW_DIR" "$SRC" "$LOGS" "$NEW_DIR/keys_fixed" "$NEW_DIR/assets" "$NEW_DIR/.env"; do guard_write_path "$p"; done
 run_begin 10-build "$BE_SHA" "$FE_SHA" "$@"
+settings_say
 [ "$INFRA_ONLY" = 0 ] || say "!!!!! $INFRA_ONLY_BANNER"
 old_snapshot_begin
 install -d -m 700 "$NEW_DIR" "$SRC" "$LOGS"
+settings_record
+# The frontend tarball first: a web build for another API host would only fail after the backend build (30 min).
+[ -f "$FE_TGZ" ] && [ -f "$FE_TGZ.sha256" ] || die "upload first: remote.sh upload-web $FE_SHA (expects $FE_TGZ and .sha256)"
+[ "$(sha256sum < "$FE_TGZ" | cut -c1-64)" = "$(cut -c1-64 "$FE_TGZ.sha256")" ] || die "tarball sha256 mismatch"
+fe_api_base_check "$FE_TGZ"
 
 check_resources() {
   local mem disk; mem=$(mem_avail_mb); disk=$(disk_avail_gb)
@@ -178,18 +189,8 @@ if ! run_build_watched "$LOGS/build-web-$FE12.log" --build-arg VITE_MODE=tge --b
   tail -25 "$LOGS/build-web-$FE12.log"; die "web build failed (log: $LOGS/build-web-$FE12.log)"
 fi
 pass "web image built in $(( $(date +%s)-t0 ))s, size $(docker image ls --format '{{.Size}}' "$WEB_IMAGE")"
-docker run --rm --network none --entrypoint cat "$WEB_IMAGE" /var/www/ddc-build.json | python3 -c '
-import json, sys
-m = json.load(sys.stdin)
-want = {"mode": "tge", "apiEnv": "tge", "apiBaseUrl": "https://tge-api.datadance.ai/api", "w3aNetwork": "sapphire_mainnet", "chainId": 44508}
-bad = [k for k, v in want.items() if m.get(k) != v]
-cid = str(m.get("w3aClientId", ""))
-if not cid.startswith("BBpkxUTUr"): bad.append("w3aClientId")
-for k in ["mode", "apiEnv", "apiBaseUrl", "w3aNetwork", "chainId"]: print("marker %s=%s" % (k, m.get(k)))
-print("marker w3aClientId=%s... (len %d)" % (cid[:9], len(cid)))
-sys.exit("FAIL marker fields wrong: " + ",".join(bad) if bad else 0)
-' || die "build marker check failed"
-pass "ddc-build.json: tge / tge / tge-api / sapphire_mainnet / BBpkxUTUr / 44508"
+docker run --rm --network none --entrypoint cat "$WEB_IMAGE" /var/www/ddc-build.json | web_marker_check || die "build marker check failed (the web image must call https://$API_HOST/api)"
+pass "ddc-build.json: tge / tge / https://$API_HOST/api / sapphire_mainnet / BBpkxUTUr / 44508"
 n=$(docker run --rm --network none --entrypoint sh "$WEB_IMAGE" -c 'grep -rl "BGiGcxrX" /var/www 2>/dev/null | wc -l' | tr -dc '0-9')
 [ "$n" = 0 ] && pass "no devnet client id (BGiGcxrX...) anywhere in /var/www" || die "$n files in the tge bundle carry the devnet client id"
 
