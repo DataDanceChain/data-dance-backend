@@ -311,6 +311,18 @@ describe('registration open (SSO_DEVELOPER_REGISTRATION=on): a signed-in account
     assert.equal(row.contactEmail, 'dev@example.com');
     assert.equal(row.secretHash, sha256Hex(res.body.client_secret));
     assert.equal(JSON.stringify(prisma.store).includes(res.body.client_secret), false);
+    // The client belongs to the account that registered it.
+    assert.equal(row.ownerUserId, MEMBER.id);
+    assert.equal(row.kind, 'developer');
+  });
+
+  it('the service records an owner only when the caller passes one', async () => {
+    const { createDeveloperClient } = require('../../src/services/ssoDeveloperClient');
+    const anonymous = await createDeveloperClient(registration());
+    const owned = await createDeveloperClient(registration(), { ownerUserId: MEMBER.id });
+    const rows = prisma.store.ssoDeveloperClient;
+    assert.equal(rows.find((r) => r.clientId === anonymous.clientId).ownerUserId, null);
+    assert.equal(rows.find((r) => r.clientId === owned.clientId).ownerUserId, MEMBER.id);
   });
 
   it('on + signed-in: validates and rate-limits as before', async () => {

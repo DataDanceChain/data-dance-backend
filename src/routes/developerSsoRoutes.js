@@ -29,7 +29,8 @@ function registrationOpen(req, res, next) {
 
 router.post('/clients', registrationOpen, protect, rateLimiters.developerClientCreate, async (req, res) => {
   try {
-    const created = await createDeveloperClient(req.body || {});
+    // `protect` set req.user: the client belongs to the account that registered it.
+    const created = await createDeveloperClient(req.body || {}, { ownerUserId: req.user.id });
     const issuer = publicBaseUrl(req);
     return res.status(201).json({
       client_id: created.clientId,

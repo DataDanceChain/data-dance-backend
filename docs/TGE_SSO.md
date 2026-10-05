@@ -529,7 +529,8 @@ unconditionally — the issuer is never derived from a request header), `APP_PUB
   consult the switch.
 - **Turning it on still requires a signed-in DataDance account.** The route itself checks the
   user's JWT, as other `/api` routes do. An anonymous caller gets `401` in the usual auth shape;
-  a signed-in account gets `201` with the new client. A self-serve console must therefore send the
+  a signed-in account gets `201` with the new client, which records that account as its owner
+  (`ownerUserId`) and `kind` `developer`. A self-serve console must therefore send the
   user's token (`Authorization: Bearer <DataDance JWT>`). To register a client by hand, set `on`,
   restart, register while signed in, set `off` and restart again.
 - The value is read once at boot, so a change needs a restart. Any value other than `off` or `on`

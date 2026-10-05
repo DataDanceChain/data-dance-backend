@@ -112,4 +112,13 @@ describe('prisma/schema.prisma is fully created by prisma/migrations', () => {
     assert.doesNotMatch(sql, /CREATE TABLE "SsoDeveloperClient"|CREATE (UNIQUE )?INDEX "SsoDeveloperClient_/);
     assert.doesNotMatch(sql, /DROP TABLE|DELETE FROM|TRUNCATE/i, 'never drops data');
   });
+
+  it('SsoDeveloperClient kind and owner are added idempotently (safe where the columns already exist)', () => {
+    const sql = fs.readFileSync(path.join(PRISMA_DIR, 'migrations/20261005180000_sso_partner_kind/migration.sql'), 'utf8');
+    assert.match(sql, /ALTER TABLE "SsoDeveloperClient" ADD COLUMN IF NOT EXISTS "kind" TEXT NOT NULL DEFAULT 'developer';/);
+    assert.match(sql, /ALTER TABLE "SsoDeveloperClient" ADD COLUMN IF NOT EXISTS "ownerUserId" TEXT;/);
+    assert.match(sql, /CREATE INDEX IF NOT EXISTS "SsoDeveloperClient_ownerUserId_idx" ON "SsoDeveloperClient"\("ownerUserId"\);/);
+    assert.doesNotMatch(sql, /ADD COLUMN "|CREATE INDEX "/, 'no plain ADD COLUMN or CREATE INDEX');
+    assert.doesNotMatch(sql, /DROP |DELETE FROM|TRUNCATE/i, 'never drops data');
+  });
 });

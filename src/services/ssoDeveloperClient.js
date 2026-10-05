@@ -99,7 +99,11 @@ function newClientId() {
   return `sso_${crypto.randomBytes(18).toString('base64url')}`;
 }
 
-async function createDeveloperClient(body = {}) {
+/**
+ * `ownerUserId` is the signed-in DataDance account that registers the client (the route runs
+ * `protect`). Callers that pass none store null, as before.
+ */
+async function createDeveloperClient(body = {}, { ownerUserId = null } = {}) {
   const clientName = cleanName(body.client_name);
   const contactEmail = cleanEmail(body.contact_email);
   const redirectUris = cleanRedirects(body.redirect_uris);
@@ -127,6 +131,7 @@ async function createDeveloperClient(body = {}) {
       redirectUris,
       enabled: true,
       kind: 'developer',
+      ownerUserId: ownerUserId || null,
     },
   });
   return {
