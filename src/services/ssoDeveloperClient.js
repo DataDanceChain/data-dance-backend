@@ -1,8 +1,10 @@
 /**
- * Self-serve DDC SSO partners. Data Planet stays the one env-configured client.
- * A row created here is a normal confidential partner: its own client_id, its own
- * secret hash, and the login scopes. Campaign scopes stay with the env client.
- * The plaintext secret is returned once and is not written to the database or to logs.
+ * Partner clients in one registry.
+ * A public registration is a developer client: login scopes only.
+ * A row with kind "partner" is a first-party partner (Data Planet): the same
+ * confidential flow, plus points, referral, referral network, and referral bind
+ * when this environment serves that write. The plaintext secret is returned once
+ * and is not written to the database or to logs.
  */
 const crypto = require('crypto');
 const prisma = require('../utils/prisma');
@@ -10,9 +12,14 @@ const {
   sha256Hex,
   PARTNER_KIND,
   PARTNER_DEFAULT_SCOPE,
+  PARTNER_REQUEST_TTL_MS,
+  PARTNER_CODE_TTL_MS,
+  PARTNER_ACCESS_TTL_SEC,
   PARTNER_TOKEN_ENDPOINT_AUTH_METHODS,
   partnerResourceUrl,
   getPartnerClient,
+  readPartnerConfig,
+  availablePartnerScopes,
 } = require('../constants/partnerClient');
 
 const DEVELOPER_SCOPES = Object.freeze([
@@ -29,6 +36,15 @@ const DEVELOPER_STATUS_FIELDS = Object.freeze([
   'wallet_address',
   'email_masked',
   'avatar',
+]);
+
+/** Fields the first-party Data Planet partner reads. Self-serve clients do not get these. */
+const PARTNER_STATUS_FIELDS = Object.freeze([
+  ...DEVELOPER_STATUS_FIELDS,
+  'data_licence_granted',
+  'points',
+  'referral',
+  'referral_network',
 ]);
 
 class DeveloperClientError extends Error {
@@ -110,6 +126,7 @@ async function createDeveloperClient(body = {}) {
       secretHash,
       redirectUris,
       enabled: true,
+      kind: 'developer',
     },
   });
   return {
@@ -123,6 +140,8 @@ async function createDeveloperClient(body = {}) {
 
 function shapeDeveloperClient(row, req) {
   if (!row) return null;
+  const firstParty = row.kind === 'partner';
+  const cfg = readPartnerConfig();
   return {
     kind: PARTNER_KIND,
     clientId: row.clientId,
@@ -132,11 +151,17 @@ function shapeDeveloperClient(row, req) {
     tokenEndpointAuthMethod: 'client_secret_post',
     tokenEndpointAuthMethods: [...PARTNER_TOKEN_ENDPOINT_AUTH_METHODS],
     resource: partnerResourceUrl(req),
-    scopes: [...DEVELOPER_SCOPES],
+    scopes: firstParty ? [...availablePartnerScopes()] : [...DEVELOPER_SCOPES],
     defaultScope: PARTNER_DEFAULT_SCOPE,
-    statusFields: [...DEVELOPER_STATUS_FIELDS],
+    requestTtlMs: PARTNER_REQUEST_TTL_MS,
+    codeTtlMs: PARTNER_CODE_TTL_MS,
+    accessTtlSec: PARTNER_ACCESS_TTL_SEC,
+    statusFields: firstParty ? [...PARTNER_STATUS_FIELDS] : [...DEVELOPER_STATUS_FIELDS],
+    requireVerifiedSession: firstParty ? cfg.requireVerifiedSession : false,
+    autoApprove: firstParty ? { ...cfg.autoApprove } : { app: false, web: false },
     secretHash: row.secretHash,
-    developer: true,
+    developer: !firstParty,
+    firstParty,
   };
 }
 
@@ -147,10 +172,19 @@ async function loadDeveloperPartnerClient(clientId, req) {
   return shapeDeveloperClient(row, req);
 }
 
+/** Env-configured partner first, then a registry row (developer or first-party). */
+async function loadPartnerClient(clientId, req) {
+  const configured = getPartnerClient(clientId, req);
+  if (configured) return configured;
+  return loadDeveloperPartnerClient(clientId, req);
+}
+
 module.exports = {
   DeveloperClientError,
   DEVELOPER_SCOPES,
   DEVELOPER_STATUS_FIELDS,
+  PARTNER_STATUS_FIELDS,
   createDeveloperClient,
   loadDeveloperPartnerClient,
+  loadPartnerClient,
 };

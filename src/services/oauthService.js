@@ -23,7 +23,7 @@ const { normalizeReferralCodeInput, formatReferralCodeForDisplay } = require('..
 const { createLogger } = require('../utils/logger');
 // The write scope's gate (decision 30 A); kept on their own line, apart from the main import.
 const { availablePartnerScopes, referralBindEnabled } = require('../constants/partnerClient');
-const { loadDeveloperPartnerClient } = require('./ssoDeveloperClient');
+const { loadDeveloperPartnerClient, loadPartnerClient } = require('./ssoDeveloperClient');
 
 const logger = createLogger('oauthService');
 
@@ -605,7 +605,7 @@ async function getConsentRequest(id) {
   if (!row || row.consumedAt || row.expiresAt < new Date()) {
     throw new OAuthError(404, 'invalid_request', 'This authorization request has expired.');
   }
-  const partner = getPartnerClient(row.clientId);
+  const partner = await loadPartnerClient(row.clientId);
   if (partner && !partner.enabled) {
     throw new OAuthError(400, 'unauthorized_client', 'This client is disabled.');
   }
@@ -632,7 +632,7 @@ async function getConsentRequest(id) {
     expiresAt: row.expiresAt,
     // Only a hint for the Wallet (post the Allow without a tap). Never a decision: the code is
     // minted by the credentialed POST /api/oauth/consent, which re-checks the switch itself.
-    autoApprove: autoApproveFor(partner ? row.clientId : null),
+    autoApprove: partner && partner.autoApprove ? partner.autoApprove : autoApproveFor(partner ? row.clientId : null),
   };
 }
 
@@ -671,7 +671,8 @@ async function decideConsent(user, requestId, allow, ctx = {}) {
   // Auto-approval gate: the configured TGE client only, and only for an entry type the switch
   // allows. Checked before anything is consumed, so a refusal leaves the request decidable by hand.
   const entry = consentEntry(ctx);
-  if (auto && !(partner && autoApproveFor(row.clientId)[entry])) {
+  const autoFlags = client && client.autoApprove ? client.autoApprove : autoApproveFor(row.clientId);
+  if (auto && !(partner && autoFlags[entry])) {
     throw new AutoApproveNotAllowedError(entry);
   }
 
@@ -847,7 +848,7 @@ async function exchangeAuthorizationCode(req, body) {
   // Partner client authentication happens BEFORE the code lookup (RFC 6749 §4.1.3): the
   // presented client_id decides whether credentials are required at all.
   const presented = presentedClientCredentials(req, body);
-  const presentedPartner = presented?.clientId ? getPartnerClient(presented.clientId, req) : null;
+  const presentedPartner = presented?.clientId ? await loadPartnerClient(presented.clientId, req) : null;
   if (presentedPartner) authenticatePartnerClient(presentedPartner, presented);
 
   const row = await prisma.oAuthAuthorization.findUnique({ where: { codeHash: hashSecret(code) } });
@@ -862,7 +863,7 @@ async function exchangeAuthorizationCode(req, body) {
     throw new OAuthError(400, 'invalid_grant', 'Authorization code is invalid or expired.');
   }
 
-  const rowPartner = getPartnerClient(row.clientId, req);
+  const rowPartner = await loadPartnerClient(row.clientId, req);
   if (rowPartner) {
     if (!presentedPartner || presentedPartner.clientId !== row.clientId) {
       throw new OAuthError(401, 'invalid_client', 'Client authentication is required for this code.');
@@ -912,7 +913,7 @@ async function exchangeAuthorizationCode(req, body) {
 }
 
 async function issueOAuthTokens(userId, clientId, resource, scope, { codeRowId, client, req } = {}) {
-  const partner = client || getPartnerClient(clientId, req);
+  const partner = client || await loadPartnerClient(clientId, req);
   if (isPartnerClient(partner)) {
     const issued = await issuePartnerToken(userId, partner, { resource, scope });
     if (codeRowId) rememberIssuedToken(codeRowId, { tokenHash: hashToken(issued.token) });
@@ -967,7 +968,7 @@ async function exchangeRefreshToken(body) {
   if (!row || row.revokedAt || row.expiresAt < new Date()) {
     throw new OAuthError(400, 'invalid_grant', 'Refresh token is invalid or expired.');
   }
-  if (getPartnerClient(row.clientId)) {
+  if (await loadPartnerClient(row.clientId)) {
     // Partner clients never receive refresh tokens; a row like this cannot legitimately exist.
     throw new OAuthError(400, 'invalid_grant', 'Refresh tokens are not available for this client.');
   }
@@ -997,7 +998,7 @@ async function revokeToken(token, { req, body } = {}) {
   if (!trimmed) return;
   if (isPartnerAccessToken(trimmed)) {
     const presented = presentedClientCredentials(req, body || {});
-    const client = presented?.clientId ? getPartnerClient(presented.clientId, req) : null;
+    const client = presented?.clientId ? await loadPartnerClient(presented.clientId, req) : null;
     if (!client || !presented.clientSecret || !verifyClientSecret(client, presented.clientSecret)) {
       throw new OAuthError(401, 'invalid_client', 'Client authentication is required to revoke a partner token.');
     }

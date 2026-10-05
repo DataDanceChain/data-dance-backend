@@ -62,6 +62,8 @@ const PARTNER_REFERRAL_CACHE_MAX_AGE_SEC = 60;
 const PARTNER_ENVIRONMENTS = Object.freeze(['test', 'prod']);
 const PARTNER_TOKEN_ENDPOINT_AUTH_METHODS = Object.freeze(['client_secret_basic', 'client_secret_post']);
 const CLIENT_ID_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
+/** Retired names. They are not client ids and are not aliases of any partner. */
+const RETIRED_PARTNER_CLIENT_IDS = new Set(['tge', 'tge-rehearsal']);
 
 /**
  * Every field /partner/tge/me and /partner/tge/status can carry, with the two gates in front of
@@ -264,9 +266,14 @@ function readPartnerConfig(env = process.env) {
  * TGE partner client, all false for anything else (MCP clients, an unconfigured deployment).
  * Read on every call, like the rest of this module.
  */
+function isRetiredPartnerClientId(clientId) {
+  return RETIRED_PARTNER_CLIENT_IDS.has(String(clientId || '').trim());
+}
+
 function autoApproveFor(clientId, env = process.env) {
   const cfg = readPartnerConfig(env);
-  if (!cfg.clientId || clientId === undefined || clientId === null || !samePartnerClientId(cfg.clientId, clientId)) {
+  if (!cfg.clientId || isRetiredPartnerClientId(cfg.clientId)) return { ...AUTO_APPROVE_OFF };
+  if (clientId === undefined || clientId === null || !samePartnerClientId(cfg.clientId, clientId)) {
     return { ...AUTO_APPROVE_OFF };
   }
   return { ...cfg.autoApprove };
@@ -279,14 +286,11 @@ function canonicalPartnerScope(scope) {
 }
 
 /**
- * The client id partners send. `tge` and `tge-rehearsal` stay registered in the environment;
- * `sso` and `sso-rehearsal` are the same clients.
+ * The client id partners send. It is the registered id itself.
+ * `tge` and `tge-rehearsal` are retired and are not rewritten to another id.
  */
 function publicPartnerClientId(clientId) {
-  const value = String(clientId || '');
-  if (value === 'tge') return 'sso';
-  if (value === 'tge-rehearsal') return 'sso-rehearsal';
-  return value;
+  return String(clientId || '');
 }
 
 function samePartnerClientId(configured, presented) {
@@ -329,7 +333,7 @@ function samePartnerResource(a, b) {
  */
 function getPartnerClient(clientId, req) {
   const cfg = readPartnerConfig();
-  if (!cfg.clientId) return null;
+  if (!cfg.clientId || isRetiredPartnerClientId(cfg.clientId)) return null;
   if (!samePartnerClientId(cfg.clientId, clientId)) return null;
   return {
     kind: PARTNER_KIND,
@@ -362,8 +366,8 @@ function isPartnerClient(client) {
  */
 function verifyClientSecret(client, secret, { now = Date.now() } = {}) {
   if (!client || typeof secret !== 'string' || !secret || secret.length > 1024) return false;
-  // A self-serve partner carries its own hash. The env client never sets `developer`.
-  if (client.developer) return hashesEqual(sha256Hex(secret), client.secretHash);
+  // A registry partner carries its own hash. The env client never sets one.
+  if (client.secretHash) return hashesEqual(sha256Hex(secret), client.secretHash);
   const cfg = readPartnerConfig();
   if (!cfg.clientId || client.clientId !== cfg.clientId) return false;
   const presented = sha256Hex(secret);
@@ -509,7 +513,9 @@ function assertPartnerConfig(env = process.env) {
       problems.push(`SSO_ENVIRONMENT must be ${PARTNER_ENVIRONMENTS.join('|')} when SSO_TGE_ENABLED=true`);
     }
     if (!cfg.clientId) problems.push('SSO_TGE_CLIENT_ID is required');
-    else if (!CLIENT_ID_PATTERN.test(cfg.clientId)) {
+    else if (isRetiredPartnerClientId(cfg.clientId)) {
+      problems.push('SSO_TGE_CLIENT_ID cannot be tge or tge-rehearsal; use the partner client id');
+    } else if (!CLIENT_ID_PATTERN.test(cfg.clientId)) {
       problems.push('SSO_TGE_CLIENT_ID must match [A-Za-z0-9._-]{1,64} (no URL, no ":")');
     }
     if (!cfg.secretHash) problems.push('SSO_TGE_CLIENT_SECRET_SHA256 must be the 64-hex sha256 of the client secret');
@@ -732,6 +738,7 @@ module.exports = {
   canonicalPartnerScope,
   publicPartnerClientId,
   samePartnerClientId,
+  isRetiredPartnerClientId,
   isPartnerAccessToken,
   getPartnerClient,
   isPartnerClient,

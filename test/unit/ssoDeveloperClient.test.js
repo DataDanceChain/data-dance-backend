@@ -106,4 +106,42 @@ describe('self-serve SSO clients', () => {
     });
     assert.match(envConsent, /^https:\/\/app\.test\.local\/oauth\/consent\?request=/);
   });
+
+  it('gives a first-party partner Data Planet scopes and keeps them off a developer client', async () => {
+    await prisma.ssoDeveloperClient.create({
+      data: {
+        id: 'planet-1',
+        clientId: 'sso-rehearsal',
+        clientName: 'Data Planet',
+        contactEmail: 'planet@datadance.ai',
+        secretHash: SECRET_HASH,
+        redirectUris: [PARTNER_REDIRECT],
+        enabled: true,
+        kind: 'partner',
+        createdAt: new Date(),
+      },
+    });
+    const planet = await resolveClient('sso-rehearsal');
+    assert.equal(planet.firstParty, true);
+    assert.equal(planet.scopes.includes('sso:points'), true);
+    assert.equal(planet.scopes.includes('sso:referral'), true);
+    assert.equal(planet.scopes.includes('sso:referral_network'), true);
+    assert.equal(planet.statusFields.includes('avatar'), true);
+    assert.equal(planet.statusFields.includes('referral_network'), true);
+    assert.equal(verifyClientSecret(planet, SECRET), true);
+    const consent = await startAuthorization({}, authorizeQuery('sso-rehearsal', 'sso:identity sso:referral_network'));
+    assert.match(consent, /^https:\/\/app\.test\.local\/oauth\/consent\?request=/);
+
+    const created = await createDeveloperClient({
+      client_name: 'Northwind',
+      contact_email: 'dev@example.com',
+      redirect_uris: [PARTNER_REDIRECT],
+    });
+    assert.equal(created.scopes.includes('sso:referral'), false);
+    await assert.rejects(
+      () => startAuthorization({}, authorizeQuery(created.clientId, 'sso:points')),
+      (error) => error.error === 'invalid_scope',
+    );
+    assert.equal(await resolveClient('tge').then(() => true, () => false), false);
+  });
 });

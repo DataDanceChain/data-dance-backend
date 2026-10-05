@@ -105,6 +105,19 @@ describe('readPartnerConfig / getPartnerClient', () => {
     assert.equal(getPartnerClient().clientId, 'tge-test');
   });
 
+  it('does not treat tge as a client id', () => {
+    setEnv(baseEnv({ SSO_TGE_CLIENT_ID: 'tge' }));
+    assert.equal(getPartnerClient('tge'), null);
+    assert.equal(getPartnerClient('sso'), null);
+    assert.equal(getPartnerClient(), null);
+    setEnv(baseEnv({ SSO_TGE_CLIENT_ID: 'tge-rehearsal' }));
+    assert.equal(getPartnerClient('tge-rehearsal'), null);
+    assert.equal(getPartnerClient('sso-rehearsal'), null);
+    setEnv(baseEnv({ SSO_TGE_CLIENT_ID: 'sso-rehearsal' }));
+    assert.equal(getPartnerClient('sso-rehearsal').clientId, 'sso-rehearsal');
+    assert.equal(getPartnerClient('tge'), null);
+  });
+
   it('never exposes secret hashes on the client object and carries the contract constants', () => {
     setEnv(baseEnv());
     const client = getPartnerClient('tge-test');
@@ -288,6 +301,15 @@ describe('assertPartnerConfig (boot)', () => {
     assert.throws(() => assertPartnerConfig(), /SSO_TGE_CLIENT_ID must match/);
     setEnv(baseEnv({ SSO_TGE_CLIENT_ID: 'a:b' }));
     assert.throws(() => assertPartnerConfig(), /SSO_TGE_CLIENT_ID must match/);
+  });
+
+  it('refuses to boot an enabled partner named tge', () => {
+    setEnv(baseEnv({ SSO_TGE_CLIENT_ID: 'tge' }));
+    assert.throws(() => assertPartnerConfig(), /cannot be tge or tge-rehearsal/);
+    setEnv(baseEnv({ SSO_TGE_CLIENT_ID: 'tge-rehearsal' }));
+    assert.throws(() => assertPartnerConfig(), /cannot be tge or tge-rehearsal/);
+    setEnv(baseEnv({ SSO_TGE_CLIENT_ID: 'sso-rehearsal' }));
+    assert.equal(assertPartnerConfig().clientId, 'sso-rehearsal');
   });
 
   it('enforces redirect URI rules: absolute, no fragment, https except localhost outside prod', () => {
