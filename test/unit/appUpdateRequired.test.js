@@ -15,7 +15,9 @@
  */
 const { describe, it, before, after, beforeEach } = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
 const http = require('node:http');
+const path = require('node:path');
 const express = require('express');
 const request = require('supertest');
 const jose = require('jose');
@@ -615,5 +617,63 @@ describe('configuration', () => {
         value
       );
     }
+  });
+
+  describe('a retired id that is still an accepted audience', () => {
+    const ACTIVE = 'BBpkxUTUr-active-client-id-under-test';
+    const OLD = 'BGiGcxrX-retired-client-id-under-test';
+    const prod = { NODE_ENV: 'production', WEB3AUTH_CLIENT_ID: ACTIVE };
+
+    it('production: the boot refuses it when it equals WEB3AUTH_CLIENT_ID, naming the position only', () => {
+      assert.throws(
+        () => assertBootConfig({ ...prod, WEB3AUTH_RETIRED_CLIENT_IDS: `${OLD}, ${ACTIVE}` }),
+        (err) =>
+          /^WEB3AUTH_RETIRED_CLIENT_IDS is misconfigured: entry #2 equals WEB3AUTH_CLIENT_ID\. /.test(err.message) &&
+          !err.message.includes(ACTIVE) &&
+          !err.message.includes(OLD)
+      );
+    });
+
+    it('production: the boot refuses it when it equals a WEB3AUTH_EXTERNAL_AUDIENCE entry', () => {
+      assert.throws(
+        () => assertBootConfig({ ...prod, WEB3AUTH_EXTERNAL_AUDIENCE: `${ACTIVE},${OLD}`, WEB3AUTH_RETIRED_CLIENT_IDS: OLD }),
+        /^Error: WEB3AUTH_RETIRED_CLIENT_IDS is misconfigured: entry #1 equals a WEB3AUTH_EXTERNAL_AUDIENCE entry\. /
+      );
+    });
+
+    it('production: distinct ids boot', () => {
+      const cfg = assertBootConfig({ ...prod, WEB3AUTH_EXTERNAL_AUDIENCE: ACTIVE, WEB3AUTH_RETIRED_CLIENT_IDS: OLD });
+      assert.deepEqual(cfg.retiredClientIds, [OLD]);
+    });
+
+    it('outside production the same overlap boots', () => {
+      for (const NODE_ENV of [undefined, 'development', 'test']) {
+        assert.doesNotThrow(() => assertBootConfig({ ...prod, NODE_ENV, WEB3AUTH_RETIRED_CLIENT_IDS: ACTIVE }), String(NODE_ENV));
+      }
+    });
+  });
+
+  it('one startup line: the retired-id count, the first 8 characters of each id, and the flag', () => {
+    const line = identityService.describeOldAppSwitches(
+      loadConfig({ ...base, WEB3AUTH_RETIRED_CLIENT_IDS: 'BGiGcxrXAdtx-43HZ-devnet, short', LOGIN_MISSING_IDTOKEN_MEANS_OLD_APP: 'ON' })
+    );
+    assert.equal(
+      line,
+      'Old App update answer (426 APP_UPDATE_REQUIRED): WEB3AUTH_RETIRED_CLIENT_IDS count=2 first8=BGiGcxrX,short LOGIN_MISSING_IDTOKEN_MEANS_OLD_APP=on'
+    );
+    assert.equal(
+      identityService.describeOldAppSwitches(loadConfig(base)),
+      'Old App update answer (426 APP_UPDATE_REQUIRED): WEB3AUTH_RETIRED_CLIENT_IDS count=0 first8=(none) LOGIN_MISSING_IDTOKEN_MEANS_OLD_APP=off'
+    );
+    // Without an argument it describes the configuration the server runs with.
+    configure({ retired: `${RETIRED_ID},x`, missingMeansOldApp: 'off' });
+    assert.match(identityService.describeOldAppSwitches(), / count=2 first8=retired-,x LOGIN_MISSING_IDTOKEN_MEANS_OLD_APP=off$/);
+  });
+
+  it('src/server.js prints that line at boot, once the environment is loaded', () => {
+    const src = fs.readFileSync(path.join(__dirname, '../../src/server.js'), 'utf8');
+    const printAt = src.indexOf('console.log(describeOldAppSwitches());');
+    assert.ok(printAt > -1, 'server.js must print describeOldAppSwitches()');
+    assert.ok(src.indexOf('dotenv.config();') < printAt, 'after dotenv.config()');
   });
 });

@@ -171,6 +171,8 @@ function loadConfig(env = process.env) {
     emailTrustedVerifiers: csv(envOr(env, 'WEB3AUTH_EMAIL_TRUSTED_VERIFIERS')),
     // Old App builds: these only pick the message of a refusal (see DEFAULTS).
     retiredClientIds: csv(envOr(env, 'WEB3AUTH_RETIRED_CLIENT_IDS')),
+    // WEB3AUTH_EXTERNAL_AUDIENCE as configured (empty = WEB3AUTH_CLIENT_ID, see kinds.external).
+    externalAudience,
     missingIdTokenMeansOldAppRaw: envOr(env, 'LOGIN_MISSING_IDTOKEN_MEANS_OLD_APP').toLowerCase(),
     missingIdTokenMeansOldApp: envOr(env, 'LOGIN_MISSING_IDTOKEN_MEANS_OLD_APP').toLowerCase() === 'on',
     kinds: {
@@ -253,6 +255,7 @@ function assertBootConfig(env = process.env) {
       `LOGIN_MISSING_IDTOKEN_MEANS_OLD_APP must be "on" or "off" (got "${cfg.missingIdTokenMeansOldAppRaw}")`
     );
   }
+  assertRetiredClientIdsConfig(cfg);
   for (const kind of Object.keys(cfg.kinds)) {
     const k = cfg.kinds[kind];
     // eslint-disable-next-line no-new
@@ -293,6 +296,26 @@ function assertRebindConfig(cfg) {
   }
   if (problems.length) {
     throw new Error(`WEB3AUTH_NETWORK_REBIND=on is misconfigured: ${problems.join('; ')}.`);
+  }
+}
+
+/**
+ * WEB3AUTH_RETIRED_CLIENT_IDS in production: a retired id must not also be an accepted audience.
+ * Tokens for such an id verify and log in, so the entry would never answer anything, and the
+ * network switch would not be the one the operator set up (the two ids swapped, or the new one
+ * pasted into the wrong variable). Positions, not values, in the message.
+ */
+function assertRetiredClientIdsConfig(cfg) {
+  if (cfg.nodeEnv !== 'production' || !cfg.retiredClientIds.length) return;
+  const problems = [];
+  cfg.retiredClientIds.forEach((id, index) => {
+    if (id === cfg.clientId) problems.push(`entry #${index + 1} equals WEB3AUTH_CLIENT_ID`);
+    if (cfg.externalAudience.includes(id)) problems.push(`entry #${index + 1} equals a WEB3AUTH_EXTERNAL_AUDIENCE entry`);
+  });
+  if (problems.length) {
+    throw new Error(
+      `WEB3AUTH_RETIRED_CLIENT_IDS is misconfigured: ${problems.join('; ')}. A retired client id must not be an accepted ID token audience.`
+    );
   }
 }
 
@@ -414,6 +437,20 @@ function getAllowLegacyFallback() {
  */
 function getMissingIdTokenMeansOldApp() {
   return getConfig().missingIdTokenMeansOldApp;
+}
+
+/**
+ * One startup line (src/server.js) so the operator can confirm both old-App switches without
+ * sending a login: the number of retired client ids, the first 8 characters of each (client ids
+ * are public; the prefix tells devnet from mainnet), and LOGIN_MISSING_IDTOKEN_MEANS_OLD_APP.
+ */
+function describeOldAppSwitches(cfg = getConfig()) {
+  const prefixes = cfg.retiredClientIds.map((id) => id.slice(0, 8));
+  return (
+    'Old App update answer (426 APP_UPDATE_REQUIRED): ' +
+    `WEB3AUTH_RETIRED_CLIENT_IDS count=${prefixes.length} first8=${prefixes.join(',') || '(none)'} ` +
+    `LOGIN_MISSING_IDTOKEN_MEANS_OLD_APP=${cfg.missingIdTokenMeansOldApp ? 'on' : 'off'}`
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -600,7 +637,8 @@ async function verifyIdToken(idToken) {
  * The `aud` is read WITHOUT verification. Call this only for a token verifyIdToken has already
  * refused with IDTOKEN_AUDIENCE, and only to choose the words of that refusal: the answer never
  * grants, links or looks up anything. (jose checks the signature and the issuer before the
- * audience, so such a token was signed by a Web3Auth key; nothing here relies on that.)
+ * audience, so such a token was signed by a key the configured JWKS served; the G4 pin is checked
+ * only after the audience. Nothing here relies on either.)
  * Never throws: a malformed token, or one without a string `aud`, is simply not retired.
  */
 function isRetiredClientIdToken(idToken) {
@@ -1264,11 +1302,13 @@ module.exports = {
   getAllowLegacyFallback,
   getMissingIdTokenMeansOldApp,
   isRetiredClientIdToken,
+  describeOldAppSwitches,
   Web3AuthIdentityError,
   EXTERNAL_WALLET_VERIFIER,
   isNetworkRebindOn: () => getConfig().networkRebind,
   _internals: {
     assertRebindConfig,
+    assertRetiredClientIdsConfig,
     DEFAULTS,
     HTTP_STATUS,
     PIN_MODES,
