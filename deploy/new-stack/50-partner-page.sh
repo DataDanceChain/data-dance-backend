@@ -44,7 +44,8 @@
 # UNDO: ./50-partner-page.sh remove. 99-teardown.sh removes the app vhost (the page is then no longer served) but not
 #   these files. Rotate the client secret and the page password after the joint test (APPROVAL.md section 8).
 # Local test only (DDC_LOCAL_TEST=1): NEW_DIR, SRV_DIR, NGINX_LOCAL_URL, PARTNER_CRYPT_IMAGE (for example
-#   node:22-alpine) and DDC_TEST_SUFFIX (appended to the throwaway container's name).
+#   node:22-alpine) and DDC_TEST_RUN_ID (appended to the throwaway container's name and set as its label
+#   ddcnew-localtest=<id>, so the test finds and counts only its own containers).
 set -euo pipefail
 case "$-" in *x*) printf 'FAIL refusing to run with xtrace (set -x / bash -x): it would print the page password\n' >&2; exit 1;; esac
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -62,13 +63,15 @@ SEC_FILE="$NEW_DIR/secrets/tge_rehearsal_client_secret"
 ENV_FILE="$NEW_DIR/.env.rehearsal"
 ITER=600000
 CRYPT_NAME="ddcnew-partner-crypt-$$"
+CRYPT_LABEL=()
 if ddc_local_test; then
-  if [ -n "${DDC_TEST_SUFFIX:-}" ]; then
-    [[ "$DDC_TEST_SUFFIX" =~ ^[0-9]{8}$ ]] || die "DDC_TEST_SUFFIX must be 8 digits"
-    CRYPT_NAME="$CRYPT_NAME-$DDC_TEST_SUFFIX"
+  if [ -n "${DDC_TEST_RUN_ID:-}" ]; then
+    [[ "$DDC_TEST_RUN_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || die "DDC_TEST_RUN_ID must be 1 to 64 letters, digits, dots, dashes or underscores"
+    CRYPT_NAME="$CRYPT_NAME-$DDC_TEST_RUN_ID"; CRYPT_LABEL=(--label "ddcnew-localtest=$DDC_TEST_RUN_ID")
   fi
 else
   [ -z "${PARTNER_CRYPT_IMAGE:-}" ] || die "PARTNER_CRYPT_IMAGE override is only allowed with DDC_LOCAL_TEST=1"
+  [ -z "${DDC_TEST_RUN_ID:-}" ] || die "DDC_TEST_RUN_ID is only allowed with DDC_LOCAL_TEST=1"
 fi
 re_url='^https://[A-Za-z0-9.-]+(:[0-9]{1,5})?(/[A-Za-z0-9._~%/=:@?&+-]*)?$'
 re_v4='^[0-9]{1,3}[.][0-9]{1,3}[.][0-9]{1,3}[.][0-9]{1,3}$'
@@ -257,7 +260,7 @@ function verify(lines) {
 JS
 crypt() { # <encrypt <iterations> | verify>; stdin -> stdout. Nothing secret in the arguments or the environment.
   # --ulimit core=0: a crash of node never writes the password or the secret into a core file.
-  docker run --rm -i --network none --pull never --name "$CRYPT_NAME" --read-only --cap-drop ALL \
+  docker run --rm -i --network none --pull never --name "$CRYPT_NAME" ${CRYPT_LABEL[@]+"${CRYPT_LABEL[@]}"} --read-only --cap-drop ALL \
     --security-opt no-new-privileges --user 65534:65534 --memory 256m --pids-limit 64 --ulimit core=0 --log-driver none \
     --entrypoint node "$IMG" -e "$CRYPT_JS" "$@"
 }

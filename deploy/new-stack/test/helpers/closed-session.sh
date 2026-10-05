@@ -5,7 +5,8 @@
 #         drops below the floor. The watchdog must still stop the (stub) build and exit 1, not die of SIGPIPE.
 #   disk: BUILD_DISK_FLOOR_MB is set above the real free space: the watchdog must stop the build and exit 1.
 # Prints: rc=<exit status> term=<build got SIGTERM> build_alive=<after the run> reader_lines=<n> bash=<version>
-# Runs on macOS bash 3.2 and Ubuntu 22.04 bash 5.1, as a normal user (DDC_LOCAL_TEST=1).
+# Runs on macOS bash 3.2 and Ubuntu 22.04 bash 5.1, as a normal user (DDC_LOCAL_TEST=1). The (stub) docker build gets
+# the run's label like every build of run-local-tests.sh (DDC_TEST_RUN_ID).
 set -u
 PKG="$1"; W="$2"; MODE="${3:-mem}"
 rm -rf "$W"; mkdir -p "$W/bin" "$W/ddcnew"
@@ -29,7 +30,7 @@ hi
 floor=3072; [ "$MODE" != disk ] || floor=999999999
 watch() { # the 10-build.sh situation: set -euo pipefail, run_build_watched called directly
   PATH="$W/bin:$PATH" STUB_DIR="$W" DDC_LOCAL_TEST=1 NEW_DIR="$W/ddcnew" DDC_MEMINFO="$W/meminfo" BUILD_WATCH_INTERVAL=1 \
-  BUILD_DISK_FLOOR_MB="$floor" "$BASH" -c 'set -euo pipefail; . "$1/common.sh"; run_build_watched "$2/build.log" -t closed-session-test .' _ "$PKG" "$W"
+  BUILD_DISK_FLOOR_MB="$floor" "$BASH" -c 'set -euo pipefail; . "$1/common.sh"; run_build_watched "$2/build.log" --label "ddcnew-localtest=$3" -t closed-session-test .' _ "$PKG" "$W" "${DDC_TEST_RUN_ID:-none}"
 }
 if [ "$MODE" = mem ]; then
   mkfifo "$W/fifo"

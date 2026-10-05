@@ -51,9 +51,10 @@ Which stack serves the rehearsal hosts, and the commands for either outcome: [AP
     bash test/run-local-tests.sh <new-scratch-dir>
 
 Needs Docker Desktop, shellcheck 0.11, GNU coreutils (`grealpath`, `timeout`) and, for the partner page's browser test,
-npm (it installs playwright-core 1.60.0 into the scratch directory and uses the local Playwright Chromium). Throwaway
-containers and images are named `*-<DDC_TEST_SUFFIX>` (default `*-20261005`) and removed at the end; existing
-containers are never touched. The run must end with
+npm (it installs playwright-core 1.60.0 into the scratch directory and uses the local Playwright Chromium). Every
+container and image a run creates carries the label `ddcnew-localtest=<run id>` (new for each run); the cleanup at the
+end removes, and the counts count, only what carries that label, and an image only when this run built it, so other
+sessions' containers are never touched. The run must end with
 `summary: fails=0`. The SSH tests run on scratch copies of the scripts with a test `local.env` that points at a
 throwaway loopback sshd, and the real 1Password CLI is never called. Section 13 scans every committable file of this
 package for server addresses, 1Password references or ids, hashes or keys, statements about a server's security state

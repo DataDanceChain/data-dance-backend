@@ -330,39 +330,55 @@ Consequences the data step (separate approval) must honour:
 ## 6. Local tests
 
 `bash test/run-local-tests.sh <new-scratch-dir>` runs on the Mac and touches no server (Docker Desktop, shellcheck 0.11
-and GNU coreutils needed; throwaway containers and images are named `*-<DDC_TEST_SUFFIX>`, by default `*-20261005`, and
-removed at the end, and no existing container is touched). It must end with `summary: fails=0`. It covers:
+and GNU coreutils needed). Every container and image it creates carries the label `ddcnew-localtest=<run id>` (a new id
+per run) and a name or tag with that id; its cleanup and every count select by that label only, never by name, and an
+image is removed only when this run built it, so other sessions' containers are never touched. It must end with
+`summary: fails=0`. It covers:
 - `bash -n` and `shellcheck -x -S warning` on every script; `docker compose config` (ports loopback-only, memory limits).
 - `20-env.sh` twice on a synthetic old env (multi-line quoted values, comments, `export`, duplicates, inline comments,
   signing keys and a mnemonic): idempotent, no secret in the output or the server-side log, compose's own parser
   agrees, the credential policy (removed, blanked, fail-closed on unclassified names and on credential-shaped values),
   and identical output on ubuntu:jammy (mawk, GNU tools).
-- `30-nginx.sh` render on synthetic vhost fixtures and `nginx -t` on nginx 1.18 and stable; apply and undo stop when an
-  old vhost's status code changes.
-- Old-stack fingerprint on a fake tree; the memory and disk watchdog on Docker Desktop, after the SSH session ends
+- `30-nginx.sh` render on synthetic vhost fixtures (default and overridden hosts and ports) and `nginx -t` on nginx 1.18
+  and stable; apply and undo stop when another host's status code changes; with Race-like entries at the default
+  names: apply stops and changes nothing, `TAKE_OVER_VHOSTS=yes` backs up and replaces, `restore` puts them back byte
+  for byte (modes and link target included), a failing `nginx -t` puts them back at once, a `server_name` clash and a
+  port held by another container stop apply, and outcome B leaves them untouched (and stops if his hosts answer
+  differently after the reload).
+- The settings: defaults, overrides reaching every host value and compose's ports, the record and a conflicting
+  override, and the refusals (production host, other domain, old-stack port, bad values).
+- Old-stack fingerprint on a fake tree (Race's vhost, link and `/root/ddc-mainnet` stand-in detected; this package's
+  own files ignored; read-write mounted data left out; a restarted `ddc-mainnet-*` container detected); the memory and
+  disk watchdog on Docker Desktop, after the SSH session ends
   (bash 3.2 and 5.1), on fake `/proc` trees for both cgroup drivers, and on a real dockerd 29.1.3 with the systemd
   cgroup driver in a privileged throwaway container.
 - JWKS pin decisions, the `10-build.sh` flag gate, `refuse_if_infra_only`, the disk verdict and `expand_check` on a real
   ext4 partition; the throwaway pass signer; the money-path fields.
 - The SSH login guard against a throwaway loopback sshd, using scratch copies with a test `local.env`; `local.env`
   refusals (missing, placeholders, empty, wrong shape) with stub `op` and `ssh` that record every call; the preflight's
-  git-tree hash; `00-preflight.sh` as root in a throwaway container.
-- Root mode in ubuntu:22.04: the write guard (`/srv/ddcnew` included), `require_server`, the run lock and the
-  server-side log, and `50-partner-page.sh`'s refusals as root (page directory under `/root` or a symlink, overrides).
+  git-tree hash and settings lines; `00-preflight.sh` as root in a throwaway container (Race's stand-ins listed and
+  fingerprinted, a foreign entry at the default names a WARN, a `server_name` clash a FAIL).
+- Root mode in ubuntu:22.04: the write guard (`/srv/ddcnew` and the settings' vhost names included, `/root/ddc-mainnet`
+  refused), `require_server` (settings validated, the record honoured), the run lock and the server-side log, and
+  `50-partner-page.sh`'s refusals as root (page directory under `/root` or a symlink, overrides).
 - `p1-backup.sh verify` stop cases (synthetic counts) and the `99-teardown.sh` label fallback.
 - Section 13: `test/helpers/public-repo-scan.sh` on every committable file of the package, with a negative control.
 - Section 14, the partner info page: `50-partner-page.sh` on a `20-env.sh` output (its generated secret) with dummy
   32-character page passwords: `apply` writes the two files (modes, `secret.json` fields, a new salt and IV per run),
-  `verify` gives `match=yes`, and `match=no` for a wrong password; the refusals (empty, short, blank-ended or CRLF
-  password, a terminal on stdin, `bash -x`, a missing or malformed `PARTNER_ALLOWED_IP`, the `.invalid` placeholder, a
-  secret that does not match `SSO_TGE_CLIENT_SECRET_SHA256`, a missing image) change nothing; neither value appears in
-  the files, the output, the server-side logs or anything `ps` shows (arguments and environment, sampled during the
-  runs, with the throwaway container's configuration). Then nginx:stable serves the page with the rendered tge-app
-  vhost (headers checked) and headless Chromium (playwright-core 1.60.0, `test/helpers/partner-browser.js`) checks
-  the filled values, a wrong password (error), the right one (exactly the secret), copy, hide, an unreachable
-  `secret.json`, phone width in dark mode, and that the page requests nothing from another origin. In 10c-10e:
-  the piped password reaches the remote script through the real ssh, `op` reads none of it, a terminal is refused,
-  and `upload` ships the new files.
+  `verify` gives `match=yes`, and `match=no` for a wrong password; the refusals (empty password, 31 or 33 characters, a
+  symbol, a blank or a carriage return, a terminal on stdin, `bash -x`, a missing or malformed `PARTNER_ALLOWED_IP`,
+  the `.invalid` placeholder, a secret that does not match `SSO_TGE_CLIENT_SECRET_SHA256`, a missing image) change
+  nothing; neither value appears in the files, the output, the server-side logs or anything `ps` shows (arguments and
+  environment, sampled during the runs, with the throwaway container's configuration, whose core ulimit is 0). The
+  page has no `<form>`, a password field without a name, an unlock box hidden until the script shows it and
+  `translate="no"` on the secret. Then nginx:stable serves the page with the rendered app vhost (headers checked:
+  nosniff and the CSP with `form-action 'none'` and `base-uri 'none'`), `status` compares each served body with its
+  file, and headless Chromium (playwright-core 1.60.0, `test/helpers/partner-browser.js`) checks the filled values, a
+  wrong password (error), the right one (exactly the secret), copy, hide, an unreachable `secret.json`, phone width in
+  dark mode, that the page requests nothing from another origin, and, with JavaScript disabled: no field is offered;
+  forced into view, Enter and the button send nothing; a `<form>` injected around the field is blocked by the CSP;
+  with the CSP stripped the native submit goes out without the password. In 10c-10e: the piped password reaches the
+  remote script through the real ssh, `op` reads none of it, a terminal is refused, and `upload` ships the new files.
 
 ## 7. Gate: prerequisites before ANY production data lands on the new stack
 

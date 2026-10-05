@@ -2,8 +2,11 @@
 // Local test helper (run-local-tests.sh section 14; touches no server). Drives headless Chromium through playwright-core
 // (resolved through NODE_PATH) against the partner info page that nginx serves with the 30-nginx.sh /partner-info/
 // location: the filled values, the unlock flow (empty, wrong, right password; secret.json unreachable), copy and hide,
-// phone width in dark mode, and every request the page makes. Prints PASS/FAIL lines and never the secret, a password or
-// page text that could hold one (values are compared here, only verdicts and lengths are printed). Exit 1 on any FAIL.
+// phone width in dark mode, every request the page makes, and the page with JavaScript disabled: no field is offered,
+// and even with the box forced visible, or a <form> injected around the field, no request carries the password (with
+// the served CSP form-action 'none' blocks the submit; without the CSP the submit goes out, but the field has no name).
+// Prints PASS/FAIL lines and never the secret, a password or page text that could hold one (values are compared here,
+// only verdicts and lengths are printed). Exit 1 on any FAIL.
 'use strict';
 const fs = require('fs');
 const path = require('path');
@@ -15,7 +18,6 @@ const secret = value(secretFile);
 const password = value(pwFile);
 const wrong = value(wrongFile);
 const expect = JSON.parse(fs.readFileSync(expectFile, 'utf8'));
-const FONT_HOSTS = new Set(['fonts.googleapis.com', 'fonts.gstatic.com']);
 const MSG = {
   empty: '请输入密码。',
   password: '密码不正确，请检查后重试。',
@@ -60,9 +62,11 @@ async function main() {
   const res = await page.goto(url, { waitUntil: 'load' });
   const h = res ? res.headers() : {};
   check(res && res.status() === 200, 'the page answers 200');
+  const csp = h['content-security-policy'] || '';
   check(h['cache-control'] === 'no-store' && h['x-frame-options'] === 'DENY' && h['referrer-policy'] === 'no-referrer'
-        && h['x-robots-tag'] === 'noindex, nofollow' && /frame-ancestors 'none'/.test(h['content-security-policy'] || ''),
-        'response headers: no-store, DENY, no-referrer, noindex, CSP');
+        && h['x-robots-tag'] === 'noindex, nofollow' && h['x-content-type-options'] === 'nosniff'
+        && /frame-ancestors 'none'/.test(csp) && /form-action 'none'/.test(csp) && /base-uri 'none'/.test(csp) && !/fonts\.g/.test(csp),
+        "response headers: no-store, DENY, no-referrer, noindex, nosniff, CSP with form-action 'none' and base-uri 'none', no Google Fonts");
   const inDom = async (p) => (await p.content()).includes(secret);
   check(!(await inDom(page)), 'before unlocking, the secret is nowhere in the DOM');
   const texts = (sel) => page.$$eval(sel, (els) => els.map((e) => e.textContent));
@@ -123,13 +127,71 @@ async function main() {
   check((await p3.textContent('#secret-value')) === '"' + secret + '"', 'phone: the unlock works there too');
   await p3.screenshot({ path: path.join(shots, 'phone-dark-unlocked.png'), fullPage: true });
   await ctx3.close();
+
+  // 4. JavaScript disabled. The password must not be able to leave by a native submit: no field is offered at all, and
+  // even when one is forced into view or a <form> is wrapped around it, no request carries the password.
+  const withPw = (list) => list.filter((r) => r.url.includes(password) || r.post.includes(password) || r.url.includes(encodeURIComponent(password)));
+  const noJs = async (label, opts) => {
+    const c = await browser.newContext({ viewport: { width: 1280, height: 900 }, javaScriptEnabled: false });
+    const reqs = [];
+    const logs = [];
+    if (opts.stripCsp) {
+      await c.route((u) => u.pathname.startsWith('/partner-info/'), async (route) => {
+        const r = await route.fetch();
+        const hd = { ...r.headers() };
+        delete hd['content-security-policy'];
+        await route.fulfill({ response: r, headers: hd });
+      });
+    }
+    const p = await c.newPage();
+    p.on('request', (r) => reqs.push({ url: r.url(), post: r.postData() || '', nav: r.isNavigationRequest() }));
+    p.on('console', (m) => logs.push(m.text()));
+    await p.goto(url, { waitUntil: 'load' });
+    const loaded = reqs.length;
+    if (opts.firstLook) {
+      check(await p.isHidden('#unlock'), 'JS off: the unlock box is hidden: no password field is offered');
+      // (Playwright's text engine skips <noscript>, so a CSS locator: with scripting off its <p> is a rendered element)
+      const note = p.locator('noscript p.msg.bad');
+      check((await note.isVisible()) && (await note.textContent()).includes('需要开启 JavaScript'), 'JS off: the page says that JavaScript is needed');
+      check((await p.locator('form').count()) === 0 && (await p.getAttribute('#unlock-pw', 'name')) === null && (await p.getAttribute('#unlock-btn', 'type')) === 'button',
+            'JS off: no <form> on the page, the password field has no name, the button is type=button');
+      await p.screenshot({ path: path.join(shots, 'desktop-nojs.png'), fullPage: true });
+    }
+    // DevTools evaluation still works with page scripts disabled: show the box, and optionally wrap it in a form
+    // without method or action (a native submit would GET the current URL with every named field).
+    await p.evaluate((wrap) => {
+      const box = document.getElementById('unlock');
+      box.hidden = false;
+      if (wrap) { const f = document.createElement('form'); box.parentNode.insertBefore(f, box); f.appendChild(box); }
+    }, !!opts.wrapForm);
+    await p.fill('#unlock-pw', password);
+    // keyboard.press: unlike page.press it does not wait for a navigation (the blocked one would never finish)
+    await p.focus('#unlock-pw');
+    await p.keyboard.press('Enter');
+    if (!opts.wrapForm) await p.click('#unlock-btn');
+    for (let i = 0; i < 25 && !(opts.expectNav && reqs.slice(loaded).some((r) => r.nav)); i++) await p.waitForTimeout(200);
+    const after = reqs.slice(loaded);
+    const leaked = withPw(reqs);
+    const navs = after.filter((r) => r.nav);
+    const cspSeen = logs.some((t) => /form-action/.test(t));
+    await c.close();
+    return { after, leaked, navs, cspSeen };
+  };
+  let r = await noJs('as served', { firstLook: true });
+  check(r.leaked.length === 0 && r.after.length === 0,
+        'JS off, the box forced visible, the password typed, Enter and the button pressed: no request at all (' + r.after.length + '), none with the password');
+  r = await noJs('form, CSP', { wrapForm: true });
+  check(r.leaked.length === 0 && r.after.length === 0,
+        "JS off, a <form> without method/action injected around the field, Enter: the served CSP (form-action 'none') blocks the submit: no request (" + r.after.length + '), none with the password' + (r.cspSeen ? '; Chromium logged the form-action refusal' : ''));
+  r = await noJs('form, no CSP', { wrapForm: true, stripCsp: true, expectNav: true });
+  check(r.navs.length >= 1 && r.leaked.length === 0,
+        'JS off, the same <form>, the CSP stripped: the native submit goes out (' + r.navs.length + ' navigation, ' + r.navs.map((x) => new URL(x.url).pathname + new URL(x.url).search).join(' ') + ') and carries no password: the field has no name');
   await browser.close();
 
-  // 4. every request: the page's own origin only (Google Fonts would be allowed; the page uses none)
+  // 5. every request (JS on): the page's own origin only; nothing from Google Fonts or any other origin
   const net = requests.filter((u) => !u.startsWith('data:'));
-  const foreign = net.filter((u) => { const x = new URL(u); return x.origin !== origin && !FONT_HOSTS.has(x.hostname); });
-  const fonts = net.filter((u) => FONT_HOSTS.has(new URL(u).hostname)).length;
-  check(foreign.length === 0, net.length + ' requests: ' + (net.length - foreign.length - fonts) + ' to the page origin, ' + fonts + ' to Google Fonts, ' + foreign.length + ' elsewhere');
+  const foreign = net.filter((u) => new URL(u).origin !== origin);
+  check(foreign.length === 0, net.length + ' requests: ' + (net.length - foreign.length) + ' to the page origin, ' + foreign.length + ' elsewhere');
   const paths = [...new Set(net.filter((u) => new URL(u).origin === origin).map((u) => new URL(u).pathname))].sort();
   check(same(paths, ['/partner-info/', '/partner-info/secret.json']), 'same-origin paths: ' + paths.join(' '));
   check(problems.length === 0, 'no console error or warning, no page error' + (problems.length ? ': ' + problems.join(' | ') : ''));
