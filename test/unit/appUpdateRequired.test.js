@@ -490,6 +490,38 @@ describe('with both switches on, every other login answers exactly as before', (
     assert.equal(on.body.code, 'WALLET_NOT_IN_TOKEN');
     assert.deepEqual(on.body, off.body);
   });
+
+  // The 426 replaces IDTOKEN_AUDIENCE and nothing else. A token can name a retired id and still pass
+  // the audience check (an `aud` list that also holds the active id); whatever refuses it later keeps
+  // its own answer, IDENTITY_CONFLICT included, which comes after the account lookup.
+  const alsoRetired = { aud: [MAINNET_ID, RETIRED_ID] };
+  const laterRefusals = {
+    IDTOKEN_VERIFIER_NOT_ALLOWED: [401, () => mint(mainnetClaims({ aggregateVerifier: 'connection-nobody-chose' }), alsoRetired)],
+    IDTOKEN_EXPIRED: [401, () => mint(mainnetClaims(), { ...alsoRetired, iat: nowSec() - 7200, exp: nowSec() - 3600 })],
+    IDENTITY_CONFLICT: [409, () => mint(mainnetClaims({ verifierId: 'someone-else|1' }), alsoRetired)],
+  };
+  for (const [code, [status, makeToken]] of Object.entries(laterRefusals)) {
+    it(`an \`aud\` list naming a retired id next to the active one keeps ${code} (${status}), never 426`, async () => {
+      const { off, on } = await bothWays(async () => ({ idToken: await makeToken() }));
+      assert.equal(on.status, status, JSON.stringify(on.body));
+      assert.equal(on.body.code, code);
+      assert.deepEqual(on.body, off.body);
+    });
+  }
+
+  it('a retired-id token while the Web3Auth key set is unavailable keeps 503 IDTOKEN_UPSTREAM_UNAVAILABLE, never 426', async () => {
+    const served = process.env.WEB3AUTH_JWKS_URL;
+    process.env.WEB3AUTH_JWKS_URL = served.replace(/\/jwks$/, '/jwks-gone'); // the local JWKS answers 404 there
+    try {
+      const { off, on } = await bothWays(async () => ({ idToken: await retiredToken() }));
+      assert.equal(on.status, 503, JSON.stringify(on.body));
+      assert.equal(on.body.code, 'IDTOKEN_UPSTREAM_UNAVAILABLE');
+      assert.deepEqual(on.body, off.body);
+    } finally {
+      process.env.WEB3AUTH_JWKS_URL = served;
+      configure();
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
