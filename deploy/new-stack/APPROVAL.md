@@ -33,6 +33,7 @@ new stack**.
 | M | `P1_USERS_MIN` for `p1-backup.sh verify`: the minimum number of users in a complete dump. It is a production figure, so it is in the private runbook, not here. | Sloan | P1 verify |
 | N | Partner info page (section 8): the page password, created once in 1Password; the partner server's address (`PARTNER_ALLOWED_IP`, also in the WAF rule of item F); the partner's callback and start-login addresses in `20-env.sh`. Sloan shares the page password with the partner. | Sloan | `50-partner-page.sh` |
 | O | Which stack serves the rehearsal hosts (section 9): **A**, this stack takes over Race's names (`TAKE_OVER_VHOSTS=yes`, his vhost entries backed up first), or **B**, both stacks run side by side, this one under other names (their DNS, WAF rule, Web3Auth allow-list entry and a frontend commit built for them). | Sloan + Race | `30-nginx.sh apply` (A), or everything from `10-build.sh` on (B) |
+| P | `REHEARSAL_CLIENT_ID`: the partner's client id for the rehearsal (`SSO_TGE_CLIENT_ID`). **Required, no default:** since backend fd2d4e9 the api refuses to boot with `tge` or `tge-rehearsal`, and any id that is not `[A-Za-z0-9._-]{1,64}`. Given on the first `20-env.sh` run, recorded, reused afterwards. | Sloan (with the partner) | `20-env.sh` |
 
 ## 2. Decisions taken in this package
 
@@ -126,6 +127,8 @@ new stack**.
   production host; a port must be 1024-65535, not an old-stack port, and the three must differ. The first write script
   records them in `/root/ddcnew/settings.env`; every later script uses the recorded values and stops on an override
   that differs (so the steps, and `99-teardown.sh`, always agree), and `99-teardown.sh` removes the record at its end.
+  The record is written whole and renamed, so it always holds each of the five exactly once (and `REHEARSAL_CLIENT_ID`
+  at most once, below): an empty or partial record, a repeated or unknown name, or an empty value stops every script.
   `compose.yaml` has no port of its own: `common.sh dc()` passes the three, and compose refuses to run without them.
 - **JWKS pins (`40-up.sh` step 1a):** computed **inside the new image** with `scripts/web3authJwksThumbprints.js`
   (`docker run --rm --pull never`, only the two public JWKS URLs passed, no env file, no secret) and written into
@@ -149,21 +152,66 @@ new stack**.
   `server_name` line. The CORS lines are copied unchanged; `30-nginx.sh` refuses to render when the api vhost sets a
   literal `Access-Control-Allow-Origin` origin (the copy would then need the app origin added by hand). The app copy
   keeps `/downloads/` and `/architecture/` (served by the host nginx from `/opt/ddc`) and the duplicated
-  `map $connection_upgrade` block, which passes `nginx -t` on nginx 1.18 and stable.
+  `map $connection_upgrade` block, which passes `nginx -t` on nginx 1.18 and stable. Both copies also get
+  `location = /.well-known/ddcnew-vhost-token`, right after their `server_name` line: a random token (written once to
+  `/root/ddcnew/vhost-token`, 600) answered to 127.0.0.1 only (403 to anyone else). The Host-header checks read it
+  through the host nginx first: another stack behind the same names answers the same 401 and build marker, but not this
+  token, so it proves that nginx really serves this package's vhosts.
   - **Only its own files.** `30-nginx.sh apply` refuses to create or overwrite anything at those names (the file, its
     `.new` temporary, the link) that does not carry the marker line, or a link that is not its own: on 10-05 Race's
     vhosts sit at the default names, so with the defaults apply stops and lists them. `TAKE_OVER_VHOSTS=yes` (only once
-    Sloan and Race agree, section 9) backs them up first to `/root/ddcnew/vhost-takeover/<ts>-<pid>/` (copies with
-    their mode, link targets, a `MANIFEST` with each sha256), then replaces them; if `nginx -t` then fails they are put
-    back at once and nothing is reloaded. `30-nginx.sh restore` puts the latest backup back (after checking it against
-    the `MANIFEST`) and marks it `RESTORED`. `undo` removes this package's entries only.
+    Sloan and Race agree, section 9) first requires this stack to answer on its own ports (the api 401 on
+    `127.0.0.1:API_PORT/partner/tge/me`, the web's build marker on `127.0.0.1:WEB_PORT`; so `40-up.sh` runs before it),
+    then backs the entries up to `/root/ddcnew/vhost-takeover/<ts>-<pid>/` (copies with their mode, link targets, a
+    `MANIFEST` with each sha256, written as `MANIFEST.part` and renamed only when complete), then replaces them.
+  - **What can be taken over:** only the other party's rehearsal vhost of exactly that host: every `server_name` it
+    declares is the host (a wildcard, a regex, `_` or `""` counts as another name), no `listen` of it is a default
+    server, it includes nothing but certbot's `/etc/letsencrypt/options-ssl-nginx.conf` and `proxy_params`, it has a
+    `proxy_pass` and no other `*_pass`, and every `proxy_pass` (comments removed, a statement may span lines) goes to
+    `localhost` or `127.0.0.1` on a host port that a `ddc-mainnet-*` container binds (running or stopped; the preflight
+    prints them). A static site (`docs.datadance.ai`, say), another stack's vhost, a remote upstream or a file that also
+    serves another name stays refused, flag or not, so no name the other party serves can leave the before/after
+    check. A take-over is also refused while this package has entries of its own at those names next to his (undo them
+    first), so its rollback only ever removes what that run wrote.
+  - **A take-over that does not complete is rolled back:** from the removal of the first entry until every check has
+    passed, any failure (a command, a stop such as another host answering differently after the reload, nginx -t,
+    failing Host-header checks, apply's final old-stack check, a signal to the script or to its whole process group
+    such as Ctrl-C or a hangup in an interactive session) puts the backed-up entries back at once (the backup marked
+    `RESTORED`), reloads nginx if apply had tried to (even when that reload reported a failure), and compares the other
+    hosts again. Nothing stops the rollback once it runs (it ignores further signals and a closed log pipe; the log's
+    `tee` ignores the signals too, so its lines reach the server-side log); it says so when its own reload fails. If it
+    cannot finish, the script says to run `30-nginx.sh restore <backup>`.
+  - `30-nginx.sh restore` sets this package's entries aside, puts the latest complete backup back (after checking it
+    against the `MANIFEST`), then `nginx -t` and reload; if `nginx -t` fails with the restored entries they go again
+    and this package's come back, so the names never end up with neither. An entry that is already back exactly as its
+    `MANIFEST` line says (a rollback that stopped half way) is kept; anything else at those names stops it. It marks the
+    backup `RESTORED`. An interrupted backup (no `MANIFEST`) never blocks `restore`, `undo` or `99-teardown.sh`.
+  - **Recovery order after a take-over: `restore` first, then `99-teardown.sh`.** `undo` and `99-teardown.sh` (every
+    mode) refuse while a take-over backup was never restored: `undo` first would leave his names with no vhost at all
+    (nginx would answer them from its default server) until someone restored them, while `restore` swaps the entries in
+    one reload. After the restore, teardown finds nothing of this package's at those names. `undo` removes this
+    package's entries only.
   - apply also stops when **another** file that nginx loads (`sites-enabled/*`, `conf.d/*.conf`) declares one of the two
     hosts as a `server_name` (nginx would answer from only one of them; no flag overrides this), and when `API_PORT` or
     `WEB_PORT` is held by anything other than this stack's own container (Race's containers hold 10010 and 9011).
   - Around every reload, **every other host nginx serves** (the production api/app/business/admin hosts and each exact
-    `server_name` of the other loaded vhosts, Race's included) must answer with the same status code as before.
-- **Rehearsal TGE client:** `tge-rehearsal`. The secret is generated on the server and its plaintext is kept only in
-  `/root/ddcnew/secrets/tge_rehearsal_client_secret`. `SSO_TGE_REDIRECT_URIS` defaults to
+    `server_name` of the other loaded vhosts, Race's included) must answer with the same status code as before: over
+    http, and over https with SNI on 443 whenever something listens there.
+    When something listens on 443 but https on 127.0.0.1 answers `000` for every host before and after, a WARN says
+    that the comparison covered http only (nginx may listen on 443 on another address).
+  - After the reload apply runs the Host-header checks through the new vhosts (this package's vhost token for both
+    hosts first, then `<API_HOST>/partner/tge/me` 401 JSON and `<APP_HOST>/ddc-build.json` the build for
+    `https://<API_HOST>/api`): always after a take-over (a stack that stopped answering since the check before it fails
+    them, and the take-over is rolled back), otherwise when this stack answers on its ports; else `40-up.sh` runs them
+    when it starts the stack. `40-up.sh` runs them only while this package's vhosts serve both hosts, and says that
+    they are deferred otherwise.
+- **Rehearsal client id: `REHEARSAL_CLIENT_ID`, required, no default** (item P). `20-env.sh` writes it as
+  `SSO_TGE_CLIENT_ID` and checks it with the api's own rule: `[A-Za-z0-9._-]{1,64}`, and not `tge` or `tge-rehearsal`
+  (retired in backend fd2d4e9: the api refuses both at boot). A run that passes records it in `settings.env`; later
+  runs reuse it, an override that differs stops, and `99-teardown.sh` removes it with the record. The local test boots
+  this checkout's own `src/server.js` on the env `20-env.sh` writes (`test/helpers/backend-boot.js`, nothing listens or
+  connects) and checks that it refuses `tge-rehearsal`. The secret is generated on the server and its plaintext is kept
+  only in `/root/ddcnew/secrets/tge_rehearsal_client_secret`. `SSO_TGE_REDIRECT_URIS` defaults to
   `https://tge-rehearsal.invalid/oauth/callback`, a placeholder that passes the boot check and never resolves. Re-run
   `20-env.sh` with `REHEARSAL_REDIRECT_URIS=...` once the partner's test site is known. The partner receives the secret
   through the partner info page (section 8), where it is only ciphertext.
@@ -233,23 +281,25 @@ fingerprint.
 | 5 | `./remote.sh run p2-disk.sh preview`, `run p2-disk.sh expand-check`, then `run p2-disk.sh apply` | prunes **build cache only**, vacuums the journal to 200M; writes `/root/backup/disk-need.txt` | avail >= `need_build_gb`; images still present; old stack unchanged | 5 min | not needed |
 | 6 | Overlay reconcile (D), merges (E) -> `BE_SHA`, `FE_SHA` (full 40-hex) | - | audit signed off (or proceed with `--infra-only` for the empty stack) | separate | - |
 | 7 | `./remote.sh pack-web $FE_SHA`, then `upload-web $FE_SHA` | `/root/ddcnew/src/ddc-frontend-<sha>.tar.gz` (+ .sha256) | `sha256sum -c: OK` | 3 min | `rm` the tarball |
-| 8 | `./remote.sh run 10-build.sh $BE_SHA $FE_SHA --overlays-reconciled` (or `--infra-only`) | clean clone; images `ddcnew/backend:<sha12>[-infra]`, `ddcnew/web:tge-<sha12>`; `wwdr.pem` copy, throwaway pass signer and throwaway `apn_key.p8` (400); `assets/campaigns`, `assets/passes`; `/root/ddcnew/.env` | `PASS frontend source: API_BASE_URLS.tge = https://<API_HOST>/api` before any build; >= 12G free before the backend build, >= 7G before the web build, MemAvailable >= 3000 MB before each; watchdog never fires; `BuildKit step processes given oom_score_adj=1000: <n >= 1>` for each build and no `WARN watchdog: no BuildKit step process was marked` (unless every step came from the cache); 0 `.env*` in the image; PR #25/#27 present; build marker `mode=tge apiBaseUrl=https://<API_HOST>/api ... w3aClientId=BBpkxUTUr... chainId=44508`; no devnet client id in `/var/www`; `signerKey.pem and signerCert.pem are a throwaway pair`; `apn_key.p8 is a throwaway key`; old stack unchanged | 30-45 min | `99-teardown.sh --remove-images` |
-| 9 | `./remote.sh run 20-env.sh` | `/root/ddcnew/secrets/*` (generated once), `.env.rehearsal`, `.env.db` (600) | `db_target=db:5432/ddc_rehearsal schema=public`; JWT differs from old; SSO secret differs from JWT; TGE hash = sha256(secret file); client id = the frontend's `.env.tge` (BBpkxUTUr...); `PASS issuer PUBLIC_BASE_URL = API_BASE_URL = https://<API_HOST>; consent origin APP_PUBLIC_URL = FRONTEND_URL = https://<APP_HOST>`; `PASS WEB3AUTH_RETIRED_CLIENT_IDS = the old WEB3AUTH_CLIENT_ID (<8 characters>..., the devnet id being retired), not the mainnet id` (stops when the old id is empty, equals the mainnet id or is not 87 base64url characters starting with B; only its first 8 characters are printed) and `PASS LOGIN_MISSING_IDTOKEN_MEANS_OLD_APP=on; WEB3AUTH_RETIRED_CLIENT_IDS: 1 entry, equal to neither WEB3AUTH_CLIENT_ID nor a WEB3AUTH_EXTERNAL_AUDIENCE entry` (backend PR #38's boot checks, so a bad value stops here and not at the api's boot); `DISBURSEMENT_PAUSED` 1, `BSC_PAYOUT_PRIVATE_KEY` 0; **no private-key / mnemonic name left**; `BACKEND_WALLET_PRIVATE_KEY` and `CHAIN_SIGNER_PRIVATE_KEY` absent; blanked list printed; `every name with a value is classified`; `no copied value carries a URL credential, a PEM key block or a 32-byte hex key`; kept values byte-identical; `.env.rehearsal installed ... after every check passed`; old stack unchanged | 1 min | `rm` the env files (secrets only before pgdata exists) |
-| 10 | `./remote.sh run 30-nginx.sh apply` (outcome A: add `TAKE_OVER_VHOSTS=yes`, section 9) | two vhost files `<API_HOST>`, `<APP_HOST>` + their links; with `TAKE_OVER_VHOSTS=yes` first a backup of what sat there; `nginx -t`; reload | `PASS nothing at these names that this package did not write` (or, with the flag, `take-over backup: ...` and `taken over: ...` per entry); `PASS no other loaded vhost declares ...`; `PASS API_PORT ... and WEB_PORT ... are free or held by this stack's own containers`; the diff shows only the marker lines, `server_name` and port lines, plus the `/partner-info/` location block in the app copy (section 8); `nginx -t ok`; `PASS every other host answers exactly as before` (if not, the script prints the integrity check and **stops**: `run ./30-nginx.sh undo now`); old stack unchanged; the two hosts answer 502 until step 11 | 2 min | `30-nginx.sh undo` (after a take-over, then `30-nginx.sh restore`) |
-| 11 | `./remote.sh run 40-up.sh` (add `JWKS_NEW_PINS_VERIFIED=...` only if it asks) | `compose.yaml`, `.env.api` (with today's pins), `pgdata/`, empty `ddc_rehearsal` + migrated schema, containers `ddcnew-{db,api,web}-1` on 127.0.0.1:`API_PORT`/`DB_PORT`/`WEB_PORT` | INFRA banner if `-infra`; `apn_key.p8`, `signerKey.pem`, `signerCert.pem` differ from production; pins: `configured_and_served >= 1`, `.env.api = .env.rehearsal except the pins`; `published ports: ...` = the settings and `ports ... are free or published by this stack's own containers`; db healthy; `db_target` exact; `migrate status: Database schema is up to date`; log line `Partner SSO money-path assertions OK` with all 9 exact fields, `issuer=https://<API_HOST>` and `consentOrigin=https://<APP_HOST>` included (any miss stops the script), and `publicClientRegistration=closed`; when the image has backend PR #38, its line `Old App update answer (426 APP_UPDATE_REQUIRED): ... count=1 first8=<the old id's 8 characters> LOGIN_MISSING_IDTOKEN_MEANS_OLD_APP=on` (any difference stops; an image without it says so); running api carries exactly the written pins, the throwaway `apn_key.p8` and the throwaway `signerKey.pem`; `/partner/tge/me` through `<API_HOST>` -> 401 JSON; `/ddc-build.json` through `<APP_HOST>` -> tge/mainnet for `https://<API_HOST>/api`; every other host's code unchanged (else it **stops**); old stack unchanged; `REHEARSAL_DB` only `ddc_rehearsal` or `ddc_rehearsal2` | 5-10 min | `99-teardown.sh` |
+| 8 | `./remote.sh run 10-build.sh $BE_SHA $FE_SHA --overlays-reconciled` (or `--infra-only`) | clean clone; images `ddcnew/backend:<sha12>[-infra]`, `ddcnew/web:tge-<sha12>`; `wwdr.pem` copy, throwaway pass signer and throwaway `apn_key.p8` (400); `assets/campaigns`, `assets/passes`; `/root/ddcnew/.env` | `PASS frontend source: API_BASE_URLS.tge = https://<API_HOST>/api` before any build (and before the settings are recorded); `backend PR #38's old-App line (42005bebf9d4): in this commit` or `not in this commit` (an ancestor check on the history since 2026-10-01, recorded as `OLD_APP_SWITCHES` in `/root/ddcnew/.env`); >= 12G free before the backend build, >= 7G before the web build, MemAvailable >= 3000 MB before each; watchdog never fires; `BuildKit step processes given oom_score_adj=1000: <n >= 1>` for each build and no `WARN watchdog: no BuildKit step process was marked` (unless every step came from the cache); 0 `.env*` in the image; PR #25/#27 present; build marker `mode=tge apiBaseUrl=https://<API_HOST>/api ... w3aClientId=BBpkxUTUr... chainId=44508`; no devnet client id in `/var/www`; `signerKey.pem and signerCert.pem are a throwaway pair`; `apn_key.p8 is a throwaway key`; old stack unchanged | 30-45 min | `99-teardown.sh --remove-images` |
+| 9 | `./remote.sh run 20-env.sh REHEARSAL_CLIENT_ID=<the partner's client id>` (required on the first run, recorded, then reused; item P) | `/root/ddcnew/secrets/*` (generated once), `.env.rehearsal`, `.env.db` (600) | `db_target=db:5432/ddc_rehearsal schema=public`; JWT differs from old; SSO secret differs from JWT; TGE hash = sha256(secret file); client id = the frontend's `.env.tge` (BBpkxUTUr...); `rehearsal client id: <id> (override)` or `(recorded in ...)`; `PASS SSO_TGE_CLIENT_ID=<id>: matches [A-Za-z0-9._-]{1,64} and is neither tge nor tge-rehearsal`; refused before anything is written without it (no default) or with `tge`, `tge-rehearsal` or another shape; `PASS issuer PUBLIC_BASE_URL = API_BASE_URL = https://<API_HOST>; consent origin APP_PUBLIC_URL = FRONTEND_URL = https://<APP_HOST>`; `PASS WEB3AUTH_RETIRED_CLIENT_IDS = the old WEB3AUTH_CLIENT_ID (<8 characters>..., the devnet id being retired), not the mainnet id` (stops when the old id is empty, equals the mainnet id or is not 87 base64url characters starting with B; only its first 8 characters are printed) and `PASS LOGIN_MISSING_IDTOKEN_MEANS_OLD_APP=on; WEB3AUTH_RETIRED_CLIENT_IDS: 1 entry, equal to neither WEB3AUTH_CLIENT_ID nor a WEB3AUTH_EXTERNAL_AUDIENCE entry` (backend PR #38's boot checks, so a bad value stops here and not at the api's boot); `DISBURSEMENT_PAUSED` 1, `BSC_PAYOUT_PRIVATE_KEY` 0; **no private-key / mnemonic name left**; `BACKEND_WALLET_PRIVATE_KEY` and `CHAIN_SIGNER_PRIVATE_KEY` absent; blanked list printed; `every name with a value is classified`; `no copied value carries a URL credential, a PEM key block or a 32-byte hex key`; kept values byte-identical; `.env.rehearsal installed ... after every check passed`; old stack unchanged | 1 min | `rm` the env files (secrets only before pgdata exists) |
+| 10 | `./remote.sh run 40-up.sh` (add `JWKS_NEW_PINS_VERIFIED=...` only if it asks) | `compose.yaml`, `.env.api` (with today's pins), `pgdata/`, empty `ddc_rehearsal` + migrated schema, containers `ddcnew-{db,api,web}-1` on 127.0.0.1:`API_PORT`/`DB_PORT`/`WEB_PORT` | INFRA banner if `-infra`; `apn_key.p8`, `signerKey.pem`, `signerCert.pem` differ from production; pins: `configured_and_served >= 1`, `.env.api = .env.rehearsal except the pins`; `published ports: ...` = the settings and `ports ... are free or published by this stack's own containers`; db healthy; `db_target` exact; `migrate status: Database schema is up to date`; log line `Partner SSO money-path assertions OK` with all 9 exact fields, `issuer=https://<API_HOST>` and `consentOrigin=https://<APP_HOST>` included (any miss stops the script), and `publicClientRegistration=closed`; when the image has backend PR #38, its line `Old App update answer (426 APP_UPDATE_REQUIRED): ... count=1 first8=<the old id's 8 characters> LOGIN_MISSING_IDTOKEN_MEANS_OLD_APP=on` (any difference stops; a missing line stops when `OLD_APP_SWITCHES=1`, and is said otherwise); running api carries exactly the written pins, the throwaway `apn_key.p8` and the throwaway `signerKey.pem`; step 7, the Host-header checks: `/partner/tge/me` through `<API_HOST>` -> 401 JSON and `/ddc-build.json` through `<APP_HOST>` -> tge/mainnet for `https://<API_HOST>/api` when this package's vhosts serve both hosts, else `DEFERRED` (step 11 runs them); every other host's code unchanged (else it **stops**); old stack unchanged; `REHEARSAL_DB` only `ddc_rehearsal` or `ddc_rehearsal2` | 5-10 min | `99-teardown.sh` |
+| 11 | `./remote.sh run 30-nginx.sh apply` (outcome A: add `TAKE_OVER_VHOSTS=yes`, section 9) | two vhost files `<API_HOST>`, `<APP_HOST>` + their links; with `TAKE_OVER_VHOSTS=yes` first a backup of what sat there (refused until this stack answers on its ports: step 10 first); `nginx -t`; reload | `PASS nothing at these names that this package did not write` (or, with the flag, `take-over backup: ...` and `taken over: ...` per entry); `PASS no other loaded vhost declares ...`; `PASS API_PORT ... and WEB_PORT ... are free or held by this stack's own containers`; the diff shows only the marker lines, `server_name` and port lines, plus the `/partner-info/` location block in the app copy (section 8); `nginx -t ok`; `PASS every other host answers exactly as before` over http (and https with SNI when 443 is served; if not, the script prints the integrity check and **stops**: `run ./30-nginx.sh undo now`, or, after a take-over, it rolls the take-over back and names undo and restore); the Host-header checks pass through the new vhosts (`PASS <API_HOST> answers 401 JSON`, `PASS <APP_HOST> serves the tge mainnet build ...`); with the flag `PASS take-over complete`; old stack unchanged | 2 min | `30-nginx.sh undo`; after a take-over `30-nginx.sh restore` instead (undo refuses until then) |
 | 12 | External: from a team address open `https://<API_HOST>/partner/tge/me` (401) and `https://<APP_HOST>/ddc-build.json`; from any other address expect the WAF block | - | runbook pass criteria | 5 min | - |
 | 13 | Partner info page: the commands of section 8 (`op read ... \| DDC_APPROVED=yes ./remote.sh run 50-partner-page.sh apply PARTNER_ALLOWED_IP=<ip>`, then `verify` and `status`) | `/srv/ddcnew/partner-info/` (`index.html`, `secret.json`) | section 8 | 10 min | `50-partner-page.sh remove` |
 
 Total wall clock is about 2-2.5 h of execution plus the external waits (D-H).
 
-**Undo for the whole stack:** `./remote.sh run 99-teardown.sh` runs compose down and removes this package's vhosts
-(never anything else at those names), then the settings record. If compose cannot run (e.g. `/root/ddcnew/.env`
-missing), it removes the project by its compose label instead: containers labelled `com.docker.compose.project=ddcnew`
-(all must be named `ddcnew-*`), then the networks with that label (`ddcnew_*`). The base images the builds pulled,
-`postgres:17` and the build cache stay behind (`docker builder prune -f` or `p2-disk.sh apply` frees the cache). Add
-`--remove-images` to remove the `ddcnew/*` images (including `-infra`), and `--delete-dir` to remove `/root/ddcnew`
-(refused while a take-over backup there was never restored: `30-nginx.sh restore` first). Teardown never touches the P1
-dumps, the cron entry or Race's rehearsal (`ddc-mainnet-*`, `/root/ddc-mainnet`, his vhosts).
+**Undo for the whole stack:** after a take-over (outcome A), first `./remote.sh run 30-nginx.sh restore` (the other
+party's entries back, this package's removed, in one reload): `99-teardown.sh` refuses in every mode, before it changes
+anything, while a take-over backup was never restored. Then `./remote.sh run 99-teardown.sh` runs compose down and
+removes this package's vhosts (never anything else at those names), then the settings record. If compose cannot run
+(e.g. `/root/ddcnew/.env` missing), it removes the project by its compose label instead: containers labelled
+`com.docker.compose.project=ddcnew` (all must be named `ddcnew-*`), then the networks with that label (`ddcnew_*`). The
+base images the builds pulled, `postgres:17` and the build cache stay behind (`docker builder prune -f` or
+`p2-disk.sh apply` frees the cache). Add `--remove-images` to remove the `ddcnew/*` images (including `-infra`), and
+`--delete-dir` to remove `/root/ddcnew`. Teardown never touches the P1 dumps, the cron entry or Race's rehearsal
+(`ddc-mainnet-*`, `/root/ddc-mainnet`, his vhosts).
 
 ### 4.1 Accepted runbook deviation (40-up on an empty database)
 
@@ -291,8 +341,11 @@ Consequences the data step (separate approval) must honour:
   kernel kills a new-stack process before the old Postgres or API.
 - **One write run at a time, logged on the server:** every write script takes `flock` on `/root/ddcnew/.lock` (a child
   write script, such as `30-nginx.sh undo` started by `99-teardown.sh`, inherits it) and copies its output to
-  `/root/ddcnew/logs/<ts>-<script>-<pid>.log` (600; names, counts and hashes only, like the screen output). Read-only
-  modes write nothing. Every script that sources `common.sh` runs with `LC_ALL=C`.
+  `/root/ddcnew/logs/<ts>-<script>-<pid>.log` (600; names, counts and hashes only, like the screen output). The log's
+  `tee` ignores HUP, INT, TERM and QUIT, so a signal to the whole process group (Ctrl-C or a hangup when a script is
+  run in an interactive session on the server) reaches the script, and what it does about it (a take-over's
+  rollback) still reaches the log. Read-only modes write nothing. Every script that sources `common.sh` runs with
+  `LC_ALL=C`.
 - **Shared root disk:** the dump, restore test, nightly cron and both builds each check free space first, so none of
   them can fill the disk under the live Postgres.
 - **Dump locks:** `pg_dump` holds ACCESS SHARE locks on `ddc`; DDL, TRUNCATE or `prisma migrate` on the old database
@@ -301,15 +354,20 @@ Consequences the data step (separate approval) must honour:
 - **remote.sh overrides (allowlist):** `run` passes only `REHEARSAL_DB`, `REHEARSAL_REDIRECT_URIS`,
   `REHEARSAL_INITIATE_LOGIN_URI`, `OAUTH_PUBLIC_REGISTRATION`, `W3A_GOOGLE/EMAIL/APPLE/X`, `JWKS_NEW_PINS_VERIFIED`,
   `BUILD_MEM_FLOOR_MB`, `P1_USERS_MIN`, `PARTNER_ALLOWED_IP`, the settings `API_HOST`, `APP_HOST`, `API_PORT`,
-  `WEB_PORT`, `DB_PORT`, and `TAKE_OVER_VHOSTS` to the server; every other `NAME=value` (`PATH`, `BASH_ENV`,
-  `LD_PRELOAD`, `DDC_LOCAL_TEST`, `NEW_DIR`, `SRV_DIR`, `BACKUP_DIR`, `MAINNET_DIR`, `NGINX_*`, ...) is refused before
-  connecting. `preflight` takes the five settings only. `run` forwards its stdin to the remote script untouched (`op`
-  never reads it) and refuses a terminal on stdin for `50-partner-page.sh apply` and `verify`. On the server,
-  `common.sh require_server` refuses again the overrides of `NEW_DIR`, `SRV_DIR`, `OLD_ENV`, `OLD_BACKEND_DIR`,
-  `OLD_APP_DIR`, `MAINNET_DIR`, `BACKUP_DIR`, `SWITCH_DIR`, `NGINX_AVAIL`, `NGINX_ENABLED`, `NGINX_CONFD`,
-  `NGINX_LOCAL_URL`, `DDC_MEMINFO`, `DDC_PROC` and `BUILD_WATCH_INTERVAL`, validates the settings (section 2) and
-  `TAKE_OVER_VHOSTS` (`yes` or unset), and allows `BUILD_MEM_FLOOR_MB` (>= 1000) and `BUILD_DISK_FLOOR_MB` (>= 3072)
-  only upwards; `DDC_LOCAL_TEST=1` is refused as root.
+  `WEB_PORT`, `DB_PORT`, `REHEARSAL_CLIENT_ID` and `TAKE_OVER_VHOSTS` to the server; every other `NAME=value` (`PATH`,
+  `BASH_ENV`, `LD_PRELOAD`, `DDC_LOCAL_TEST`, `NEW_DIR`, `SRV_DIR`, `BACKUP_DIR`, `MAINNET_DIR`, `NGINX_*`, ...) is
+  refused before connecting. Every argument must consist of `[A-Za-z0-9._/=:,-]` only (no `;`, `$()`, backticks, blank,
+  newline or carriage return can reach the server's root shell), and the settings, `REHEARSAL_CLIENT_ID` and
+  `TAKE_OVER_VHOSTS` among the overrides are checked with the server's own rules (`common.sh
+  remote_overrides_check`) before anything connects (a setting not given counts with its default there, as in
+  `preflight`; the server checks again against its record). `preflight` takes the five settings only, and `run
+  00-preflight.sh` is refused (the preflight needs the lines `preflight` prepends). `run` forwards its stdin to the
+  remote script untouched (`op` never reads it) and refuses a terminal on stdin for `50-partner-page.sh apply` and
+  `verify`. On the server, `common.sh require_server` refuses again the overrides of `NEW_DIR`, `SRV_DIR`, `OLD_ENV`,
+  `OLD_BACKEND_DIR`, `OLD_APP_DIR`, `MAINNET_DIR`, `BACKUP_DIR`, `SWITCH_DIR`, `NGINX_AVAIL`, `NGINX_ENABLED`,
+  `NGINX_CONFD`, `NGINX_LOCAL_URL`, `NGINX_LOCAL_TLS_PORT`, `DDC_MEMINFO`, `DDC_PROC` and `BUILD_WATCH_INTERVAL`,
+  validates the settings (section 2) and `TAKE_OVER_VHOSTS` (`yes` or unset), and allows `BUILD_MEM_FLOOR_MB`
+  (>= 1000) and `BUILD_DISK_FLOOR_MB` (>= 3072) only upwards; `DDC_LOCAL_TEST=1` is refused as root.
 - **SSH logins (`sshpw.sh`, used by `remote.sh` and `survey/ro-ssh.sh`):** the login and the 1Password reference come
   from the untracked `local.env`; nothing connects, and 1Password is not asked, while it is missing, empty, still the
   placeholder, or of the wrong shape (the target must be `user@host`, so it can never be read as an ssh option; the
@@ -329,24 +387,51 @@ Consequences the data step (separate approval) must honour:
 
 ## 6. Local tests
 
-`bash test/run-local-tests.sh <new-scratch-dir>` runs on the Mac and touches no server (Docker Desktop, shellcheck 0.11
-and GNU coreutils needed). Every container and image it creates carries the label `ddcnew-localtest=<run id>` (a new id
-per run) and a name or tag with that id; its cleanup and every count select by that label only, never by name, and an
-image is removed only when this run built it, so other sessions' containers are never touched. It must end with
-`summary: fails=0`. It covers:
+`bash test/run-local-tests.sh <new-scratch-dir>` runs on the Mac and touches no server (Docker Desktop, shellcheck 0.11,
+GNU coreutils, and node with the backend's `node_modules` needed). Every container and image it creates carries the label `ddcnew-localtest=<run id>` (a new id
+per run) and a name or tag with that id; its cleanup (an exit trap, so it also runs when a check fails or the run is
+interrupted) and every count select by that label only, never by name, and an image is removed only when this run built
+it, so other sessions' containers are never touched. A failing check prints a `FAIL` line naming it and the run goes
+on; the watchdog checks look only at this run's own processes (markers unique to the run), so two suites can run side
+by side. It must end with `summary: fails=0`. It covers:
 - `bash -n` and `shellcheck -x -S warning` on every script; `docker compose config` (ports loopback-only, memory limits).
 - `20-env.sh` twice on a synthetic old env (multi-line quoted values, comments, `export`, duplicates, inline comments,
   signing keys and a mnemonic): idempotent, no secret in the output or the server-side log, compose's own parser
   agrees, the credential policy (removed, blanked, fail-closed on unclassified names and on credential-shaped values),
-  and identical output on ubuntu:jammy (mawk, GNU tools).
+  and identical output on ubuntu:jammy (mawk, GNU tools). `REHEARSAL_CLIENT_ID`: required on the first run (no
+  default), refused when malformed (65 characters, a blank, a symbol), when `tge` or `tge-rehearsal`, or when it differs
+  from the recorded one; a failing run does not record it; a re-run reuses the recorded value. The backend's own boot
+  checks (`test/helpers/backend-boot.js` runs the checkout's real `src/server.js` with `src/app.js` stubbed, so nothing
+  listens) accept the env file `20-env.sh` wrote and refuse the same file with `tge-rehearsal`.
 - `30-nginx.sh` render on synthetic vhost fixtures (default and overridden hosts and ports) and `nginx -t` on nginx 1.18
-  and stable; apply and undo stop when another host's status code changes; with Race-like entries at the default
-  names: apply stops and changes nothing, `TAKE_OVER_VHOSTS=yes` backs up and replaces, `restore` puts them back byte
-  for byte (modes and link target included), a failing `nginx -t` puts them back at once, a `server_name` clash and a
-  port held by another container stop apply, and outcome B leaves them untouched (and stops if his hosts answer
-  differently after the reload).
+  and stable; apply and undo stop when another host's status code changes (over https too when 443 is served); with
+  Race-like entries at the default names: apply stops and changes nothing; `TAKE_OVER_VHOSTS=yes` is refused while
+  this stack does not answer on its ports, and for an entry that does not proxy to a `ddc-mainnet-*` port (another
+  upstream, a static root, no mainnet containers at all); otherwise it backs up and replaces and runs the Host-header
+  checks after the reload; `restore` puts them back byte for byte (modes and link target included); a failing `nginx
+  -t`, a failing copy, failing Host-header checks after the reload and a failure while putting them back each leave
+  his entries in place or print the `restore` command; a backup interrupted by SIGKILL never counts as a backup and
+  never blocks `restore`, `undo` or teardown; `restore` keeps this package's entries aside until `nginx -t` passes; a
+  `server_name` clash and a port held by another container stop apply, and outcome B leaves them untouched (and stops
+  if his hosts answer differently after the reload). Since the review of #42: both copies carry the vhost token (127.0.0.1
+  only) and the checks after a reload start with it; after a take-over they always run, and a stack that stops
+  answering after the check before it, a host nginx that still serves his stack (same 401 and marker, no token), a
+  reload that reports a failure and apply's final old-stack check each roll the take-over back exactly; the rollback
+  compares the other hosts again and reports its own failed reload; `undo` and `99-teardown.sh` (every mode, before
+  any change) refuse until a take-over is restored, and `restore` right after the take-over swaps the entries in one
+  reload; `restore` keeps what a half-finished rollback already put back, and arms its own rollback before it sets
+  anything aside; a take-over next to an entry of this package's is refused; S4 also refuses wildcard, regex and `_`
+  names, a default server, other includes, `fastcgi_pass`, a commented-out `proxy_pass`, a remote host on a
+  `ddc-mainnet-*` port number and the old stack's ports (the stub docker lists old-stack containers too), and takes over
+  a certbot-style vhost; an api answering 200 instead of 401 is refused; a listener on 443 that never answers ends each
+  probe at its time limit, with a WARN; the https probe is checked with SNI only. Section 12c sends TERM to the script,
+  and TERM, HUP and INT to its whole process group, right after the removal: under bash 3.2 (macOS) and bash 5.1
+  (ubuntu:jammy) the entries come back exactly and the rollback reaches the server-side log.
 - The settings: defaults, overrides reaching every host value and compose's ports, the record and a conflicting
-  override, and the refusals (production host, other domain, old-stack port, bad values).
+  override, the refusals (production host, other domain, old-stack port, bad values), and a record that is empty,
+  lacks a name or holds one twice (each stops). `10-build.sh` records the settings only after the frontend tarball's
+  API check passed; the old-App startup line is required exactly when the built backend commit contains PR #38 (git
+  ancestry, cases on both sides).
 - Old-stack fingerprint on a fake tree (Race's vhost, link and `/root/ddc-mainnet` stand-in detected; this package's
   own files ignored; read-write mounted data left out; a restarted `ddc-mainnet-*` container detected); the memory and
   disk watchdog on Docker Desktop, after the SSH session ends
@@ -355,8 +440,9 @@ image is removed only when this run built it, so other sessions' containers are 
 - JWKS pin decisions, the `10-build.sh` flag gate, `refuse_if_infra_only`, the disk verdict and `expand_check` on a real
   ext4 partition; the throwaway pass signer; the money-path fields.
 - The SSH login guard against a throwaway loopback sshd, using scratch copies with a test `local.env`; `local.env`
-  refusals (missing, placeholders, empty, wrong shape) with stub `op` and `ssh` that record every call; the preflight's
-  git-tree hash and settings lines; `00-preflight.sh` as root in a throwaway container (Race's stand-ins listed and
+  refusals (missing, placeholders, empty, wrong shape) with stub `op` and `ssh` that record every call; `remote.sh`'s
+  refusals before connecting (`;`, `$()`, backticks, a blank, a newline and a carriage return in each override, bad
+  settings or client ids, `run 00-preflight.sh`); the preflight's git-tree hash and settings lines; `00-preflight.sh` as root in a throwaway container (Race's stand-ins listed and
   fingerprinted, a foreign entry at the default names a WARN, a `server_name` clash a FAIL).
 - Root mode in ubuntu:22.04: the write guard (`/srv/ddcnew` and the settings' vhost names included, `/root/ddc-mainnet`
   refused), `require_server` (settings validated, the record honoured), the run lock and the server-side log, and
@@ -463,8 +549,8 @@ partner.
 | # | Command | Changes on the server | Pass criteria | Undo |
 |---|---|---|---|---|
 | P1 | `DDC_APPROVED=yes ./remote.sh upload` | this package's scripts and `partner-info/index.html` in `/root/ddcnew/deploy` | `files=12` | `rm -rf /root/ddcnew/deploy` |
-| P2 | Only while the rehearsal env still has the `.invalid` placeholder (P4 says so): `DDC_APPROVED=yes ./remote.sh run 20-env.sh REHEARSAL_REDIRECT_URIS=<partner callback> REHEARSAL_INITIATE_LOGIN_URI=<partner start-login URL>`, then `DDC_APPROVED=yes ./remote.sh run 40-up.sh` | `.env.rehearsal`; the api runs with it | section 4, steps 9 and 11 | as there |
-| P3 | `DDC_APPROVED=yes ./remote.sh run 30-nginx.sh apply` (with section 9's flag or overrides) | both vhosts written again, the app one with `/partner-info/`; nginx reload | section 4, step 10; the printed diff adds the location to the app copy only | `./remote.sh run 30-nginx.sh undo` (approved) |
+| P2 | Only while the rehearsal env still has the `.invalid` placeholder (P4 says so): `DDC_APPROVED=yes ./remote.sh run 20-env.sh REHEARSAL_REDIRECT_URIS=<partner callback> REHEARSAL_INITIATE_LOGIN_URI=<partner start-login URL>`, then `DDC_APPROVED=yes ./remote.sh run 40-up.sh` | `.env.rehearsal`; the api runs with it | section 4, steps 9 and 10 | as there |
+| P3 | `DDC_APPROVED=yes ./remote.sh run 30-nginx.sh apply` (with section 9's flag or overrides) | both vhosts written again, the app one with `/partner-info/`; nginx reload | section 4, step 11; the printed diff adds the location to the app copy only | `./remote.sh run 30-nginx.sh undo` (approved) |
 | P4 | `op read "op://<vault>/<item>/password" \| DDC_APPROVED=yes ./remote.sh run 50-partner-page.sh apply PARTNER_ALLOWED_IP=<partner server IP>` | `/srv/ddcnew/partner-info/index.html` and `secret.json`; one throwaway container, removed | `PASS sha256(secrets/tge_rehearsal_client_secret) = SSO_TGE_CLIENT_SECRET_SHA256`, `PASS secret.json: v=1 kdf=PBKDF2-SHA256 iter=600000 ...`, the two paths with their mode and sha256, old stack unchanged | `50-partner-page.sh remove` |
 | P5 | `op read "op://<vault>/<item>/password" \| DDC_APPROVED=yes ./remote.sh run 50-partner-page.sh verify` | nothing but its log | `match=yes` | - |
 | P6 | `./remote.sh run 50-partner-page.sh status` (read-only) | nothing | both files with the sha256 that P4 printed; `/partner-info/ location count=1`; `PASS local nginx: /partner-info/ -> 200, served body = index.html` and the same for `secret.json` (the sha256 of what nginx serves equals the file's) | - |
@@ -498,7 +584,11 @@ containers, files and vhosts like the old stack (fingerprinted, never written), 
 9021, 15434), and never overwrites his vhosts unless told to. Sloan and Race decide (item O):
 
 **A. This stack takes over Race's names** (after his OK). The defaults already name his hosts; only `30-nginx.sh apply`
-needs the flag, and it backs his four entries up first:
+needs the flag. The stack boots first (`40-up.sh`), so his hosts are never pointed at a stack that has not booted:
+`30-nginx.sh apply` refuses the take-over until this stack answers on its ports, backs his four entries up, and runs
+the Host-header checks through the new vhosts right after the reload, this package's vhost token first (`40-up.sh`
+defers them while his vhosts still serve the names). Any failure after his entries were removed, a signal included,
+puts them back at once.
 
 ```bash
 ./remote.sh preflight                                    # WARN lines name his entries at the two names; no FAIL
@@ -506,14 +596,17 @@ DDC_APPROVED=yes ./remote.sh upload
 ./remote.sh pack-web <FE_SHA>                            # a frontend commit at or after a3ee809 (api-rehearsal)
 DDC_APPROVED=yes ./remote.sh upload-web <FE_SHA>
 DDC_APPROVED=yes ./remote.sh run 10-build.sh <BE_SHA> <FE_SHA> --infra-only
-DDC_APPROVED=yes ./remote.sh run 20-env.sh
-DDC_APPROVED=yes ./remote.sh run 30-nginx.sh apply TAKE_OVER_VHOSTS=yes
-DDC_APPROVED=yes ./remote.sh run 40-up.sh
+DDC_APPROVED=yes ./remote.sh run 20-env.sh REHEARSAL_CLIENT_ID=<the partner's client id>
+DDC_APPROVED=yes ./remote.sh run 40-up.sh                # the stack boots; step 7 (Host-header checks) is DEFERRED
+DDC_APPROVED=yes ./remote.sh run 30-nginx.sh apply TAKE_OVER_VHOSTS=yes   # refused until the stack answers; Host checks after the reload
 ./remote.sh run 30-nginx.sh status                       # four entries "ours"; the backup listed
 ```
 
-Undo: `DDC_APPROVED=yes ./remote.sh run 99-teardown.sh`, then `DDC_APPROVED=yes ./remote.sh run 30-nginx.sh restore`
-(his entries back exactly as they were; whether his containers still serve them is his to check). Clean-ups of his own
+Undo, in this order: `DDC_APPROVED=yes ./remote.sh run 30-nginx.sh restore` FIRST (his entries back exactly as they
+were and this package's removed, in one reload; whether his containers still serve them is his to check), THEN
+`DDC_APPROVED=yes ./remote.sh run 99-teardown.sh`. `99-teardown.sh` and `30-nginx.sh undo` refuse until the restore:
+run first, they would leave his names without any vhost (nginx would answer them from its default server) until
+someone restored them. Clean-ups of his own
 (his older `tge-api.datadance.ai` / `tge.datadance.ai` files) are his: this package never touches them.
 
 **B. Both stacks run side by side**, this one under other names. Prerequisites: DNS records, the WAF rule and the
@@ -527,9 +620,9 @@ DDC_APPROVED=yes ./remote.sh upload
 ./remote.sh pack-web <FE_SHA>                            # a frontend commit built for https://<api host>/api
 DDC_APPROVED=yes ./remote.sh upload-web <FE_SHA>
 DDC_APPROVED=yes ./remote.sh run 10-build.sh <BE_SHA> <FE_SHA> --infra-only API_HOST=<api host> APP_HOST=<app host>
-DDC_APPROVED=yes ./remote.sh run 20-env.sh
-DDC_APPROVED=yes ./remote.sh run 30-nginx.sh apply
-DDC_APPROVED=yes ./remote.sh run 40-up.sh
+DDC_APPROVED=yes ./remote.sh run 20-env.sh REHEARSAL_CLIENT_ID=<the partner's client id>
+DDC_APPROVED=yes ./remote.sh run 40-up.sh                # step 7 DEFERRED until the vhosts exist
+DDC_APPROVED=yes ./remote.sh run 30-nginx.sh apply       # Host-header checks after the reload
 ```
 
 `30-nginx.sh apply` checks around the reload that his hosts answer exactly as before, and stops if another loaded vhost

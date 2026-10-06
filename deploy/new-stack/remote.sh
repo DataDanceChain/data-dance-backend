@@ -19,8 +19,11 @@
 # nothing connects either when the askpass file cannot be created completely (mktemp or write failure); the askpass
 # kills ssh instead of letting it send an empty password; password method only; NumberOfPasswordPrompts=1.
 # NAME=value arguments to `run` are environment overrides, accepted only from an allowlist (SERVER_ENV_ALLOWED). The
-# rehearsal hosts and ports are among them (API_HOST, APP_HOST, API_PORT, WEB_PORT, DB_PORT; common.sh), and so is
-# TAKE_OVER_VHOSTS=yes (30-nginx.sh apply; only after Sloan and Race agree, APPROVAL.md section 9).
+# rehearsal hosts and ports are among them (API_HOST, APP_HOST, API_PORT, WEB_PORT, DB_PORT; common.sh), and so are
+# REHEARSAL_CLIENT_ID (20-env.sh; required on its first run) and TAKE_OVER_VHOSTS=yes (30-nginx.sh apply; only after
+# Sloan and Race agree, APPROVAL.md section 9). Before anything connects, every argument must be made of
+# [A-Za-z0-9._/=:,-] only, and the settings, the client id and TAKE_OVER_VHOSTS among the overrides must pass the
+# checks the server applies (common.sh remote_overrides_check). 00-preflight.sh only runs through `preflight`.
 # No tty is allocated: Ctrl-C or a dropped connection stops only the LOCAL ssh. The script keeps running on the
 # server to its end; its output continues in /root/ddcnew/logs/<ts>-<script>-<pid>.log (write runs; APPROVAL.md section 5).
 # stdin: `run` forwards this script's stdin, untouched, to the remote script on ssh's stdin (1Password never reads it:
@@ -50,7 +53,7 @@ rssh() { # rssh <remote command> ; stdin is forwarded
   rm -f "$a"; return $rc
 }
 # Environment overrides that may reach the server (everything else is refused, including PATH, BASH_ENV, LD_*).
-SERVER_ENV_ALLOWED="REHEARSAL_DB REHEARSAL_REDIRECT_URIS REHEARSAL_INITIATE_LOGIN_URI OAUTH_PUBLIC_REGISTRATION W3A_GOOGLE W3A_EMAIL W3A_APPLE W3A_X JWKS_NEW_PINS_VERIFIED BUILD_MEM_FLOOR_MB P1_USERS_MIN PARTNER_ALLOWED_IP API_HOST APP_HOST API_PORT WEB_PORT DB_PORT TAKE_OVER_VHOSTS"
+SERVER_ENV_ALLOWED="REHEARSAL_DB REHEARSAL_REDIRECT_URIS REHEARSAL_INITIATE_LOGIN_URI OAUTH_PUBLIC_REGISTRATION W3A_GOOGLE W3A_EMAIL W3A_APPLE W3A_X JWKS_NEW_PINS_VERIFIED BUILD_MEM_FLOOR_MB P1_USERS_MIN PARTNER_ALLOWED_IP API_HOST APP_HOST API_PORT WEB_PORT DB_PORT TAKE_OVER_VHOSTS REHEARSAL_CLIENT_ID"
 valid_sha() { [[ "$1" =~ ^[0-9a-f]{40}$ ]] || { echo "need a full 40-hex commit id"; exit 2; }; }
 
 case "$cmd" in
@@ -99,21 +102,25 @@ case "$cmd" in
     rssh "cat > /root/ddcnew/src/ddc-frontend-$sha.tar.gz.sha256 && cd /root/ddcnew/src && sha256sum -c ddc-frontend-$sha.tar.gz.sha256" < "$f.sha256" | tee "$PKG/logs/$TS-upload-web.txt";;
   run)
     s="${1:-}"; shift || true
-    [[ "$s" =~ ^(00-preflight|p1-backup|p2-disk|10-build|20-env|30-nginx|40-up|50-partner-page|99-teardown)\.sh$ ]] || { echo "unknown script $s"; exit 2; }
-    case "$s ${1:-}" in "00-preflight.sh "*|"p2-disk.sh preview"|"p2-disk.sh expand-check"|"p1-backup.sh status"|"30-nginx.sh status"|"50-partner-page.sh status") ;; *) need_approval;; esac
+    [ "$s" != 00-preflight.sh ] || { echo "refusing: run the preflight with ./remote.sh preflight [API_HOST=... ...]: it prepends the settings and the git-tree hash that 00-preflight.sh checks"; exit 2; }
+    [[ "$s" =~ ^(p1-backup|p2-disk|10-build|20-env|30-nginx|40-up|50-partner-page|99-teardown)\.sh$ ]] || { echo "unknown script $s"; exit 2; }
+    case "$s ${1:-}" in "p2-disk.sh preview"|"p2-disk.sh expand-check"|"p1-backup.sh status"|"30-nginx.sh status"|"50-partner-page.sh status") ;; *) need_approval;; esac
     # Read-only modes run without the run lock; an override there only changes what they look at.
     case "$s ${1:-}" in
       "50-partner-page.sh apply"|"50-partner-page.sh verify")
         [ ! -t 0 ] || { echo "refusing: the page password is piped, never typed (a terminal would echo it): op read \"op://<vault>/<item>/password\" | DDC_APPROVED=yes ./remote.sh run $s ${1:-} ..."; exit 2; };;
     esac
     # NAME=value arguments become environment overrides (e.g. REHEARSAL_DB=ddc_rehearsal2), the rest are arguments.
-    envs=""; args=""
+    envs=""; args=""; ovr=()
     for a in "$@"; do
       [[ "$a" =~ ^[A-Za-z0-9._/=:,-]+$ ]] || { echo "unsafe argument"; exit 2; }
       if [[ "$a" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then
-        case " $SERVER_ENV_ALLOWED " in *" ${a%%=*} "*) envs="$envs $a";; *) echo "override ${a%%=*} is not allowed on the server (allowed: $SERVER_ENV_ALLOWED)"; exit 2;; esac
+        case " $SERVER_ENV_ALLOWED " in *" ${a%%=*} "*) envs="$envs $a"; ovr+=("$a");; *) echo "override ${a%%=*} is not allowed on the server (allowed: $SERVER_ENV_ALLOWED)"; exit 2;; esac
       else args="$args $a"; fi
     done
+    # The same checks the server applies to the settings, the client id and TAKE_OVER_VHOSTS, here, before connecting.
+    chk=$(env -i PATH="$PATH" ${ovr[@]+"${ovr[@]}"} bash -c '. "$1/common.sh" && remote_overrides_check' _ "$PKG" 2>&1) \
+      || { echo "refusing before connecting: $(printf '%s' "$chk" | tail -n 1)"; exit 2; }
     rssh "cd /root/ddcnew/deploy && env$envs ./$s$args" 2>&1 | tee "$PKG/logs/$TS-${s%.sh}.txt";;
   *) sed -n '2,14p' "$0"; exit 2;;
 esac

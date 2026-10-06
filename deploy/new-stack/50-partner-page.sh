@@ -154,12 +154,15 @@ check_url() { # <name> <url>
   case "$h" in *.invalid|*.invalid.) die "$1 in $ENV_FILE is still the .invalid placeholder: re-run 20-env.sh with REHEARSAL_REDIRECT_URIS (and REHEARSAL_INITIATE_LOGIN_URI) set to the partner's addresses, then 40-up.sh";; esac
 }
 read_env() {
-  local raw u
+  local raw u rec
   [ -f "$ENV_FILE" ] || die "$ENV_FILE missing: run 20-env.sh first"
   ISSUER=$(env_get_simple PUBLIC_BASE_URL "$ENV_FILE")
   [ "$ISSUER" = "https://$API_HOST" ] || die "PUBLIC_BASE_URL in $ENV_FILE is not https://$API_HOST (API_HOST): this page is for the rehearsal stack's test environment only"
   CLIENT_ID=$(env_get_simple SSO_TGE_CLIENT_ID "$ENV_FILE")
   [[ "$CLIENT_ID" =~ $re_client ]] || die "SSO_TGE_CLIENT_ID in $ENV_FILE is missing or not [A-Za-z0-9._-]{1,64}"
+  case "$CLIENT_ID" in tge|tge-rehearsal) die "SSO_TGE_CLIENT_ID in $ENV_FILE is $CLIENT_ID, which the api refuses at boot (backend fd2d4e9): re-run 20-env.sh with REHEARSAL_CLIENT_ID=<the partner's client id>, then 40-up.sh";; esac
+  rec=$(settings_recorded REHEARSAL_CLIENT_ID)
+  [ -z "$rec" ] || [ "$rec" = "$CLIENT_ID" ] || die "SSO_TGE_CLIENT_ID in $ENV_FILE ($CLIENT_ID) is not the recorded REHEARSAL_CLIENT_ID ($rec): re-run 20-env.sh, then 40-up.sh"
   raw=$(env_get_simple SSO_TGE_REDIRECT_URIS "$ENV_FILE")
   while IFS= read -r u; do
     u="${u#"${u%%[![:space:]]*}"}"; u="${u%"${u##*[![:space:]]}"}"   # trimmed, as the api reads the list

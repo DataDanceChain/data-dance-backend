@@ -20,7 +20,11 @@
 #                                         apn.Provider only needs a valid key file). The cutover copies the production
 #                                         files in under its own approval (APPROVAL item L).
 #   /root/ddcnew/assets/campaigns|passes/ COPIES of /root/ddc-backend/campaign-covers and /root/ddc-backend/passes
-#   /root/ddcnew/.env                     compose interpolation only: API_IMAGE, WEB_IMAGE tags and INFRA_ONLY=0|1 (no secrets)
+#   /root/ddcnew/.env                     compose interpolation only: API_IMAGE, WEB_IMAGE tags, INFRA_ONLY=0|1 and
+#                                         OLD_APP_SWITCHES=0|1 (does the backend commit contain backend PR #38's old-App
+#                                         line; an ancestor check, read by 40-up.sh) (no secrets)
+#   /root/ddcnew/src/backend-<sha12>/     also the history since 2026-10-01 of that commit (git fetch --shallow-since), for
+#                                         the ancestor check
 #   /root/ddcnew/settings.env             the hosts and ports (common.sh settings), if no earlier script recorded them
 #   /root/ddcnew/.lock, /root/ddcnew/logs/<ts>-10-build-<pid>.log (600) and logs/build-*.log: run lock and output copies
 #   The old directories are only read (cp/rsync source); nothing under /root/ddc-backend is written.
@@ -79,11 +83,12 @@ settings_say
 [ "$INFRA_ONLY" = 0 ] || say "!!!!! $INFRA_ONLY_BANNER"
 old_snapshot_begin
 install -d -m 700 "$NEW_DIR" "$SRC" "$LOGS"
-settings_record
-# The frontend tarball first: a web build for another API host would only fail after the backend build (30 min).
+# The frontend tarball first: a web build for another API host would only fail after the backend build (30 min). Only
+# once it names https://<API_HOST>/api are the settings recorded (a mismatch leaves no record behind).
 [ -f "$FE_TGZ" ] && [ -f "$FE_TGZ.sha256" ] || die "upload first: remote.sh upload-web $FE_SHA (expects $FE_TGZ and .sha256)"
 [ "$(sha256sum < "$FE_TGZ" | cut -c1-64)" = "$(cut -c1-64 "$FE_TGZ.sha256")" ] || die "tarball sha256 mismatch"
 fe_api_base_check "$FE_TGZ"
+settings_record
 
 check_resources() {
   local mem disk; mem=$(mem_avail_mb); disk=$(disk_avail_gb)
@@ -105,6 +110,13 @@ else
 fi
 [ "$(git -C "$BE_DIR" rev-parse HEAD)" = "$BE_SHA" ] || die "checkout is not at $BE_SHA"
 [ -z "$(git -C "$BE_DIR" status --porcelain --ignored)" ] || die "checkout is not clean"
+# Does the commit contain backend PR #38's old-App startup line (OLD_APP_COMMIT, 2026-10-05)? An ancestor check on the
+# history since 2026-10-01 (common.sh old_app_switches). 40-up.sh then requires the line when it does
+# (OLD_APP_SWITCHES=1 in /root/ddcnew/.env).
+OLD_APP_SWITCHES=$(old_app_switches "$BE_DIR" "$BE_REPO" "$BE_SHA") \
+  || die "cannot tell whether $BE12 contains PR #38 (the history fetch since 2026-10-01 failed, and the commit is not older): re-run"
+[ "$(git -C "$BE_DIR" rev-parse HEAD)" = "$BE_SHA" ] && [ -z "$(git -C "$BE_DIR" status --porcelain --ignored)" ] || die "the checkout changed during the history fetch"
+say "backend PR #38's old-App line (${OLD_APP_COMMIT:0:12}): $([ "$OLD_APP_SWITCHES" = 1 ] && echo "in this commit: 40-up.sh requires it" || echo "not in this commit: inert")"
 pass "backend HEAD=$BE12 \"$(git -C "$BE_DIR" log -1 --format=%s | cut -c1-80)\""
 [ -f "$BE_DIR/.dockerignore" ] && grep -qx '\*\*/.env' "$BE_DIR/.dockerignore" || die ".dockerignore with **/.env missing: PR #25 is not in this commit"
 [ -f "$BE_DIR/scripts/mainnetSwitch.js" ] || die "scripts/mainnetSwitch.js missing: PR #27 is not in this commit"
@@ -197,8 +209,8 @@ n=$(docker run --rm --network none --entrypoint sh "$WEB_IMAGE" -c 'grep -rl "BG
 # ---------------------------------------------------------------------------
 step "6. image tags for compose"
 umask 077
-printf 'API_IMAGE=%s\nWEB_IMAGE=%s\nINFRA_ONLY=%s\n' "$API_IMAGE" "$WEB_IMAGE" "$INFRA_ONLY" > "$NEW_DIR/.env"
-say "$NEW_DIR/.env: API_IMAGE=$API_IMAGE WEB_IMAGE=$WEB_IMAGE INFRA_ONLY=$INFRA_ONLY"
+printf 'API_IMAGE=%s\nWEB_IMAGE=%s\nINFRA_ONLY=%s\nOLD_APP_SWITCHES=%s\n' "$API_IMAGE" "$WEB_IMAGE" "$INFRA_ONLY" "$OLD_APP_SWITCHES" > "$NEW_DIR/.env"
+say "$NEW_DIR/.env: API_IMAGE=$API_IMAGE WEB_IMAGE=$WEB_IMAGE INFRA_ONLY=$INFRA_ONLY OLD_APP_SWITCHES=$OLD_APP_SWITCHES"
 [ "$INFRA_ONLY" = 0 ] || say "!!!!! $INFRA_ONLY_BANNER"
 df -h / | tail -1; docker system df --format '{{.Type}} {{.Size}} {{.Reclaimable}}' | grep -E 'Images|Build'
 say "optional: docker builder prune -f   (frees the build cache these builds left; images stay)"

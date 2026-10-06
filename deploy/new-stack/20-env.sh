@@ -45,6 +45,10 @@
 # sha256 comparisons (match/differ). Never a value. Multi-line quoted values, comments, blank lines, duplicate
 # names and `export` prefixes in the old file are handled; values that are kept are copied byte for byte.
 #
+# REQUIRED, no default: REHEARSAL_CLIENT_ID=<the partner's client id>, written as SSO_TGE_CLIENT_ID. Since backend fd2d4e9
+#   the api refuses tge and tge-rehearsal at boot, and any id that is not [A-Za-z0-9._-]{1,64} (common.sh
+#   client_id_check applies the same rule). A run that passes records it in settings.env; later runs reuse it, and an
+#   override that differs from the record stops (99-teardown.sh removes the record).
 # Overridable for round 2 or once the partner sends its test site (defaults in brackets):
 #   REHEARSAL_DB [ddc_rehearsal]
 #   REHEARSAL_REDIRECT_URIS [https://tge-rehearsal.invalid/oauth/callback]  (.invalid never resolves: boot-valid placeholder)
@@ -75,9 +79,11 @@ SEC="$NEW_DIR/secrets"
 
 guard_db_name "$REHEARSAL_DB"
 case "$REHEARSAL_DB" in ddc_rehearsal|ddc_rehearsal2) ;; *) die "REHEARSAL_DB must be ddc_rehearsal or ddc_rehearsal2";; esac
+client_id_resolve   # REHEARSAL_CLIENT_ID: the override or the record; required, no default
 for p in "$OUT" "$OUT_DB" "$SEC"; do guard_write_path "$p"; done
 run_begin 20-env "$@"
 settings_say
+say "rehearsal client id: $REHEARSAL_CLIENT_ID ($CLIENT_ID_SOURCE)"
 [ -r "$OLD_ENV" ] || die "old env file $OLD_ENV not readable"
 [ -r "$FE_ENV_TGE" ] || die "frontend .env.tge not found at $FE_ENV_TGE (10-build.sh unpacks it)"
 old_snapshot_begin
@@ -245,7 +251,7 @@ setv LOGIN_MISSING_IDTOKEN_MEANS_OLD_APP on
 # 5.2 TGE SSO (rehearsal client)
 setv SSO_TGE_ENABLED true
 setv SSO_ENVIRONMENT prod
-setv SSO_TGE_CLIENT_ID tge-rehearsal
+setv SSO_TGE_CLIENT_ID "$REHEARSAL_CLIENT_ID"
 setv SSO_TGE_CLIENT_NAME "DDC TGE"
 setv SSO_TGE_CLIENT_SECRET_SHA256 "$TGE_SECRET_SHA"
 setv SSO_TGE_REDIRECT_URIS "$REHEARSAL_REDIRECT_URIS"
@@ -370,9 +376,15 @@ for n in $NEW_NAMES; do case "$n" in SSO_*|WEB3AUTH_*) inlist "$n" "$SET_NAMES $
 pass "every SSO_* / WEB3AUTH_* name is either set by the runbook tables or in the unchanged list"
 say "SMTP_* names emptied: $(printf '%s\n' $SET_NAMES | grep -c '^SMTP_' || true)"
 say "kept and needed: APNS_KEY_ID/APNS_TEAM_ID (boot requires them; key file is a throwaway), PASS_TYPE_ID, OPS_ADMIN_* (own stack)"
-say "rehearsal TGE client: id=tge-rehearsal, plaintext secret only in $SEC/tge_rehearsal_client_secret (hand over out of band)"
+v=$(getv "$CHK" SSO_TGE_CLIENT_ID)
+[ "$v" = "$REHEARSAL_CLIENT_ID" ] || die "SSO_TGE_CLIENT_ID in the new file is not REHEARSAL_CLIENT_ID"
+( client_id_check "$v" ) || die "SSO_TGE_CLIENT_ID in the new file would stop the api at boot (backend fd2d4e9)"
+unset v
+pass "SSO_TGE_CLIENT_ID=$REHEARSAL_CLIENT_ID: matches [A-Za-z0-9._-]{1,64} and is neither tge nor tge-rehearsal (the api's boot rule since backend fd2d4e9)"
+say "rehearsal TGE client: id=$REHEARSAL_CLIENT_ID, plaintext secret only in $SEC/tge_rehearsal_client_secret (hand over out of band)"
 old_snapshot_assert
 step "install"
+client_id_record   # only now, after every check passed: later runs reuse it
 if [ -f "$OUT" ] && ! cmp -s "$OUT" "$TMP"; then cp -p "$OUT" "$OUT.prev"; chmod 600 "$OUT.prev"; say "previous version kept as $(basename "$OUT").prev"; fi
 mv "$TMP" "$OUT"; ENV_OK=1
 pass "$OUT installed (mode $(stat -c %a "$OUT" 2>/dev/null || stat -f %Lp "$OUT")) after every check passed"
