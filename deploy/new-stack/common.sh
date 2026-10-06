@@ -289,6 +289,9 @@ guard_db_name() {
 #    complete when the script returns. The scripts print no secret values, so the log holds none either. GNU tee -p
 #    keeps writing the log after the SSH session ends; the script itself goes on to its end, because its stdout (the
 #    pipe to tee) stays open (no tty: Ctrl-C on the Mac or a dropped connection does not stop it; see APPROVAL.md).
+#    tee ignores HUP, INT, TERM and QUIT: a signal to the whole process group (Ctrl-C or a hangup of an interactive
+#    session on the server) reaches the script, and what the script then does about it (30-nginx.sh's rollback) still
+#    reaches the log; tee ends when the script closes the pipe.
 #    A write script started by a logged run (99-teardown.sh -> 30-nginx.sh undo) writes into the parent's log.
 # 2. One write run at a time: an exclusive flock on $NEW_DIR/.lock (600, holds the holder's pid/label/start time).
 #    A second write run stops at once and names the holder. A child write script of a run that holds the lock
@@ -310,9 +313,9 @@ run_begin() {
     export DDC_RUN_LOG="$log"
     set +e
     if tee -p </dev/null >/dev/null 2>&1; then   # GNU tee: a closed SSH session does not stop the log
-      "$BASH" "$0" "$@" 2>&1 | tee -p -a "$log"; rc=${PIPESTATUS[0]}
+      "$BASH" "$0" "$@" 2>&1 | ( trap '' HUP INT TERM QUIT; exec tee -p -a "$log" ); rc=${PIPESTATUS[0]}
     else
-      "$BASH" "$0" "$@" 2>&1 | tee -a "$log"; rc=${PIPESTATUS[0]}
+      "$BASH" "$0" "$@" 2>&1 | ( trap '' HUP INT TERM QUIT; exec tee -a "$log" ); rc=${PIPESTATUS[0]}
     fi
     exit "$rc"
   fi
@@ -544,6 +547,19 @@ host_codes() { # <host...>: "host=<http code>" for GET /, or "host=<http code>/<
   done
   printf '%s' "${out% }"
 }
+# True when <host_codes output> probed https and every https code is 000: something listens on the TLS port, but nothing
+# answered https on 127.0.0.1 there (nginx may listen on 443 only on another address).
+tls_codes_all_000() { # <host_codes output>
+  local w seen=0
+  for w in $1; do case "$w" in */*) seen=1; [ "${w##*/}" = 000 ] || return 1;; esac; done
+  [ "$seen" = 1 ]
+}
+# After a before/after comparison that matched: say so when its https half proved nothing (000 everywhere, both times).
+tls_probe_note() { # <before> <after>
+  if tls_codes_all_000 "$1" && tls_codes_all_000 "$2"; then
+    warn "https on 127.0.0.1:$NGINX_LOCAL_TLS_PORT answered no host (000 for every host, before and after): something listens on that port, but not for 127.0.0.1, so the comparison covered http only"
+  fi
+}
 
 # ---------------------------------------------------------------------------
 # This stack, and its vhosts, as the host nginx serves them (30-nginx.sh, 40-up.sh).
@@ -574,11 +590,24 @@ vhosts_ours() {
     [ "$(vhost_state avail "$h")" = ours ] && [ "$(vhost_state enabled "$h")" = ours ] || return 1
   done
 }
+# This package's vhost copies serve a random token to 127.0.0.1 only (30-nginx.sh render: `location = $VHOST_TOKEN_PATH`,
+# the value 30-nginx.sh apply writes once to $NEW_DIR/vhost-token). Another stack behind the same names answers the same
+# 401 and the same build marker, but not this token: the token answered through the host nginx for <API_HOST> and
+# <APP_HOST> shows that nginx really serves this package's vhosts for them, and those proxy only to API_PORT and WEB_PORT,
+# which port_check ties to this stack's own containers.
+VHOST_TOKEN_PATH=/.well-known/ddcnew-vhost-token
+vhost_token() { local t; t=$(cat "$NEW_DIR/vhost-token" 2>/dev/null || true); [[ "$t" =~ ^[0-9a-f]{32}$ ]] && printf '%s' "$t"; }
 # The Host-header checks through the host nginx (40-up.sh step 7, and 30-nginx.sh apply when it writes the vhosts of a
-# stack that is already up): <API_HOST>/partner/tge/me answers 401 JSON, <APP_HOST>/ddc-build.json is the tge mainnet
-# build for https://<API_HOST>/api. Dies on any difference.
+# stack that is already up): nginx answers this package's vhost token for both hosts, <API_HOST>/partner/tge/me answers
+# 401 JSON, <APP_HOST>/ddc-build.json is the tge mainnet build for https://<API_HOST>/api. Dies on any difference.
 host_checks() {
-  local body c ct
+  local body c ct tok h
+  tok=$(vhost_token) || die "$NEW_DIR/vhost-token is missing or damaged: run ./30-nginx.sh apply (it writes the token into this package's vhosts)"
+  for h in "$API_HOST" "$APP_HOST"; do
+    [ "$(curl -s -m 10 -H "Host: $h" "$NGINX_LOCAL_URL$VHOST_TOKEN_PATH" || true)" = "$tok" ] \
+      && pass "$h: the host nginx answers this package's vhost token, so it serves this package's vhost for $h" \
+      || die "$h: the host nginx does not answer this package's vhost token, so it does not serve this package's vhost for $h (another vhost, or a configuration that was not reloaded)"
+  done
   body=$(curl -s -m 10 -H "Host: $API_HOST" "$NGINX_LOCAL_URL/partner/tge/me" || true)
   c=$(host_code "$API_HOST" /partner/tge/me); ct=$(curl -s -o /dev/null -m 10 -w '%{content_type}' -H "Host: $API_HOST" "$NGINX_LOCAL_URL/partner/tge/me" || true)
   say "$API_HOST /partner/tge/me -> $c $ct body_keys=$(printf '%s' "$body" | python3 -c 'import json,sys; print(",".join(sorted(json.load(sys.stdin).keys())))' 2>/dev/null || echo non-json)"

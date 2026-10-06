@@ -179,7 +179,7 @@ fi
 
 step "8. old stack untouched"
 OLD_AFTER=$(host_codes "${OTHER_HOSTS[@]}")
-if [ "$OLD_BEFORE" = "$OLD_AFTER" ]; then pass "every other host answers as before ($OLD_AFTER)"
+if [ "$OLD_BEFORE" = "$OLD_AFTER" ]; then pass "every other host answers as before ($OLD_AFTER)"; tls_probe_note "$OLD_BEFORE" "$OLD_AFTER"
 else
   printf 'FAIL status codes of other hosts changed: before [%s] after [%s]\n' "$OLD_BEFORE" "$OLD_AFTER" >&2
   ( old_snapshot_assert ) || true   # report containers and old files too, then stop

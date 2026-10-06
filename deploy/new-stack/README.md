@@ -29,8 +29,10 @@ removes it. Race's own rehearsal (containers `ddc-mainnet-*`, `/root/ddc-mainnet
 fingerprinted like the old stack: `30-nginx.sh` never overwrites a vhost it did not write unless
 `TAKE_OVER_VHOSTS=yes` is passed after Sloan and Race agree. Even then it takes over only entries that proxy to a
 `ddc-mainnet-*` port, only after this stack answers on its own ports (`40-up.sh` first), it backs the entries up first,
-puts them back on any failure after removing them, and `restore` puts them back later. Which stack serves the rehearsal
-hosts, and the commands for either outcome: [APPROVAL.md](APPROVAL.md) section 9.
+puts them back on any failure after removing them (a signal to the script or its process group included), and
+`restore` puts them back later. To undo a take-over, run `30-nginx.sh restore` first and `99-teardown.sh` after it:
+`undo` and teardown refuse until the restore. Which stack serves the rehearsal hosts, and the commands for either
+outcome: [APPROVAL.md](APPROVAL.md) section 9.
 
 `20-env.sh` needs `REHEARSAL_CLIENT_ID=<the partner's client id>` on its first run (there is no default; the api
 refuses `tge` and `tge-rehearsal` at boot, and anything outside `[A-Za-z0-9._-]{1,64}`). The run records it in

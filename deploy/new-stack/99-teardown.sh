@@ -16,9 +16,10 @@
 #                      Irreversible; the rehearsal TGE client secret and the db password are gone with it.
 #   Takes the run lock /root/ddcnew/.lock and logs to /root/ddcnew/logs/ (common.sh run_begin).
 #   Never touches /root/backup (P1 dumps and cron) or anything of the old stack, nor Race's mainnet rehearsal
-#   (ddc-mainnet-* containers, /root/ddc-mainnet, his vhosts). After a vhost take-over, the backed-up entries stay in
-#   /root/ddcnew/vhost-takeover/ until ./30-nginx.sh restore puts them back (a separate, approved step); --delete-dir
-#   refuses while a backup there was never restored.
+#   (ddc-mainnet-* containers, /root/ddc-mainnet, his vhosts). After a vhost take-over it refuses, in every mode and
+#   before it changes anything, while a backup in /root/ddcnew/vhost-takeover/ was never restored: ./30-nginx.sh
+#   restore first (his entries back and this package's removed, in one reload), then this script. Without the restore,
+#   step 2 would leave his host names with no vhost at all until someone restored them.
 #   STAYS BEHIND in every mode: the base images the builds pulled (node, nginx, ...) and postgres:17 (shared with
 #   the old stack), and the build cache (docker builder prune -f, or p2-disk.sh apply, removes the cache).
 # UNDO
@@ -35,6 +36,10 @@ for a in "$@"; do case "$a" in --remove-images) RM_IMAGES=1;; --delete-dir) RM_D
 run_begin 99-teardown "$@"
 settings_say
 old_snapshot_begin
+# After a take-over: restore first (header). Checked before anything changes; an interrupted backup (no MANIFEST) holds
+# nothing that was taken over and does not count.
+b=""; for d in "$NEW_DIR"/vhost-takeover/*/; do if [ -f "$d/MANIFEST" ] && [ ! -e "$d/RESTORED" ]; then b="$b $(basename "$d")"; fi; done
+[ -z "$b" ] || die "refusing: $NEW_DIR/vhost-takeover holds the backup of vhosts this package took over and never restored ($b). Run ./30-nginx.sh restore first (the other party's entries go back and this package's go, in one reload), then ./99-teardown.sh"
 
 # Fallback for step 1: remove project ddcnew by its compose label (exact match), never anything else.
 remove_project_by_label() {
@@ -88,8 +93,6 @@ fi
 
 if [ "$RM_DIR" = 1 ]; then
   step "4. delete $NEW_DIR"
-  b=""; for d in "$NEW_DIR"/vhost-takeover/*/; do if [ -f "$d/MANIFEST" ] && [ ! -e "$d/RESTORED" ]; then b="$b $(basename "$d")"; fi; done
-  [ -z "$b" ] || die "refusing --delete-dir: $NEW_DIR/vhost-takeover holds the backup of vhosts this package took over and never restored ($b); run ./30-nginx.sh restore first"
   [ "$NEW_DIR" = /root/ddcnew ] && [ -d /root/ddcnew ] && [ ! -L /root/ddcnew ] || die "refusing: $NEW_DIR is not the real /root/ddcnew directory"
   rm -rf --one-file-system /root/ddcnew
   [ ! -e /root/ddcnew ] && pass "/root/ddcnew deleted" || die "/root/ddcnew still exists"

@@ -43,6 +43,17 @@
 #   10d. every allowlisted override with ;, $(), backticks, a newline or a CR is refused before connecting; the
 #      settings, the client id and TAKE_OVER_VHOSTS are checked with the server's rules before connecting.
 #   12. the Host-header checks after the reload, the https probe with SNI on 443 when it is served.
+# Follow-ups of the review of #42 (10-06):
+#   4. both copies serve this package's vhost token to 127.0.0.1 only. 12. the checks after a reload start with it; a
+#      listener on 443 that never answers ends each probe at its time limit, with a WARN. 12b. after a take-over those
+#      checks always run: a stack that stops answering, a host nginx that still serves the other party, a reload that
+#      reports a failure and apply's final old-stack check each roll the take-over back exactly; the rollback compares the
+#      other hosts again and reports its own failed reload; undo and 99-teardown.sh refuse until a take-over is restored;
+#      restore keeps what a half-finished rollback already put back and arms its own rollback before it sets anything
+#      aside; a take-over next to an entry of this package's is refused; S4 also refuses wildcard, regex and "_" names, a
+#      default server, other includes, *_pass, a commented-out proxy_pass, a remote host, and takes over a certbot-style
+#      vhost. 12c. TERM to the script, and TERM, HUP and INT to its whole process group, right after the removal: rolled
+#      back exactly and logged, under bash 3.2 (macOS) and 5.1 (ubuntu:jammy).
 # No check ends the run early: after the prologue the suite runs without set -e, so a broken state shows up as named
 # FAIL lines, and an EXIT trap always runs the label-only cleanup.
 # Public repository (this package lives in one):
@@ -554,6 +565,15 @@ done
 [ -z "$miss" ] && [ "$(grep -c 'partner-info' "$NG/$D_API_HOST" || true)" = 0 ] && ! grep -q 'fonts\.g' "$NG/$D_APP_HOST" \
   && ok "app copy: one /partner-info/ location (alias /srv/ddcnew/partner-info/, no-store, noindex, no-referrer, DENY, nosniff, the CSP with form-action 'none' and base-uri 'none', no Google Fonts); api copy: none" \
   || bad "partner-info location in the rendered copies; missing or repeated:$miss"
+# This package's vhost token location (common.sh host_checks): in both copies, once, with the token of vhost-token (32 hex
+# characters, mode 600), answered to 127.0.0.1 only.
+TOK=$(cat "$T/ddcnew/vhost-token" 2>/dev/null || true); tl=0
+for f in "$NG/$D_API_HOST" "$NG/$D_APP_HOST"; do
+  [ "$(grep -c 'location = /.well-known/ddcnew-vhost-token {' "$f")" = 1 ] && [ "$(grep -cF "return 200 \"$TOK\";" "$f")" = 1 ] \
+    && [ "$(grep -c 'allow 127.0.0.1;' "$f")" = 1 ] && [ "$(grep -c 'deny all;' "$f")" = 1 ] && tl=$((tl + 1))
+done
+[[ "$TOK" =~ ^[0-9a-f]{32}$ ]] && [ "$tl" = 2 ] && [ "$(stat -f %Lp "$T/ddcnew/vhost-token")" = 600 ] \
+  && ok "both copies: one vhost token location (the 32-hex token of vhost-token, mode 600), answered to 127.0.0.1 only" || bad "vhost token location in the rendered copies (tl=$tl)"
 # Outcome B: other names and ports render the same way.
 NGB="$T/nginx-b"; mkdir -p "$NGB"
 if DDC_LOCAL_TEST=1 NEW_DIR="$T/nginx-b-new" API_HOST=api-coexist.datadance.ai APP_HOST=app-coexist.datadance.ai API_PORT=10031 WEB_PORT=9031 \
@@ -1300,8 +1320,9 @@ vhosts() { # <dir>: avail/ and enabled/ with the two synthetic vhost fixtures, c
 }
 NX="$T/nginx-stop"; vhosts "$NX"
 ngx() { # <dir> <host whose code changes after the reload | none> <30-nginx.sh args...>; output in <dir>/out, status in $RC
+  # NGX_TIMEOUT=<s>: stop the run after that long (timeout's exit 124 then shows that it hung)
   local d="$1" ch="$2"; shift 2; rm -f "$d/reloaded" "$d/reloads"; RC=0
-  env PATH="$d/bin:$ST:$PATH" STUB_DIR="$d" CHANGE_HOST="$ch" CHANGE_TLS_HOST="${CHANGE_TLS_HOST:-none}" OUR_HOSTS="${OUR_HOSTS:-$D_API_HOST $D_APP_HOST}" \
+  ${NGX_TIMEOUT:+timeout "$NGX_TIMEOUT"} env PATH="$d/bin:$ST:$PATH" STUB_DIR="$d" CHANGE_HOST="$ch" CHANGE_TLS_HOST="${CHANGE_TLS_HOST:-none}" OUR_HOSTS="${OUR_HOSTS:-$D_API_HOST $D_APP_HOST}" \
     STUB_API_HOST="${STUB_API_HOST:-$D_API_HOST}" STUB_API_PORT="${STUB_API_PORT:-$D_API_PORT}" STUB_WEB_PORT="${STUB_WEB_PORT:-$D_WEB_PORT}" \
     DDC_LOCAL_TEST=1 NEW_DIR="${NGX_NEW:-$d/ddcnew}" NGINX_AVAIL="$d/avail" NGINX_ENABLED="$d/enabled" NGINX_CONFD="$d/confd" MAINNET_DIR="$d/mainnet" \
     ${NGX_ENV:-} bash "$PKG/30-nginx.sh" "$@" > "$d/out" 2>&1 || RC=$?
@@ -1315,7 +1336,8 @@ ng none apply
   && ok "30-nginx.sh apply, other hosts' codes unchanged -> passes; both files carry the marker line; the stack is not up, so the Host-header checks are left to 40-up.sh" || { cat "$NX/out"; bad "apply baseline (rc=$RC)"; }
 touch "$NX/stack-up"; ng none apply
 [ "$RC" = 0 ] && grep -q "^PASS $D_API_HOST answers 401 JSON$" "$NX/out" && grep -q "^PASS $D_APP_HOST serves the tge mainnet build for https://$D_API_HOST/api$" "$NX/out" \
-  && ok "30-nginx.sh apply with the stack up: the Host-header checks run right after the reload (401 JSON through $D_API_HOST, the build marker through $D_APP_HOST)" || { cat "$NX/out"; bad "apply with the stack up (rc=$RC)"; }
+  && grep -q "^PASS $D_API_HOST: the host nginx answers this package's vhost token" "$NX/out" && grep -q "^PASS $D_APP_HOST: the host nginx answers this package's vhost token" "$NX/out" \
+  && ok "30-nginx.sh apply with the stack up: the Host-header checks run right after the reload (this package's vhost token for both hosts, 401 JSON through $D_API_HOST, the build marker through $D_APP_HOST)" || { cat "$NX/out"; bad "apply with the stack up (rc=$RC)"; }
 NGX_ENV="STUB_VIA_NGINX_BROKEN=1" ng none apply
 [ "$RC" = 1 ] && [ "$(tail -1 "$NX/out")" = "FAIL the Host-header checks failed after the reload — run ./30-nginx.sh undo now" ] \
   && ok "30-nginx.sh apply: a Host-header check that fails after the reload STOPS and says to undo" || { tail -5 "$NX/out"; bad "failing Host-header check (rc=$RC)"; }
@@ -1327,10 +1349,19 @@ ng api.datadance.ai apply
 # https with SNI on 443 joins the check whenever something listens there; a change on https alone is caught too.
 touch "$NX/tls-on"; ng none apply
 [ "$RC" = 0 ] && grep -qF "other hosts before: admin.datadance.ai=200/200 api.datadance.ai=200/200 app.datadance.ai=200/200 business.datadance.ai=200/200" "$NX/out" \
+  && ! grep -q '^WARN https on' "$NX/out" \
   && ok "with a listener on 443 every other host is probed over http and over https with SNI (host=<http>/<https>)" || { grep 'other hosts' "$NX/out"; bad "https probe (rc=$RC)"; }
+# stub-curl.py picks the https virtual server by the SNI name only (as nginx does for TLS): a probe without SNI misses this.
 CHANGE_TLS_HOST=app.datadance.ai ng none apply
 [ "$RC" = 1 ] && grep -qF "after [admin.datadance.ai=200/200 api.datadance.ai=200/200 app.datadance.ai=200/502" "$NX/out" \
-  && ok "a host that changes only over https after the reload STOPS apply" || { grep -E 'FAIL|other hosts' "$NX/out"; bad "https-only change (rc=$RC)"; }
+  && ok "a host that changes only over https (SNI app.datadance.ai) after the reload STOPS apply" || { grep -E 'FAIL|other hosts' "$NX/out"; bad "https-only change (rc=$RC)"; }
+# A listener on 443 that never completes TLS: every https probe stops at its time limit (curl -m; the stub hangs without
+# one), so apply ends, and a WARN says that the https half of the comparison proved nothing (000 everywhere, both times).
+NGX_TIMEOUT=120 NGX_ENV="STUB_TLS_HANG=1" ng none apply
+[ "$RC" = 0 ] && grep -qF "other hosts before: admin.datadance.ai=200/000 api.datadance.ai=200/000 app.datadance.ai=200/000 business.datadance.ai=200/000" "$NX/out" \
+  && grep -q '^WARN https on 127.0.0.1:443 answered no host (000 for every host, before and after)' "$NX/out" \
+  && ok "a listener on 443 that never answers: each https probe ends at its time limit (000), apply finishes, and a WARN says that the comparison covered http only" \
+  || { tail -4 "$NX/out"; bad "https probe against a listener that never answers (rc=$RC; 124 = hung)"; }
 rm -f "$NX/tls-on"
 ng app.datadance.ai undo
 [ "$RC" = 1 ] && grep -q "FAIL status codes of other hosts changed after the reload — this package's vhosts are already removed" "$NX/out" && [ ! -e "$NX/avail/$D_API_HOST" ] \
@@ -1350,18 +1381,21 @@ grep -q '^if vhosts_ours; then$' "$PKG/40-up.sh" && grep -q '^  host_checks$' "$
 echo; echo "== 12b. 30-nginx.sh and the vhosts it did not write (Race's at the default names): refusal, take-over with backup, rollback, restore, limits, clash, port, outcome B"
 NR="$T/nginx-race"; vhosts "$NR"
 mainnet_docker() { # <dir> [port]: stub docker with Race's two containers, ddc-mainnet-api (host port 10010) and
-  # ddc-mainnet-app (9011); with <port>, ddc-mainnet-api also publishes 127.0.0.1:<port> (a port held by another container)
+  # ddc-mainnet-app (9011), and two of the old production stack, ddc-ddc-app-1 (9001) and ddc-backend-ddc-backend-api-1
+  # (10000): only Race's ports may count as his. With <port>, ddc-mainnet-api also publishes 127.0.0.1:<port> (a port held
+  # by another container). ddc-mainnet-api's restart count is $STUB_DIR/restarts when that file exists (else 0).
   cat > "$1/bin/docker" <<STUB
 #!/bin/sh
 HELD="${2:-}"
 STUB
   cat >> "$1/bin/docker" <<'STUB'
 case "$1" in
-  ps) case "$*" in *"{{.Names}} {{.Ports}}"*) [ -z "$HELD" ] || echo "ddc-mainnet-api 127.0.0.1:$HELD->3000/tcp";; *"{{.Names}}"*) printf '%s\n' ddc-mainnet-api ddc-mainnet-app;; esac;;
+  ps) case "$*" in *"{{.Names}} {{.Ports}}"*) [ -z "$HELD" ] || echo "ddc-mainnet-api 127.0.0.1:$HELD->3000/tcp";; *"{{.Names}}"*) printf '%s\n' ddc-mainnet-api ddc-mainnet-app ddc-ddc-app-1 ddc-backend-ddc-backend-api-1;; esac;;
   inspect) for c; do :; done
            case "$*" in
-             *PortBindings*) case "$c" in ddc-mainnet-api) echo "10010 ";; ddc-mainnet-app) echo "9011 ";; esac;;
-             *"{{.Name}}|{{.Id}}"*) echo "/$c|id-$c|running|2026-10-05T04:00:00Z|0|unless-stopped";;
+             *PortBindings*) case "$c" in ddc-mainnet-api) echo "10010 ";; ddc-mainnet-app) echo "9011 ";; ddc-ddc-app-1) echo "9001 ";; ddc-backend-ddc-backend-api-1) echo "10000 ";; esac;;
+             *"{{.Name}}|{{.Id}}"*) r=0; if [ "$c" = ddc-mainnet-api ] && [ -f "$STUB_DIR/restarts" ]; then r=$(cat "$STUB_DIR/restarts"); fi
+                                   echo "/$c|id-$c|running|2026-10-05T04:00:00Z|$r|unless-stopped";;
            esac;;
 esac
 exit 0
@@ -1394,6 +1428,11 @@ NGX_ENV="TAKE_OVER_VHOSTS=yes" nr none apply
   && vsnap | cmp -s - "$NR/orig.snap" && [ -z "$(backups "$NR")" ] && [ ! -f "$NR/reloaded" ] \
   && ok "TAKE_OVER_VHOSTS=yes while this stack does not answer on 127.0.0.1:$D_API_PORT: refused before any backup or change (40-up.sh first)" || { cat "$NR/out"; bad "take-over before the stack is up (rc=$RC)"; }
 touch "$NR/stack-up"
+# S3: the api port must answer exactly 401 (not merely something).
+NGX_ENV="TAKE_OVER_VHOSTS=yes STUB_API_CODE=200" nr none apply
+[ "$RC" = 1 ] && grep -q "^FAIL refusing TAKE_OVER_VHOSTS=yes until this stack answers on its own ports: api on 127.0.0.1:$D_API_PORT answers 200 for /partner/tge/me, not 401" "$NR/out" \
+  && vsnap | cmp -s - "$NR/orig.snap" && [ -z "$(backups "$NR")" ] && [ ! -f "$NR/reloaded" ] \
+  && ok "TAKE_OVER_VHOSTS=yes while the api on 127.0.0.1:$D_API_PORT answers 200 instead of 401: refused before any backup or change" || { cat "$NR/out"; bad "take-over with the api answering 200 (rc=$RC)"; }
 NGX_ENV="TAKE_OVER_VHOSTS=yes" nr none apply
 bk=$(backups "$NR" | tail -n 1)
 copies_ok=0
@@ -1406,15 +1445,22 @@ fi
 [ "$RC" = 0 ] && [ "$copies_ok" = 1 ] && [ "$(head -n 1 "$NR/avail/$D_API_HOST")" = "$MARKER" ] && [ "$(head -n 1 "$NR/avail/$D_APP_HOST")" = "$MARKER" ] \
   && [ "$(readlink "$NR/enabled/$D_APP_HOST")" = "$NR/avail/$D_APP_HOST" ] && grep -q '^PASS every other host answers exactly as before (6 hosts)' "$NR/out" \
   && grep -q "^PASS $D_API_HOST answers 401 JSON$" "$NR/out" && grep -q '^PASS take-over complete: ' "$NR/out" && grep -q '^PASS old-stack files unchanged' "$NR/out" \
+  && grep -q "^PASS $D_API_HOST: the host nginx answers this package's vhost token" "$NR/out" && grep -q "^PASS $D_APP_HOST: the host nginx answers this package's vhost token" "$NR/out" \
   && [ "$(vsnap | grep -E 'tge(-api)?\.datadance\.ai' | tr '\n' ' ')" = "$(grep -E 'tge(-api)?\.datadance\.ai' "$NR/orig.snap" | tr '\n' ' ')" ] \
-  && ok "TAKE_OVER_VHOSTS=yes with this stack up: the 4 entries backed up first (complete MANIFEST: sha256 of each copy, the link target), replaced, and the Host-header checks pass through the new vhosts; Race's other vhosts untouched" \
+  && ok "TAKE_OVER_VHOSTS=yes with this stack up: the 4 entries backed up first (complete MANIFEST: sha256 of each copy, the link target), replaced, and the Host-header checks pass through the new vhosts (their token first); Race's other vhosts untouched" \
   || { cat "$NR/out"; bad "take-over (rc=$RC copies_ok=$copies_ok)"; }
+# Recovery order: restore first (one reload swaps the entries back), never undo first (the names would have no vhost).
 nr none undo
-[ "$RC" = 0 ] && grep -q "^take-over backup not restored yet: " "$NR/out" && [ ! -e "$NR/avail/$D_API_HOST" ] && [ ! -e "$NR/enabled/$D_APP_HOST" ] \
-  && ok "undo after a take-over removes this package's entries and names the backup that restore puts back" || { cat "$NR/out"; bad "undo after take-over (rc=$RC)"; }
+[ "$RC" = 1 ] && grep -q "^FAIL refusing: the take-over backup(s) $(basename "$bk") under .* were never restored. Run ./30-nginx.sh restore first" "$NR/out" \
+  && [ "$(head -n 1 "$NR/avail/$D_API_HOST")" = "$MARKER" ] && [ -L "$NR/enabled/$D_APP_HOST" ] && [ ! -f "$NR/reloaded" ] \
+  && ok "undo after a take-over refuses while its backup is not restored (restore first); nothing changed, no reload" || { cat "$NR/out"; bad "undo after take-over (rc=$RC)"; }
 nr none restore
 [ "$RC" = 0 ] && vsnap | cmp -s - "$NR/orig.snap" && [ -f "$bk/RESTORED" ] && grep -q '^PASS restored 4 entries from ' "$NR/out" && grep -q '^PASS old-stack files unchanged' "$NR/out" \
-  && ok "restore puts Race's 4 entries back exactly (content, modes, the link target, the regular file in sites-enabled) and marks the backup RESTORED" || { cat "$NR/out"; vsnap | diff "$NR/orig.snap" - || true; bad "restore (rc=$RC)"; }
+  && [ "$(nreloads "$NR")" = 1 ] && [ -z "$(ls -A "$NR/ddcnew/vhost-restore-hold" 2>/dev/null)" ] \
+  && ok "restore right after the take-over: this package's entries set aside, Race's 4 put back exactly (content, modes, the link target, the regular file in sites-enabled) in one reload, the backup marked RESTORED" || { cat "$NR/out"; vsnap | diff "$NR/orig.snap" - || true; bad "restore (rc=$RC)"; }
+nr none undo
+[ "$RC" = 0 ] && grep -q "^PASS nothing of this package's at $D_API_HOST / $D_APP_HOST: nothing removed, nginx not reloaded" "$NR/out" && vsnap | cmp -s - "$NR/orig.snap" \
+  && ok "after the restore, undo (and so 99-teardown.sh) finds nothing of this package's at the names: no change, no reload" || { cat "$NR/out"; bad "undo after the restore (rc=$RC)"; }
 nr none restore "$(basename "$bk")"
 [ "$RC" = 1 ] && grep -q 'was already restored' "$NR/out" && vsnap | cmp -s - "$NR/orig.snap" && ok "a second restore of the same backup is refused" || { cat "$NR/out"; bad "second restore (rc=$RC)"; }
 # E3: restore when nginx -t fails with the restored entries: this package's entries come back, never neither.
@@ -1441,21 +1487,24 @@ bk=$(backups "$NR" | tail -n 1)
   && grep -q "rolled back: the other party's entries are back; nginx was not reloaded" "$NR/out" && [ ! -f "$NR/reloaded" ] \
   && ok "a failure after Race's entries were removed (before nginx -t) puts them back at once from the backup (RESTORED), exactly; nothing reloaded" || { cat "$NR/out"; vsnap | diff "$NR/orig.snap" - || true; bad "rollback before nginx -t (rc=$RC)"; }
 # E1 + E5: a failure after the reload (another host changed): the take-over is rolled back and nginx reloaded again;
-# the message names undo and restore in case the rollback could not finish.
+# the message names restore in case the rollback could not finish. The rollback compares the other hosts again after its
+# reload, and says so when one still answers differently (the stub's host stays changed).
 NGX_ENV="TAKE_OVER_VHOSTS=yes" nr api.datadance.ai apply
 bk=$(backups "$NR" | tail -n 1)
-[ "$RC" = 1 ] && grep -qF "the take-over is rolled back now, the other party's entries go back from the backup (if that fails: ./30-nginx.sh undo, then ./30-nginx.sh restore)" "$NR/out" \
+[ "$RC" = 1 ] && grep -qF "the take-over is rolled back now, the other party's entries go back from the backup (if that fails: ./30-nginx.sh restore)" "$NR/out" \
   && vsnap | cmp -s - "$NR/orig.snap" && [ -f "$bk/RESTORED" ] && [ "$(nreloads "$NR")" = 2 ] && grep -q "rolled back: the other party's entries are back and nginx is reloaded with them" "$NR/out" \
-  && ok "another host changing after a take-over's reload: STOP that names undo and restore, then the rollback puts Race's entries back and reloads nginx again (2 reloads)" || { cat "$NR/out"; bad "rollback after the reload (rc=$RC reloads=$(nreloads "$NR"))"; }
+  && grep -q '^FAIL after the rollback the other hosts do not answer as before apply: before \[.*api.datadance.ai=200 .*\] after \[.*api.datadance.ai=502 ' "$NR/out" \
+  && ok "another host changing after a take-over's reload: STOP that names restore, then the rollback puts Race's entries back, reloads nginx again (2 reloads) and reports the host that still answers differently" || { cat "$NR/out"; bad "rollback after the reload (rc=$RC reloads=$(nreloads "$NR"))"; }
 # S3 + E1: the Host-header checks run through the new vhosts right after a take-over's reload; when they fail there, the
-# take-over is rolled back the same way.
+# take-over is rolled back the same way, and the other hosts answer as before apply again.
 NGX_ENV="TAKE_OVER_VHOSTS=yes STUB_VIA_NGINX_BROKEN=1" nr none apply
 bk=$(backups "$NR" | tail -n 1)
 [ "$RC" = 1 ] && grep -qF "FAIL the Host-header checks failed after the reload — the take-over is rolled back now" "$NR/out" \
   && vsnap | cmp -s - "$NR/orig.snap" && [ -f "$bk/RESTORED" ] && [ "$(nreloads "$NR")" = 2 ] && grep -q "rolled back: the other party's entries are back and nginx is reloaded with them" "$NR/out" \
-  && ok "the Host-header checks failing through the new vhosts after a take-over's reload: STOP, Race's entries put back exactly, nginx reloaded again (2 reloads)" || { cat "$NR/out"; bad "rollback after failing Host-header checks (rc=$RC reloads=$(nreloads "$NR"))"; }
+  && grep -q '^PASS after the rollback every other host answers exactly as before apply (6 hosts)' "$NR/out" \
+  && ok "the Host-header checks failing through the new vhosts after a take-over's reload: STOP, Race's entries put back exactly, nginx reloaded again (2 reloads), every other host answers as before apply" || { cat "$NR/out"; bad "rollback after failing Host-header checks (rc=$RC reloads=$(nreloads "$NR"))"; }
 # A rollback that cannot finish (here: the backup copy no longer matches its MANIFEST when the install fails) says to run
-# undo, then restore, with the backup's name.
+# restore, with the backup's name.
 mkdir -p "$NR/bin-e1b"; cp "$NR/bin/docker" "$NR/bin-e1b/docker"
 cat > "$NR/bin-e1b/chmod" <<STUB
 #!/bin/sh
@@ -1468,8 +1517,8 @@ chmod 755 "$NR/bin-e1b/chmod"; mv "$NR/bin" "$NR/bin-ok"; mv "$NR/bin-e1b" "$NR/
 NGX_ENV="TAKE_OVER_VHOSTS=yes" nr none apply
 mv "$NR/bin" "$NR/bin-e1b"; mv "$NR/bin-ok" "$NR/bin"
 bk=$(backups "$NR" | tail -n 1)
-[ "$RC" != 0 ] && grep -qF "FAIL could not put the taken-over entries back: run ./30-nginx.sh undo, then ./30-nginx.sh restore $(basename "$bk")" "$NR/out" && [ ! -e "$bk/RESTORED" ] \
-  && ok "a rollback that cannot finish (the backup no longer matches its MANIFEST) says to run ./30-nginx.sh undo, then ./30-nginx.sh restore $(basename "$bk")" || { tail -6 "$NR/out"; bad "rollback that cannot finish (rc=$RC)"; }
+[ "$RC" != 0 ] && grep -qF "FAIL could not put the taken-over entries back: run ./30-nginx.sh restore $(basename "$bk")" "$NR/out" && [ ! -e "$bk/RESTORED" ] \
+  && ok "a rollback that cannot finish (the backup no longer matches its MANIFEST) says to run ./30-nginx.sh restore $(basename "$bk")" || { tail -6 "$NR/out"; bad "rollback that cannot finish (rc=$RC)"; }
 rm -rf -- "$bk"; rm -f "$NR/avail/$D_API_HOST" "$NR/avail/$D_APP_HOST" "$NR/enabled/$D_API_HOST" "$NR/enabled/$D_APP_HOST"; race_entries "$NR"
 vsnap | cmp -s - "$NR/orig.snap" || bad "test setup: Race's entries not back to the original after the damaged-backup case"
 # nginx -t fails with the new files: the taken-over entries go back at once, nothing is reloaded.
@@ -1480,6 +1529,128 @@ mv "$NR/bin" "$NR/bin-ntf"; mv "$NR/bin-ok" "$NR/bin"
 [ "$RC" = 1 ] && grep -q "rolled back: the other party's entries are back" "$NR/out" && grep -q '^FAIL nginx -t failed with the new vhosts' "$NR/out" && [ ! -f "$NR/reloaded" ] \
   && vsnap | cmp -s - "$NR/orig.snap" && [ -z "$(for b in $(backups "$NR"); do [ -f "$b/RESTORED" ] || echo "$b"; done)" ] \
   && ok "nginx -t failing after a take-over: Race's entries are put back at once (every backup marked RESTORED), nothing reloaded" || { cat "$NR/out"; bad "take-over rollback on nginx -t (rc=$RC)"; }
+# M1: the stack answered before the take-over, then stops answering before the checks after the reload (a crash loop, an
+# OOM kill): after a take-over those checks always run, fail, and the take-over is rolled back (never "complete").
+printf '#!/bin/sh\n[ "$1 $2" = "reload nginx" ] && { touch "$STUB_DIR/reloaded"; echo reload >> "$STUB_DIR/reloads"; rm -f "$STUB_DIR/stack-up"; }\nexit 0\n' > "$NR/bin/systemctl"; chmod 755 "$NR/bin/systemctl"
+NGX_ENV="TAKE_OVER_VHOSTS=yes" nr none apply
+rm -f "$NR/bin/systemctl"; touch "$NR/stack-up"
+bk=$(backups "$NR" | tail -n 1)
+[ "$RC" = 1 ] && ! grep -q '^PASS take-over complete' "$NR/out" && grep -q "^FAIL $D_API_HOST check failed (502" "$NR/out" \
+  && grep -qF "FAIL the Host-header checks failed after the reload — the take-over is rolled back now" "$NR/out" \
+  && vsnap | cmp -s - "$NR/orig.snap" && [ -f "$bk/RESTORED" ] && [ "$(nreloads "$NR")" = 2 ] \
+  && ok "the stack stops answering between the check before a take-over and the checks after its reload: the checks run anyway and fail, the take-over is rolled back exactly (2 reloads), never reported complete" \
+  || { cat "$NR/out"; bad "take-over with a stack that stops answering after the pre-check (rc=$RC reloads=$(nreloads "$NR"))"; }
+# The checks after the reload prove that nginx serves THIS package's vhosts (their token): a host nginx that still serves
+# the other party's vhosts (a configuration that was not reloaded) answers the same 401 and build marker, not the token.
+NGX_ENV="TAKE_OVER_VHOSTS=yes STUB_NGINX_STALE=1" nr none apply
+bk=$(backups "$NR" | tail -n 1)
+[ "$RC" = 1 ] && grep -q "^FAIL $D_API_HOST: the host nginx does not answer this package's vhost token" "$NR/out" && ! grep -q '^PASS take-over complete' "$NR/out" \
+  && vsnap | cmp -s - "$NR/orig.snap" && [ -f "$bk/RESTORED" ] && [ "$(nreloads "$NR")" = 2 ] \
+  && ok "a host nginx that still serves the other party's stack after the reload (same 401, same build marker): no vhost token, so the take-over is rolled back exactly" \
+  || { cat "$NR/out"; bad "take-over with a host nginx that did not switch (rc=$RC)"; }
+# A reload that reports a failure may still have reloaded nginx: the rollback then reloads it again (RELOADED is set first).
+printf '#!/bin/sh\n[ "$1 $2" = "reload nginx" ] && { touch "$STUB_DIR/reloaded"; echo reload >> "$STUB_DIR/reloads"; [ -f "$STUB_DIR/failed-once" ] || { touch "$STUB_DIR/failed-once"; exit 1; }; }\nexit 0\n' > "$NR/bin/systemctl"; chmod 755 "$NR/bin/systemctl"
+rm -f "$NR/failed-once"; NGX_ENV="TAKE_OVER_VHOSTS=yes" nr none apply
+rm -f "$NR/bin/systemctl" "$NR/failed-once"
+bk=$(backups "$NR" | tail -n 1)
+[ "$RC" != 0 ] && vsnap | cmp -s - "$NR/orig.snap" && [ -f "$bk/RESTORED" ] && [ "$(nreloads "$NR")" = 2 ] && grep -q "rolled back: the other party's entries are back and nginx is reloaded with them" "$NR/out" \
+  && ok "systemctl reload reports a failure during a take-over (nginx may have reloaded anyway): the rollback puts Race's entries back and reloads nginx again (2 reloads)" \
+  || { cat "$NR/out"; bad "rollback after a reload that reported a failure (rc=$RC reloads=$(nreloads "$NR"))"; }
+# The rollback says so when its own reload fails (the entries are back on disk; nginx may still serve this package's).
+printf '#!/bin/sh\n[ "$1 $2" = "reload nginx" ] && { echo reload >> "$STUB_DIR/reloads"; [ -f "$STUB_DIR/reloaded" ] && exit 1; touch "$STUB_DIR/reloaded"; }\nexit 0\n' > "$NR/bin/systemctl"; chmod 755 "$NR/bin/systemctl"
+NGX_ENV="TAKE_OVER_VHOSTS=yes STUB_VIA_NGINX_BROKEN=1" nr none apply
+rm -f "$NR/bin/systemctl"
+bk=$(backups "$NR" | tail -n 1)
+[ "$RC" = 1 ] && grep -q "^FAIL the rollback put the other party's entries back, but systemctl reload nginx failed" "$NR/out" \
+  && vsnap | cmp -s - "$NR/orig.snap" && [ -f "$bk/RESTORED" ] && [ "$(nreloads "$NR")" = 2 ] \
+  && ok "a rollback whose own reload fails says so (the entries are back on disk; reload nginx by hand)" || { cat "$NR/out"; bad "rollback with a failing reload (rc=$RC)"; }
+# Nothing stops a rollback once it runs: a second TERM, sent while the rollback runs nginx -t (the 3rd nginx -t of the run),
+# is ignored; the rollback still reloads nginx and compares the other hosts.
+cat > "$NR/bin/nginx" <<STUB
+#!/bin/sh
+n=\$(cat "$NR/nginxn" 2>/dev/null || echo 0); n=\$((n + 1)); echo \$n > "$NR/nginxn"
+if [ "\$1" = -t ] && [ \$n = 3 ]; then kill -TERM \$PPID; fi
+exit 0
+STUB
+chmod 755 "$NR/bin/nginx"; rm -f "$NR/nginxn"
+NGX_ENV="TAKE_OVER_VHOSTS=yes STUB_VIA_NGINX_BROKEN=1" nr none apply
+rm -f "$NR/bin/nginx" "$NR/nginxn"
+bk=$(backups "$NR" | tail -n 1)
+[ "$RC" = 1 ] && vsnap | cmp -s - "$NR/orig.snap" && [ -f "$bk/RESTORED" ] && [ "$(nreloads "$NR")" = 2 ] \
+  && grep -q "rolled back: the other party's entries are back and nginx is reloaded with them" "$NR/out" && grep -q '^PASS after the rollback every other host answers exactly as before apply' "$NR/out" \
+  && ok "a second TERM while the rollback runs (during its nginx -t) is ignored: Race's entries back, nginx reloaded again, the other hosts compared" \
+  || { cat "$NR/out"; bad "rollback with a second signal (rc=$RC reloads=$(nreloads "$NR"))"; }
+# The last check of apply (the old stack, Race's containers included, unchanged) fails after a take-over: rolled back too.
+printf '#!/bin/sh\n[ "$1 $2" = "reload nginx" ] && { touch "$STUB_DIR/reloaded"; echo reload >> "$STUB_DIR/reloads"; echo 1 > "$STUB_DIR/restarts"; }\nexit 0\n' > "$NR/bin/systemctl"; chmod 755 "$NR/bin/systemctl"
+NGX_ENV="TAKE_OVER_VHOSTS=yes" nr none apply
+rm -f "$NR/bin/systemctl" "$NR/restarts"
+bk=$(backups "$NR" | tail -n 1)
+[ "$RC" = 1 ] && grep -q '^FAIL old-stack containers changed during this script' "$NR/out" && ! grep -q '^PASS take-over complete' "$NR/out" \
+  && vsnap | cmp -s - "$NR/orig.snap" && [ -f "$bk/RESTORED" ] && [ "$(nreloads "$NR")" = 2 ] \
+  && ok "a ddc-mainnet container restarting during a take-over fails apply's final old-stack check: the take-over is rolled back exactly (2 reloads), never reported complete" \
+  || { cat "$NR/out"; bad "rollback on the final old-stack check (rc=$RC)"; }
+# A rollback that stops half way (putting back Race's file at sites-available/<APP_HOST> fails) says to run restore, and
+# restore then keeps the entries already back exactly as their MANIFEST lines say and puts back the missing one.
+cat > "$NR/bin/chmod" <<STUB
+#!/bin/sh
+for a in "\$@"; do case "\$a" in *.new) echo "chmod: stub failure" >&2; exit 1;; esac; done
+exec /bin/chmod "\$@"
+STUB
+cat > "$NR/bin/cp" <<STUB
+#!/bin/sh
+for last; do :; done
+case "\$last" in *vhost-takeover*) ;; */avail/$D_APP_HOST) case "\$*" in *vhost-takeover*) echo "cp: stub failure" >&2; exit 1;; esac;; esac
+exec /bin/cp "\$@"
+STUB
+chmod 755 "$NR/bin/chmod" "$NR/bin/cp"
+NGX_ENV="TAKE_OVER_VHOSTS=yes" nr none apply
+rm -f "$NR/bin/chmod" "$NR/bin/cp"
+bk=$(backups "$NR" | tail -n 1); half=0
+[ "$RC" != 0 ] && grep -qF "FAIL could not put the taken-over entries back: run ./30-nginx.sh restore $(basename "$bk")" "$NR/out" && [ ! -e "$NR/avail/$D_APP_HOST" ] && [ -f "$NR/enabled/$D_APP_HOST" ] && half=1
+nr none restore
+[ "$half" = 1 ] && [ "$RC" = 0 ] && [ "$(grep -c '^  already back exactly as in the backup: ' "$NR/out")" = 3 ] && grep -q '^PASS restored 1 entries from ' "$NR/out" \
+  && vsnap | cmp -s - "$NR/orig.snap" && [ -f "$bk/RESTORED" ] \
+  && ok "a rollback that stops half way says to run restore; restore keeps the 3 entries already back (each exactly its MANIFEST line) and puts back the missing one: Race's 4 entries exactly" \
+  || { cat "$NR/out"; vsnap | diff "$NR/orig.snap" - || true; bad "restore after a rollback that stopped half way (half=$half rc=$RC)"; }
+# A take-over refuses while this package already has an entry at the names next to Race's (a leftover .new here): its
+# rollback must only ever remove what that run wrote itself.
+cp "$NG/$D_APP_HOST" "$NR/avail/$D_APP_HOST.new"; nb=$(backups "$NR" | grep -c . || true)
+NGX_ENV="TAKE_OVER_VHOSTS=yes" nr none apply
+rm -f "$NR/avail/$D_APP_HOST.new"
+[ "$RC" = 1 ] && grep -q "^FAIL refusing TAKE_OVER_VHOSTS=yes while this package already has entries at these names" "$NR/out" \
+  && grep -qF "written by this package earlier: $NR/avail/$D_APP_HOST.new" "$NR/out" && [ "$(backups "$NR" | grep -c . || true)" = "$nb" ] && [ ! -f "$NR/reloaded" ] \
+  && vsnap | cmp -s - "$NR/orig.snap" \
+  && ok "TAKE_OVER_VHOSTS=yes refuses while an entry of this package's sits at the names next to Race's (undo first): nothing backed up or changed, no reload" || { cat "$NR/out"; bad "take-over next to this package's own entry (rc=$RC)"; }
+# E3: restore arms its rollback before it sets anything aside: when setting this package's 2nd entry aside fails, the 1st
+# comes back too.
+NGX_ENV="TAKE_OVER_VHOSTS=yes" nr none apply; vsnap > "$NR/ours2.snap"; bk=$(backups "$NR" | tail -n 1)
+cat > "$NR/bin/mv" <<STUB
+#!/bin/sh
+case "\$*" in *vhost-restore-hold*) n=\$(cat "$NR/mvn" 2>/dev/null || echo 0); n=\$((n + 1)); echo \$n > "$NR/mvn"; [ \$n = 2 ] && { echo "mv: stub failure" >&2; exit 1; };; esac
+exec /bin/mv "\$@"
+STUB
+chmod 755 "$NR/bin/mv"; rm -f "$NR/mvn"
+nr none restore
+rm -f "$NR/bin/mv" "$NR/mvn"
+[ "$RC" = 1 ] && grep -q '^FAIL cannot set .* aside' "$NR/out" && vsnap | cmp -s - "$NR/ours2.snap" && [ ! -e "$bk/RESTORED" ] && [ ! -f "$NR/reloaded" ] \
+  && ok "restore failing while it sets this package's entries aside (the 2nd move): the 1st comes back, this package's entries are exactly as before, nothing reloaded" \
+  || { cat "$NR/out"; vsnap | diff "$NR/ours2.snap" - || true; bad "restore with a failing set-aside (rc=$RC)"; }
+nr none restore
+[ "$RC" = 0 ] && vsnap | cmp -s - "$NR/orig.snap" || { cat "$NR/out"; bad "test setup: restore after the failing set-aside (rc=$RC)"; }
+# S4 takes over the usual shape of a certbot-managed rehearsal vhost: an https server block that includes certbot's
+# options and proxy_params and proxies to a ddc-mainnet-* port, and a port-80 block that only redirects.
+NC="$T/nginx-certbot"; vhosts "$NC"; mainnet_docker "$NC"; race_entries "$NC"; touch "$NC/stack-up"
+for hp in "$D_API_HOST:10010" "$D_APP_HOST:9011"; do
+  h=${hp%%:*}; pt=${hp#*:}
+  printf 'server {\n    server_name %s;\n    location / {\n        include proxy_params;\n        proxy_pass http://127.0.0.1:%s/;\n    }\n    listen 443 ssl; # managed by Certbot\n    ssl_certificate /etc/letsencrypt/live/%s/fullchain.pem; # managed by Certbot\n    include /etc/letsencrypt/options-ssl-nginx.conf; # managed by Certbot\n}\nserver {\n    if ($host = %s) {\n        return 301 https://$host$request_uri;\n    } # managed by Certbot\n    listen 80;\n    server_name %s;\n    return 404; # managed by Certbot\n}\n' "$h" "$pt" "$h" "$h" "$h" > "$NC/avail/$h"
+done
+rm -f "$NC/enabled/$D_APP_HOST"; ln -s "../avail/$D_APP_HOST" "$NC/enabled/$D_APP_HOST"; vsnap "$NC" > "$NC/orig.snap"
+NGX_ENV="TAKE_OVER_VHOSTS=yes" ngx "$NC" none apply
+[ "$RC" = 0 ] && grep -q '^PASS take-over complete' "$NC/out" \
+  && ok "TAKE_OVER_VHOSTS=yes takes over certbot-style rehearsal vhosts (include proxy_params and certbot's options, proxy_pass to 127.0.0.1:<ddc-mainnet port>/, a port-80 redirect block)" \
+  || { grep '^FAIL' "$NC/out"; bad "certbot-style take-over (rc=$RC)"; }
+ngx "$NC" none restore
+[ "$RC" = 0 ] && vsnap "$NC" | cmp -s - "$NC/orig.snap" && ok "restore puts the certbot-style vhosts back exactly" || { cat "$NC/out"; bad "certbot-style restore (rc=$RC)"; }
 # E2: an interrupted backup (the process killed mid-way, so no trap runs) leaves no MANIFEST, only MANIFEST.part, and
 # then blocks neither restore, nor undo, nor 99-teardown.sh --delete-dir.
 NE="$T/nginx-e2"; vhosts "$NE"; mainnet_docker "$NE"; race_entries "$NE"; touch "$NE/stack-up"; vsnap "$NE" > "$NE/orig.snap"
@@ -1499,40 +1670,51 @@ e2b=$(backups "$NE" | tail -n 1)
 ngx "$NE" none restore
 [ "$RC" = 1 ] && grep -q '^FAIL no take-over backup to restore' "$NE/out" && ok "restore ignores the interrupted backup (no complete backup to restore)" || { cat "$NE/out"; bad "restore with an interrupted backup (rc=$RC)"; }
 ngx "$NE" none undo
-[ "$RC" = 0 ] && ! grep -q 'take-over backup not restored yet' "$NE/out" && ok "undo does not report the interrupted backup as one to restore" || { cat "$NE/out"; bad "undo with an interrupted backup (rc=$RC)"; }
+[ "$RC" = 0 ] && ! grep -q 'were never restored' "$NE/out" && ok "undo does not count the interrupted backup as one to restore (it is not refused)" || { cat "$NE/out"; bad "undo with an interrupted backup (rc=$RC)"; }
 printf 'name: ddcnew\n' > "$NE/ddcnew/compose.yaml"
 printf '#!/bin/sh\ncase "$1" in compose) exit 1;; esac\nexit 0\n' > "$NE/bin/docker"; chmod 755 "$NE/bin/docker"
 RC=0; env PATH="$NE/bin:$ST:$PATH" STUB_DIR="$NE" OUR_HOSTS="$D_API_HOST $D_APP_HOST" DDC_LOCAL_TEST=1 NEW_DIR="$NE/ddcnew" NGINX_AVAIL="$NE/avail" NGINX_ENABLED="$NE/enabled" \
   NGINX_CONFD="$NE/confd" MAINNET_DIR="$NE/mainnet" bash "$PKG/99-teardown.sh" --delete-dir > "$NE/td.out" 2>&1 || RC=$?
-! grep -q 'refusing --delete-dir' "$NE/td.out" && grep -q 'is not the real /root/ddcnew directory' "$NE/td.out" \
+! grep -q 'never restored' "$NE/td.out" && grep -q 'is not the real /root/ddcnew directory' "$NE/td.out" \
   && ok "99-teardown.sh --delete-dir is not blocked by the interrupted backup (it stops later, at the local-test guard of the real /root/ddcnew)" || { tail -3 "$NE/td.out"; bad "teardown with an interrupted backup (rc=$RC)"; }
 # S4: what TAKE_OVER_VHOSTS takes over: only the other party's rehearsal vhost of exactly that host, every upstream a
-# ddc-mainnet-* port. Each variant stays refused with the flag and changes nothing.
+# ddc-mainnet-* port (the stub docker also lists two old-stack containers, on 9001 and 10000). Each variant stays refused
+# with the flag and changes nothing. (%b: a variant's \n is a line break inside the file.)
 cp -p "$NR/avail/$D_APP_HOST" "$NR/race-app.keep"; cp -p "$NR/enabled/$D_APP_HOST" "$NR/race-app-en.keep"
 for v in "static|server_name $D_APP_HOST; root /opt/ddc/docs;|it proxies to nothing (a static site, not a rehearsal stack)" \
          "otherport|server_name $D_APP_HOST; location / { proxy_pass http://localhost:9500; }|it proxies to port 9500, which no ddc-mainnet-* container binds (they bind: 9011 10010)" \
          "oldport|server_name $D_APP_HOST; location / { proxy_pass http://localhost:10000; }|it proxies to port 10000, which no ddc-mainnet-* container binds" \
+         "oldapp|server_name $D_APP_HOST; location / { proxy_pass http://127.0.0.1:9001/; }|it proxies to port 9001, which no ddc-mainnet-* container binds" \
          "remote|server_name $D_APP_HOST; location / { proxy_pass https://upstream.example.invalid; }|it proxies to https://upstream.example.invalid, not to a local port" \
-         "second-name|server_name $D_APP_HOST other-rehearsal.datadance.ai; location / { proxy_pass http://localhost:9011; }|it declares server_name $D_APP_HOST other-rehearsal.datadance.ai instead of only $D_APP_HOST"; do
+         "remote-port|server_name $D_APP_HOST; location / { proxy_pass http://198.51.100.9:9011; }|it proxies to http://198.51.100.9:9011, not to a local port" \
+         "second-name|server_name $D_APP_HOST other-rehearsal.datadance.ai; location / { proxy_pass http://localhost:9011; }|it declares server_name $D_APP_HOST other-rehearsal.datadance.ai instead of only $D_APP_HOST" \
+         "wildcard|server_name $D_APP_HOST *.rehearsal.datadance.ai; location / { proxy_pass http://localhost:9011; }|it declares server_name *.rehearsal.datadance.ai $D_APP_HOST instead of only $D_APP_HOST" \
+         "regex|server_name $D_APP_HOST ~^app-r; location / { proxy_pass http://localhost:9011; }|it declares server_name $D_APP_HOST ~^app-r instead of only $D_APP_HOST" \
+         "underscore|server_name $D_APP_HOST _; location / { proxy_pass http://localhost:9011; }|it declares server_name _ $D_APP_HOST instead of only $D_APP_HOST" \
+         "default-server|listen 443 default_server; server_name $D_APP_HOST; location / { proxy_pass http://localhost:9011; }|it is a default server (listen 443 default_server)" \
+         "include|include /etc/nginx/snippets/more-sites.conf; server_name $D_APP_HOST; location / { proxy_pass http://localhost:9011; }|it includes /etc/nginx/snippets/more-sites.conf, which may declare more" \
+         "fastcgi|server_name $D_APP_HOST; location / { proxy_pass http://localhost:9011; } location ~ [.]php$ { fastcgi_pass 127.0.0.1:9000; }|it hands requests on with fastcgi_pass" \
+         "multiline|server_name $D_APP_HOST; location / { proxy_pass http://localhost:9011; }\n    location /x { proxy_pass\n        http://localhost:10000; }|it proxies to port 10000, which no ddc-mainnet-* container binds" \
+         "commented|server_name $D_APP_HOST; root /opt/static; # location / { proxy_pass http://localhost:9011; }|it proxies to nothing (a static site, not a rehearsal stack)"; do
   lbl=${v%%|*}; r=${v#*|}; body=${r%%|*}; why=${r#*|}
-  printf 'server {\n    %s\n    listen 80;\n}\n' "$body" > "$NR/avail/$D_APP_HOST"; cp -p "$NR/avail/$D_APP_HOST" "$NR/enabled/$D_APP_HOST"
+  printf 'server {\n    %b\n    listen 80;\n}\n' "$body" > "$NR/avail/$D_APP_HOST"; cp -p "$NR/avail/$D_APP_HOST" "$NR/enabled/$D_APP_HOST"
   vsnap > "$NR/variant.snap"; nb=$(backups "$NR" | grep -c . || true)
   NGX_ENV="TAKE_OVER_VHOSTS=yes" nr none apply
   [ "$RC" = 1 ] && grep -qF "refusing to take over $NR/" "$NR/out" && grep -qF -- "$why" "$NR/out" && vsnap | cmp -s - "$NR/variant.snap" && [ ! -f "$NR/reloaded" ] && [ "$(backups "$NR" | grep -c . || true)" = "$nb" ] \
     || { grep '^FAIL' "$NR/out" | head -2; bad "take-over limit ($lbl, rc=$RC)"; }
 done
 cp -p "$NR/race-app.keep" "$NR/avail/$D_APP_HOST"; cp -p "$NR/race-app-en.keep" "$NR/enabled/$D_APP_HOST"; vsnap | cmp -s - "$NR/orig.snap" || bad "test setup: Race's entries not back to the original"
-ok "TAKE_OVER_VHOSTS=yes refuses, before any backup or change: a static site, an upstream on a port no ddc-mainnet-* container binds (another port, an old-stack port), a remote upstream, and a file that also serves another name"
+ok "TAKE_OVER_VHOSTS=yes refuses, before any backup or change: a static site (also one with a commented-out proxy_pass), an upstream on a port no ddc-mainnet-* container binds (another port, the old stack's api and app ports), a remote upstream (also one on a ddc-mainnet-* port number), a file that also serves another name (exact, wildcard, regex or _), a default server, an include outside certbot's options and proxy_params, a fastcgi_pass, and a proxy_pass to the old stack written over two lines"
 printf '#!/bin/sh\nexit 0\n' > "$NR/bin/docker"
 NGX_ENV="TAKE_OVER_VHOSTS=yes" nr none apply
 mainnet_docker "$NR"
 [ "$RC" = 1 ] && grep -qF "no ddc-mainnet-* container binds a host port, so its upstream cannot be shown to be the other party's rehearsal" "$NR/out" && vsnap | cmp -s - "$NR/orig.snap" \
   && ok "with no ddc-mainnet-* container (none bound to a port), nothing is taken over" || { grep '^FAIL' "$NR/out"; bad "take-over without ddc-mainnet containers (rc=$RC)"; }
-# The reviewer's case: APP_HOST names a real static site (docs.datadance.ai) on this server.
+# A hypothetical case: APP_HOST names a static site (docs.datadance.ai, say) that the same nginx serves.
 DOCS=docs.datadance.ai; printf 'server {\n    server_name %s;\n    root /opt/ddc/docs;\n    listen 80;\n}\n' "$DOCS" > "$NR/avail/$DOCS"; ln -sfn "../avail/$DOCS" "$NR/enabled/$DOCS"; vsnap > "$NR/docs.snap"
 OUR_HOSTS="$D_API_HOST $DOCS" NGX_NEW="$NR/ddcnew-docs" NGX_ENV="TAKE_OVER_VHOSTS=yes APP_HOST=$DOCS" nr none apply
 [ "$RC" = 1 ] && grep -qF "refusing to take over $NR/enabled/$DOCS: it proxies to nothing (a static site, not a rehearsal stack)" "$NR/out" && vsnap | cmp -s - "$NR/docs.snap" \
-  && ok "APP_HOST=docs.datadance.ai (a static site here) with TAKE_OVER_VHOSTS=yes: refused, the docs vhost stays as it is" || { grep -E '^(FAIL|PASS TAKE)' "$NR/out"; bad "docs take-over (rc=$RC)"; }
+  && ok "APP_HOST=docs.datadance.ai (a static site in this test) with TAKE_OVER_VHOSTS=yes: refused, the docs vhost stays as it is" || { grep -E '^(FAIL|PASS TAKE)' "$NR/out"; bad "docs take-over (rc=$RC)"; }
 rm -f "$NR/avail/$DOCS" "$NR/enabled/$DOCS"
 # A server_name clash in another loaded file stops apply, even with TAKE_OVER_VHOSTS=yes.
 printf 'server { server_name other.datadance.ai %s; }\n' "$D_APP_HOST" > "$NR/confd/extra.conf"; vsnap > "$NR/clash.snap"
@@ -1598,13 +1780,39 @@ rmc=$(grep -E '^(rm|network rm)' "$TD/calls" | tr '\n' ';')
   && [ ! -e "$TD/ddcnew/settings.env" ] && grep -q '^settings record .* removed: the next run may choose other hosts' "$TD/out" && grep -q "^settings: API_HOST=api-tdtest.datadance.ai .*(recorded in " "$TD/out" \
   && ok "99-teardown.sh undoes this package's vhosts at the RECORDED non-default hosts, then removes the record" || { cat "$TD/out"; bad "teardown with non-default recorded settings"; }
 mkdir -p "$TD/ddcnew/vhost-takeover/20261005-170000-1"; : > "$TD/ddcnew/vhost-takeover/20261005-170000-1/MANIFEST"
-td 0 --delete-dir
-[ "$RC" = 1 ] && grep -q 'FAIL refusing --delete-dir: .*never restored ( 20261005-170000-1)' "$TD/out" && [ -d "$TD/ddcnew" ] \
-  && ok "99-teardown.sh --delete-dir refuses while a take-over backup was never restored" || { tail -3 "$TD/out"; bad "--delete-dir with an unrestored backup (rc=$RC)"; }
+tdr=0
+for mode in "" --delete-dir; do
+  td 0 $mode
+  [ "$RC" = 1 ] && grep -q "FAIL refusing: .*vhost-takeover holds the backup of vhosts this package took over and never restored ( 20261005-170000-1). Run ./30-nginx.sh restore first" "$TD/out" \
+    && [ -d "$TD/ddcnew" ] && ! grep -qE '^(compose|rm|network)' "$TD/calls" && tdr=$((tdr + 1)) || { tail -3 "$TD/out"; bad "99-teardown.sh ${mode:-without options} with an unrestored backup (rc=$RC)"; }
+done
+[ "$tdr" = 2 ] && ok "99-teardown.sh, with and without --delete-dir, refuses while a take-over backup was never restored, before it changes anything (no compose, rm or network call): restore first"
 rm -rf "$TD/ddcnew/vhost-takeover"
 td 1
 [ "$RC" = 1 ] && grep -q 'FAIL refusing: container(s) labelled project ddcnew without the ddcnew- name prefix: ddc-backend-ddc-backend-api-1' "$TD/out" && ! grep -qE '^(rm|network rm)' "$TD/calls" \
   && ok "teardown fallback refuses when a ddcnew-labelled container has another name: nothing removed" || { cat "$TD/out"; bad "teardown fallback name check (rc=$RC)"; }
+
+echo; echo "== 12c. a signal right after a take-over removed the other party's entries (TERM to the script; TERM, HUP, INT to its whole process group): bash 3.2 (macOS) and bash 5.1 (ubuntu:jammy)"
+# test/helpers/takeover-signals.sh: a group signal also reaches the run_begin wrapper and the log's tee; the rollback must
+# still put the entries back exactly and its lines must reach the server-side log.
+sig_results() { # <label> <helper output file> <helper exit status>
+  local l n=0
+  while IFS= read -r l; do
+    case "$l" in "PASS "*) ok "${l#PASS }"; n=$((n + 1));; "FAIL "*) bad "${l#FAIL }"; n=$((n + 1));; esac
+  done < "$2"
+  [ "$n" -ge 4 ] || { cat "$2"; bad "$1: takeover-signals.sh printed $n results, not 4 (exit $3)"; }
+}
+rc=0; timeout 300 bash "$PKG/test/helpers/takeover-signals.sh" "$PKG" "$T/sig-local" > "$T/sig-local.out" 2>&1 || rc=$?
+sig_results "local bash" "$T/sig-local.out" "$rc"
+if docker info >/dev/null 2>&1; then
+  SIG_IMG="ddcnew-bash5test:$RUN_ID"; mkdir -p "$T/bash5-img"
+  printf 'FROM ubuntu:jammy\nRUN export DEBIAN_FRONTEND=noninteractive && apt-get update -qq && apt-get -o Acquire::Retries=8 install -y -qq --no-install-recommends python3 >/dev/null && rm -rf /var/lib/apt/lists/*\n' > "$T/bash5-img/Dockerfile"
+  if timeout 600 docker build -q "${LT[@]}" -t "$SIG_IMG" "$T/bash5-img" >/dev/null; then
+    rc=0; timeout 300 docker run --rm --init "${LT[@]}" --name "sigtest-$RANDOM-$RUN_ID" --user 1000:1000 -v "$PKG:/pkg:ro" "$SIG_IMG" \
+      bash /pkg/test/helpers/takeover-signals.sh /pkg /tmp/sig > "$T/sig-bash5.out" 2>&1 || rc=$?
+    sig_results "bash 5.1 (ubuntu:jammy)" "$T/sig-bash5.out" "$rc"
+  else bad "could not build $SIG_IMG (ubuntu:jammy with python3)"; fi
+else bad "section 12c (bash 5.1) needs Docker Desktop"; fi
 
 # ---------------------------------------------------------------------------
 echo; echo "== 13. public repository: no server address, 1Password reference or id, hash or key, or server finding in any committable file"
