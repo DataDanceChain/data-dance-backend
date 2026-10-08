@@ -23,6 +23,8 @@
 #   4. NumberOfPasswordPrompts=1 (SSHPW_OPTS): at most one attempt per connection.
 #   5. PreferredAuthentications=password only: one method, so one prompt limit applies.
 # The password only ever passes from `op` to ssh through the askpass's stdout; it is never printed or stored.
+# Both `op read` calls take their stdin from /dev/null: remote.sh forwards its own stdin to the remote script (the
+# partner page password, an upload's tarball), and the askpass inherits ssh's stdin, so op must never read it.
 SSHPW_OP_BIN=/opt/homebrew/bin/op   # fixed; only the local test reassigns it (after sourcing, or in a scratch copy)
 SSHPW_LOCAL_ENV="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/local.env"
 SSHPW_TARGET=""; SSHPW_OP_REF=""    # set by sshpw_load_local_env, and only when both values pass every check
@@ -66,7 +68,7 @@ sshpw_load_local_env() {
 # Abort before connecting when local.env is not usable or 1Password does not answer now. Prints nothing secret.
 sshpw_precheck() {
   sshpw_load_local_env || return 1
-  if "$SSHPW_OP_BIN" read "$SSHPW_OP_REF" >/dev/null 2>&1; then return 0; fi
+  if "$SSHPW_OP_BIN" read "$SSHPW_OP_REF" >/dev/null 2>&1 </dev/null; then return 0; fi
   echo "REFUSING TO CONNECT: 1Password did not return the server password (op read failed: locked, not approved, or timed out). No SSH connection was made, so no failed login reached the server. Approve 1Password, then re-run." >&2
   return 1
 }
@@ -75,7 +77,7 @@ sshpw_precheck() {
 sshpw_askpass_text() {
   printf '#!/bin/sh\n'
   printf '# askpass for remote.sh / ro-ssh.sh (sshpw.sh). Never prints anything but the password, and only on success.\n'
-  printf 'pw=$(%q read %q 2>/dev/null) && [ -n "$pw" ] && { printf "%%s\\n" "$pw"; exit 0; }\n' "$SSHPW_OP_BIN" "$SSHPW_OP_REF"
+  printf 'pw=$(%q read %q 2>/dev/null </dev/null) && [ -n "$pw" ] && { printf "%%s\\n" "$pw"; exit 0; }\n' "$SSHPW_OP_BIN" "$SSHPW_OP_REF"
   printf 'echo "askpass: 1Password read failed: stopping ssh before it sends a password" >&2\n'
   printf 'case "$(ps -o comm= -p "$PPID" 2>/dev/null)" in\n'
   printf '  ssh|*/ssh) kill -TERM "$PPID" 2>/dev/null; sleep 1; kill -KILL "$PPID" 2>/dev/null;;\n'

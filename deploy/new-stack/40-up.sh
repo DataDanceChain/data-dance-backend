@@ -12,20 +12,33 @@
 #                               start the api if none of the pins configured in .env.rehearsal is served; a served key
 #                               that was never pinned must be confirmed from a second network first
 #                               (JWKS_NEW_PINS_VERIFIED=<thumbprint,...>). Previous file kept as .env.api.prev.
-#   /root/ddcnew/pgdata/        new Postgres cluster (container ddcnew-db-1, 127.0.0.1:15433)
+#   /root/ddcnew/pgdata/        new Postgres cluster (container ddcnew-db-1, 127.0.0.1:<DB_PORT>)
 #   database ddc_rehearsal      created EMPTY in the new cluster, then `prisma migrate deploy` creates the schema
-#   containers ddcnew-api-1 (127.0.0.1:10010), ddcnew-web-1 (127.0.0.1:9011), network ddcnew_default,
+#   containers ddcnew-api-1 (127.0.0.1:<API_PORT>), ddcnew-web-1 (127.0.0.1:<WEB_PORT>), network ddcnew_default,
 #   plus short-lived `docker compose run --rm api` containers.
-#   Never touches the old containers, their ports or the database ddc (asserted before/after).
+#   /root/ddcnew/settings.env   the hosts and ports (common.sh settings), if no earlier script recorded them
+#   Never touches the old containers (Race's ddc-mainnet-* included), their ports or the database ddc (asserted
+#   before/after).
+# PORTS (settings API_PORT, WEB_PORT, DB_PORT; defaults 10020, 9021, 15434): each must be free or published by this
+#   stack's own container (a re-run); anything else listening on it stops the script before a container starts.
 # KEYS: refuses to start if keys_fixed/apn_key.p8, signerKey.pem or signerCert.pem equals the production file, and checks
 #   that the running api sees the mounted throwaway apn_key.p8 and signerKey.pem.
-# MONEY PATH: every field of the "Partner SSO money-path assertions OK" line (nodeEnv, allowedVerifiers=5, issuer,
-#   consentOrigin, web3authVerify, legacyFallback, jwksPinMode, jwksPins=<served>, sessionSecretSeparate=true) must match
+# OLD APP SWITCHES (backend PR #38): when the image prints the "Old App update answer (426 APP_UPDATE_REQUIRED)" line,
+#   count=1, first8=<the old WEB3AUTH_CLIENT_ID's first 8 characters> and LOGIN_MISSING_IDTOKEN_MEANS_OLD_APP=on must be in
+#   it, or the script STOPS. 10-build.sh records whether the backend commit contains PR #38's commit (OLD_APP_SWITCHES in
+#   /root/ddcnew/.env, an ancestor check); when it does, a missing line STOPS too.
+# HOST-HEADER CHECKS (step 7): only when this package's vhosts serve API_HOST and APP_HOST. Before 30-nginx.sh apply has
+#   written them (outcome A runs 40-up.sh first, then the take-over), step 7 says it is deferred, and 30-nginx.sh apply
+#   runs the same checks (common.sh host_checks) right after its reload.
+# MONEY PATH: every field of the "Partner SSO money-path assertions OK" line (nodeEnv, allowedVerifiers=5,
+#   issuer=https://<API_HOST>, consentOrigin=https://<APP_HOST>, web3authVerify, legacyFallback, jwksPinMode,
+#   jwksPins=<served>, sessionSecretSeparate=true) must match
 #   exactly, or the script STOPS (common.sh money_path_fields_check); publicClientRegistration=open is a warning while
 #   runbook 5.2 is open. The line is read from the api log since the api container's last start (State.StartedAt), so a
 #   re-run that leaves the container as it is still finds it.
-# OLD VHOSTS: api/app.datadance.ai must answer with the same status codes at the end as at the start, or the script
-#   STOPS (after printing the old-stack integrity check).
+# OTHER HOSTS: the production api/app/business/admin hosts and every other host nginx serves (Race's included) must
+#   answer with the same status codes at the end as at the start, or the script STOPS (after printing the old-stack
+#   integrity check).
 # UNDO
 #   ./99-teardown.sh            (compose down + vhosts removed; --delete-dir also removes /root/ddcnew)
 # Note for the later data step: ddc_rehearsal now holds the migrated EMPTY schema, so the restore must
@@ -43,8 +56,12 @@ guard_db_name "$REHEARSAL_DB"
 case "$REHEARSAL_DB" in ddc_rehearsal|ddc_rehearsal2) ;; *) die "REHEARSAL_DB must be ddc_rehearsal or ddc_rehearsal2";; esac
 for p in "$NEW_DIR/compose.yaml" "$NEW_DIR/.env.api" "$NEW_DIR/.env.api.new" "$NEW_DIR/pgdata"; do guard_write_path "$p"; done
 run_begin 40-up "$@"
+settings_say
 for f in .env .env.rehearsal .env.db keys_fixed/apn_key.p8 keys_fixed/signerKey.pem keys_fixed/signerCert.pem keys_fixed/wwdr.pem assets/passes; do [ -e "$NEW_DIR/$f" ] || die "$NEW_DIR/$f missing (run 10-build.sh and 20-env.sh first)"; done
 API_IMAGE=$(env_get_simple API_IMAGE "$NEW_DIR/.env"); INFRA_ONLY=$(infra_only_value)
+# Whether the backend commit contains PR #38's old-App line (10-build.sh, an ancestor check of OLD_APP_COMMIT).
+OLD_APP_SWITCHES=$(env_get_simple OLD_APP_SWITCHES "$NEW_DIR/.env")
+case "$OLD_APP_SWITCHES" in 0|1) ;; *) die "OLD_APP_SWITCHES in $NEW_DIR/.env is '${OLD_APP_SWITCHES}', not 0 or 1: re-run 10-build.sh (it records whether the backend commit contains PR #38)";; esac
 case "$API_IMAGE" in
   ddcnew/backend:*-infra) [ "$INFRA_ONLY" = 1 ] || die "$API_IMAGE is an infra-only tag but INFRA_ONLY=${INFRA_ONLY:-unset}";;
   ddcnew/backend:*) [ "$INFRA_ONLY" = 0 ] || die "INFRA_ONLY=${INFRA_ONLY:-unset} does not match $API_IMAGE (expected 0)";;
@@ -59,8 +76,8 @@ done
 pass_signer_ok "$NEW_DIR/keys_fixed/signerKey.pem" "$NEW_DIR/keys_fixed/signerCert.pem" "$OLD_BACKEND_DIR/keys_fixed/signerKey.pem" "$OLD_BACKEND_DIR/keys_fixed/signerCert.pem" \
   && pass "keys_fixed: apn_key.p8, signerKey.pem and signerCert.pem differ from production (throwaway pass signer: cert matches key)" || die "keys_fixed pass signer is not a valid throwaway pair"
 old_snapshot_begin
-code() { curl -s -o /dev/null -m 10 -w '%{http_code}' -H "Host: $1" "http://127.0.0.1$2" || true; }
-OLD_BEFORE="api=$(code api.datadance.ai /) app=$(code app.datadance.ai /)"
+OTHER_HOSTS=(); while IFS= read -r h; do OTHER_HOSTS+=("$h"); done < <(other_hosts "$API_HOST" "$APP_HOST")
+OLD_BEFORE=$(host_codes "${OTHER_HOSTS[@]}"); say "other hosts before: $OLD_BEFORE"
 
 install_copy() { # src dst
   if [ -f "$2" ] && ! cmp -s "$1" "$2"; then cp -p "$2" "$2.prev"; fi
@@ -80,6 +97,7 @@ served="$JWKS_SERVED"; PINS="$JWKS_PINS"
 cnt() { printf '%s\n' "$1" | grep -c . || true; }
 
 step "1b. compose file and the api env (the pin gate passed)"
+settings_record
 install_copy "$HERE/compose.yaml" "$NEW_DIR/compose.yaml"
 umask 077
 # The temporary file never outlives the script, also when a check below stops it.
@@ -99,10 +117,10 @@ c = json.load(sys.stdin)
 print(" ".join(sorted("%s:%s" % (p.get("host_ip"), p.get("published")) for s in c["services"].values() for p in s.get("ports", []))))
 bad = [v["source"] for s in c["services"].values() for v in s.get("volumes", []) if not v["source"].startswith("/root/ddcnew/")]
 sys.exit("FAIL bind source outside /root/ddcnew: %s" % bad if bad else 0)')
-[ "$ports" = "127.0.0.1:10010 127.0.0.1:15433 127.0.0.1:9011" ] && pass "published ports: $ports; every mount under /root/ddcnew" || die "unexpected ports: $ports"
-for p in 10010 15433 9011; do
-  if port_in_use "$p" && ! docker ps --format '{{.Names}} {{.Ports}}' | grep -E '^ddcnew-' | grep -q "127.0.0.1:$p->"; then die "port $p is taken by something else"; fi
-done
+want_ports=$(printf '127.0.0.1:%s\n' "$API_PORT" "$DB_PORT" "$WEB_PORT" | LC_ALL=C sort | tr '\n' ' ' | sed 's/ $//')
+[ "$ports" = "$want_ports" ] && pass "published ports: $ports (API_PORT, DB_PORT, WEB_PORT); every mount under /root/ddcnew" || die "unexpected ports: $ports (expected $want_ports)"
+port_check "$API_PORT" api API_PORT; port_check "$DB_PORT" db DB_PORT; port_check "$WEB_PORT" web WEB_PORT
+pass "ports $API_PORT, $DB_PORT and $WEB_PORT are free or published by this stack's own containers"
 say "images: $(grep -E '^(API|WEB)_IMAGE=' "$NEW_DIR/.env" | tr '\n' ' ')"
 
 step "2. database container"
@@ -132,7 +150,7 @@ say "tables after: $(dc exec -T db sh -c 'psql -U "$POSTGRES_USER" -d "$0" -tAc 
 
 step "5. start api and web"
 dc up -d api web
-for _ in $(seq 1 60); do c=$(curl -s -o /dev/null -m 5 -w '%{http_code}' http://127.0.0.1:10010/partner/tge/me || true); [ "$c" = 401 ] && break; sleep 2; done
+for _ in $(seq 1 60); do c=$(curl -s -o /dev/null -m 5 -w '%{http_code}' "http://127.0.0.1:$API_PORT/partner/tge/me" || true); [ "$c" = 401 ] && break; sleep 2; done
 dc ps --format '{{.Name}} {{.Status}} {{.Ports}}'
 API_CID=$(dc ps -q api); [ -n "$API_CID" ] || die "the api container is not running"
 API_STARTED=$(docker inspect --format '{{.State.StartedAt}}' "$API_CID")
@@ -141,7 +159,8 @@ LOG=$(dc logs --no-color --since "$API_STARTED" api 2>&1)
 printf '%s\n' "$LOG" | grep -E 'Partner SSO (enabled|disabled)' | tail -1 | sed 's/^[^|]*| //'
 line=$(printf '%s\n' "$LOG" | grep 'Partner SSO money-path assertions OK' | tail -1 | sed 's/^[^|]*| //' || true)
 [ -n "$line" ] && { say "$line"; pass "startup log has 'Partner SSO money-path assertions OK'"; } || { printf '%s\n' "$LOG" | grep -iE 'error|invalid|refus' | grep -viE 'postgres(ql)?://|secret|password|token' | tail -10; printf '%s\n' "$LOG" | sed 's/^[^|]*| //' | grep -E '^ - (SSO_|WEB3AUTH_|NODE_ENV|PUBLIC_BASE_URL|APP_PUBLIC_URL)' | tail -20; die "no money-path assertion line in the api log"; }
-money_path_fields_check "$line" "$(cnt "$served")"   # dies on any missing or different field (APPROVAL row 11)
+money_path_fields_check "$line" "$(cnt "$served")"   # dies on any missing or different field (APPROVAL section 4, row 10)
+old_app_line_check "$LOG" "$(env_get_simple WEB3AUTH_RETIRED_CLIENT_IDS "$NEW_DIR/.env.api" | cut -c1-8)" "$OLD_APP_SWITCHES"
 
 step "6. running api: JWKS pins, APNs key and pass signer"
 pinned=$(dc exec -T api node -e 'console.log(String(process.env.WEB3AUTH_JWKS_PINNED_THUMBPRINTS||"").split(",").map(s=>s.trim()).filter(Boolean).join("\n"))' | LC_ALL=C sort -u)
@@ -151,26 +170,20 @@ capn=$(dc exec -T api sh -c 'sha256sum /app/keys_fixed/apn_key.p8' | cut -c1-64)
 csk=$(dc exec -T api sh -c 'sha256sum /app/keys_fixed/signerKey.pem' | cut -c1-64)
 [ "$csk" = "$(sha256 < "$NEW_DIR/keys_fixed/signerKey.pem")" ] && pass "api sees the throwaway signerKey.pem from the mount (not the production pass-signing key)" || die "api's /app/keys_fixed/signerKey.pem is not the mounted throwaway key"
 
-step "7. local checks through host nginx (Host headers)"
-body=$(curl -s -m 10 -H "Host: $TGE_API_HOST" http://127.0.0.1/partner/tge/me || true)
-c=$(code "$TGE_API_HOST" /partner/tge/me); ct=$(curl -s -o /dev/null -m 10 -w '%{content_type}' -H "Host: $TGE_API_HOST" http://127.0.0.1/partner/tge/me || true)
-say "tge-api /partner/tge/me -> $c $ct body_keys=$(printf '%s' "$body" | python3 -c 'import json,sys; print(",".join(sorted(json.load(sys.stdin).keys())))' 2>/dev/null || echo non-json)"
-[ "$c" = 401 ] && case "$ct" in application/json*) true;; *) false;; esac && pass "tge-api answers 401 JSON" || die "tge-api check failed ($c $ct)"
-curl -s -m 10 -H "Host: $TGE_APP_HOST" http://127.0.0.1/ddc-build.json | python3 -c '
-import json, sys
-m = json.load(sys.stdin)
-print("tge-app ddc-build.json mode=%s apiEnv=%s apiBaseUrl=%s w3aNetwork=%s w3aClientId=%s... chainId=%s" % (m.get("mode"), m.get("apiEnv"), m.get("apiBaseUrl"), m.get("w3aNetwork"), str(m.get("w3aClientId"))[:9], m.get("chainId")))
-ok = m.get("mode") == "tge" and m.get("apiEnv") == "tge" and m.get("apiBaseUrl") == "https://tge-api.datadance.ai/api" and m.get("w3aNetwork") == "sapphire_mainnet" and str(m.get("w3aClientId")).startswith("BBpkxUTUr") and m.get("chainId") == 44508
-sys.exit(0 if ok else 1)' && pass "tge-app serves the tge mainnet build" || die "tge-app build marker check failed"
-say "tge-app / -> $(code "$TGE_APP_HOST" /)  /downloads/ -> $(code "$TGE_APP_HOST" /downloads/) (host nginx, same as app)  direct 127.0.0.1:9011 -> $(curl -s -o /dev/null -m 5 -w '%{http_code}' http://127.0.0.1:9011/ || true)"
+step "7. local checks through host nginx (Host headers $API_HOST and $APP_HOST)"
+if vhosts_ours; then
+  host_checks
+else
+  say "DEFERRED: the vhost entries at $API_HOST / $APP_HOST are not this package's yet (sites-available: $(vhost_state avail "$API_HOST") / $(vhost_state avail "$APP_HOST")), so the host nginx does not route these hosts to this stack. 30-nginx.sh apply runs these checks right after it has written them (outcome A: TAKE_OVER_VHOSTS=yes, APPROVAL.md section 9)"
+fi
 
 step "8. old stack untouched"
-OLD_AFTER="api=$(code api.datadance.ai /) app=$(code app.datadance.ai /)"
-if [ "$OLD_BEFORE" = "$OLD_AFTER" ]; then pass "old vhosts answer as before ($OLD_AFTER)"
+OLD_AFTER=$(host_codes "${OTHER_HOSTS[@]}")
+if [ "$OLD_BEFORE" = "$OLD_AFTER" ]; then pass "every other host answers as before ($OLD_AFTER)"; tls_probe_note "$OLD_BEFORE" "$OLD_AFTER"
 else
-  printf 'FAIL old vhost status codes changed: before [%s] after [%s]\n' "$OLD_BEFORE" "$OLD_AFTER" >&2
+  printf 'FAIL status codes of other hosts changed: before [%s] after [%s]\n' "$OLD_BEFORE" "$OLD_AFTER" >&2
   ( old_snapshot_assert ) || true   # report containers and old files too, then stop
-  die "old vhost status codes changed while 40-up.sh ran — check the old stack now; ./99-teardown.sh stops the new stack if it is the cause"
+  die "status codes of other hosts changed while 40-up.sh ran — check the old stack now; ./99-teardown.sh stops the new stack if it is the cause"
 fi
 old_snapshot_assert
 docker stats --no-stream --format '{{.Name}} cpu={{.CPUPerc}} mem={{.MemUsage}}' | grep -E '^ddcnew-' || true

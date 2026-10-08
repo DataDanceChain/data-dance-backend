@@ -35,7 +35,8 @@ const { protect } = require('../middlewares/authMiddleware');
 const { rateLimiters } = require('../middlewares/rateLimitMiddleware');
 const { createLogger } = require('../utils/logger');
 const { appPublicUrl } = require('../constants/lifeContext');
-const { getPartnerClient, maskEmail, sha256Hex } = require('../constants/partnerClient');
+const { maskEmail, sha256Hex } = require('../constants/partnerClient');
+const { loadPartnerClient } = require('../services/ssoDeveloperClient');
 const { isCEndSubject } = require('../services/dataLicenceConsent');
 
 const router = express.Router();
@@ -188,7 +189,7 @@ function verifySsoSession(token) {
  *     half of the kill switch deletes those rows, which revokes every outstanding session.
  */
 async function ssoSessionRefusal(claims, req) {
-  const client = getPartnerClient(claims.clientId, req);
+  const client = await loadPartnerClient(claims.clientId, req);
   if (!client || !client.enabled || !client.initiateLoginUri) return 'client_disabled';
   if (typeof claims.jti !== 'string' || !claims.jti) return 'ticket_missing';
   const row = await prisma.ssoTicket.findUnique({ where: { id: claims.jti } });
@@ -207,7 +208,7 @@ router.post('/app-ticket', protect, lim('ssoTicket'), async (req, res, next) => 
     const clientId = typeof req.body?.client_id === 'string' ? req.body.client_id.trim() : '';
     if (!clientId) return fail(res, 400, 'SSO_CLIENT_UNKNOWN', 'client_id is required.');
 
-    const client = getPartnerClient(clientId, req);
+    const client = await loadPartnerClient(clientId, req);
     if (!client) return fail(res, 400, 'SSO_CLIENT_UNKNOWN', 'This client is not registered with DataDance.');
     // No initiate_login_uri means the hand-off cannot complete: refuse it here rather than
     // mint a ticket that can only fail at exchange.
@@ -286,7 +287,7 @@ router.post('/ticket/exchange', lim('ssoExchange'), async (req, res, next) => {
     }
 
     const row = await prisma.ssoTicket.findUnique({ where: { ticketHash } });
-    const client = getPartnerClient(row.clientId, req);
+    const client = await loadPartnerClient(row.clientId, req);
     if (!client || !client.enabled || !client.initiateLoginUri) {
       logger.warn('sso.exchange_rejected', { reason: 'client_disabled', ticketId: row.id, clientId: row.clientId });
       return fail(res, 403, 'CLIENT_DISABLED', 'This client is not available.');

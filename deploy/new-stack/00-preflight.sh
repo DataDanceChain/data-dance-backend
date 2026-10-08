@@ -4,10 +4,19 @@
 #   nothing is pulled or pruned. Reads: df, /proc/meminfo, ss, docker ps/inspect/system df/info,
 #   docker buildx inspect, journalctl --disk-usage, getent, a size query on the old database, the NAMES in backend.env.
 # UNDO: nothing to undo.
-# Self-contained (no common.sh) so it can be piped to the server: ./remote.sh preflight (it prepends one line,
-#   GIT_APN_SHA=<sha256>, for the apn_key.p8 comparison below; piped without it, that comparison reports "not checked").
+# Self-contained (no common.sh) so it can be piped to the server: ./remote.sh preflight prepends GIT_APN_SHA=<sha256>
+#   (for the apn_key.p8 comparison below; piped without it, that comparison reports "not checked") and the settings
+#   API_HOST, APP_HOST, API_PORT, WEB_PORT, DB_PORT (common.sh defaults, or the overrides given to remote.sh preflight).
+#   It checks those ports and host names, our vhost entries at those names, and server_name clashes.
+# Race's mainnet rehearsal (ddc-mainnet-* containers, /root/ddc-mainnet) is listed and fingerprinted like the old stack,
+#   read only.
 # Prints names, counts, sizes and PASS/WARN/FAIL only - never a secret value.
 set -euo pipefail
+API_HOST="${API_HOST:-}"; APP_HOST="${APP_HOST:-}"; API_PORT="${API_PORT:-}"; WEB_PORT="${WEB_PORT:-}"; DB_PORT="${DB_PORT:-}"
+# The first line of every vhost file 30-nginx.sh writes: the same string as VHOST_MARKER in common.sh (the local test
+# checks that the two copies are identical).
+VHOST_MARKER='# ddcnew-vhost: written by deploy/new-stack/30-nginx.sh, which replaces or removes only files that start with this line.'
+MAINNET_DIR=/root/ddc-mainnet
 
 fails=0; warns=0
 sec()  { printf '\n===== %s =====\n' "$1"; }
@@ -43,10 +52,23 @@ docker system df --format '{{.Type}}|{{.TotalCount}}|{{.Active}}|{{.Size}}|{{.Re
 journalctl --disk-usage 2>/dev/null | sed -E 's/.*take up ([^ ]+).*/journal=\1/' || true
 docker image ls --format '{{.Repository}}:{{.Tag}}|{{.ID}}|{{.Size}}'
 
-sec "ports (new stack must find them free, old stack must hold its own)"
-for p in 10010 15433 9011 9012 9013; do
-  if ss -Htln "sport = :$p" | grep -q .; then fail "port $p is in use"; else pass "port $p free"; fi
-done
+sec "settings and ports (the new stack's must be free, the old stack must hold its own)"
+if [ -n "$API_HOST" ] && [ -n "$APP_HOST" ] && [ -n "$API_PORT" ] && [ -n "$WEB_PORT" ] && [ -n "$DB_PORT" ]; then
+  echo "settings: API_HOST=$API_HOST APP_HOST=$APP_HOST API_PORT=$API_PORT WEB_PORT=$WEB_PORT DB_PORT=$DB_PORT"
+  if [ -f /root/ddcnew/settings.env ]; then
+    rec=$(tr '\n' ' ' < /root/ddcnew/settings.env); echo "recorded in /root/ddcnew/settings.env: $rec"
+    [ "$rec" = "API_HOST=$API_HOST APP_HOST=$APP_HOST API_PORT=$API_PORT WEB_PORT=$WEB_PORT DB_PORT=$DB_PORT " ] && pass "the recorded settings are these" \
+      || warn "the stack was set up with the recorded settings: the write scripts refuse other values until 99-teardown.sh removes the record"
+  else echo "no settings recorded yet (/root/ddcnew/settings.env absent)"; fi
+  for pp in "API_PORT:$API_PORT:api" "DB_PORT:$DB_PORT:db" "WEB_PORT:$WEB_PORT:web"; do
+    n=${pp%%:*}; r=${pp#*:}; p=${r%%:*}; svc=${r#*:}
+    if ss -Htln "sport = :$p" | grep -q .; then
+      who=$(docker ps --format '{{.Names}} {{.Ports}}' | awk -v p="$p" '{ for (i = 2; i <= NF; i++) if (index($i, ":" p "->") > 0) { print $1; break } }' | tr '\n' ' ')
+      if [ "$who" = "ddcnew-$svc-1 " ]; then pass "$n $p: held by this stack's own ddcnew-$svc-1 (a re-run)"
+      else fail "$n $p is in use by ${who:-a process that is not a container}: choose another port ($n=<port>)"; fi
+    else pass "$n $p free"; fi
+  done
+else fail "no settings were passed: run it with ./remote.sh preflight (it prepends API_HOST, APP_HOST and the three ports)"; fi
 for p in 10000 9000 9001 9002 9003 15432 80; do
   if ss -Htln "sport = :$p" | grep -q .; then echo "old port $p listening"; else warn "old port $p NOT listening"; fi
 done
@@ -60,21 +82,64 @@ docker image ls --format '{{.Repository}}:{{.Tag}}' | grep -E '^ddcnew/' && warn
 docker network ls --format '{{.Name}}' | grep -E '^ddcnew' && warn "ddcnew network exists" || pass "no ddcnew network"
 
 sec "old stack (must stay as it is)"
-docker ps -a --format '{{.Names}}|{{.Status}}|{{.Ports}}' | grep -E '^ddc-' | sort
-up=$(docker ps --format '{{.Names}}' | grep -cE '^ddc-' || true)
+docker ps -a --format '{{.Names}}|{{.Status}}|{{.Ports}}' | { grep -E '^ddc-' || true; } | { grep -v '^ddc-mainnet-' || true; } | sort
+up=$(docker ps --format '{{.Names}}' | { grep -E '^ddc-' || true; } | { grep -vc '^ddc-mainnet-' || true; })
 [ "$up" -ge 6 ] && pass "$up old containers running" || fail "only $up old containers running (expected 6)"
 docker inspect --format '{{.Name}} restart={{.HostConfig.RestartPolicy.Name}} started={{.State.StartedAt}}' ddc-backend-ddc-backend-api-1 ddc-backend-ddc-backend-db-1 2>/dev/null
 DB_BYTES=$(docker exec ddc-backend-ddc-backend-db-1 sh -c 'psql -U "$POSTGRES_USER" -d ddc -tAc "SELECT pg_database_size(current_database())"' 2>/dev/null | tr -dc '0-9' || true)
 PGV=$(docker exec ddc-backend-ddc-backend-db-1 sh -c 'psql -U "$POSTGRES_USER" -d ddc -tAc "SHOW server_version"' 2>/dev/null | awk '{print $1}' || true)
 echo "old_db=ddc size_bytes=${DB_BYTES:-?} size_gb=$(awk -v b="${DB_BYTES:-0}" 'BEGIN{printf "%.2f", b/1024^3}') server_version=${PGV:-?}"
 
+sec "Race's mainnet rehearsal (read only; the write scripts fingerprint it like the old stack)"
+docker ps -a --format '{{.Names}}|{{.Status}}|{{.Ports}}' | { grep -E '^ddc-mainnet-' || true; } | sort
+for c in $(docker ps -a --format '{{.Names}}' | { grep -E '^ddc-mainnet-' || true; }); do
+  docker inspect --format '{{.Name}} restart={{.HostConfig.RestartPolicy.Name}} started={{.State.StartedAt}}' "$c" 2>/dev/null || true
+done
+echo "ddc-mainnet-* containers: $(docker ps -a --format '{{.Names}}' | { grep -cE '^ddc-mainnet-' || true; })"
+# The host ports they bind (running or stopped): the only upstreams a vhost may have for 30-nginx.sh to take it over.
+echo "ddc-mainnet-* host ports: $(for c in $(docker ps -a --format '{{.Names}}' | { grep -E '^ddc-mainnet-' || true; }); do docker inspect --format '{{range $p, $b := .HostConfig.PortBindings}}{{range $b}}{{.HostPort}} {{end}}{{end}}' "$c" 2>/dev/null || true; done | tr ' ' '\n' | { grep -E '^[0-9]+$' || true; } | sort -un | tr '\n' ' ')"
+# Directories under /root/ddc-mainnet that a container mounts read-write hold data it writes itself: not fingerprinted.
+RW_MOUNTS=$(for id in $(docker ps -aq 2>/dev/null || true); do docker inspect --format '{{range .Mounts}}{{if and (eq .Type "bind") .RW}}{{.Source}}{{"\n"}}{{end}}{{end}}' "$id" 2>/dev/null || true; done \
+  | awk -v d="$MAINNET_DIR" '$0 == d || index($0, d "/") == 1' | LC_ALL=C sort -u)
+if [ -d "$MAINNET_DIR" ]; then
+  echo "$MAINNET_DIR exists; mounted read-write by a container (not fingerprinted): ${RW_MOUNTS:-none}" | tr '\n' ' '; echo
+else echo "$MAINNET_DIR absent"; fi
+
 sec "existing new-stack dirs"
-for d in /root/ddcnew /root/mainnet-switch /root/backup /root/backup/pg; do
+for d in /root/ddcnew /root/mainnet-switch /root/backup /root/backup/pg /root/ddcnew/vhost-takeover; do
   if [ -e "$d" ]; then echo "$d exists ($(find "$d" -mindepth 1 -maxdepth 1 | wc -l) entries)"; else echo "$d absent"; fi
 done
-for f in /etc/nginx/sites-available/tge-api.datadance.ai /etc/nginx/sites-available/tge-app.datadance.ai /etc/nginx/sites-enabled/tge-api.datadance.ai /etc/nginx/sites-enabled/tge-app.datadance.ai /etc/cron.d/ddc-pgdump; do
-  [ -e "$f" ] && echo "$f exists" || echo "$f absent"
-done
+[ -e /etc/cron.d/ddc-pgdump ] && echo "/etc/cron.d/ddc-pgdump exists" || echo "/etc/cron.d/ddc-pgdump absent"
+
+sec "nginx entries at the rehearsal names, and server_name clashes"
+ours_file() { [ -f "$1" ] && [ ! -L "$1" ] && [ "$(head -n 1 -- "$1" 2>/dev/null)" = "$VHOST_MARKER" ]; }
+names_in() { sed -e 's/#.*//' -- "$1" 2>/dev/null | tr '\n' ' ' | tr ';{}' '\n\n\n' | awk '{ for (i = 1; i <= NF; i++) if ($i == "server_name") { for (j = i + 1; j <= NF; j++) print tolower($j); break } }' | tr -d '"'; }
+ours_entry() { # <path in sites-available or sites-enabled>: written by 30-nginx.sh for one of the two names
+  local d b; d=$(dirname -- "$1"); b=$(basename -- "$1")
+  case "$b" in "$API_HOST"|"$APP_HOST"|"$API_HOST.new"|"$APP_HOST.new") ;; *) return 1;; esac
+  case "$d" in
+    /etc/nginx/sites-available) ours_file "$1";;
+    /etc/nginx/sites-enabled) [ -L "$1" ] && ours_file "/etc/nginx/sites-available/$b" && [ "$(readlink -f -- "$1")" = "/etc/nginx/sites-available/$b" ];;
+    *) return 1;;
+  esac
+}
+if [ -n "$API_HOST" ] && [ -n "$APP_HOST" ]; then
+  for h in "$API_HOST" "$APP_HOST"; do
+    for f in "/etc/nginx/sites-available/$h" "/etc/nginx/sites-available/$h.new" "/etc/nginx/sites-enabled/$h"; do
+      if [ ! -e "$f" ] && [ ! -L "$f" ]; then echo "$f absent"
+      elif ours_entry "$f"; then echo "$f written by this package"
+      else
+        if [ -L "$f" ]; then what="symlink -> $(readlink -- "$f")"; else what="server_name $(names_in "$f" | tr '\n' ' ')proxy_pass $( { grep -oE 'proxy_pass[[:space:]]+[^;]+' "$f" || true; } | awk '{print $2}' | tr '\n' ' ')"; fi
+        warn "$f was NOT written by this package ($what): 30-nginx.sh apply refuses it; only after Sloan and Race agree, TAKE_OVER_VHOSTS=yes backs it up and takes it over"
+      fi
+    done
+    for f in /etc/nginx/sites-enabled/* /etc/nginx/conf.d/*.conf; do
+      [ -e "$f" ] || continue
+      [ "$f" != "/etc/nginx/sites-enabled/$API_HOST" ] && [ "$f" != "/etc/nginx/sites-enabled/$APP_HOST" ] || continue
+      if names_in "$f" | grep -qxF -- "$h"; then fail "$f also declares server_name $h: 30-nginx.sh apply refuses until its owner removes or renames it"; fi
+    done
+  done
+else fail "no settings were passed: the vhost names are not checked"; fi
 
 sec "old env file (names only)"
 F=/root/ddc-backend/backend.env
@@ -103,11 +168,22 @@ if [ -f /root/ddc-backend/keys_fixed/apn_key.p8 ]; then
   else echo "keys_fixed/apn_key.p8 identical to the git-tree copy: not checked (no git-tree hash passed: run it with ./remote.sh preflight)"; fi
 fi
 
-echo "old-stack files the write scripts fingerprint (path, short sha256; common.sh old_files):"
+echo "old-stack files the write scripts fingerprint (path, short sha256; common.sh old_files: a symlink counts with its target):"
 { printf '%s\n' /root/ddc-backend/backend.env /root/ddc-backend/docker-compose.yaml /root/ddc/docker-compose.yml
   find /root/ddc-backend/overlays -type f 2>/dev/null | LC_ALL=C sort
-  find /etc/nginx/sites-available -mindepth 1 -maxdepth 1 ! -type d ! -name 'tge-api.datadance.ai*' ! -name 'tge-app.datadance.ai*' | LC_ALL=C sort
-} | while IFS= read -r f; do if [ -f "$f" ]; then printf '  %s %s\n' "$(sha256sum < "$f" | cut -c1-12)" "$f"; else printf '  MISSING %s\n' "$f"; fi; done
+  for d in /etc/nginx/sites-available /etc/nginx/sites-enabled; do
+    find "$d" -mindepth 1 -maxdepth 1 ! -type d 2>/dev/null | LC_ALL=C sort | while IFS= read -r f; do ours_entry "$f" || printf '%s\n' "$f"; done
+  done
+  if [ -d "$MAINNET_DIR" ]; then
+    find "$MAINNET_DIR" \( -name .git -o -name node_modules \) -prune -o ! -type d -print | LC_ALL=C sort | while IFS= read -r f; do
+      skip=0; for m in $RW_MOUNTS; do case "$f/" in "$m"/*) skip=1;; esac; done
+      [ "$skip" = 1 ] || printf '%s\n' "$f"
+    done
+  else printf '%s/\n' "$MAINNET_DIR"; fi
+} | while IFS= read -r f; do
+  if [ -L "$f" ]; then printf '  %s %s\n' "$( { printf 'symlink %s\n' "$(readlink -- "$f")"; cat -- "$f" 2>/dev/null || true; } | sha256sum | cut -c1-12)" "$f"
+  elif [ -f "$f" ]; then printf '  %s %s\n' "$(sha256sum < "$f" | cut -c1-12)" "$f"; else printf '  MISSING %s\n' "$f"; fi
+done
 
 sec "production-only code in the old api (input for the overlay reconcile step)"
 docker inspect --format '{{range .Mounts}}{{if eq .Type "bind"}}{{.Source}}{{"\n"}}{{end}}{{end}}' ddc-backend-ddc-backend-api-1 | grep -c '/overlays/' | sed 's/^/overlay_file_mounts=/' || true
@@ -116,13 +192,14 @@ docker diff ddc-backend-ddc-backend-api-1 | awk '$2 ~ /^\/app\/src\/.*\.js$/ {pr
 echo "container-layer files under /app/public (runtime uploads outside the mounts): $(docker diff ddc-backend-ddc-backend-api-1 | awk '$1!="D" && $2 ~ /^\/app\/public\/.*\.[A-Za-z0-9]+$/' | wc -l)"
 docker diff ddc-backend-ddc-backend-api-1 | awk '$1!="D" && $2 ~ /^\/app\/public\/.*\.[A-Za-z0-9]+$/ {n=split($2,a,"/"); d=""; for(i=2;i<n;i++) d=d "/" a[i]; c[d]++} END {for (k in c) print "  " c[k] " " k}'
 
-sec "DNS for the temporary domains"
-for h in tge-api.datadance.ai tge-app.datadance.ai api.datadance.ai app.datadance.ai; do
+sec "DNS for the rehearsal hosts (settings API_HOST, APP_HOST)"
+for h in ${API_HOST:-} ${APP_HOST:-} api.datadance.ai app.datadance.ai; do
   r=$(getent hosts "$h" | awk '{print $1}' | tr '\n' ' ' || true)
   echo "$h -> ${r:-<no record>}"
 done
-getent hosts tge-api.datadance.ai >/dev/null && pass "tge-api resolves" || warn "tge-api.datadance.ai has no DNS record yet (Cloudflare A record needed)"
-getent hosts tge-app.datadance.ai >/dev/null && pass "tge-app resolves" || warn "tge-app.datadance.ai has no DNS record yet (Cloudflare A record needed)"
+for h in ${API_HOST:-} ${APP_HOST:-}; do
+  getent hosts "$h" >/dev/null && pass "$h resolves" || warn "$h has no DNS record yet (Cloudflare A record needed)"
+done
 
 sec "outbound (image builds pull base images and packages)"
 chk() { local c; c=$(curl -s -o /dev/null -m 10 -w '%{http_code}' "$1" || true); echo "$c $1"; case "$c" in "$2") pass "$1 reachable";; *) fail "$1 answered $c (expected $2)";; esac; }

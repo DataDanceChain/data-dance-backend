@@ -118,6 +118,9 @@ const ME = 'user-bind-me';
 const CODES = { [ME]: 'MEME23', alice: 'ALIC23', bob: 'BOBB23', carol: 'CARO23' };
 const basic = `Basic ${Buffer.from(`tge-test:${SECRET}`).toString('base64')}`;
 const FULL = 'tge:identity tge:referral_bind';
+// The canonical names since the tge:* -> sso:* rename. FULL keeps sending the old aliases, which the
+// server still accepts (test/unit/partnerScopeAliases.test.js); responses always use these names.
+const FULL_SSO = 'sso:identity sso:referral_bind';
 
 function addUser(id) {
   prisma.user.rows.push({
@@ -205,18 +208,18 @@ beforeEach(() => {
 
 describe('scope tge:referral_bind', () => {
   it('is advertised, echoed by /oauth/token and listed on consent as `referral_bind`', async () => {
-    assert.ok(PARTNER_SCOPES.includes('tge:referral_bind'));
+    assert.ok(PARTNER_SCOPES.includes('sso:referral_bind'));
     const meta = await request(server).get('/.well-known/oauth-authorization-server');
-    assert.ok(meta.body.scopes_supported.includes('tge:referral_bind'));
-    const { tokenScope, scopeItems } = await mintToken(FULL);
-    assert.equal(tokenScope, FULL);
+    assert.ok(meta.body.scopes_supported.includes('sso:referral_bind'));
+    const { tokenScope, scopeItems } = await mintToken(FULL_SSO);
+    assert.equal(tokenScope, FULL_SSO);
     assert.deepEqual(scopeItems, ['identity', 'referral_bind']);
   });
 
   it('is never default-granted: an authorization without a scope gets tge:identity only', async () => {
-    assert.ok(!PARTNER_DEFAULT_SCOPE.split(/\s+/).includes('tge:referral_bind'));
+    assert.ok(!PARTNER_DEFAULT_SCOPE.split(/\s+/).includes('sso:referral_bind'));
     const { tokenScope, token } = await mintToken('');
-    assert.equal(tokenScope, 'tge:identity');
+    assert.equal(tokenScope, 'sso:identity');
     const res = await bind(token, { code: CODES.alice });
     assert.equal(res.status, 403);
     assert.equal(res.body.error, 'insufficient_scope');
@@ -224,11 +227,11 @@ describe('scope tge:referral_bind', () => {
   });
 
   it('403 insufficient_scope for a token with every read scope but not this one', async () => {
-    const { token } = await mintToken('tge:identity tge:status tge:referral');
+    const { token } = await mintToken('sso:identity sso:status sso:referral');
     const res = await bind(token, { code: CODES.alice });
     assert.equal(res.status, 403);
     assert.equal(res.body.error, 'insufficient_scope');
-    assert.match(res.headers['www-authenticate'], /scope="tge:referral_bind"/);
+    assert.match(res.headers['www-authenticate'], /scope="sso:referral_bind"/);
     assert.equal(inviterOf(ME), null);
   });
 });
@@ -249,17 +252,17 @@ describe('the consent for the write opens only with its switch', () => {
     for (const value of [undefined, 'false']) {
       if (value === undefined) delete process.env.SSO_TGE_REFERRAL_BIND;
       else process.env.SSO_TGE_REFERRAL_BIND = value;
-      await assert.rejects(authorize(FULL), (e) => e.error === 'invalid_scope' && /tge:referral_bind/.test(e.description));
-      await assert.rejects(authorize('tge:referral_bind'), (e) => e.error === 'invalid_scope');
+      await assert.rejects(authorize(FULL_SSO), (e) => e.error === 'invalid_scope' && /sso:referral_bind/.test(e.description));
+      await assert.rejects(authorize('sso:referral_bind'), (e) => e.error === 'invalid_scope');
       const as = await request(server).get('/.well-known/oauth-authorization-server');
-      assert.ok(!as.body.scopes_supported.includes('tge:referral_bind'), String(value));
-      assert.ok(as.body.scopes_supported.includes('tge:referral_network'));
+      assert.ok(!as.body.scopes_supported.includes('sso:referral_bind'), String(value));
+      assert.ok(as.body.scopes_supported.includes('sso:referral_network'));
       const pr = await request(server).get('/.well-known/oauth-protected-resource/partner/tge');
-      assert.deepEqual(pr.body.scopes_supported, PARTNER_SCOPES.filter((item) => item !== 'tge:referral_bind'));
+      assert.deepEqual(pr.body.scopes_supported, PARTNER_SCOPES.filter((item) => item !== 'sso:referral_bind'));
     }
     // Every read scope is still served while the write is off.
-    const { tokenScope } = await mintToken('tge:identity tge:status tge:referral');
-    assert.equal(tokenScope, 'tge:identity tge:status tge:referral');
+    const { tokenScope } = await mintToken('sso:identity sso:status sso:referral');
+    assert.equal(tokenScope, 'sso:identity sso:status sso:referral');
   });
 
   it('switch on: advertised on both metadata documents', async () => {

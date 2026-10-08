@@ -3,7 +3,8 @@ const prisma = require('../utils/prisma');
 const { protect } = require('../middlewares/authMiddleware');
 const { rateLimiters } = require('../middlewares/rateLimitMiddleware');
 const { createLogger } = require('../utils/logger');
-const { PARTNER_REALM, getPartnerClient, verifyClientSecret } = require('../constants/partnerClient');
+const { PARTNER_REALM, verifyClientSecret } = require('../constants/partnerClient');
+const { loadPartnerClient } = require('../services/ssoDeveloperClient');
 const { verifySsoSession, looksLikeSsoSession, ssoSessionRefusal } = require('./ssoRoutes');
 const {
   OAuthError,
@@ -257,11 +258,11 @@ router.get('/oauth/authorize', lim('oauthAuthorize'), async (req, res) => {
  * client, correct secret), or null. Cheap: one sha256 per request, no database. Any malformed or
  * ambiguous credential is simply "not authenticated" here — the handler still answers it properly.
  */
-function verifiedConfidentialClientId(req) {
+async function verifiedConfidentialClientId(req) {
   try {
     const presented = presentedClientCredentials(req, req.body || {});
     if (!presented || !presented.clientSecret) return null;
-    const client = getPartnerClient(presented.clientId, req);
+    const client = await loadPartnerClient(presented.clientId, req);
     if (!client || !client.enabled) return null;
     return verifyClientSecret(client, presented.clientSecret) ? client.clientId : null;
   } catch {
@@ -283,12 +284,15 @@ function verifiedConfidentialClientId(req) {
  */
 function clientAwareLimit(ipLimiter, clientLimiter) {
   return (req, res, next) => {
-    const clientId = verifiedConfidentialClientId(req);
-    if (clientId) {
-      req.oauthTokenClientId = clientId;
-      return lim(clientLimiter)(req, res, next);
-    }
-    return lim(ipLimiter)(req, res, next);
+    Promise.resolve(verifiedConfidentialClientId(req))
+      .then((clientId) => {
+        if (clientId) {
+          req.oauthTokenClientId = clientId;
+          return lim(clientLimiter)(req, res, next);
+        }
+        return lim(ipLimiter)(req, res, next);
+      })
+      .catch(next);
   };
 }
 

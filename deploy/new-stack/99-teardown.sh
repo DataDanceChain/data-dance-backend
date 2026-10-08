@@ -3,7 +3,10 @@
 #
 # CHANGES ON THE SERVER
 #   default            docker compose -p ddcnew down (containers ddcnew-*, network ddcnew_default; no -v needed:
-#                      the data is a bind mount); removes the tge-api / tge-app vhosts (links + files), nginx -t, reload.
+#                      the data is a bind mount); 30-nginx.sh undo: removes this package's vhosts at API_HOST / APP_HOST
+#                      (links + files; anything else at those names stays), nginx -t and reload if it removed something;
+#                      then removes the settings record /root/ddcnew/settings.env (the hosts and ports the stack was set
+#                      up with: this run uses them, so the next run may choose others).
 #                      If compose cannot run (compose.yaml or .env missing, compose error), the project is removed by
 #                      its compose label instead: containers labelled com.docker.compose.project=ddcnew (all named
 #                      ddcnew-*, checked first), then networks with that label (named ddcnew_*, checked first).
@@ -12,7 +15,11 @@
 #                      server-side log of this run goes with it, the Mac keeps its copy in deploy/new-stack/logs/).
 #                      Irreversible; the rehearsal TGE client secret and the db password are gone with it.
 #   Takes the run lock /root/ddcnew/.lock and logs to /root/ddcnew/logs/ (common.sh run_begin).
-#   Never touches /root/backup (P1 dumps and cron) or anything of the old stack.
+#   Never touches /root/backup (P1 dumps and cron) or anything of the old stack, nor Race's mainnet rehearsal
+#   (ddc-mainnet-* containers, /root/ddc-mainnet, his vhosts). After a vhost take-over it refuses, in every mode and
+#   before it changes anything, while a backup in /root/ddcnew/vhost-takeover/ was never restored: ./30-nginx.sh
+#   restore first (his entries back and this package's removed, in one reload), then this script. Without the restore,
+#   step 2 would leave his host names with no vhost at all until someone restored them.
 #   STAYS BEHIND in every mode: the base images the builds pulled (node, nginx, ...) and postgres:17 (shared with
 #   the old stack), and the build cache (docker builder prune -f, or p2-disk.sh apply, removes the cache).
 # UNDO
@@ -27,7 +34,12 @@ require_server
 RM_IMAGES=0; RM_DIR=0
 for a in "$@"; do case "$a" in --remove-images) RM_IMAGES=1;; --delete-dir) RM_DIR=1;; *) die "unknown option $a";; esac; done
 run_begin 99-teardown "$@"
+settings_say
 old_snapshot_begin
+# After a take-over: restore first (header). Checked before anything changes; an interrupted backup (no MANIFEST) holds
+# nothing that was taken over and does not count.
+b=""; for d in "$NEW_DIR"/vhost-takeover/*/; do if [ -f "$d/MANIFEST" ] && [ ! -e "$d/RESTORED" ]; then b="$b $(basename "$d")"; fi; done
+[ -z "$b" ] || die "refusing: $NEW_DIR/vhost-takeover holds the backup of vhosts this package took over and never restored ($b). Run ./30-nginx.sh restore first (the other party's entries go back and this package's go, in one reload), then ./99-teardown.sh"
 
 # Fallback for step 1: remove project ddcnew by its compose label (exact match), never anything else.
 remove_project_by_label() {
@@ -69,8 +81,9 @@ fi
 left=$(docker ps -a --filter "label=com.docker.compose.project=$PROJECT" --format '{{.Names}}' | grep -c . || true)
 [ "$left" = 0 ] && pass "no ddcnew containers left" || die "$left ddcnew containers remain"
 
-step "2. vhosts"
+step "2. vhosts (this package's only)"
 "$HERE/30-nginx.sh" undo
+settings_forget
 
 if [ "$RM_IMAGES" = 1 ]; then
   step "3. images ddcnew/*"
@@ -85,4 +98,4 @@ if [ "$RM_DIR" = 1 ]; then
   [ ! -e /root/ddcnew ] && pass "/root/ddcnew deleted" || die "/root/ddcnew still exists"
 fi
 old_snapshot_assert
-say "kept: /root/backup (P1). Not touched: /root/ddc, /root/ddc-backend, /root/deploy-src, ddc-* containers. Left behind: base images and the build cache (see header)."
+say "kept: /root/backup (P1). Not touched: /root/ddc, /root/ddc-backend, /root/deploy-src, $MAINNET_DIR, ddc-* containers (${MAINNET_CTR_PREFIX}* included), vhosts this package did not write. Left behind: base images and the build cache (see header)."

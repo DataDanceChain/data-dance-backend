@@ -6,15 +6,18 @@
 #                  40-up.sh and refuse_if_infra_only; compose ignores it)
 #   .env.api       the backend's active environment = .env.rehearsal with the JWKS pins 40-up.sh computed (later .env.cutover).
 #                  The runbook's "cp .env.rehearsal .env" is "cp .env.rehearsal .env.api" here, so the
-#                  compose interpolation file never carries secrets. After changing it:
-#                  docker compose up -d --force-recreate api   (restart does not re-read env files)
+#                  compose interpolation file never carries secrets. After changing it, re-run 40-up.sh, or by hand
+#                  (the ports come from settings.env): (set -a; . ./settings.env; docker compose -p ddcnew up -d
+#                  --force-recreate api)   (restart does not re-read env files)
 #   .env.db        POSTGRES_USER / POSTGRES_PASSWORD / POSTGRES_DB (generated on the server)
 #   keys_fixed/    wwdr.pem (public Apple certificate, copied) + a THROWAWAY pass signer (signerKey.pem/signerCert.pem)
 #                  + a THROWAWAY apn_key.p8 (rehearsal: no production private key); the mount covers /app/keys_fixed,
 #                  so no key file baked into the image is used
 #   assets/        own copies of campaign covers and Wallet passes (never the old directories)
 #   pgdata/        the new Postgres cluster
-# Ports: loopback only, all different from the old stack (10000, 9000-9003, 15432).
+# Ports: loopback only, from the settings API_PORT, DB_PORT and WEB_PORT (common.sh; defaults 10020, 15434, 9021; the
+# values are recorded in settings.env and passed by common.sh dc()). common.sh refuses the old stack's ports (10000,
+# 9000-9003, 15432), and 40-up.sh refuses a port that anything but this stack's own container listens on.
 # No source-code mounts, no `command: npm run dev`, no host network, no external networks or volumes.
 #
 # Memory (the host has NO swap and is shared with the live old stack):
@@ -40,7 +43,7 @@ services:
     image: ${API_IMAGE:?API_IMAGE missing - run 10-build.sh, which writes /root/ddcnew/.env}
     env_file: .env.api
     ports:
-      - "127.0.0.1:10010:3000"
+      - "127.0.0.1:${API_PORT:?API_PORT missing - common.sh dc() passes the settings}:3000"
     volumes:
       - ./keys_fixed:/app/keys_fixed:ro
       - ./assets/campaigns:/app/public/assets/campaigns
@@ -57,7 +60,7 @@ services:
     image: postgres:17     # same major version as the old database; already present on the host
     env_file: .env.db
     ports:
-      - "127.0.0.1:15433:5432"
+      - "127.0.0.1:${DB_PORT:?DB_PORT missing - common.sh dc() passes the settings}:5432"
     volumes:
       - ./pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -74,8 +77,8 @@ services:
   web:
     image: ${WEB_IMAGE:?WEB_IMAGE missing - run 10-build.sh, which writes /root/ddcnew/.env}
     ports:
-      - "127.0.0.1:9011:80"
-    # /downloads/ and /architecture/ are served by host nginx from /opt/ddc (the tge-app vhost keeps them).
+      - "127.0.0.1:${WEB_PORT:?WEB_PORT missing - common.sh dc() passes the settings}:80"
+    # /downloads/ and /architecture/ are served by host nginx from /opt/ddc (the app vhost copy keeps them).
     restart: unless-stopped
     mem_limit: 128m
     oom_score_adj: 500

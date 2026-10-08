@@ -1003,9 +1003,13 @@ model SsoDeveloperClient {
   secretHash   String
   redirectUris String[]
   enabled      Boolean  @default(true)
+  /// developer: self-serve login scopes. partner: first-party Data Planet scopes.
+  kind         String   @default("developer")
+  ownerUserId  String?
   createdAt    DateTime @default(now())
 
   @@index([contactEmail])
+  @@index([ownerUserId])
 }
 
 /// Public OAuth clients from DCR or CIMD (ChatGPT / Claude).

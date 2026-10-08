@@ -20,7 +20,12 @@
 #                                         apn.Provider only needs a valid key file). The cutover copies the production
 #                                         files in under its own approval (APPROVAL item L).
 #   /root/ddcnew/assets/campaigns|passes/ COPIES of /root/ddc-backend/campaign-covers and /root/ddc-backend/passes
-#   /root/ddcnew/.env                     compose interpolation only: API_IMAGE, WEB_IMAGE tags and INFRA_ONLY=0|1 (no secrets)
+#   /root/ddcnew/.env                     compose interpolation only: API_IMAGE, WEB_IMAGE tags, INFRA_ONLY=0|1 and
+#                                         OLD_APP_SWITCHES=0|1 (does the backend commit contain backend PR #38's old-App
+#                                         line; an ancestor check, read by 40-up.sh) (no secrets)
+#   /root/ddcnew/src/backend-<sha12>/     also the history since 2026-10-01 of that commit (git fetch --shallow-since), for
+#                                         the ancestor check
+#   /root/ddcnew/settings.env             the hosts and ports (common.sh settings), if no earlier script recorded them
 #   /root/ddcnew/.lock, /root/ddcnew/logs/<ts>-10-build-<pid>.log (600) and logs/build-*.log: run lock and output copies
 #   The old directories are only read (cp/rsync source); nothing under /root/ddc-backend is written.
 # UNDO
@@ -35,6 +40,10 @@
 #   --infra-only           Build anyway to prove the infrastructure (empty stack). The backend image is tagged
 #                          ddcnew/backend:<sha12>-infra and /root/ddcnew/.env gets INFRA_ONLY=1: 40-up.sh prints a
 #                          banner and every data step refuses (refuse_if_infra_only in common.sh).
+# WEB BUILD FOR API_HOST: the frontend compiles its tge API in (src/config/environment.ts API_BASE_URLS.tge;
+#   https://api-rehearsal.datadance.ai/api since frontend a3ee809). Before any build, the uploaded source must name
+#   https://<API_HOST>/api (common.sh fe_api_base_check); after the web build, ddc-build.json must say apiBaseUrl
+#   https://<API_HOST>/api (web_marker_check). A frontend commit for another host stops the script.
 # MEMORY AND DISK: each docker build runs under a watchdog (common.sh run_build_watched): MemAvailable and the free
 #   space on / are polled every 2 s and the build is killed (client, then any BuildKit RUN-step process) if MemAvailable
 #   falls below 1000 MB or the free disk below 3 GB; the script then fails. RUN-step processes get oom_score_adj=1000 on
@@ -70,9 +79,16 @@ if ddc_local_test && [ "${DDC_ARGS_ONLY:-0}" = 1 ]; then say "args ok: INFRA_ONL
 
 for p in "$NEW_DIR" "$SRC" "$LOGS" "$NEW_DIR/keys_fixed" "$NEW_DIR/assets" "$NEW_DIR/.env"; do guard_write_path "$p"; done
 run_begin 10-build "$BE_SHA" "$FE_SHA" "$@"
+settings_say
 [ "$INFRA_ONLY" = 0 ] || say "!!!!! $INFRA_ONLY_BANNER"
 old_snapshot_begin
 install -d -m 700 "$NEW_DIR" "$SRC" "$LOGS"
+# The frontend tarball first: a web build for another API host would only fail after the backend build (30 min). Only
+# once it names https://<API_HOST>/api are the settings recorded (a mismatch leaves no record behind).
+[ -f "$FE_TGZ" ] && [ -f "$FE_TGZ.sha256" ] || die "upload first: remote.sh upload-web $FE_SHA (expects $FE_TGZ and .sha256)"
+[ "$(sha256sum < "$FE_TGZ" | cut -c1-64)" = "$(cut -c1-64 "$FE_TGZ.sha256")" ] || die "tarball sha256 mismatch"
+fe_api_base_check "$FE_TGZ"
+settings_record
 
 check_resources() {
   local mem disk; mem=$(mem_avail_mb); disk=$(disk_avail_gb)
@@ -94,6 +110,13 @@ else
 fi
 [ "$(git -C "$BE_DIR" rev-parse HEAD)" = "$BE_SHA" ] || die "checkout is not at $BE_SHA"
 [ -z "$(git -C "$BE_DIR" status --porcelain --ignored)" ] || die "checkout is not clean"
+# Does the commit contain backend PR #38's old-App startup line (OLD_APP_COMMIT, 2026-10-05)? An ancestor check on the
+# history since 2026-10-01 (common.sh old_app_switches). 40-up.sh then requires the line when it does
+# (OLD_APP_SWITCHES=1 in /root/ddcnew/.env).
+OLD_APP_SWITCHES=$(old_app_switches "$BE_DIR" "$BE_REPO" "$BE_SHA") \
+  || die "cannot tell whether $BE12 contains PR #38 (the history fetch since 2026-10-01 failed, and the commit is not older): re-run"
+[ "$(git -C "$BE_DIR" rev-parse HEAD)" = "$BE_SHA" ] && [ -z "$(git -C "$BE_DIR" status --porcelain --ignored)" ] || die "the checkout changed during the history fetch"
+say "backend PR #38's old-App line (${OLD_APP_COMMIT:0:12}): $([ "$OLD_APP_SWITCHES" = 1 ] && echo "in this commit: 40-up.sh requires it" || echo "not in this commit: inert")"
 pass "backend HEAD=$BE12 \"$(git -C "$BE_DIR" log -1 --format=%s | cut -c1-80)\""
 [ -f "$BE_DIR/.dockerignore" ] && grep -qx '\*\*/.env' "$BE_DIR/.dockerignore" || die ".dockerignore with **/.env missing: PR #25 is not in this commit"
 [ -f "$BE_DIR/scripts/mainnetSwitch.js" ] || die "scripts/mainnetSwitch.js missing: PR #27 is not in this commit"
@@ -178,26 +201,16 @@ if ! run_build_watched "$LOGS/build-web-$FE12.log" --build-arg VITE_MODE=tge --b
   tail -25 "$LOGS/build-web-$FE12.log"; die "web build failed (log: $LOGS/build-web-$FE12.log)"
 fi
 pass "web image built in $(( $(date +%s)-t0 ))s, size $(docker image ls --format '{{.Size}}' "$WEB_IMAGE")"
-docker run --rm --network none --entrypoint cat "$WEB_IMAGE" /var/www/ddc-build.json | python3 -c '
-import json, sys
-m = json.load(sys.stdin)
-want = {"mode": "tge", "apiEnv": "tge", "apiBaseUrl": "https://tge-api.datadance.ai/api", "w3aNetwork": "sapphire_mainnet", "chainId": 44508}
-bad = [k for k, v in want.items() if m.get(k) != v]
-cid = str(m.get("w3aClientId", ""))
-if not cid.startswith("BBpkxUTUr"): bad.append("w3aClientId")
-for k in ["mode", "apiEnv", "apiBaseUrl", "w3aNetwork", "chainId"]: print("marker %s=%s" % (k, m.get(k)))
-print("marker w3aClientId=%s... (len %d)" % (cid[:9], len(cid)))
-sys.exit("FAIL marker fields wrong: " + ",".join(bad) if bad else 0)
-' || die "build marker check failed"
-pass "ddc-build.json: tge / tge / tge-api / sapphire_mainnet / BBpkxUTUr / 44508"
+docker run --rm --network none --entrypoint cat "$WEB_IMAGE" /var/www/ddc-build.json | web_marker_check || die "build marker check failed (the web image must call https://$API_HOST/api)"
+pass "ddc-build.json: tge / tge / https://$API_HOST/api / sapphire_mainnet / BBpkxUTUr / 44508"
 n=$(docker run --rm --network none --entrypoint sh "$WEB_IMAGE" -c 'grep -rl "BGiGcxrX" /var/www 2>/dev/null | wc -l' | tr -dc '0-9')
 [ "$n" = 0 ] && pass "no devnet client id (BGiGcxrX...) anywhere in /var/www" || die "$n files in the tge bundle carry the devnet client id"
 
 # ---------------------------------------------------------------------------
 step "6. image tags for compose"
 umask 077
-printf 'API_IMAGE=%s\nWEB_IMAGE=%s\nINFRA_ONLY=%s\n' "$API_IMAGE" "$WEB_IMAGE" "$INFRA_ONLY" > "$NEW_DIR/.env"
-say "$NEW_DIR/.env: API_IMAGE=$API_IMAGE WEB_IMAGE=$WEB_IMAGE INFRA_ONLY=$INFRA_ONLY"
+printf 'API_IMAGE=%s\nWEB_IMAGE=%s\nINFRA_ONLY=%s\nOLD_APP_SWITCHES=%s\n' "$API_IMAGE" "$WEB_IMAGE" "$INFRA_ONLY" "$OLD_APP_SWITCHES" > "$NEW_DIR/.env"
+say "$NEW_DIR/.env: API_IMAGE=$API_IMAGE WEB_IMAGE=$WEB_IMAGE INFRA_ONLY=$INFRA_ONLY OLD_APP_SWITCHES=$OLD_APP_SWITCHES"
 [ "$INFRA_ONLY" = 0 ] || say "!!!!! $INFRA_ONLY_BANNER"
 df -h / | tail -1; docker system df --format '{{.Type}} {{.Size}} {{.Reclaimable}}' | grep -E 'Images|Build'
 say "optional: docker builder prune -f   (frees the build cache these builds left; images stay)"
