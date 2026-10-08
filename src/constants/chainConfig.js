@@ -28,8 +28,8 @@
  * appears in a message or a log line, and neither does the RPC URL in this module's own errors or
  * in the boot log (which carries the RPC host only). That does NOT extend to ethers: its errors
  * (SERVER_ERROR and the like) carry the full RPC URL in their message, and some callers return
- * error.message to the client (createActivity does, in its 500 body). So the RPC URL must never
- * carry a credential: no user:password@, no API key in the path or the query.
+ * error.message to the client. So the RPC URL must never carry a credential: no user:password@, no
+ * API key in the path or the query.
  */
 
 const DEFAULT_CHAIN_RPC_URL = 'https://dev-exp-alpha.datadance.ai/eth/rpc';

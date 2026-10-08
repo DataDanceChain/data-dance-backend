@@ -5,7 +5,7 @@
  * 35), which is the only route here outside the read-only guard.
  *
  * Auth: `Authorization: Bearer ddc_tge_…` only (never a query string). The token must have
- * been issued to the static partner client for THIS audience (`${PUBLIC_BASE_URL}/partner/tge`)
+ * been issued to an enabled partner client for THIS audience (`${PUBLIC_BASE_URL}/partner/sso`)
  * and the client must currently be enabled; otherwise 401 invalid_token. A DDC user JWT, an
  * MCP token (`ddc_mcp_`) or a manual PAT can never pass, and a partner token can pass neither
  * `protect` (not a JWT) nor `/mcp` (prefix). Identity always comes from the token: a `sub` /
@@ -20,7 +20,10 @@ const {
   PARTNER_POINTS_CACHE_MAX_AGE_SEC,
   getPartnerClient,
   partnerResourceUrl,
+  canonicalPartnerScope,
+  publicPartnerClientId,
   maskEmail,
+  partnerAvatarUrl,
   realEmail,
   checksumWalletAddress,
   referralBindEnabled,
@@ -35,6 +38,7 @@ const {
 } = require('../services/partnerReferralBind');
 const { issueConfirmToken, verifyConfirmToken } = require('../services/referralBindConfirm');
 const { findUserByPartnerToken } = require('../services/mcpTokenService');
+const { loadDeveloperPartnerClient } = require('../services/ssoDeveloperClient');
 const { withPartnerVisibleWallet } = require('../services/networkRebindWallet');
 const { hasActiveConsent } = require('../services/dataLicenceConsent');
 const { isDisplayReferralCode, getInviter, countDirectInvitees } = require('../utils/referralUtils');
@@ -67,7 +71,7 @@ const passthrough = (req, res, next) => next();
 const lim = (name) => (rateLimiters && rateLimiters[name]) || passthrough;
 
 function resourceMetadataUrl(req) {
-  return `${publicBaseUrl(req)}/.well-known/oauth-protected-resource/partner/tge`;
+  return `${publicBaseUrl(req)}/.well-known/oauth-protected-resource/partner/sso`;
 }
 
 function challenge(req, { error, description, scope }) {
@@ -94,7 +98,10 @@ function readBearer(req) {
 }
 
 function hasScope(tokenScope, scope) {
-  return String(tokenScope || '').split(/\s+/).includes(scope);
+  const wanted = canonicalPartnerScope(scope);
+  return String(tokenScope || '')
+    .split(/\s+/)
+    .some((item) => canonicalPartnerScope(item) === wanted);
 }
 
 /** Account status is `unknown` until the `User.disabledAt` column exists (P0 branch). */
@@ -120,12 +127,13 @@ async function requirePartnerToken(req, res, next) {
     if (!token) {
       return sendError(req, res, 401, 'invalid_token', 'A partner access token is required in the Authorization header.');
     }
-    const client = getPartnerClient(undefined, req);
-    if (!client || !client.enabled) {
-      return sendError(req, res, 401, 'invalid_token', 'The partner client is disabled.');
-    }
     const resolved = await findUserByPartnerToken(token, partnerResourceUrl(req));
-    if (!resolved || resolved.token.clientId !== client.clientId) {
+    if (!resolved) {
+      return sendError(req, res, 401, 'invalid_token', 'The access token is invalid, expired or revoked.');
+    }
+    const client = getPartnerClient(resolved.token.clientId, req)
+      || await loadDeveloperPartnerClient(resolved.token.clientId, req);
+    if (!client || !client.enabled || resolved.token.clientId !== client.clientId) {
       return sendError(req, res, 401, 'invalid_token', 'The access token is invalid, expired or revoked.');
     }
     // During the Web3Auth network switch an account whose re-bind is pending still stores its
@@ -139,9 +147,10 @@ async function requirePartnerToken(req, res, next) {
 }
 
 function requireScope(scope) {
+  const name = canonicalPartnerScope(scope);
   return (req, res, next) => {
-    if (!hasScope(req.partner.token.scope, scope)) {
-      return sendError(req, res, 403, 'insufficient_scope', `Scope ${scope} is required.`, { scope });
+    if (!hasScope(req.partner.token.scope, name)) {
+      return sendError(req, res, 403, 'insufficient_scope', `Scope ${name} is required.`, { scope: name });
     }
     if (req.partner.user.disabledAt) {
       return sendError(req, res, 403, 'account_disabled', 'This DataDance account is disabled.');
@@ -202,7 +211,7 @@ function meBody(req) {
   const serves = fieldGate(req);
   const body = {
     sub: user.id,
-    client_id: token.clientId,
+    client_id: publicPartnerClientId(token.clientId),
     issued_at: iso(token.issuedAt),
     expires_at: iso(token.expiresAt),
     // BOTH gates, like every other field: the catalog declares `email_masked` under
@@ -211,6 +220,11 @@ function meBody(req) {
     // for a caller; the point is that the field can never again outlive its own declaration.
     email_masked: serves('tge:identity', 'email_masked') ? maskEmail(realEmail(user)) : null,
   };
+  // Optional. Present only when this environment serves it and the account has a picture URL.
+  if (serves('tge:identity', 'avatar')) {
+    const avatar = partnerAvatarUrl(user.avatar, publicBaseUrl(req));
+    if (avatar) body.avatar = avatar;
+  }
   // The real address, for the campaign's own mail. null when the e-mail column holds a wallet
   // address (external-wallet login) or a legacy `twitter|<id>` subject — see realEmail().
   if (serves('tge:email', 'email')) body.email = realEmail(user);
@@ -219,7 +233,7 @@ function meBody(req) {
   return body;
 }
 
-router.get('/me', requirePartnerToken, readOnlyRequest, requireScope('tge:identity'), (req, res) => {
+router.get('/me', requirePartnerToken, readOnlyRequest, requireScope('sso:identity'), (req, res) => {
   res.set('Cache-Control', 'no-store');
   const body = meBody(req);
   recordAccess(req, 'me', body);
@@ -260,7 +274,7 @@ async function referralSummary(user) {
   };
 }
 
-router.get('/status', requirePartnerToken, readOnlyRequest, requireScope('tge:status'), async (req, res, next) => {
+router.get('/status', requirePartnerToken, readOnlyRequest, requireScope('sso:status'), async (req, res, next) => {
   try {
     const { user } = req.partner;
     const serves = fieldGate(req);
@@ -318,7 +332,7 @@ function networkServed(req, res, next) {
   return next();
 }
 
-router.get('/referral-network', requirePartnerToken, readOnlyRequest, networkServed, requireScope('tge:referral_network'), async (req, res, next) => {
+router.get('/referral-network', requirePartnerToken, readOnlyRequest, networkServed, requireScope('sso:referral_network'), async (req, res, next) => {
   try {
     const { cursor, limit, as_of: asOf } = req.query || {};
     const body = await buildReferralNetwork(req.partner.user.id, { cursor, limit, as_of: asOf });
@@ -436,7 +450,7 @@ function readBindBody(req, res, step) {
 const bindGates = [
   requirePartnerToken,
   referralBindServed,
-  requireScope('tge:referral_bind'),
+  requireScope('sso:referral_bind'),
   referralFeaturesEnabled,
   lim('partnerReferralBind'),
 ];

@@ -447,7 +447,7 @@ describe('auto-approval runs the manual Allow path unchanged', () => {
       .type('form')
       .send({ grant_type: 'authorization_code', code, redirect_uri: REDIRECT, code_verifier: verifier });
     assert.equal(token.status, 200, token.text);
-    assert.match(token.body.access_token, /^ddc_tge_/);
+    assert.match(token.body.access_token, /^ddc_sso_/);
   });
 });
 
@@ -466,7 +466,7 @@ describe('audit line oauth.consent_auto_approved', () => {
       assert.deepEqual(lines[0].meta, {
         clientId: 'tge-test',
         entry,
-        scopes: 'tge:identity tge:email',
+        scopes: 'sso:identity sso:email',
         requestId,
         userId: cUser.id,
       });

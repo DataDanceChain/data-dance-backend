@@ -1,0 +1,85 @@
+# compose.yaml - the new production stack, compose project "ddcnew" (runbook 4.1 step 2).
+# Installed as /root/ddcnew/compose.yaml by 40-up.sh. Every relative path below is under /root/ddcnew.
+#
+# Files it reads (all in /root/ddcnew, all written by 10-build.sh / 20-env.sh, none shared with the old stack):
+#   .env           compose interpolation only: API_IMAGE, WEB_IMAGE (image tags, no secrets), INFRA_ONLY (0|1, read by
+#                  40-up.sh and refuse_if_infra_only; compose ignores it)
+#   .env.api       the backend's active environment = .env.rehearsal with the JWKS pins 40-up.sh computed (later .env.cutover).
+#                  The runbook's "cp .env.rehearsal .env" is "cp .env.rehearsal .env.api" here, so the
+#                  compose interpolation file never carries secrets. After changing it, re-run 40-up.sh, or by hand
+#                  (the ports come from settings.env): (set -a; . ./settings.env; docker compose -p ddcnew up -d
+#                  --force-recreate api)   (restart does not re-read env files)
+#   .env.db        POSTGRES_USER / POSTGRES_PASSWORD / POSTGRES_DB (generated on the server)
+#   keys_fixed/    wwdr.pem (public Apple certificate, copied) + a THROWAWAY pass signer (signerKey.pem/signerCert.pem)
+#                  + a THROWAWAY apn_key.p8 (rehearsal: no production private key); the mount covers /app/keys_fixed,
+#                  so no key file baked into the image is used
+#   assets/        own copies of campaign covers and Wallet passes (never the old directories)
+#   pgdata/        the new Postgres cluster
+# Ports: loopback only, from the settings API_PORT, DB_PORT and WEB_PORT (common.sh; defaults 10020, 15434, 9021; the
+# values are recorded in settings.env and passed by common.sh dc()). common.sh refuses the old stack's ports (10000,
+# 9000-9003, 15432), and 40-up.sh refuses a port that anything but this stack's own container listens on.
+# No source-code mounts, no `command: npm run dev`, no host network, no external networks or volumes.
+#
+# Memory (the host has NO swap and is shared with the live old stack):
+#   oom_score_adj: 500 on every ddcnew service: if the host ever runs out of memory, the kernel OOM killer picks a new-
+#   stack process before the old Postgres or API (old containers run at 0; docker accepts -1000..1000).
+#   mem_limit 1g + 1g + 128m = 2.1 GB in all, sized with headroom over the old stack's own measured use (the figures
+#   are in the private runbook). api 1g leaves room for sharp/pdfkit (`compose run --rm api` for prisma inherits it).
+#   db 1g: shared_buffers is 128 MB by default and page cache is reclaimed inside the limit before any OOM, so the later
+#   restore of the production database still fits. web 128m = static nginx. If a limit is hit, only that ddcnew
+#   container is killed (and restarted), never an old one.
+#   The 40-up.sh checks print docker stats for ddcnew-* at the end.
+
+name: ddcnew
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "50m"
+    max-file: "3"
+
+services:
+  api:
+    image: ${API_IMAGE:?API_IMAGE missing - run 10-build.sh, which writes /root/ddcnew/.env}
+    env_file: .env.api
+    ports:
+      - "127.0.0.1:${API_PORT:?API_PORT missing - common.sh dc() passes the settings}:3000"
+    volumes:
+      - ./keys_fixed:/app/keys_fixed:ro
+      - ./assets/campaigns:/app/public/assets/campaigns
+      - ./assets/passes:/app/public/assets/passes
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+    mem_limit: 1g          # the host has no swap; keep a runaway process away from the old stack (see header)
+    oom_score_adj: 500
+    logging: *logging
+
+  db:
+    image: postgres:17     # same major version as the old database; already present on the host
+    env_file: .env.db
+    ports:
+      - "127.0.0.1:${DB_PORT:?DB_PORT missing - common.sh dc() passes the settings}:5432"
+    volumes:
+      - ./pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+    shm_size: 256m
+    mem_limit: 1g
+    oom_score_adj: 500
+    logging: *logging
+
+  web:
+    image: ${WEB_IMAGE:?WEB_IMAGE missing - run 10-build.sh, which writes /root/ddcnew/.env}
+    ports:
+      - "127.0.0.1:${WEB_PORT:?WEB_PORT missing - common.sh dc() passes the settings}:80"
+    # /downloads/ and /architecture/ are served by host nginx from /opt/ddc (the app vhost copy keeps them).
+    restart: unless-stopped
+    mem_limit: 128m
+    oom_score_adj: 500
+    logging: *logging

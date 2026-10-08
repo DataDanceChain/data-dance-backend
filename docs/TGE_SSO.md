@@ -1,5 +1,11 @@
 # DataDance SSO for the TGE partner — integration guide (backend v0.1)
 
+The public names are `/partner/sso`, scopes `sso:*`, and token prefix `ddc_sso_`. The previous
+`/partner/tge`, `tge:*`, and `ddc_tge_` names still work and mean the same thing. Client ids
+`tge` and `tge-rehearsal` are retired and are not accepted. Partners send the registered
+client id (`sso` or `sso-rehearsal`). A first-party partner row keeps Data Planet's scopes;
+a self-serve client does not.
+
 Normative contract: `ddc-sso-kit/openapi/ddc-sso-tge-v0.1.yaml`. This document explains how the
 DataDance API implements it and what the partner backend must do. Where this build deviates from
 the contract, the deviation is listed in §12.
@@ -261,15 +267,18 @@ the **scope** the user granted, and DataDance's per-environment freeze list
 
 - for the original candidates (`registered_at`, `wallet_bound`, `data_licence_granted`,
   `email_masked`) — the key is present with value `null`;
-- for the fields added for the campaign (`email`, `wallet_address`, `points`, `referral`) — the
-  key is **absent**, so the partner can tell "this deployment does not serve it" from "DataDance
-  has no value for this user" (which is `null` *inside* a field that is served).
+- for the fields added for the campaign (`email`, `wallet_address`, `points`, `referral`,
+  `avatar`) — the key is **absent**, so the partner can tell "this deployment does not serve it"
+  from "DataDance has no value for this user" (which is `null` *inside* a field that is served).
+  `avatar` is the exception on the second half: a served account with no picture also omits the
+  key. Absence means "do not show a picture", not "look up a placeholder".
 
 | Field | Scope | Endpoint | Source | `null` means | Cache |
 | --- | --- | --- | --- | --- | --- |
 | `sub` | `tge:identity` | both | `User.id` (uuid) — permanent key, the same person across Wallet, Business and this partner | never null | — |
 | `client_id`, `issued_at`, `expires_at` | `tge:identity` | `/me` | the token itself | never null | — |
 | `email_masked` | `tge:identity` | `/me` | `User.email` as `j***@domain.com`; display hint, never an identifier | no real e-mail, **or the token lacks `tge:identity`**, or not frozen | no-store |
+| `avatar` | `tge:identity` | `/me` | `User.avatar` when it is an `http(s)` picture URL, or a site path joined to `PUBLIC_BASE_URL`. The wallet placeholder and non-URL values are not returned | never null — the key is absent when the account has no picture, or the field is not frozen | no-store |
 | `email` | `tge:email` | `/me` | `User.email` when it really is an address — the address a campaign can write to | the account has no e-mail (see below) | no-store |
 | `wallet_address` | `tge:wallet` | `/me` | `User.walletAddress`, EIP-55 checksummed when it parses. **Not** proof of control, **not** permission to sign or transfer (F05) | no wallet bound | no-store |
 | `account_status` | `tge:status` | `/status` | `User.disabledAt` → `active` / `disabled`; `unknown` until the column is deployed | never null | 60 s |
@@ -496,8 +505,8 @@ Environment (see `env.example`): `SSO_ENVIRONMENT`, `SSO_TGE_ENABLED`, `SSO_TGE_
 `SSO_TGE_SECRET_ROTATION_UNTIL`, `SSO_TGE_REDIRECT_URIS`, `SSO_TGE_INITIATE_LOGIN_URI`,
 `SSO_TGE_STATUS_FIELDS`, `SSO_REQUIRE_VERIFIED_SESSION`, plus `PUBLIC_BASE_URL` (now required
 unconditionally — the issuer is never derived from a request header), `APP_PUBLIC_URL`,
-`WEB3AUTH_ALLOWED_VERIFIERS`, `WEB3AUTH_JWKS_PIN_MODE`, `WEB3AUTH_JWKS_PINNED_THUMBPRINTS` and
-`OAUTH_PUBLIC_REGISTRATION_ENABLED`.
+`WEB3AUTH_ALLOWED_VERIFIERS`, `WEB3AUTH_JWKS_PIN_MODE`, `WEB3AUTH_JWKS_PINNED_THUMBPRINTS`,
+`OAUTH_PUBLIC_REGISTRATION_ENABLED` and `SSO_DEVELOPER_REGISTRATION`.
 
 - `src/server.js` calls `assertPartnerConfig()` at boot and refuses to start with every problem
   listed (missing hash, http redirect URI outside localhost, fragment, unknown status field,
@@ -511,12 +520,28 @@ unconditionally — the issuer is never derived from a request header), `APP_PUB
   switch that off — turn `SSO_TGE_ENABLED` off instead. The boot log prints a summary with no
   secret values (`jwksPinMode=… jwksPins=<count>`, never the pins). See the README section
   "金融级加固：合作方 SSO".
+- **Self-serve client registration** (`POST /api/developer/sso/clients`) is closed unless
+  `SSO_DEVELOPER_REGISTRATION=on`. The default, `off`, also applies when the variable is unset or
+  blank. Closed, the endpoint answers every caller, signed in or not, `403` with
+  `{"error":"registration_closed", "error_description":"Self-serve client registration is closed.
+  Contact DataDance to register a client."}`, before any database access, so nothing is written.
+  Clients registered earlier keep working: sign-in, the token exchange and the partner API do not
+  consult the switch.
+- **Turning it on still requires a signed-in DataDance account.** The route itself checks the
+  user's JWT, as other `/api` routes do. An anonymous caller gets `401` in the usual auth shape;
+  a signed-in account gets `201` with the new client, which records that account as its owner
+  (`ownerUserId`) and `kind` `developer`. A self-serve console must therefore send the
+  user's token (`Authorization: Bearer <DataDance JWT>`). To register a client by hand, set `on`,
+  restart, register while signed in, set `off` and restart again.
+- The value is read once at boot, so a change needs a restart. Any value other than `off` or `on`
+  refuses to start in production; elsewhere it is one warning and reads as `off`. The money-path
+  boot line reports it as `developerRegistration=open|closed`, next to `publicClientRegistration`.
 - Generate a secret: `node scripts/genPartnerSecret.js` (prints once; nothing is written).
 - Rotate: move the current hash to `…_PREVIOUS`, set the new hash, set `…_ROTATION_UNTIL`,
   recreate the container; after the deadline remove the previous hash.
 - Freeze a status field: add it to `SSO_TGE_STATUS_FIELDS` and recreate. `email`,
-  `wallet_address`, `points`, `referral` and `referral_network` are **off** until listed, so deploying this change
-  set alone exposes nothing new. Boot refuses an unknown field name.
+  `wallet_address`, `points`, `referral`, `referral_network` and `avatar` are **off** until listed, so deploying this change
+  set alone exposes nothing new. Boot refuses an unknown field name. `avatar` then appears on `/me` only when the account has a picture URL.
 - `SSO_REQUIRE_VERIFIED_SESSION=true` requires the consenting user's DataDance JWT to carry
   `ver >= 2` (issued by the verified Web3Auth login); older sessions get `login_required`.
 - Partner tokens are `McpToken` rows with `source = 'partner'`; they are hidden from the

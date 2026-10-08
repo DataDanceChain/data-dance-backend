@@ -11,7 +11,8 @@ const {
   getUserClaimedActivities,
   claimActivity,
   getCreatedActivities,
-  createActivity
+  createActivity,
+  activityCreationGate
 } = require('../controllers/activityController');
 const { protect } = require('../middlewares/authMiddleware');
 
@@ -39,7 +40,9 @@ router.get('/', getAllActivities);
 router.get('/created-by-me', getCreatedActivities);
 
 // 创建新活动 - 使用 /new 端点，处理文件上传
-router.post('/new', 
+// activityCreationGate runs before the upload: while creation is unavailable (503) no file is stored.
+router.post('/new',
+  activityCreationGate,
   (req, res, next) => {
     const upload = req.app.get('upload');
     upload.any()(req, res, (err) => {

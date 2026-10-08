@@ -102,4 +102,23 @@ describe('prisma/schema.prisma is fully created by prisma/migrations', () => {
     assert.match(sql, /ALTER TABLE "User" ADD COLUMN IF NOT EXISTS\s+"legacyReferralCode"/);
     assert.match(sql, /CREATE UNIQUE INDEX IF NOT EXISTS "User_legacyReferralCode_key" ON "User"\("legacyReferralCode"\)/);
   });
+
+  it('SsoDeveloperClient is created idempotently (safe where a database already has the table)', () => {
+    const sql = fs.readFileSync(path.join(PRISMA_DIR, 'migrations/20261005120000_sso_developer_client/migration.sql'), 'utf8');
+    assert.match(sql, /CREATE TABLE IF NOT EXISTS "SsoDeveloperClient" \(/);
+    assert.match(sql, /ALTER TABLE "SsoDeveloperClient" DROP CONSTRAINT IF EXISTS "SsoDeveloperClient_clientId_key";/);
+    assert.match(sql, /CREATE UNIQUE INDEX IF NOT EXISTS "SsoDeveloperClient_clientId_key" ON "SsoDeveloperClient"\("clientId"\);/);
+    assert.match(sql, /CREATE INDEX IF NOT EXISTS "SsoDeveloperClient_contactEmail_idx" ON "SsoDeveloperClient"\("contactEmail"\);/);
+    assert.doesNotMatch(sql, /CREATE TABLE "SsoDeveloperClient"|CREATE (UNIQUE )?INDEX "SsoDeveloperClient_/);
+    assert.doesNotMatch(sql, /DROP TABLE|DELETE FROM|TRUNCATE/i, 'never drops data');
+  });
+
+  it('SsoDeveloperClient kind and owner are added idempotently (safe where the columns already exist)', () => {
+    const sql = fs.readFileSync(path.join(PRISMA_DIR, 'migrations/20261005180000_sso_partner_kind/migration.sql'), 'utf8');
+    assert.match(sql, /ALTER TABLE "SsoDeveloperClient" ADD COLUMN IF NOT EXISTS "kind" TEXT NOT NULL DEFAULT 'developer';/);
+    assert.match(sql, /ALTER TABLE "SsoDeveloperClient" ADD COLUMN IF NOT EXISTS "ownerUserId" TEXT;/);
+    assert.match(sql, /CREATE INDEX IF NOT EXISTS "SsoDeveloperClient_ownerUserId_idx" ON "SsoDeveloperClient"\("ownerUserId"\);/);
+    assert.doesNotMatch(sql, /ADD COLUMN "|CREATE INDEX "/, 'no plain ADD COLUMN or CREATE INDEX');
+    assert.doesNotMatch(sql, /DROP |DELETE FROM|TRUNCATE/i, 'never drops data');
+  });
 });

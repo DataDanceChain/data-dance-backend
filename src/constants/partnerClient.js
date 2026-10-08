@@ -16,10 +16,14 @@
 const crypto = require('crypto');
 const { getAddress } = require('ethers');
 const { publicBaseUrl } = require('./lifeContext');
+const { readDeveloperRegistration } = require('./developerRegistration');
 
 const PARTNER_KIND = 'partner';
 const PARTNER_REALM = 'ddc-sso';
-const PARTNER_TOKEN_PREFIX = 'ddc_tge_';
+const PARTNER_TOKEN_PREFIX = 'ddc_sso_';
+const LEGACY_PARTNER_TOKEN_PREFIX = 'ddc_tge_';
+const PARTNER_RESOURCE_PATH = '/partner/sso';
+const LEGACY_PARTNER_RESOURCE_PATH = '/partner/tge';
 /**
  * Every scope the partner client may request at /oauth/authorize. `tge:identity` (default),
  * `tge:status` and `tge:referral_network` gate an ENDPOINT — missing one is 403 insufficient_scope.
@@ -28,15 +32,15 @@ const PARTNER_TOKEN_PREFIX = 'ddc_tge_';
  * answering 403 (a partner that asked for less must still get the rest of the response).
  */
 const PARTNER_SCOPES = Object.freeze([
-  'tge:identity',
-  'tge:status',
-  'tge:email',
-  'tge:wallet',
-  'tge:points',
-  'tge:referral',
+  'sso:identity',
+  'sso:status',
+  'sso:email',
+  'sso:wallet',
+  'sso:points',
+  'sso:referral',
   // Sloan, 2026-09-23: the partner may read the user's COMPLETE referral network (every upline,
   // every downline, any depth) — GET /partner/tge/referral-network. Also frozen per environment.
-  'tge:referral_network',
+  'sso:referral_network',
   // Sloan, 2026-09-28 (decision 30 A): the ONE write scope. POST /partner/tge/referral/bind binds
   // an invite code as the signed-in user's inviter (TGE: no inviter, no subscription). Never part
   // of PARTNER_DEFAULT_SCOPE; the consent page lists it as `referral_bind`. Item 35 (same day): it
@@ -44,9 +48,9 @@ const PARTNER_SCOPES = Object.freeze([
   // the bind itself: the partner's own confirm dialog, enforced by /referral/bind/check's
   // confirm_token. Switched per environment (SSO_TGE_REFERRAL_BIND, default off → the route is 404
   // not_available and /oauth/authorize answers invalid_scope; see availablePartnerScopes).
-  'tge:referral_bind',
+  'sso:referral_bind',
 ]);
-const PARTNER_DEFAULT_SCOPE = 'tge:identity';
+const PARTNER_DEFAULT_SCOPE = 'sso:identity';
 const PARTNER_REQUEST_TTL_MS = 10 * 60 * 1000;
 const PARTNER_CODE_TTL_MS = 60 * 1000;
 const PARTNER_ACCESS_TTL_SEC = 300;
@@ -58,6 +62,8 @@ const PARTNER_REFERRAL_CACHE_MAX_AGE_SEC = 60;
 const PARTNER_ENVIRONMENTS = Object.freeze(['test', 'prod']);
 const PARTNER_TOKEN_ENDPOINT_AUTH_METHODS = Object.freeze(['client_secret_basic', 'client_secret_post']);
 const CLIENT_ID_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
+/** Retired names. They are not client ids and are not aliases of any partner. */
+const RETIRED_PARTNER_CLIENT_IDS = new Set(['tge', 'tge-rehearsal']);
 
 /**
  * Every field /partner/tge/me and /partner/tge/status can carry, with the two gates in front of
@@ -78,7 +84,7 @@ const CLIENT_ID_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
 const STATUS_FIELD_CATALOG = Object.freeze({
   registered_at: {
     endpoint: 'status',
-    scope: 'tge:status',
+    scope: 'sso:status',
     presence: 'null',
     source: 'User.createdAt',
     meaning: 'When the DataDance account was created.',
@@ -87,7 +93,7 @@ const STATUS_FIELD_CATALOG = Object.freeze({
   },
   wallet_bound: {
     endpoint: 'status',
-    scope: 'tge:status',
+    scope: 'sso:status',
     presence: 'null',
     source: 'User.walletAddress != null',
     meaning: 'A wallet address is bound to the account. Not proof of control, not a signing permission.',
@@ -96,7 +102,7 @@ const STATUS_FIELD_CATALOG = Object.freeze({
   },
   data_licence_granted: {
     endpoint: 'status',
-    scope: 'tge:status',
+    scope: 'sso:status',
     presence: 'null',
     source: 'DataLicenceConsent active (grantedAt set, not withdrawn, current policy version)',
     meaning: 'The user allowed DataDance to license their Connect records. Unrelated to partner eligibility.',
@@ -105,16 +111,26 @@ const STATUS_FIELD_CATALOG = Object.freeze({
   },
   email_masked: {
     endpoint: 'me',
-    scope: 'tge:identity',
+    scope: 'sso:identity',
     presence: 'null',
     source: 'User.email masked as j***@domain.com',
     meaning: 'Display hint for the partner; never an identifier.',
     nullMeaning: 'No e-mail on the account, not a real address, or not frozen.',
     cacheTtlSec: 0,
   },
+  avatar: {
+    endpoint: 'me',
+    scope: 'sso:identity',
+    presence: 'omit',
+    source: 'User.avatar, when it is an http(s) picture URL or a site path under PUBLIC_BASE_URL',
+    meaning:
+      'The account picture, for display. Omitted when the account has none, when the stored value is the placeholder, or when it is not a URL this API will hand out.',
+    nullMeaning: 'Never null. The key is absent when there is no picture to return.',
+    cacheTtlSec: 0,
+  },
   email: {
     endpoint: 'me',
-    scope: 'tge:email',
+    scope: 'sso:email',
     presence: 'omit',
     source: 'User.email, when it really is an e-mail address',
     meaning: "The user's e-mail address, as the campaign will write to it.",
@@ -124,7 +140,7 @@ const STATUS_FIELD_CATALOG = Object.freeze({
   },
   wallet_address: {
     endpoint: 'me',
-    scope: 'tge:wallet',
+    scope: 'sso:wallet',
     presence: 'omit',
     source: 'User.walletAddress, EIP-55 checksummed when it parses',
     meaning:
@@ -134,7 +150,7 @@ const STATUS_FIELD_CATALOG = Object.freeze({
   },
   points: {
     endpoint: 'status',
-    scope: 'tge:points',
+    scope: 'sso:points',
     presence: 'omit',
     source: 'User.totalPoints (denormalised balance; the Point ledger is the source of truth)',
     meaning: '{ balance, as_of, cache_max_age }. The DataDance points balance at `as_of`.',
@@ -143,7 +159,7 @@ const STATUS_FIELD_CATALOG = Object.freeze({
   },
   referral: {
     endpoint: 'status',
-    scope: 'tge:referral',
+    scope: 'sso:referral',
     presence: 'omit',
     source: 'User.referralCode + Referral rows for this user (inviteeId for the inviter, level-1 inviterId count)',
     meaning:
@@ -157,7 +173,7 @@ const STATUS_FIELD_CATALOG = Object.freeze({
   // (404 {"error":"not_available"} otherwise, so "not served here" stays distinct from "not granted").
   referral_network: {
     endpoint: 'referral-network',
-    scope: 'tge:referral_network',
+    scope: 'sso:referral_network',
     presence: 'endpoint',
     source: 'Referral rows (inviterId → inviteeId, append-only), walked up and down with a cycle-guarded recursive CTE over the snapshot createdAt <= as_of',
     meaning:
@@ -233,7 +249,7 @@ function readPartnerConfig(env = process.env) {
     environment: String(env.SSO_ENVIRONMENT || '').trim(),
     enabled: flag(env.SSO_TGE_ENABLED),
     clientId: String(env.SSO_TGE_CLIENT_ID || '').trim(),
-    clientName: String(env.SSO_TGE_CLIENT_NAME || '').trim() || 'TGE',
+    clientName: String(env.SSO_TGE_CLIENT_NAME || '').trim() || 'DataDance',
     secretHash: normalizeHash(env.SSO_TGE_CLIENT_SECRET_SHA256),
     previousSecretHash: normalizeHash(env.SSO_TGE_CLIENT_SECRET_SHA256_PREVIOUS),
     rotationUntil: parseDate(env.SSO_TGE_SECRET_ROTATION_UNTIL),
@@ -250,21 +266,62 @@ function readPartnerConfig(env = process.env) {
  * TGE partner client, all false for anything else (MCP clients, an unconfigured deployment).
  * Read on every call, like the rest of this module.
  */
+function isRetiredPartnerClientId(clientId) {
+  return RETIRED_PARTNER_CLIENT_IDS.has(String(clientId || '').trim());
+}
+
 function autoApproveFor(clientId, env = process.env) {
   const cfg = readPartnerConfig(env);
-  if (!cfg.clientId || clientId === undefined || clientId === null || String(clientId) !== cfg.clientId) {
+  if (!cfg.clientId || isRetiredPartnerClientId(cfg.clientId)) return { ...AUTO_APPROVE_OFF };
+  if (clientId === undefined || clientId === null || !samePartnerClientId(cfg.clientId, clientId)) {
     return { ...AUTO_APPROVE_OFF };
   }
   return { ...cfg.autoApprove };
 }
 
+/** `tge:identity` and `sso:identity` are the same permission. New grants use the `sso:` name. */
+function canonicalPartnerScope(scope) {
+  const value = String(scope || '').trim();
+  return value.startsWith('tge:') ? `sso:${value.slice(4)}` : value;
+}
+
 /**
- * Audience of partner access tokens: `${PUBLIC_BASE_URL}/partner/tge` (same convention as
+ * The client id partners send. It is the registered id itself.
+ * `tge` and `tge-rehearsal` are retired and are not rewritten to another id.
+ */
+function publicPartnerClientId(clientId) {
+  return String(clientId || '');
+}
+
+function samePartnerClientId(configured, presented) {
+  if (presented === undefined || presented === null) return true;
+  return publicPartnerClientId(configured) === publicPartnerClientId(presented);
+}
+
+function isPartnerAccessToken(token) {
+  const value = String(token || '');
+  return value.startsWith(PARTNER_TOKEN_PREFIX) || value.startsWith(LEGACY_PARTNER_TOKEN_PREFIX);
+}
+
+/**
+ * Audience of partner access tokens: `${PUBLIC_BASE_URL}/partner/sso` (same convention as
  * `/mcp`). Always the configured origin — never the request host and never a localhost guess,
  * or the audience a token is bound to would be chosen by whoever asked for it.
+ * `/partner/tge` is the previous audience and still matches.
  */
 function partnerResourceUrl(req) {
-  return `${publicBaseUrl(req)}/partner/tge`;
+  return `${publicBaseUrl(req)}${PARTNER_RESOURCE_PATH}`;
+}
+
+function samePartnerResource(a, b) {
+  const normalize = (value) => String(value || '').replace(/\/$/, '');
+  const left = normalize(a);
+  const right = normalize(b);
+  if (left === right) return true;
+  const swap = (value) => value
+    .replace(/\/partner\/sso$/, LEGACY_PARTNER_RESOURCE_PATH)
+    .replace(/\/partner\/tge$/, PARTNER_RESOURCE_PATH);
+  return swap(left) === right || left === swap(right);
 }
 
 /**
@@ -276,8 +333,8 @@ function partnerResourceUrl(req) {
  */
 function getPartnerClient(clientId, req) {
   const cfg = readPartnerConfig();
-  if (!cfg.clientId) return null;
-  if (clientId !== undefined && clientId !== null && String(clientId) !== cfg.clientId) return null;
+  if (!cfg.clientId || isRetiredPartnerClientId(cfg.clientId)) return null;
+  if (!samePartnerClientId(cfg.clientId, clientId)) return null;
   return {
     kind: PARTNER_KIND,
     clientId: cfg.clientId,
@@ -309,6 +366,8 @@ function isPartnerClient(client) {
  */
 function verifyClientSecret(client, secret, { now = Date.now() } = {}) {
   if (!client || typeof secret !== 'string' || !secret || secret.length > 1024) return false;
+  // A registry partner carries its own hash. The env client never sets one.
+  if (client.secretHash) return hashesEqual(sha256Hex(secret), client.secretHash);
   const cfg = readPartnerConfig();
   if (!cfg.clientId || client.clientId !== cfg.clientId) return false;
   const presented = sha256Hex(secret);
@@ -365,6 +424,33 @@ function realEmail(user) {
   const at = value.indexOf('@');
   if (at < 1 || at === value.length - 1) return null;
   return value;
+}
+
+const DEFAULT_AVATAR_PATH = '/assets/avatars/default-avatar.png';
+
+/**
+ * A picture URL a partner can load, or null. Empty, the wallet placeholder, and anything that is
+ * not http(s) or a same-site path are omitted — the field is optional and never invented.
+ * A site path (`/assets/...`) is prefixed with PUBLIC_BASE_URL so the partner does not have to
+ * guess the host. `data:` and protocol-relative URLs are not returned.
+ */
+function partnerAvatarUrl(avatar, baseUrl) {
+  const value = String(avatar || '').trim();
+  if (!value || value.length > 2048) return null;
+  if (value === DEFAULT_AVATAR_PATH || value.endsWith(DEFAULT_AVATAR_PATH)) return null;
+  if (/^https?:\/\//i.test(value)) {
+    try {
+      const url = new URL(value);
+      if (url.username || url.password) return null;
+      return url.href;
+    } catch {
+      return null;
+    }
+  }
+  if (!value.startsWith('/') || value.startsWith('//') || value.includes('..') || value.includes('\\')) return null;
+  const base = String(baseUrl || '').trim().replace(/\/$/, '');
+  if (!base) return null;
+  return `${base}${value}`;
 }
 
 /** `j***@domain.com`; null when there is no usable e-mail. */
@@ -427,7 +513,9 @@ function assertPartnerConfig(env = process.env) {
       problems.push(`SSO_ENVIRONMENT must be ${PARTNER_ENVIRONMENTS.join('|')} when SSO_TGE_ENABLED=true`);
     }
     if (!cfg.clientId) problems.push('SSO_TGE_CLIENT_ID is required');
-    else if (!CLIENT_ID_PATTERN.test(cfg.clientId)) {
+    else if (isRetiredPartnerClientId(cfg.clientId)) {
+      problems.push('SSO_TGE_CLIENT_ID cannot be tge or tge-rehearsal; use the partner client id');
+    } else if (!CLIENT_ID_PATTERN.test(cfg.clientId)) {
       problems.push('SSO_TGE_CLIENT_ID must match [A-Za-z0-9._-]{1,64} (no URL, no ":")');
     }
     if (!cfg.secretHash) problems.push('SSO_TGE_CLIENT_SECRET_SHA256 must be the 64-hex sha256 of the client secret');
@@ -597,6 +685,9 @@ function assertFinancialGradeConfig(env = process.env) {
     appPublicUrl: String(env.APP_PUBLIC_URL).trim(),
     sessionSecretSeparate: true,
     publicRegistration: String(env.OAUTH_PUBLIC_REGISTRATION_ENABLED ?? 'true').trim().toLowerCase() !== 'false',
+    // Self-serve SSO client registration (SSO_DEVELOPER_REGISTRATION, default off). server.js refuses
+    // to start on a value that is neither off nor on before it gets here.
+    developerRegistration: readDeveloperRegistration(env).open,
   };
 }
 
@@ -619,13 +710,14 @@ function referralBindEnabled(env = process.env) {
  * under one switch — never a consent a user can approve for a route that is not live yet.
  */
 function availablePartnerScopes(env = process.env) {
-  return PARTNER_SCOPES.filter((item) => item !== 'tge:referral_bind' || referralBindEnabled(env));
+  return PARTNER_SCOPES.filter((item) => item !== 'sso:referral_bind' || referralBindEnabled(env));
 }
 
 module.exports = {
   PARTNER_KIND,
   PARTNER_REALM,
   PARTNER_TOKEN_PREFIX,
+  LEGACY_PARTNER_TOKEN_PREFIX,
   PARTNER_SCOPES,
   PARTNER_DEFAULT_SCOPE,
   PARTNER_REQUEST_TTL_MS,
@@ -642,12 +734,19 @@ module.exports = {
   parseAutoApprove,
   autoApproveFor,
   partnerResourceUrl,
+  samePartnerResource,
+  canonicalPartnerScope,
+  publicPartnerClientId,
+  samePartnerClientId,
+  isRetiredPartnerClientId,
+  isPartnerAccessToken,
   getPartnerClient,
   isPartnerClient,
   verifyClientSecret,
   parseBasicAuth,
   parseBasicCredentials: parseBasicAuth,
   maskEmail,
+  partnerAvatarUrl,
   realEmail,
   checksumWalletAddress,
   EXTERNAL_WALLET_VERIFIER,

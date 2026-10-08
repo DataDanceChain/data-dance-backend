@@ -202,6 +202,7 @@ function createMockPrisma() {
     userDailyEvent: makeModel(store, 'userDailyEvent'),
     crawlerTask: makeModel(store, 'crawlerTask'),
     ssoTicket: makeModel(store, 'ssoTicket'),
+    ssoDeveloperClient: makeModel(store, 'ssoDeveloperClient'),
     // Commerce rows that attestHashOnChain writes to (purchase orders and disbursement items).
     purchaseOrder: makeModel(store, 'purchaseOrder', {
       relations: {

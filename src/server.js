@@ -4,6 +4,8 @@ const { assertPartnerConfig, assertFinancialGradeConfig } = require('./constants
 const { applyPartnerKillSwitch } = require('./services/partnerKillSwitch');
 const { warnIfChainSignerUnavailable } = require('./constants/chainConfig');
 const { initVersionPolicy } = require('./constants/appVersionPolicy');
+const { initDeveloperRegistration } = require('./constants/developerRegistration');
+const { describeOldAppSwitches } = require('./services/web3authIdentity');
 
 // 加载环境变量
 dotenv.config();
@@ -16,6 +18,10 @@ warnIfChainSignerUnavailable();
 // App version policy (GET /api/app/version-policy): validate APP_MIN_VERSION_* and the update URLs
 // once, now. A bad value is one warning and falls back (no minimum / default URL), never a failure.
 initVersionPolicy();
+
+// Self-serve SSO client registration: SSO_DEVELOPER_REGISTRATION=off|on (default off), read once,
+// now. Any other value refuses to start in production; elsewhere it is one warning and reads as off.
+initDeveloperRegistration();
 
 // Partner (TGE) SSO: refuse to boot half-configured. Throws with every problem listed; the
 // summary never contains secrets.
@@ -44,9 +50,15 @@ if (moneyPath.enforced) {
       `legacyFallback=${moneyPath.legacyFallback} allowedVerifiers=${moneyPath.allowedVerifierCount} ` +
       `jwksPinMode=${moneyPath.jwksPinMode} jwksPins=${moneyPath.jwksPinCount} ` +
       `sessionSecretSeparate=${moneyPath.sessionSecretSeparate} issuer=${moneyPath.publicBaseUrl} ` +
-      `consentOrigin=${moneyPath.appPublicUrl} publicClientRegistration=${moneyPath.publicRegistration ? 'open' : 'closed'}`,
+      `consentOrigin=${moneyPath.appPublicUrl} publicClientRegistration=${moneyPath.publicRegistration ? 'open' : 'closed'} ` +
+      `developerRegistration=${moneyPath.developerRegistration ? 'open' : 'closed'}`,
   );
 }
+
+// Old App builds after the network switch: the two switches that answer a refused old-App login
+// with 426 APP_UPDATE_REQUIRED. One line to confirm them without sending a login; client-id
+// prefixes only (public).
+console.log(describeOldAppSwitches());
 
 const PORT = process.env.PORT || 3000;
 

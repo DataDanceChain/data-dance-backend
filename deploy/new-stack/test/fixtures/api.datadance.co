@@ -1,0 +1,39 @@
+# SYNTHETIC test fixture for test/run-local-tests.sh, written for the tests: not a copy of any server's file.
+# It has only the shape that 30-nginx.sh render and nginx -t need from an api vhost (the upgrade map comes from the
+# app fixture, loaded in the same http block).
+server {
+    server_name api.datadance.ai;
+
+    client_max_body_size 10M;
+
+    location / {
+        proxy_hide_header Access-Control-Allow-Origin;
+        proxy_hide_header Access-Control-Allow-Credentials;
+        proxy_hide_header Access-Control-Allow-Methods;
+        proxy_hide_header Access-Control-Allow-Headers;
+        if ($request_method = 'OPTIONS') {
+            add_header 'Access-Control-Allow-Origin' $http_origin;
+            add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS';
+            add_header 'Access-Control-Allow-Headers' 'Content-Type, X-Fixture-Header';
+            add_header 'Access-Control-Allow-Credentials' 'true';
+            add_header 'Content-Length' 0;
+            return 204;
+        }
+        if ($request_method = 'GET') {
+            add_header 'Access-Control-Allow-Origin' $http_origin always;
+            add_header 'Access-Control-Allow-Credentials' 'true' always;
+        }
+        if ($request_method = 'POST') {
+            add_header 'Access-Control-Allow-Origin' $http_origin always;
+            add_header 'Access-Control-Allow-Credentials' 'true' always;
+        }
+
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+        proxy_set_header Host $host;
+        proxy_pass http://localhost:10000;
+    }
+
+    listen 80;
+}

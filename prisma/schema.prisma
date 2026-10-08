@@ -942,6 +942,24 @@ model McpToken {
   @@index([userId])
 }
 
+/// Self-serve DDC SSO partner. The secret is stored only as sha256; the plaintext is shown once.
+model SsoDeveloperClient {
+  id           String   @id @default(uuid())
+  clientId     String   @unique
+  clientName   String
+  contactEmail String
+  secretHash   String
+  redirectUris String[]
+  enabled      Boolean  @default(true)
+  /// developer: self-serve login scopes. partner: first-party Data Planet scopes.
+  kind         String   @default("developer")
+  ownerUserId  String?
+  createdAt    DateTime @default(now())
+
+  @@index([contactEmail])
+  @@index([ownerUserId])
+}
+
 /// Public OAuth clients from DCR or CIMD (ChatGPT / Claude).
 model OAuthClient {
   id                       String   @id @default(uuid())

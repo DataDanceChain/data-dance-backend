@@ -151,6 +151,46 @@ describe('src/app mount order', () => {
     assert.notEqual(ok.status, 401, 'a user JWT must still be accepted by the crawler routes');
   });
 
+  it('self-serve SSO client registration answers for itself: 403 registration_closed while closed, never a 401 from a router that protects /api', async () => {
+    const res = await request(server).post('/api/developer/sso/clients').send({});
+    assert.equal(res.status, 403, `got ${res.status} ${JSON.stringify(res.body)}`);
+    assert.equal(res.body.error, 'registration_closed');
+  });
+
+  it('self-serve SSO client registration carries its own login requirement, wherever crawlerRoutes is mounted', async () => {
+    const express = require('express');
+    const { protect } = require('../../src/middlewares/authMiddleware');
+    const developerSsoRoutes = require('../../src/routes/developerSsoRoutes');
+    const { initDeveloperRegistration } = require('../../src/constants/developerRegistration');
+
+    // On the route itself: the switch first, then the standard JWT check, then the rate limiter.
+    const layer = developerSsoRoutes.stack.find((l) => l.route && l.route.path === '/clients' && l.route.methods.post);
+    const chain = layer.route.stack.map((l) => l.handle);
+    assert.equal(chain[0].name, 'registrationOpen', 'the switch answers first');
+    assert.equal(chain[1], protect, 'then authMiddleware.protect, on the route and not only on some other router');
+
+    const body = { client_name: 'Northwind', contact_email: 'dev@example.com', redirect_uris: ['https://partner.example.com/cb'] };
+    const userJwt = jwt.sign({ id: user.id, ver: 2 }, JWT_SECRET, { expiresIn: '5m' });
+    initDeveloperRegistration({ env: { SSO_DEVELOPER_REGISTRATION: 'on' } });
+    // The router alone, with no crawlerRoutes anywhere: as if crawlerRoutes were moved or lost its blanket check.
+    const bare = express();
+    bare.use(express.json());
+    bare.use('/api/developer/sso', developerSsoRoutes);
+    const bareServer = await listenLoopback(bare);
+    try {
+      for (const target of [bareServer, server]) {
+        const anonymous = await request(target).post('/api/developer/sso/clients').send(body);
+        assert.equal(anonymous.status, 401, `anonymous: got ${anonymous.status} ${JSON.stringify(anonymous.body)}`);
+        assert.deepEqual(anonymous.body, { status: 'fail', message: 'Authentication required. Please login first.' });
+        const member = await request(target).post('/api/developer/sso/clients').set('Authorization', `Bearer ${userJwt}`).send(body);
+        assert.equal(member.status, 201, `signed in: got ${member.status} ${JSON.stringify(member.body)}`);
+      }
+    } finally {
+      initDeveloperRegistration({ env: {} });
+      await new Promise((resolve) => bareServer.close(resolve));
+    }
+  });
+
   it('the App version policy is public: no credential needed, and no router that protects /api answers it first', async () => {
     const res = await request(server).get('/api/app/version-policy');
     assert.equal(res.status, 200, `got ${res.status} ${JSON.stringify(res.body)}`);

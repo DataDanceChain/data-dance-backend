@@ -67,6 +67,8 @@ docker-compose*.yml
 docker-compose*.yaml
 
 # --- Tests, docs and local tools -------------------------------------------
+# Operator scripts for the server (deploy/new-stack); never part of the backend image.
+deploy/
 test/
 src/**/*.test.js
 coverage/

@@ -30,7 +30,7 @@ const ENV_KEYS = [
   'SSO_SESSION_SECRET', 'JWT_SECRET',
   'PUBLIC_BASE_URL', 'APP_PUBLIC_URL', 'NODE_ENV', 'PORT', 'FRONTEND_URL',
   'WEB3AUTH_VERIFY_MODE', 'WEB3AUTH_ALLOW_LEGACY_FALLBACK', 'WEB3AUTH_CLIENT_ID', 'WEB3AUTH_ALLOWED_VERIFIERS',
-  'OAUTH_PUBLIC_REGISTRATION_ENABLED',
+  'OAUTH_PUBLIC_REGISTRATION_ENABLED', 'SSO_DEVELOPER_REGISTRATION',
 ];
 const saved = {};
 
@@ -105,6 +105,19 @@ describe('readPartnerConfig / getPartnerClient', () => {
     assert.equal(getPartnerClient().clientId, 'tge-test');
   });
 
+  it('does not treat tge as a client id', () => {
+    setEnv(baseEnv({ SSO_TGE_CLIENT_ID: 'tge' }));
+    assert.equal(getPartnerClient('tge'), null);
+    assert.equal(getPartnerClient('sso'), null);
+    assert.equal(getPartnerClient(), null);
+    setEnv(baseEnv({ SSO_TGE_CLIENT_ID: 'tge-rehearsal' }));
+    assert.equal(getPartnerClient('tge-rehearsal'), null);
+    assert.equal(getPartnerClient('sso-rehearsal'), null);
+    setEnv(baseEnv({ SSO_TGE_CLIENT_ID: 'sso-rehearsal' }));
+    assert.equal(getPartnerClient('sso-rehearsal').clientId, 'sso-rehearsal');
+    assert.equal(getPartnerClient('tge'), null);
+  });
+
   it('never exposes secret hashes on the client object and carries the contract constants', () => {
     setEnv(baseEnv());
     const client = getPartnerClient('tge-test');
@@ -112,11 +125,11 @@ describe('readPartnerConfig / getPartnerClient', () => {
     assert.equal(client.tokenEndpointAuthMethod, 'client_secret_basic');
     assert.deepEqual(client.tokenEndpointAuthMethods, ['client_secret_basic', 'client_secret_post']);
     assert.deepEqual(client.scopes, [...PARTNER_SCOPES]);
-    assert.equal(client.defaultScope, 'tge:identity');
+    assert.equal(client.defaultScope, 'sso:identity');
     assert.equal(client.requestTtlMs, 10 * 60 * 1000);
     assert.equal(client.codeTtlMs, 60 * 1000);
     assert.equal(client.accessTtlSec, 300);
-    assert.equal(client.resource, 'https://api.test.local/partner/tge');
+    assert.equal(client.resource, 'https://api.test.local/partner/sso');
   });
 });
 
@@ -132,12 +145,12 @@ describe('partnerResourceUrl / publicBaseUrl', () => {
 
   it('uses PUBLIC_BASE_URL, trailing slash stripped', () => {
     setEnv({ PUBLIC_BASE_URL: 'https://api.test.local/' });
-    assert.equal(partnerResourceUrl(), 'https://api.test.local/partner/tge');
+    assert.equal(partnerResourceUrl(), 'https://api.test.local/partner/sso');
   });
 
   it('ignores Host and X-Forwarded-Host entirely', () => {
     setEnv({ PUBLIC_BASE_URL: 'https://api.test.local' });
-    assert.equal(partnerResourceUrl(forgedHost), 'https://api.test.local/partner/tge');
+    assert.equal(partnerResourceUrl(forgedHost), 'https://api.test.local/partner/sso');
     assert.equal(publicBaseUrl(forgedHost), 'https://api.test.local');
   });
 
@@ -288,6 +301,15 @@ describe('assertPartnerConfig (boot)', () => {
     assert.throws(() => assertPartnerConfig(), /SSO_TGE_CLIENT_ID must match/);
     setEnv(baseEnv({ SSO_TGE_CLIENT_ID: 'a:b' }));
     assert.throws(() => assertPartnerConfig(), /SSO_TGE_CLIENT_ID must match/);
+  });
+
+  it('refuses to boot an enabled partner named tge', () => {
+    setEnv(baseEnv({ SSO_TGE_CLIENT_ID: 'tge' }));
+    assert.throws(() => assertPartnerConfig(), /cannot be tge or tge-rehearsal/);
+    setEnv(baseEnv({ SSO_TGE_CLIENT_ID: 'tge-rehearsal' }));
+    assert.throws(() => assertPartnerConfig(), /cannot be tge or tge-rehearsal/);
+    setEnv(baseEnv({ SSO_TGE_CLIENT_ID: 'sso-rehearsal' }));
+    assert.equal(assertPartnerConfig().clientId, 'sso-rehearsal');
   });
 
   it('enforces redirect URI rules: absolute, no fragment, https except localhost outside prod', () => {
@@ -458,5 +480,11 @@ describe('assertFinancialGradeConfig (boot, item 8)', () => {
       assertFinancialGradeConfig(hardened({ OAUTH_PUBLIC_REGISTRATION_ENABLED: 'false' })).publicRegistration,
       false
     );
+  });
+
+  it('reports whether self-serve developer registration is open: closed unless SSO_DEVELOPER_REGISTRATION=on', () => {
+    assert.equal(assertFinancialGradeConfig(hardened()).developerRegistration, false);
+    assert.equal(assertFinancialGradeConfig(hardened({ SSO_DEVELOPER_REGISTRATION: 'off' })).developerRegistration, false);
+    assert.equal(assertFinancialGradeConfig(hardened({ SSO_DEVELOPER_REGISTRATION: 'on' })).developerRegistration, true);
   });
 });
