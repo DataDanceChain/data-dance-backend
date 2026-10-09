@@ -82,8 +82,10 @@ model User {
   ssoTickets               SsoTicket[]
   disbursementItems        DisbursementItem[]
   networkRebind            Web3AuthNetworkRebind?
+  dataDemands              DataDemand[]
 
   @@unique([web3authVerifier, web3authVerifierId])
+  @@index([organizationId])
 }
 
 model UserProfile {
@@ -138,6 +140,7 @@ model Point {
   user      User     @relation(fields: [userId], references: [id])
 
   @@index([source, sourceId])
+  @@index([userId])
 }
 
 // Generic daily event log for reward tasks (e.g. check-in, rewards hub visit)
@@ -358,6 +361,8 @@ model CrawlerTask {
   updatedAt   DateTime      @updatedAt
   data        CrawlerData[]
   user        User          @relation(fields: [userId], references: [id])
+
+  @@index([userId])
 }
 
 model CrawlerData {
@@ -378,6 +383,7 @@ model CrawlerData {
 
   @@unique([userId, source, sourceId])
   @@index([userId, createdAt])
+  @@index([taskId])
 }
 
 model Award {
@@ -549,6 +555,7 @@ model DataNFT {
   purchases    DataNFTPurchase[]
   snapshots    Snapshot[]        @relation("DataNFTToSnapshot")
   tags         Tag[]             @relation("DataNFTToTag")
+  demandFills  DataDemand[]
 }
 
 model DataNFTPurchase {
@@ -563,6 +570,50 @@ model DataNFTPurchase {
   dataNFT            DataNFT   @relation(fields: [dataNFTId], references: [id])
 
   @@index([dataNFTId, buyerId])
+}
+
+model DataDemand {
+  id             String        @id @default(uuid())
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+  buyerId        String
+  status         String        @default("submitted")
+  category       String?
+  region         String?
+  recordCount    Int
+  description    String
+  bidUsd         Float
+  deadline       DateTime?
+  similarPackId  String?
+  quotedCount    Int?
+  quotedPriceUsd Float?
+  quoteNote      String?
+  quoteExpiresAt DateTime?
+  declineReason  String?
+  dataNFTId      String?
+  purchaseId     String?
+  orderId        String?
+  buyer          User          @relation(fields: [buyerId], references: [id])
+  dataNFT        DataNFT?      @relation(fields: [dataNFTId], references: [id])
+  events         DemandEvent[]
+
+  @@index([buyerId, createdAt])
+  @@index([status, createdAt])
+}
+
+model DemandEvent {
+  id         String     @id @default(uuid())
+  demandId   String
+  actor      String
+  actorId    String?
+  action     String
+  fromStatus String?
+  toStatus   String?
+  note       String?
+  createdAt  DateTime   @default(now())
+  demand     DataDemand @relation(fields: [demandId], references: [id], onDelete: Cascade)
+
+  @@index([demandId, createdAt])
 }
 
 model OrganizationTransaction {
@@ -758,6 +809,7 @@ model ProcurementAllocation {
   @@index([orderId])
   @@index([kind])
   @@index([emailNormalized])
+  @@index([userId])
 }
 
 model ProcurementCostItem {

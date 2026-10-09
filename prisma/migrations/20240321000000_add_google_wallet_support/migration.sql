@@ -1,0 +1,22 @@
+-- Intentionally empty. This folder exists so that `prisma migrate status` finds the production record
+-- of this migration in the migrations directory.
+--
+-- History: Race Li added this migration in 0343101 (2025-05-04, "google wallet pass integration") and
+-- production applied it in May 2025. Its statements added the Google Wallet columns to "Pass"
+-- ("platform", "googleObjectId", "googleClassId", "googleAddUrl") and replaced the
+-- ("userId", "creatorId") unique constraint with ("userId", "creatorId", "platform"). In f4183cc
+-- (2025-05-13) the same file, byte for byte (git blob 911971d5), was renamed to
+-- 20250503000000_add_google_wallet_support_final, because sorted by name it ran before "Pass" exists
+-- (20250429113105_add_pass_model) and so failed on every fresh database. Production's
+-- _prisma_migrations records both names as applied.
+--
+-- Everything this migration created is created on every other database by
+-- 20250503000000_add_google_wallet_support_final, so this file must do nothing:
+--   * production: already recorded as applied; `prisma migrate deploy` matches applied migrations by
+--     name and never runs it again;
+--   * a fresh database: it runs first, before "Pass" exists;
+--   * a database built from main before this folder existed: it runs once, after
+--     20250503000000_add_google_wallet_support_final has already created everything.
+-- Its checksum differs from the one production recorded for the original file. `prisma migrate deploy`
+-- and `prisma migrate status` do not compare checksums of applied migrations; only `prisma migrate dev`
+-- does, and that is never run against production.
