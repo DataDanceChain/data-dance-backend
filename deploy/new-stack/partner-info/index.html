@@ -145,7 +145,7 @@ footer{font-size:13px;color:var(--muted);border-top:1px solid var(--line);paddin
   <h1>TGE 登录联调</h1>
   <p class="lead">TGE 站点接入 DDC 登录（OAuth 2.0 授权码 + PKCE）所需的测试环境参数。client_secret 在本页加密存放，输入密码后才在你的浏览器里解密显示。</p>
   <div class="chips">
-    <span class="chip ok">回调与登录发起地址已登记</span>
+    <span class="chip ok">回调地址已登记</span>
     <span class="chip">client_secret 需密码查看</span>
     <span class="chip">仅限测试环境</span>
   </div>
@@ -179,9 +179,9 @@ footer{font-size:13px;color:var(--muted);border-top:1px solid var(--line);paddin
   <dl class="kv">
     <div><dt>回调地址</dt><dd>{{REDIRECT_URIS_HTML}}<span class="sub">登录、同意后，浏览器带授权码跳回这里</span></dd></div>
     <div><dt>登录发起地址</dt><dd>{{INITIATE_LOGIN_HTML}}<span class="sub">用户在 DataDance App 里点活动卡片时，会被带到这个地址，由你们发起 DDC 登录</span></dd></div>
-    <div><dt>白名单 IP</dt><dd>{{ALLOWED_IPS_HTML}}<span class="sub">测试环境只对白名单开放；你们服务器换码时的出口地址须在其中</span></dd></div>
+    <div><dt>你们的服务器 IP</dt><dd>{{ALLOWED_IPS_HTML}}<span class="sub">我们登记的你们服务器换码时的出口地址；地址变了请告诉我们</span></dd></div>
   </dl>
-  <p class="note">测试同学的浏览器会访问 <code>{{API_HOST}}</code> 和 <code>{{APP_HOST}}</code> 两个域名；如果测试用的网络不在上面的白名单里，请把它的公网 IP 告诉我们。</p>
+  <p class="note">测试同学的浏览器会访问 <code>{{API_HOST}}</code> 和 <code>{{APP_HOST}}</code> 两个域名；如果打不开，请把测试网络的公网 IP 告诉我们。</p>
 </section>
 
 <section id="endpoints" aria-labelledby="h-endpoints">
