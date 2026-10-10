@@ -16,6 +16,11 @@
 #      processes found by their cgroup (the escalation path).
 #   7. JWKS pin decision (common.sh jwks_pins_decide) on script-shaped fixtures.
 #   8. 10-build.sh flag gate (--overlays-reconciled / --infra-only), refuse_if_infra_only, disk_expand_verdict.
+#   8b. (10-10) the backend from an uploaded archive, like the frontend (remote.sh pack-api / upload-api, 10-build.sh
+#      --backend-archive): throwaway commits signed with a throwaway SSH key; pack-api refuses unsigned commits, tags,
+#      unknown or short ids and shallow clones; upload-api's refusals and its three calls (stub ssh); then
+#      test/helpers/backend-archive.sh runs 10-build.sh --backend-archive to its end on macOS and ubuntu:jammy, and each
+#      refusal (wrong sha, commit id, tampered archive, sidecar, old-App record missing, malformed or contradicting).
 #   9. expand_check (read-only) on a real ext4 partition.
 #  10. round-2 review fixes: throwaway pass signer (common.sh rehearsal_pass_signer), money-path log fields
 #      (money_path_fields_check), and the SSH login guard (sshpw.sh) against a throwaway Ubuntu 22.04 sshd: a failing
@@ -910,6 +915,157 @@ chk "before the resize (30G disk, full partition, full fs)" $((30*G)) $((M)) $((
 chk "after the console resize to 80G"                      $((80*G)) $((M)) $((30*G - M - 20*1024)) $((30*G - M - 20*1024 - 4096)) yes yes
 chk "after growpart"                                       $((80*G)) $((M)) $((80*G - M - 20*1024)) $((30*G - M - 20*1024 - 4096)) no yes
 chk "after resize2fs"                                      $((80*G)) $((M)) $((80*G - M - 20*1024)) $((80*G - M - 20*1024 - 4096)) no no
+
+# ---------------------------------------------------------------------------
+echo; echo "== 8b. the backend from an uploaded archive: remote.sh pack-api / upload-api, 10-build.sh --backend-archive"
+# What it is for: building a reviewed commit that is not on GitHub yet (for example a release candidate) from an uploaded
+# archive, like the frontend. The commits are throwaway ones in a --shared clone of this repository (nothing is written to
+# this checkout or its repository), signed with a throwaway SSH key (ssh-keygen; 1Password is never asked), on this
+# checkout's HEAD (it contains PR #38) and on 6e61be2 (before it), each with a small tree: the files 10-build.sh step 1
+# checks, an executable file and a symlink. pack-api and upload-api run on a scratch copy of remote.sh (its out/ and logs/
+# in the scratch directory) with a stub op and a stub ssh that record every call; test/helpers/backend-archive.sh then runs
+# upload-api's remote commands and 10-build.sh --backend-archive to its end, on macOS and on ubuntu:jammy.
+b10a() { DDC_LOCAL_TEST=1 DDC_ARGS_ONLY=1 NEW_DIR="$T/ddcnew" bash "$PKG/10-build.sh" "$S40" "$S40" "$@" 2>&1; }
+out=$(b10a --overlays-reconciled); [ "$out" = "args ok: INFRA_ONLY=0 API_IMAGE=ddcnew/backend:0123456789ab WEB_IMAGE=ddcnew/web:tge-0123456789ab" ] \
+  && ok "without --backend-archive the arguments line is exactly as before: $out" || bad "arguments without the flag: $out"
+out=$(b10a --infra-only --backend-archive); [ "$out" = "args ok: INFRA_ONLY=1 API_IMAGE=ddcnew/backend:0123456789ab-infra WEB_IMAGE=ddcnew/web:tge-0123456789ab BACKEND_SOURCE=archive" ] \
+  && ok "--infra-only --backend-archive: $out" || bad "arguments with the flag: $out"
+out=$(b10a --backend-archive) && bad "--backend-archive without a gate flag accepted" \
+  || { printf '%s\n' "$out" | grep -q '^FAIL refusing to build: reconcile the production overlays first' && ok "--backend-archive is no gate flag: alone it is still refused" || bad "--backend-archive alone: $out"; }
+BA="$T/barchive"; BAG="$BA/clone"; BPK="$BA/pkg"; mkdir -p "$BA/sets" "$BA/bin" "$BA/upload" "$BPK"
+BAR="$(cd "$PKG/../.." && pwd)"; BAH=$(git -C "$BAR" rev-parse HEAD); BAP=$(git -C "$BAR" rev-parse --verify -q 6e61be2 || true)
+BAC=$(cd "$BAR" && cd "$(git rev-parse --git-common-dir)" && pwd)
+OACF=$( . "$PKG/common.sh"; printf '%s' "$OLD_APP_COMMIT")
+BAID=(-c user.name=ddcnew-local-test -c user.email=ddcnew-local-test@example.invalid)
+ba_blob() { printf '%b' "$1" | git -C "$BAG" hash-object -w --stdin; }
+ba_tree() { # [dotenv|nodi]: the small test tree (with a .env.lt file, or a .dockerignore without **/.env); prints its id
+  local di='**/.env\nnode_modules\n'
+  [ "${1:-}" != nodi ] || di='node_modules\n'
+  rm -f "$BA/index"
+  { printf '100644 %s\t%s\n' "$(ba_blob "$di")" .dockerignore "$(ba_blob 'FROM node:22-alpine\n')" Dockerfile \
+      "$(ba_blob 'CHAIN_SIGNER_PRIVATE_KEY=\n')" env.example "$(ba_blob '// throwaway test file\n')" scripts/mainnetSwitch.js
+    printf '100755 %s\t%s\n' "$(ba_blob '#!/bin/sh\necho ok\n')" scripts/lt-run.sh
+    printf '120000 %s\t%s\n' "$(ba_blob 'scripts/lt-run.sh')" lt-link
+    if [ "${1:-}" = dotenv ]; then printf '100644 %s\t%s\n' "$(ba_blob 'A=1\n')" .env.lt; fi
+  } | GIT_INDEX_FILE="$BA/index" git -C "$BAG" update-index --add --index-info && GIT_INDEX_FILE="$BA/index" git -C "$BAG" write-tree
+}
+ba_commit() { # <parent> <signed|unsigned> <message> [dotenv|nodi]: prints the new commit's id (kept on a branch)
+  local tree c
+  tree=$(ba_tree "${4:-}") || return 1
+  if [ "$2" = signed ]; then
+    c=$(git -C "$BAG" "${BAID[@]}" -c gpg.format=ssh -c user.signingkey="$BA/signkey" -c gpg.ssh.program=ssh-keygen commit-tree -S "$tree" -p "$1" -m "$3") || return 1
+  else c=$(git -C "$BAG" "${BAID[@]}" commit-tree --no-gpg-sign "$tree" -p "$1" -m "$3") || return 1; fi
+  git -C "$BAG" update-ref "refs/heads/lt-$c" "$c" && printf '%s' "$c"
+}
+ba_listing() { # <commit>: "<path> f-|fx|l <target>" per entry, sorted (the form in which backend-archive.sh lists a tree)
+  git -C "$BAG" ls-tree -r "$1" | while read -r m _ o p; do
+    case "$m" in 100755) printf '%s fx\n' "$p";; 120000) printf '%s l %s\n' "$p" "$(git -C "$BAG" cat-file blob "$o")";; *) printf '%s f-\n' "$p";; esac
+  done | LC_ALL=C sort
+}
+BA1=""; BA0=""; BAE=""; BAD=""; BAU=""; BAM=""; BAT=""
+if [ -n "$BAP" ] && git clone -q --shared --no-checkout "$BAC" "$BAG" && ssh-keygen -q -t ed25519 -N '' -C ddcnew-local-test -f "$BA/signkey" < /dev/null; then
+  BA1=$(ba_commit "$BAH" signed "lt release candidate (throwaway test commit)"); BA0=$(ba_commit "$BAP" signed "lt release candidate without PR #38 (throwaway test commit)")
+  BAE=$(ba_commit "$BAH" signed "lt release candidate with a .env.lt file" dotenv); BAD=$(ba_commit "$BAH" signed "lt release candidate whose .dockerignore lacks **/.env" nodi)
+  BAU=$(ba_commit "$BAH" unsigned "lt unsigned commit (throwaway test commit)"); BAM=$(ba_commit "$BAH" unsigned "gpgsig -----BEGIN SSH SIGNATURE----- (in the message only)")
+  git -C "$BAG" "${BAID[@]}" tag -a --no-sign -m "lt tag" "lt-tag-$RUN_ID" "$BA1" && BAT=$(git -C "$BAG" rev-parse "lt-tag-$RUN_ID")
+fi
+nset=0; for s in "$BA1" "$BA0" "$BAE" "$BAD" "$BAU" "$BAM" "$BAT"; do [[ "$s" =~ ^[0-9a-f]{40}$ ]] && nset=$((nset + 1)); done
+if [ "$nset" = 7 ] && [ "$(git -C "$BAG" cat-file commit "$BA1" | grep -c '^gpgsig -----BEGIN SSH SIGNATURE-----$')" = 1 ] && ! git -C "$BAG" cat-file commit "$BAU" | grep -q '^gpgsig '; then
+  ok "throwaway commits in a --shared clone: 4 signed with a throwaway SSH key (on HEAD ${BAH:0:12}, on 6e61be2, with a .env.lt file, without **/.env in .dockerignore), 2 unsigned (one with 'gpgsig' in its message only), 1 annotated tag"
+else bad "section 8b setup: throwaway clone, key or commits ($nset of 7 ids)"; fi
+cp "$PKG/remote.sh" "$PKG/common.sh" "$BPK/"
+sed "s#^SSHPW_OP_BIN=/opt/homebrew/bin/op #SSHPW_OP_BIN=$BA/bin/op #" "$PKG/sshpw.sh" > "$BPK/sshpw.sh"
+printf 'DDC_SSH_TARGET=root@127.0.0.1\nDDC_OP_SECRET_REF=op://test-vault/test-item/password\n' > "$BPK/local.env"
+printf '#!/bin/sh\necho "op $*" >> "%s/op-calls"\nprintf "%%s\\n" stub-password\n' "$BA" > "$BA/bin/op"
+cat > "$BA/bin/ssh" <<EOF
+#!/bin/sh
+# stub ssh: keeps each call's remote command (its last argument) and its stdin, numbered; connects nowhere
+n=\$(ls "$BA"/ssh-cmd.* 2>/dev/null | wc -l | tr -d ' '); n=\$((n + 1))
+for a; do last="\$a"; done
+printf '%s\n' "\$last" > "$BA/ssh-cmd.\$n"
+cat > "$BA/ssh-stdin.\$n"
+exit 0
+EOF
+chmod 755 "$BA/bin/op" "$BA/bin/ssh"
+bapack() { # <sha> [backend clone]: remote.sh pack-api on the scratch copy; output in $BA/pack.out, status in $RC
+  RC=0; PATH="$BA/bin:$PATH" BE_REPO="${2:-$BAG}" bash "$BPK/remote.sh" pack-api "$1" > "$BA/pack.out" 2>&1 < /dev/null || RC=$?
+}
+nssh() { ls "$BA"/ssh-cmd.* 2>/dev/null | wc -l | tr -d ' '; }
+packed_ok() { # <sha> <0|1> <old-App words>: pack-api's output, the three files, the record, the sidecar and the archive
+  local f="$BPK/out/ddc-backend-$1.tar.gz" t
+  t=$(shasum -a 256 < "$f" 2>/dev/null | cut -c1-64)
+  [ "$RC" = 0 ] && grep -qxF "backend PR #38's old-App line (${OACF:0:12}): $3" "$BA/pack.out" \
+    && grep -qF "commit-id=$1 signature=SSH SIGNATURE old-App record=ddc-backend-$1.tar.gz.old-app" "$BA/pack.out" \
+    && cmp -s "$f.old-app" <(printf 'commit=%s\narchive_sha256=%s\nold_app_commit=%s\nold_app_switches=%s\n' "$1" "$t" "$OACF" "$2") \
+    && [ "$(grep -c '' "$f.sha256")" = 2 ] && (cd "$BPK/out" && shasum -a 256 -c "ddc-backend-$1.tar.gz.sha256" >/dev/null 2>&1) \
+    && [ "$(gzip -dc < "$f" | git get-tar-commit-id)" = "$1" ] \
+    && [ "$(tar -tzf "$f" | grep -v '/$' | LC_ALL=C sort)" = "$(git -C "$BAG" ls-tree -r --name-only "$1" | LC_ALL=C sort)" ] \
+    && ! tar -tvzf "$f" | grep -qE '^[^l].{4}w|^[^l].{7}w' \
+    && [ ! -e "$BA/op-calls" ] && [ "$(nssh)" = 0 ]
+}
+bapack "$BA1"
+packed_ok "$BA1" 1 "in this commit: 40-up.sh requires it" \
+  && ok "pack-api of a signed commit on HEAD: archive of exactly the commit's files (commit id $(printf '%s' "$BA1" | cut -c1-12) in its header; modes without group or other write, as a checkout on the server), the old-App record (old_app_switches=1, the tarball's sha256, OLD_APP_COMMIT), a two-line sidecar that shasum -c accepts; the same old-App words as 10-build.sh; 1Password and ssh not called" \
+  || { sed 's/^/    /' "$BA/pack.out"; bad "pack-api of a signed commit on HEAD (rc=$RC)"; }
+bapack "$BA0"
+packed_ok "$BA0" 0 "not in this commit: inert" && ok "pack-api of a signed commit on 6e61be2 (before PR #38): old_app_switches=0, 'not in this commit: inert'" \
+  || { sed 's/^/    /' "$BA/pack.out"; bad "pack-api of a commit without PR #38 (rc=$RC)"; }
+for s in "$BAE" "$BAD"; do bapack "$s"; [ "$RC" = 0 ] || { sed 's/^/    /' "$BA/pack.out"; bad "pack-api of $s (rc=$RC)"; }; done
+ba_set() { # <name> <sha>: the packed files, the commit id and its tree listing, for backend-archive.sh
+  mkdir -p "$BA/sets/$1"; cp "$BPK/out/ddc-backend-$2".tar.gz* "$BA/sets/$1/"; printf '%s\n' "$2" > "$BA/sets/$1/sha"; ba_listing "$2" > "$BA/sets/$1/tree"
+}
+ba_set rc1 "$BA1"; ba_set rc0 "$BA0"; ba_set dotenv "$BAE"; ba_set nodi "$BAD"
+refused=""
+for c in "unsigned|$BAU|refusing: commit $BAU is not signed (no gpgsig header)" "gpgsig in the message only|$BAM|refusing: commit $BAM is not signed (no gpgsig header)" \
+         "an annotated tag|$BAT|not found in $BAG (or not a commit)" "an unknown sha|$(printf '%s' "$BA1" | tr '0-9a-f' '1-9a-f0')|not found in $BAG" \
+         "a short sha|$(printf '%s' "$BA1" | cut -c1-12)|need a full 40-hex commit id"; do
+  lbl=${c%%|*}; rest=${c#*|}; s=${rest%%|*}; want=${rest#*|}
+  bapack "$s"
+  if [ "$RC" != 0 ] && grep -qF -- "$want" "$BA/pack.out" && ! ls "$BPK/out/ddc-backend-$s.tar.gz"* >/dev/null 2>&1 && ! grep -q '^packed ' "$BA/pack.out"; then refused="$refused $lbl;"
+  else sed 's/^/    /' "$BA/pack.out"; bad "pack-api did not refuse $lbl (rc=$RC)"; fi
+done
+[ "$refused" = " unsigned; gpgsig in the message only; an annotated tag; an unknown sha; a short sha;" ] \
+  && ok "pack-api refuses, and writes nothing to out/:$refused" || bad "pack-api refusals:$refused"
+git init -q "$BA/shallow" && git -C "$BA/shallow" fetch -q --depth 1 "file://$BAG" "$BA1" 2>/dev/null; bapack "$BA1" "$BA/shallow"
+[ "$RC" = 2 ] && grep -qF "$BA/shallow is a shallow clone: the old-App ancestor check needs its history" "$BA/pack.out" \
+  && ok "pack-api refuses a shallow clone (the ancestor check needs the history)" || { sed 's/^/    /' "$BA/pack.out"; bad "pack-api in a shallow clone (rc=$RC)"; }
+# upload-api: approval, a missing pack and a damaged out/ are refused before anything connects; then three ssh calls,
+# the sidecar last with sha256sum -c, each stdin byte for byte the packed file.
+baup() { # <scratch package> <sha> [yes]: output in $BA/up.out, status in $RC; the stubs' records start empty
+  RC=0; rm -f "$BA"/ssh-cmd.* "$BA"/ssh-stdin.* "$BA/op-calls"
+  DDC_APPROVED="${3:-}" PATH="$BA/bin:$PATH" bash "$1/remote.sh" upload-api "$2" > "$BA/up.out" 2>&1 < /dev/null || RC=$?
+}
+cp -Rp "$BPK" "$BA/pkg-damaged"; printf 'x' >> "$BA/pkg-damaged/out/ddc-backend-$BA1.tar.gz"
+r=""
+baup "$BPK" "$BA1"; [ "$RC" = 2 ] && grep -q '^refusing: this call changes the server' "$BA/up.out" && [ "$(nssh)" = 0 ] && [ ! -e "$BA/op-calls" ] && r="$r no-approval"
+baup "$BPK" "$BAU" yes; [ "$RC" = 1 ] && grep -qx 'run pack-api first' "$BA/up.out" && [ "$(nssh)" = 0 ] && [ ! -e "$BA/op-calls" ] && r="$r not-packed"
+baup "$BA/pkg-damaged" "$BA1" yes; [ "$RC" = 1 ] && grep -q 'does not match its .sha256: run pack-api again' "$BA/up.out" && [ "$(nssh)" = 0 ] && [ ! -e "$BA/op-calls" ] && r="$r damaged"
+[ "$r" = " no-approval not-packed damaged" ] && ok "upload-api refuses before 1Password or ssh is called: without DDC_APPROVED=yes, before pack-api, and when out/ does not match its sidecar" || { sed 's/^/    /' "$BA/up.out"; bad "upload-api refusals:$r"; }
+baup "$BPK" "$BA1" yes
+F1="$BPK/out/ddc-backend-$BA1.tar.gz"; R1="/root/ddcnew/src/ddc-backend-$BA1.tar.gz"
+if [ "$RC" = 0 ] && [ "$(nssh)" = 3 ] && [ "$(grep -c "^op read op://test-vault/test-item/password\$" "$BA/op-calls")" = 3 ] \
+   && [ "$(cat "$BA/ssh-cmd.1")" = "install -d -m 700 /root/ddcnew/src && cat > $R1" ] && [ "$(cat "$BA/ssh-cmd.2")" = "cat > $R1.old-app" ] \
+   && [ "$(cat "$BA/ssh-cmd.3")" = "cat > $R1.sha256 && cd /root/ddcnew/src && sha256sum -c ddc-backend-$BA1.tar.gz.sha256" ] \
+   && cmp -s "$BA/ssh-stdin.1" "$F1" && cmp -s "$BA/ssh-stdin.2" "$F1.old-app" && cmp -s "$BA/ssh-stdin.3" "$F1.sha256"; then
+  ok "upload-api: three logins (1Password asked once each), the tarball, then its old-App record, then the sidecar with sha256sum -c on the server, each sent byte for byte"
+  cp "$BA"/ssh-cmd.* "$BA"/ssh-stdin.* "$BA/upload/"
+else sed 's/^/    /' "$BA/up.out"; for i in 1 2 3; do printf '    ssh-cmd.%s: %s\n' "$i" "$(cat "$BA/ssh-cmd.$i" 2>/dev/null)"; done; bad "upload-api (rc=$RC, ssh calls $(nssh))"; fi
+# 10-build.sh --backend-archive to its end, and its refusals, on what pack-api and upload-api produced
+if [ -f "$BA/upload/ssh-cmd.3" ] && [ -s "$BA/sets/nodi/tree" ]; then
+  if BA_GIT="$(command -v git)" BA_CLONE="$BAG" timeout 900 bash "$PKG/test/helpers/backend-archive.sh" "$PKG" "$BA/mac" "$BA" > "$BA/mac.out" 2>&1; then
+    sed 's/^/  /' "$BA/mac.out"; ok "backend-archive.sh on macOS (bash 3.2, BSD tar and find): upload, happy paths, re-run, refusals, and the public fetch without the flag"
+  else sed 's/^/  /' "$BA/mac.out"; bad "backend-archive.sh on macOS"; fi
+  if docker info >/dev/null 2>&1; then
+    BA_IMG="ddcnew-batest:$RUN_ID"; mkdir -p "$BA/img"   # this run's own tag: built here, removed by the label cleanup at the end
+    printf 'FROM ubuntu:jammy\nRUN apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=8 install -y -qq --no-install-recommends git python3 rsync openssl >/dev/null && rm -rf /var/lib/apt/lists/*\n' > "$BA/img/Dockerfile"
+    if timeout 900 docker build -q "${LT[@]}" -t "$BA_IMG" "$BA/img" >/dev/null; then
+      if timeout 900 docker run --rm "${LT[@]}" --name "barchive-$RANDOM-$RUN_ID" --user 1000:1000 -e HOME=/tmp -v "$PKG:/pkg:ro" -v "$BA/sets:/in/sets:ro" -v "$BA/upload:/in/upload:ro" \
+           "$BA_IMG" bash /pkg/test/helpers/backend-archive.sh /pkg /tmp/ba /in > "$BA/jammy.out" 2>&1; then
+        sed 's/^/  /' "$BA/jammy.out"; ok "backend-archive.sh on ubuntu:jammy (bash 5.1, GNU tar, find and coreutils, the server's tools): upload, happy paths, re-run, refusals"
+      else sed 's/^/  /' "$BA/jammy.out"; bad "backend-archive.sh on ubuntu:jammy"; fi
+    else bad "could not build $BA_IMG (ubuntu:jammy with git, python3, rsync, openssl)"; fi
+  else bad "section 8b (ubuntu:jammy) needs Docker Desktop"; fi
+else bad "section 8b: no packed set or upload to run 10-build.sh --backend-archive on"; fi
 
 # ---------------------------------------------------------------------------
 echo; echo "== 9. expand_check (read-only) on a real ext4 partition: the Docker Desktop VM disk behind /etc/hosts"

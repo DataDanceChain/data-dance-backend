@@ -3,7 +3,7 @@
 local.env
 local.env.*
 !local.env.example
-# remote.sh writes every call's output to logs/ and the packed frontend source (a private repository) to out/.
+# remote.sh writes every call's output to logs/ and the packed sources (pack-web: the private frontend; pack-api) to out/.
 logs/
 out/
 *.part

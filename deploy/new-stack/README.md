@@ -38,11 +38,25 @@ outcome: [APPROVAL.md](APPROVAL.md) section 9.
 refuses `tge` and `tge-rehearsal` at boot, and anything outside `[A-Za-z0-9._-]{1,64}`). The run records it in
 `/root/ddcnew/settings.env`; later runs reuse it and stop on a different value.
 
+## Backend source
+
+By default `10-build.sh` builds the backend from a clean `git fetch --depth 1` of this public repository at the pinned
+commit (plus its history since 2026-10-01 for the old-App ancestor check). With `--backend-archive` it builds it, like
+the frontend, from an uploaded `git archive` tarball of that commit instead: this builds a reviewed commit that is not on
+GitHub yet (for example a release candidate) from an uploaded archive. On the Mac, `./remote.sh pack-api <sha>` packs a
+**signed** commit of the backend clone (`BE_REPO=<path>`, by default the clone that holds this package) into `out/`,
+runs the old-App ancestor check there (the server gets no history in this mode) and writes its answer into a record
+beside the tarball; `DDC_APPROVED=yes ./remote.sh upload-api <sha>` copies the tarball, the record and their sha256
+sidecar to `/root/ddcnew/src/`. `10-build.sh <sha> <frontend-sha> <gate flag> --backend-archive` then checks both sums,
+the commit id in the tarball and the record (it stops when the record is missing, malformed or does not match the
+archive), unpacks into a fresh `/root/ddcnew/src/backend-<sha12>/` and runs every later check unchanged on that tree.
+Without the flag nothing changes. Order and pass criteria: [APPROVAL.md](APPROVAL.md) section 4, step 7b.
+
 ## Files
 
 | File | What it is |
 |---|---|
-| `remote.sh` | the only entry point from the Mac: preflight, upload, run; every call's output goes to `logs/` (gitignored) |
+| `remote.sh` | the only entry point from the Mac: preflight, pack and upload the sources (`pack-web`/`upload-web`, `pack-api`/`upload-api`), upload, run; every call's output goes to `logs/` (gitignored) |
 | `sshpw.sh` | login guard: reads `local.env`, asks 1Password before anything connects, never lets ssh send an empty password |
 | `local.env.example` | template for the untracked `local.env` |
 | `00-preflight.sh` | read-only checks on the server |
@@ -59,7 +73,8 @@ refuses `tge` and `tge-rehearsal` at boot, and anything outside `[A-Za-z0-9._-]{
     bash test/run-local-tests.sh <new-scratch-dir>
 
 Needs Docker Desktop, shellcheck 0.11, GNU coreutils (`grealpath`, `timeout`), node with the backend's `node_modules`
-(`npm ci` at the repository root: section 3a boots this checkout's `src/server.js`) and, for the partner page's browser
+(`npm ci` at the repository root: section 3a boots this checkout's `src/server.js`), git and ssh-keygen (section 8b signs
+throwaway commits with a throwaway key; 1Password is never asked) and, for the partner page's browser
 test, npm (it installs playwright-core 1.60.0 into the scratch directory and uses the local Playwright Chromium). Every
 container and image a run creates carries the label `ddcnew-localtest=<run id>` (new for each run); the cleanup (an
 exit trap) removes, and the counts count, only what carries that label, and an image only when this run built it, so

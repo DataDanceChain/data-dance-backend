@@ -5,8 +5,11 @@
 #                                             read-only: pipes 00-preflight.sh through survey/ro-ssh.sh, with the
 #                                             settings (common.sh defaults or these overrides) prepended
 #   ./remote.sh pack-web <frontend-sha>       local only: git archive of the pinned frontend commit -> out/ (gitignored)
+#   ./remote.sh pack-api <backend-sha>        local only: git archive of a SIGNED backend commit -> out/, with its old-App
+#                                             record (for 10-build.sh --backend-archive; see pack-api below)
 #   DDC_APPROVED=yes ./remote.sh upload       creates /root/ddcnew/deploy (700); copies the scripts, compose.yaml, partner-info/
 #   DDC_APPROVED=yes ./remote.sh upload-web <frontend-sha>   copies out/ddc-frontend-<sha>.tar.gz(+.sha256) to /root/ddcnew/src/
+#   DDC_APPROVED=yes ./remote.sh upload-api <backend-sha>    copies out/ddc-backend-<sha>.tar.gz(+.old-app, .sha256) to /root/ddcnew/src/
 #   DDC_APPROVED=yes ./remote.sh run <script> [args...]      runs /root/ddcnew/deploy/<script> on the server
 #   ./remote.sh run p2-disk.sh preview | run p2-disk.sh expand-check | run p1-backup.sh status | run 30-nginx.sh status
 #               | run 50-partner-page.sh status   (read-only, no flag needed)
@@ -29,14 +32,17 @@
 # stdin: `run` forwards this script's stdin, untouched, to the remote script on ssh's stdin (1Password never reads it:
 # sshpw.sh gives op /dev/null). Nothing here prints it; logs/ gets the remote output only. For 50-partner-page.sh apply
 # and verify, a terminal on stdin is refused before anything connects: the page password must be piped, not typed.
-# CHANGES ON THE SERVER: only what the called script changes (upload/upload-web: the files named above).
+# CHANGES ON THE SERVER: only what the called script changes (upload/upload-web/upload-api: the files named above).
 # UNDO: upload -> rm -rf /root/ddcnew/deploy ; upload-web -> rm /root/ddcnew/src/ddc-frontend-<sha>.tar.gz*
+#       upload-api -> rm /root/ddcnew/src/ddc-backend-<sha>.tar.gz*
 set -euo pipefail
 PKG="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=sshpw.sh
 . "$PKG/sshpw.sh"
 # The frontend clone: by default next to the backend clone that holds this package (override with FE_REPO=<path>).
 FE_REPO="${FE_REPO:-$PKG/../../../data-dance-frontend}"
+# The backend clone for pack-api: by default the one that holds this package (override with BE_REPO=<path>).
+BE_REPO="${BE_REPO:-$PKG/../..}"
 RO_HELPER="$PKG/survey/ro-ssh.sh"
 mkdir -p "$PKG/logs" "$PKG/out"
 cmd="${1:-}"; shift || true
@@ -55,6 +61,13 @@ rssh() { # rssh <remote command> ; stdin is forwarded
 # Environment overrides that may reach the server (everything else is refused, including PATH, BASH_ENV, LD_*).
 SERVER_ENV_ALLOWED="REHEARSAL_DB REHEARSAL_REDIRECT_URIS REHEARSAL_INITIATE_LOGIN_URI OAUTH_PUBLIC_REGISTRATION W3A_GOOGLE W3A_EMAIL W3A_APPLE W3A_X JWKS_NEW_PINS_VERIFIED BUILD_MEM_FLOOR_MB P1_USERS_MIN PARTNER_ALLOWED_IP API_HOST APP_HOST API_PORT WEB_PORT DB_PORT TAKE_OVER_VHOSTS REHEARSAL_CLIENT_ID"
 valid_sha() { [[ "$1" =~ ^[0-9a-f]{40}$ ]] || { echo "need a full 40-hex commit id"; exit 2; }; }
+# commit_signature <repo> <sha>: the kind of the commit's signature (e.g. "SSH SIGNATURE") from its gpgsig header (a
+# header line, before the first blank line: a "gpgsig" in the message does not count); fails when there is none.
+commit_signature() {
+  git -C "$1" cat-file commit "$2" | awk 'h == 0 && /^$/ { h = 1 }
+    h == 0 && /^gpgsig / { s = 1; k = $0; sub(/^gpgsig -----BEGIN /, "", k); sub(/-----$/, "", k) }
+    END { if (s) print k; exit !s }'
+}
 
 case "$cmd" in
   preflight)
@@ -90,6 +103,37 @@ case "$cmd" in
     git -C "$FE_REPO" archive --format=tar.gz -o "$f" "$sha"
     (cd "$PKG/out" && shasum -a 256 "$(basename "$f")" > "$(basename "$f").sha256")
     echo "packed $(basename "$f") $(( $(stat -f %z "$f")/1024/1024 ))MB sha256=$(cut -c1-16 "$f.sha256")... commit-id=$(gzip -dc "$f" | git get-tar-commit-id)";;
+  pack-api)
+    # The backend from an uploaded archive, like the frontend (10-build.sh --backend-archive): builds a reviewed commit
+    # that is not on GitHub yet (for example a release candidate). Only a signed commit is packed (a gpgsig header).
+    # The server gets no git history in that mode, so the old-App ancestor check of 10-build.sh (common.sh
+    # old_app_switches: does the commit contain backend PR #38's commit, judged on its history since 2026-10-01) runs
+    # here, with the same function on a throwaway copy fetched the way 10-build.sh fetches it (depth 1, then that
+    # history; from this clone through file://), and its answer goes into ddc-backend-<sha>.tar.gz.old-app:
+    #   commit=<sha>  archive_sha256=<sha256 of the tarball>  old_app_commit=<OLD_APP_COMMIT>  old_app_switches=<0|1>
+    # (one per line). The .sha256 sidecar lists the tarball and that record. Nothing is written to out/ before every
+    # check passed; an earlier pack of the same commit is removed first.
+    sha="${1:-}"; valid_sha "$sha"
+    git -C "$BE_REPO" rev-parse --git-dir >/dev/null 2>&1 || { echo "no backend clone at $BE_REPO: set BE_REPO=<path to the data-dance-backend clone>"; exit 2; }
+    [ "$(git -C "$BE_REPO" rev-parse --is-shallow-repository)" = false ] || { echo "$BE_REPO is a shallow clone: the old-App ancestor check needs its history (git -C $BE_REPO fetch --unshallow)"; exit 2; }
+    git -C "$BE_REPO" fetch -q origin
+    [ "$(git -C "$BE_REPO" cat-file -t "$sha" 2>/dev/null)" = commit ] || { echo "commit $sha not found in $BE_REPO (or not a commit)"; exit 1; }
+    sig=$(commit_signature "$BE_REPO" "$sha") || { echo "refusing: commit $sha is not signed (no gpgsig header): only a signed commit is packed"; exit 1; }
+    echo "branches containing it: $(git -C "$BE_REPO" branch -r --contains "$sha" | tr -d ' ' | tr '\n' ' ')"
+    oac=$( . "$PKG/common.sh"; printf '%s' "$OLD_APP_COMMIT")
+    src="file://$(cd "$BE_REPO" && pwd)"
+    t=$(mktemp -d "${TMPDIR:-/tmp}/ddc-pack-api.XXXXXX") || { echo "cannot create a temporary directory (TMPDIR=${TMPDIR:-/tmp})"; exit 3; }
+    rc=0; oas=$(git init -q "$t/git" && git -C "$t/git" fetch -q --depth 1 "$src" "$sha" && ( . "$PKG/common.sh"; old_app_switches "$t/git" "$src" "$sha" )) || rc=$?
+    rm -rf "$t"
+    [ "$rc" = 0 ] && [[ "$oas" =~ ^[01]$ ]] || { echo "cannot tell whether $sha contains backend PR #38 (the ancestor check on the history since 2026-10-01 gave no answer): not packed"; exit 1; }
+    f="$PKG/out/ddc-backend-$sha.tar.gz"
+    rm -f "$f" "$f.old-app" "$f.sha256"
+    # tar.umask=0022: the files get the modes a checkout on the server gives them (umask 022), as in the public fetch.
+    COPYFILE_DISABLE=1 git -C "$BE_REPO" -c tar.umask=0022 archive --format=tar.gz -o "$f" "$sha"
+    printf 'commit=%s\narchive_sha256=%s\nold_app_commit=%s\nold_app_switches=%s\n' "$sha" "$(shasum -a 256 < "$f" | cut -c1-64)" "$oac" "$oas" > "$f.old-app"
+    (cd "$PKG/out" && shasum -a 256 "$(basename "$f")" "$(basename "$f").old-app" > "$(basename "$f").sha256")
+    echo "backend PR #38's old-App line (${oac:0:12}): $([ "$oas" = 1 ] && echo "in this commit: 40-up.sh requires it" || echo "not in this commit: inert")"
+    echo "packed $(basename "$f") $(( $(stat -f %z "$f")/1024/1024 ))MB sha256=$(head -n 1 "$f.sha256" | cut -c1-16)... commit-id=$(gzip -dc "$f" | git get-tar-commit-id) signature=$sig old-App record=$(basename "$f").old-app";;
   upload)
     need_approval
     COPYFILE_DISABLE=1 tar --no-mac-metadata --no-xattrs -C "$PKG" -czf - common.sh 00-preflight.sh p1-backup.sh p2-disk.sh 10-build.sh 20-env.sh 30-nginx.sh 40-up.sh 50-partner-page.sh 99-teardown.sh compose.yaml partner-info/index.html \
@@ -100,6 +144,15 @@ case "$cmd" in
     f="$PKG/out/ddc-frontend-$sha.tar.gz"; [ -f "$f" ] && [ -f "$f.sha256" ] || { echo "run pack-web first"; exit 1; }
     rssh "install -d -m 700 /root/ddcnew/src && cat > /root/ddcnew/src/ddc-frontend-$sha.tar.gz" < "$f"
     rssh "cat > /root/ddcnew/src/ddc-frontend-$sha.tar.gz.sha256 && cd /root/ddcnew/src && sha256sum -c ddc-frontend-$sha.tar.gz.sha256" < "$f.sha256" | tee "$PKG/logs/$TS-upload-web.txt";;
+  upload-api)
+    # The three files of pack-api, the .sha256 sidecar last: sha256sum -c on the server then checks the tarball and the
+    # old-App record. They are checked here first, so a damaged set is never sent.
+    need_approval; sha="${1:-}"; valid_sha "$sha"
+    f="$PKG/out/ddc-backend-$sha.tar.gz"; [ -f "$f" ] && [ -f "$f.old-app" ] && [ -f "$f.sha256" ] || { echo "run pack-api first"; exit 1; }
+    (cd "$PKG/out" && shasum -a 256 -c "$(basename "$f").sha256" >/dev/null) || { echo "out/$(basename "$f") or its old-App record does not match its .sha256: run pack-api again"; exit 1; }
+    rssh "install -d -m 700 /root/ddcnew/src && cat > /root/ddcnew/src/ddc-backend-$sha.tar.gz" < "$f"
+    rssh "cat > /root/ddcnew/src/ddc-backend-$sha.tar.gz.old-app" < "$f.old-app"
+    rssh "cat > /root/ddcnew/src/ddc-backend-$sha.tar.gz.sha256 && cd /root/ddcnew/src && sha256sum -c ddc-backend-$sha.tar.gz.sha256" < "$f.sha256" | tee "$PKG/logs/$TS-upload-api.txt";;
   run)
     s="${1:-}"; shift || true
     [ "$s" != 00-preflight.sh ] || { echo "refusing: run the preflight with ./remote.sh preflight [API_HOST=... ...]: it prepends the settings and the git-tree hash that 00-preflight.sh checks"; exit 2; }
@@ -122,5 +175,5 @@ case "$cmd" in
     chk=$(env -i PATH="$PATH" ${ovr[@]+"${ovr[@]}"} bash -c '. "$1/common.sh" && remote_overrides_check' _ "$PKG" 2>&1) \
       || { echo "refusing before connecting: $(printf '%s' "$chk" | tail -n 1)"; exit 2; }
     rssh "cd /root/ddcnew/deploy && env$envs ./$s$args" 2>&1 | tee "$PKG/logs/$TS-${s%.sh}.txt";;
-  *) sed -n '2,14p' "$0"; exit 2;;
+  *) sed -n '2,17p' "$0"; exit 2;;
 esac

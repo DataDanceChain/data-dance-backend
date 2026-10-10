@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
-# 10-build.sh <backend-sha> <frontend-sha> --overlays-reconciled | --infra-only
+# 10-build.sh <backend-sha> <frontend-sha> --overlays-reconciled | --infra-only [--backend-archive]
 # Build the new stack's two images ON the server (no image registry is used, so no registry credentials are needed)
 # and prepare the runtime files the backend needs.
 #
 # CHANGES ON THE SERVER
-#   /root/ddcnew/src/backend-<sha12>/     clean clone of the PUBLIC backend repo at the pinned commit (git fetch by sha)
+#   /root/ddcnew/src/backend-<sha12>/     clean clone of the PUBLIC backend repo at the pinned commit (git fetch by sha);
+#                                         with --backend-archive the uploaded git-archive tarball of that commit, unpacked
+#                                         (see BACKEND SOURCE below)
 #   /root/ddcnew/src/frontend-<sha12>/    the uploaded git-archive tarball of the PRIVATE frontend repo, unpacked
 #                                         (tarball uploaded beforehand by `remote.sh upload-web`; no credentials here)
 #   /root/ddcnew/src/frontend-current     symlink to the above (20-env.sh reads .env.tge from it)
@@ -22,9 +24,11 @@
 #   /root/ddcnew/assets/campaigns|passes/ COPIES of /root/ddc-backend/campaign-covers and /root/ddc-backend/passes
 #   /root/ddcnew/.env                     compose interpolation only: API_IMAGE, WEB_IMAGE tags, INFRA_ONLY=0|1 and
 #                                         OLD_APP_SWITCHES=0|1 (does the backend commit contain backend PR #38's old-App
-#                                         line; an ancestor check, read by 40-up.sh) (no secrets)
+#                                         line; an ancestor check, read by 40-up.sh) (no secrets); with --backend-archive
+#                                         also BACKEND_SOURCE=archive (the record of where the backend source came from)
 #   /root/ddcnew/src/backend-<sha12>/     also the history since 2026-10-01 of that commit (git fetch --shallow-since), for
-#                                         the ancestor check
+#                                         the ancestor check (not with --backend-archive: remote.sh pack-api ran it)
+#   /root/ddcnew/src/ddc-backend-<sha>.tar.gz*  with --backend-archive only: read, never written (remote.sh upload-api)
 #   /root/ddcnew/settings.env             the hosts and ports (common.sh settings), if no earlier script recorded them
 #   /root/ddcnew/.lock, /root/ddcnew/logs/<ts>-10-build-<pid>.log (600) and logs/build-*.log: run lock and output copies
 #   The old directories are only read (cp/rsync source); nothing under /root/ddc-backend is written.
@@ -40,6 +44,15 @@
 #   --infra-only           Build anyway to prove the infrastructure (empty stack). The backend image is tagged
 #                          ddcnew/backend:<sha12>-infra and /root/ddcnew/.env gets INFRA_ONLY=1: 40-up.sh prints a
 #                          banner and every data step refuses (refuse_if_infra_only in common.sh).
+# BACKEND SOURCE: by default the clean public fetch above. --backend-archive builds the backend, like the frontend, from
+#   an uploaded `git archive` tarball of <backend-sha>, so that a reviewed commit that is not on GitHub yet (for example a
+#   release candidate) can be built. `remote.sh pack-api <sha>` (on the Mac; only a signed commit) and `upload-api <sha>`
+#   put /root/ddcnew/src/ddc-backend-<sha>.tar.gz, its old-App record .tar.gz.old-app and the .tar.gz.sha256 sidecar on
+#   the server. Step 1 then checks both sha256 values, that `git get-tar-commit-id` is <backend-sha>, and the old-App
+#   record (common.sh be_archive_check; fail-closed: missing, malformed, or for another commit, archive or PR #38
+#   commit -> stop), takes OLD_APP_SWITCHES from that record (there is no history here; pack-api ran the same ancestor
+#   check on the Mac's clone), and unpacks into a fresh /root/ddcnew/src/backend-<sha12>/ (an existing directory is
+#   reused only when identical to the archive, otherwise the script stops). Every later check runs unchanged on that tree.
 # WEB BUILD FOR API_HOST: the frontend compiles its tge API in (src/config/environment.ts API_BASE_URLS.tge;
 #   https://api-rehearsal.datadance.ai/api since frontend a3ee809). Before any build, the uploaded source must name
 #   https://<API_HOST>/api (common.sh fe_api_base_check); after the web build, ddc-build.json must say apiBaseUrl
@@ -59,12 +72,13 @@ BE_SHA="${1:-}"; FE_SHA="${2:-}"
 [[ "$BE_SHA" =~ ^[0-9a-f]{40}$ ]] || die "backend sha must be a full 40-hex commit id"
 [[ "$FE_SHA" =~ ^[0-9a-f]{40}$ ]] || die "frontend sha must be a full 40-hex commit id"
 shift 2
-RECONCILED=0; INFRA_ONLY=0
+RECONCILED=0; INFRA_ONLY=0; BE_ARCHIVE=0
 for a in "$@"; do
   case "$a" in
     --overlays-reconciled) RECONCILED=1;;
     --infra-only) INFRA_ONLY=1;;
-    *) die "unknown argument '$a' (expected --overlays-reconciled or --infra-only)";;
+    --backend-archive) BE_ARCHIVE=1;;
+    *) die "unknown argument '$a' (expected --overlays-reconciled or --infra-only, and optionally --backend-archive)";;
   esac
 done
 [ "$RECONCILED$INFRA_ONLY" != 11 ] || die "--overlays-reconciled and --infra-only together is an error: pick one"
@@ -75,7 +89,8 @@ if [ "$INFRA_ONLY" = 1 ]; then API_IMAGE="ddcnew/backend:$BE12-infra"; else API_
 WEB_IMAGE="ddcnew/web:tge-$FE12"
 SRC="$NEW_DIR/src"; LOGS="$NEW_DIR/logs"
 FE_TGZ="$SRC/ddc-frontend-$FE_SHA.tar.gz"
-if ddc_local_test && [ "${DDC_ARGS_ONLY:-0}" = 1 ]; then say "args ok: INFRA_ONLY=$INFRA_ONLY API_IMAGE=$API_IMAGE WEB_IMAGE=$WEB_IMAGE"; exit 0; fi
+BE_TGZ="$SRC/ddc-backend-$BE_SHA.tar.gz"   # --backend-archive only
+if ddc_local_test && [ "${DDC_ARGS_ONLY:-0}" = 1 ]; then say "args ok: INFRA_ONLY=$INFRA_ONLY API_IMAGE=$API_IMAGE WEB_IMAGE=$WEB_IMAGE$([ "$BE_ARCHIVE" = 0 ] || echo " BACKEND_SOURCE=archive")"; exit 0; fi
 
 for p in "$NEW_DIR" "$SRC" "$LOGS" "$NEW_DIR/keys_fixed" "$NEW_DIR/assets" "$NEW_DIR/.env"; do guard_write_path "$p"; done
 run_begin 10-build "$BE_SHA" "$FE_SHA" "$@"
@@ -98,26 +113,37 @@ check_resources() {
 }
 
 # ---------------------------------------------------------------------------
-step "1. backend source: clean clone of $BE_REPO at $BE_SHA"
 BE_DIR="$SRC/backend-$BE12"
-if [ -d "$BE_DIR/.git" ] && [ "$(git -C "$BE_DIR" rev-parse HEAD)" = "$BE_SHA" ] && [ -z "$(git -C "$BE_DIR" status --porcelain --ignored)" ]; then
-  say "reusing clean checkout $BE_DIR"
+if [ "$BE_ARCHIVE" = 0 ]; then
+  step "1. backend source: clean clone of $BE_REPO at $BE_SHA"
+  if [ -d "$BE_DIR/.git" ] && [ "$(git -C "$BE_DIR" rev-parse HEAD)" = "$BE_SHA" ] && [ -z "$(git -C "$BE_DIR" status --porcelain --ignored)" ]; then
+    say "reusing clean checkout $BE_DIR"
+  else
+    rm -rf "$BE_DIR"; mkdir -p "$BE_DIR"
+    git -C "$BE_DIR" init -q
+    git -C "$BE_DIR" fetch -q --depth 1 "$BE_REPO" "$BE_SHA"
+    git -C "$BE_DIR" -c advice.detachedHead=false checkout -q FETCH_HEAD
+  fi
+  [ "$(git -C "$BE_DIR" rev-parse HEAD)" = "$BE_SHA" ] || die "checkout is not at $BE_SHA"
+  [ -z "$(git -C "$BE_DIR" status --porcelain --ignored)" ] || die "checkout is not clean"
+  # Does the commit contain backend PR #38's old-App startup line (OLD_APP_COMMIT, 2026-10-05)? An ancestor check on the
+  # history since 2026-10-01 (common.sh old_app_switches). 40-up.sh then requires the line when it does
+  # (OLD_APP_SWITCHES=1 in /root/ddcnew/.env).
+  OLD_APP_SWITCHES=$(old_app_switches "$BE_DIR" "$BE_REPO" "$BE_SHA") \
+    || die "cannot tell whether $BE12 contains PR #38 (the history fetch since 2026-10-01 failed, and the commit is not older): re-run"
+  [ "$(git -C "$BE_DIR" rev-parse HEAD)" = "$BE_SHA" ] && [ -z "$(git -C "$BE_DIR" status --porcelain --ignored)" ] || die "the checkout changed during the history fetch"
+  say "backend PR #38's old-App line (${OLD_APP_COMMIT:0:12}): $([ "$OLD_APP_SWITCHES" = 1 ] && echo "in this commit: 40-up.sh requires it" || echo "not in this commit: inert")"
+  pass "backend HEAD=$BE12 \"$(git -C "$BE_DIR" log -1 --format=%s | cut -c1-80)\""
 else
-  rm -rf "$BE_DIR"; mkdir -p "$BE_DIR"
-  git -C "$BE_DIR" init -q
-  git -C "$BE_DIR" fetch -q --depth 1 "$BE_REPO" "$BE_SHA"
-  git -C "$BE_DIR" -c advice.detachedHead=false checkout -q FETCH_HEAD
+  # --backend-archive (header, BACKEND SOURCE): the uploaded tarball, its sidecar and its old-App record, fail-closed.
+  step "1. backend source: uploaded git-archive tarball of $BE_SHA (--backend-archive)"
+  be_archive_check "$BE_TGZ" "$BE_SHA"
+  OLD_APP_SWITCHES="$BE_ARCHIVE_OLD_APP"
+  say "backend PR #38's old-App line (${OLD_APP_COMMIT:0:12}): $([ "$OLD_APP_SWITCHES" = 1 ] && echo "in this commit: 40-up.sh requires it" || echo "not in this commit: inert")"
+  say "  (the ancestor check of remote.sh pack-api on the history of the packing clone, from $(basename "$BE_TGZ").old-app)"
+  be_archive_unpack "$BE_TGZ" "$BE_DIR"
+  pass "backend source: tarball and old-App record sha256 ok, commit id $BE12, unpacked to $BE_DIR"
 fi
-[ "$(git -C "$BE_DIR" rev-parse HEAD)" = "$BE_SHA" ] || die "checkout is not at $BE_SHA"
-[ -z "$(git -C "$BE_DIR" status --porcelain --ignored)" ] || die "checkout is not clean"
-# Does the commit contain backend PR #38's old-App startup line (OLD_APP_COMMIT, 2026-10-05)? An ancestor check on the
-# history since 2026-10-01 (common.sh old_app_switches). 40-up.sh then requires the line when it does
-# (OLD_APP_SWITCHES=1 in /root/ddcnew/.env).
-OLD_APP_SWITCHES=$(old_app_switches "$BE_DIR" "$BE_REPO" "$BE_SHA") \
-  || die "cannot tell whether $BE12 contains PR #38 (the history fetch since 2026-10-01 failed, and the commit is not older): re-run"
-[ "$(git -C "$BE_DIR" rev-parse HEAD)" = "$BE_SHA" ] && [ -z "$(git -C "$BE_DIR" status --porcelain --ignored)" ] || die "the checkout changed during the history fetch"
-say "backend PR #38's old-App line (${OLD_APP_COMMIT:0:12}): $([ "$OLD_APP_SWITCHES" = 1 ] && echo "in this commit: 40-up.sh requires it" || echo "not in this commit: inert")"
-pass "backend HEAD=$BE12 \"$(git -C "$BE_DIR" log -1 --format=%s | cut -c1-80)\""
 [ -f "$BE_DIR/.dockerignore" ] && grep -qx '\*\*/.env' "$BE_DIR/.dockerignore" || die ".dockerignore with **/.env missing: PR #25 is not in this commit"
 [ -f "$BE_DIR/scripts/mainnetSwitch.js" ] || die "scripts/mainnetSwitch.js missing: PR #27 is not in this commit"
 grep -q 'CHAIN_SIGNER_PRIVATE_KEY' "$BE_DIR/env.example" && say "PR #19 (env-config) present" || warn "PR #19 (env-config) not in this commit"
@@ -210,7 +236,8 @@ n=$(docker run --rm --network none --entrypoint sh "$WEB_IMAGE" -c 'grep -rl "BG
 step "6. image tags for compose"
 umask 077
 printf 'API_IMAGE=%s\nWEB_IMAGE=%s\nINFRA_ONLY=%s\nOLD_APP_SWITCHES=%s\n' "$API_IMAGE" "$WEB_IMAGE" "$INFRA_ONLY" "$OLD_APP_SWITCHES" > "$NEW_DIR/.env"
-say "$NEW_DIR/.env: API_IMAGE=$API_IMAGE WEB_IMAGE=$WEB_IMAGE INFRA_ONLY=$INFRA_ONLY OLD_APP_SWITCHES=$OLD_APP_SWITCHES"
+if [ "$BE_ARCHIVE" = 1 ]; then printf 'BACKEND_SOURCE=archive\n' >> "$NEW_DIR/.env"; fi
+say "$NEW_DIR/.env: API_IMAGE=$API_IMAGE WEB_IMAGE=$WEB_IMAGE INFRA_ONLY=$INFRA_ONLY OLD_APP_SWITCHES=$OLD_APP_SWITCHES$([ "$BE_ARCHIVE" = 0 ] || echo " BACKEND_SOURCE=archive")"
 [ "$INFRA_ONLY" = 0 ] || say "!!!!! $INFRA_ONLY_BANNER"
 df -h / | tail -1; docker system df --format '{{.Type}} {{.Size}} {{.Reclaimable}}' | grep -E 'Images|Build'
 say "optional: docker builder prune -f   (frees the build cache these builds left; images stay)"

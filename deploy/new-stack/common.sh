@@ -865,6 +865,79 @@ old_app_switches() {
 }
 
 # ---------------------------------------------------------------------------
+# The backend from an uploaded archive (10-build.sh --backend-archive), like the frontend: builds a reviewed commit that
+# is not on GitHub yet (for example a release candidate). remote.sh pack-api <sha> writes three files into out/ on the
+# Mac, and upload-api copies them to $NEW_DIR/src/:
+#   ddc-backend-<sha>.tar.gz          git archive --format=tar.gz of the (signed) commit; its header carries the commit id
+#   ddc-backend-<sha>.tar.gz.old-app  the old-App record, exactly four lines:
+#                                       commit=<sha>
+#                                       archive_sha256=<sha256 of the tarball>
+#                                       old_app_commit=<OLD_APP_COMMIT>
+#                                       old_app_switches=<1 or 0: old_app_switches on the history of the Mac's clone>
+#   ddc-backend-<sha>.tar.gz.sha256   two lines, `shasum -a 256` of the tarball and of the record, in that order
+#   be_archive_check <tarball> <sha>  dies unless the three are regular files, the sidecar lists exactly those two files
+#                                     and both sums match, git get-tar-commit-id of the tarball is <sha>, and the record
+#                                     has exactly that form and names <sha>, this tarball's sha256 and OLD_APP_COMMIT
+#                                     (fail-closed: missing, malformed or contradicting the archive stops). Sets
+#                                     BE_ARCHIVE_OLD_APP to the record's 1 or 0.
+#   be_archive_unpack <tarball> <dir> unpacks into a fresh <dir> (through <dir>.unpack); an existing <dir> is reused only
+#                                     when it is identical to the archive (tree_manifest), otherwise it stops.
+# ---------------------------------------------------------------------------
+BE_ARCHIVE_OLD_APP=""
+be_archive_check() {
+  local tgz="$1" sha="$2" b rec sums f l1 l2 tsum c a o v tid re_sum='^[0-9a-f]{64}  '
+  b=$(basename "$tgz"); rec="$tgz.old-app"; sums="$tgz.sha256"
+  for f in "$tgz" "$sums"; do
+    [ -f "$f" ] && [ ! -L "$f" ] || die "upload first: remote.sh pack-api $sha, then upload-api $sha (expects $tgz, .old-app and .sha256)"
+  done
+  [ -f "$rec" ] && [ ! -L "$rec" ] || die "the old-App record $rec is missing: this server has no history to tell whether ${sha:0:12} contains backend PR #38; pack with remote.sh pack-api $sha and upload with upload-api $sha"
+  # The sidecar: exactly two lines, "<sha256>  <tarball name>" and "<sha256>  <record name>".
+  l1=$(sed -n 1p "$sums"); l2=$(sed -n 2p "$sums")
+  [ "$(grep -c '' "$sums")" = 2 ] && [[ "$l1" =~ $re_sum ]] && [ "${l1:66}" = "$b" ] && [[ "$l2" =~ $re_sum ]] && [ "${l2:66}" = "$b.old-app" ] \
+    && cmp -s "$sums" <(printf '%s\n%s\n' "$l1" "$l2") \
+    || die "$sums does not list exactly $b and $b.old-app (two sha256 lines): pack and upload again (remote.sh pack-api / upload-api)"
+  tsum=$(sha256 < "$tgz")
+  [ "$tsum" = "${l1:0:64}" ] || die "backend tarball sha256 mismatch ($b)"
+  [ "$(sha256 < "$rec")" = "${l2:0:64}" ] || die "old-App record sha256 mismatch ($b.old-app)"
+  tid=$(gzip -dc < "$tgz" | git get-tar-commit-id 2>/dev/null || true)
+  [ "$tid" = "$sha" ] || die "backend tarball commit id is '$tid', expected $sha"
+  # The record: exactly the four lines pack-api writes, then each value against the archive and this package.
+  c=$(sed -n 's/^commit=//p' "$rec"); a=$(sed -n 's/^archive_sha256=//p' "$rec"); o=$(sed -n 's/^old_app_commit=//p' "$rec"); v=$(sed -n 's/^old_app_switches=//p' "$rec")
+  [[ "$c" =~ ^[0-9a-f]{40}$ ]] && [[ "$a" =~ ^[0-9a-f]{64}$ ]] && [[ "$o" =~ ^[0-9a-f]{40}$ ]] && [[ "$v" =~ ^[01]$ ]] \
+    && cmp -s "$rec" <(printf 'commit=%s\narchive_sha256=%s\nold_app_commit=%s\nold_app_switches=%s\n' "$c" "$a" "$o" "$v") \
+    || die "the old-App record $rec is malformed (expected exactly commit=, archive_sha256=, old_app_commit= and old_app_switches=0|1, one per line): pack and upload again"
+  [ "$c" = "$sha" ] || die "the old-App record $rec is for commit $c, not $sha: it contradicts the archive"
+  [ "$a" = "$tsum" ] || die "the old-App record $rec is for another archive (sha256 ${a:0:12}..., this tarball ${tsum:0:12}...): it contradicts the archive"
+  [ "$o" = "$OLD_APP_COMMIT" ] || die "the old-App record $rec checked ${o:0:12} as backend PR #38's commit, this package knows ${OLD_APP_COMMIT:0:12}: pack again with this package's remote.sh"
+  BE_ARCHIVE_OLD_APP="$v"
+}
+# One line per entry of <dir> (sorted by path): d <path>, l <path> -> <target>, f<x|-> <sha256> <path>, or ? <path>.
+tree_manifest() {
+  ( cd "$1" && find . -mindepth 1 | LC_ALL=C sort | while IFS= read -r p; do
+      if [ -L "$p" ]; then printf 'l %s -> %s\n' "$p" "$(readlink -- "$p")"
+      elif [ -d "$p" ]; then printf 'd %s\n' "$p"
+      elif [ -f "$p" ]; then printf 'f%s %s %s\n' "$([ -x "$p" ] && echo x || echo -)" "$(sha256 < "$p")" "$p"
+      else printf '? %s\n' "$p"; fi
+    done )
+}
+be_archive_unpack() {
+  local tgz="$1" dir="$2" new="$2.unpack"
+  guard_write_path "$dir"; guard_write_path "$new"
+  rm -rf -- "$new"; mkdir -p -- "$new"
+  tar -xzf "$tgz" -C "$new" || { rm -rf -- "$new"; die "cannot unpack $tgz"; }
+  if [ -e "$dir" ] || [ -L "$dir" ]; then
+    if [ -d "$dir" ] && [ ! -L "$dir" ] && [ "$(tree_manifest "$dir")" = "$(tree_manifest "$new")" ]; then
+      rm -rf -- "$new"; say "reusing $dir: identical to the archive"
+    else
+      rm -rf -- "$new"
+      die "$dir exists and differs from the archive (an earlier build from the public repository leaves a git clone there): remove it (rm -rf $dir) and re-run"
+    fi
+  else
+    mv -- "$new" "$dir"
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # Infra-only images (10-build.sh --infra-only): the backend image lacks the production-only code.
 # ---------------------------------------------------------------------------
 INFRA_ONLY_BANNER='INFRA-ONLY IMAGE: this backend image lacks the production-only code (tracked links /api/go, data demands, market tags; see Drive report 2026-10-04). Do NOT use it for a rehearsal with production data or for the cutover.'
