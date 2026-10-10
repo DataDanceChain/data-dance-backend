@@ -969,7 +969,7 @@ for c in "unsigned|$BAU|refusing: commit $BAU is not signed (no gpgsig header)" 
 done
 [ "$refused" = " unsigned; gpgsig in the message only; an annotated tag; an unknown sha; a short sha;" ] \
   && ok "pack-api refuses, and writes nothing to out/:$refused" || bad "pack-api refusals:$refused"
-git clone -q --depth 1 "file://$BAC" "$BA/shallow" 2>/dev/null; bapack "$BAH" "$BA/shallow"
+git init -q "$BA/shallow" && git -C "$BA/shallow" fetch -q --depth 1 "file://$BAG" "$BA1" 2>/dev/null; bapack "$BA1" "$BA/shallow"
 [ "$RC" = 2 ] && grep -qF "$BA/shallow is a shallow clone: the old-App ancestor check needs its history" "$BA/pack.out" \
   && ok "pack-api refuses a shallow clone (the ancestor check needs the history)" || { sed 's/^/    /' "$BA/pack.out"; bad "pack-api in a shallow clone (rc=$RC)"; }
 # upload-api: approval, a missing pack and a damaged out/ are refused before anything connects; then three ssh calls,
