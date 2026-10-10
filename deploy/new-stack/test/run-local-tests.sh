@@ -69,6 +69,15 @@
 #   The stdin path of remote.sh (10c real ssh, 10e stubs): the piped password reaches the remote script, 1Password
 #   never reads it, and a terminal is refused (10d). Without JavaScript the page offers no field and sends nothing,
 #   even with the box forced visible and a form injected around the field (headless Chromium).
+# Follow-ups of the review of #46 (10-10):
+#   1. no `printf ... | grep -q` in the package's scripts: under pipefail it can report a field that is there as missing.
+#   3d. 40-up.sh step 1b: the api env writer and check refuse a missing, empty, comment-only or unreadable
+#      .env.rehearsal and every other difference (a missing line, a whitespace-only line, a CRLF line), on macOS and
+#      ubuntu:jammy (test/helpers/env-api-cases.sh); 40-up.sh checks .env.api.new before it installs anything.
+#   4. the vhost token location starts with a 403 guard for every address but 127.0.0.1 (render refuses a copy without
+#      it); a REAL nginx:stable answers the token to 127.0.0.1 and 403 to another container (test/helpers/vhost-token-nginx.sh).
+#   10b. api_boot_check: an api that stops before its boot lines ends with a FAIL line and a filtered log tail; the field
+#      checks find a field in inputs larger than a pipe buffer; macOS and ubuntu:jammy (test/helpers/boot-log-cases.sh).
 # Every SSH test uses scratch COPIES of the scripts with a test local.env (loopback only): the package's own local.env,
 # if one exists, is never used to connect, and the real 1Password CLI is never called.
 # Containers and images: every docker run and docker build of this run carries the label ddcnew-localtest=<run id>
@@ -147,6 +156,11 @@ done
 # 00-preflight.sh is self-contained: its copy of the vhost marker line must be common.sh's.
 pm=$(sed -n "s/^VHOST_MARKER='\(.*\)'$/\1/p" "$PKG/00-preflight.sh"); cm=$(sed -n "s/^VHOST_MARKER='\(.*\)'$/\1/p" "$PKG/common.sh")
 [ -n "$cm" ] && [ "$pm" = "$cm" ] && ok "00-preflight.sh and common.sh carry the same VHOST_MARKER line" || bad "VHOST_MARKER differs between 00-preflight.sh and common.sh"
+# Under pipefail, `printf ... | grep -q` fails whenever grep -q exits on an early match while printf (bash line-buffers it)
+# still writes, so a check would read a field that is there as missing: the package's scripts use here-strings instead.
+pq=$(cd "$PKG" && grep -nE 'printf[^|]*[|][[:space:]]*grep[[:space:]]+-[a-zA-Z]*q|(server_names_in|names_in)[^|]*[|][[:space:]]*grep[[:space:]]+-[a-zA-Z]*q' ./*.sh | grep -vE '^[^:]+:[0-9]+:[[:space:]]*#' || true)
+[ -z "$pq" ] && ok "no printf | grep -q (nor a server-name list piped into grep -q) in the package's scripts: their checks read here-strings" \
+  || { printf '%s\n' "$pq"; bad "printf | grep -q under pipefail in the package's scripts (listed above)"; }
 
 echo; echo "== 2. docker compose config"
 mkdir -p "$T/compose"; cp "$PKG/compose.yaml" "$T/compose/"
@@ -553,6 +567,23 @@ if docker info >/dev/null 2>&1; then
   grep -rq DUMMYSECRET "$J/ddcnew/logs" && bad "the ubuntu:jammy server-side log carries a dummy secret" || ok "ubuntu:jammy server-side log: no DUMMYSECRET marker"
 else bad "section 3c needs Docker Desktop"; fi
 
+echo; echo "== 3d. 40-up.sh step 1b: the api env writer and check (common.sh env_api_write, env_api_matches_rehearsal), macOS and ubuntu:jammy"
+if bash "$PKG/test/helpers/env-api-cases.sh" "$PKG" > "$T/env-api-mac.out" 2>&1; then cat "$T/env-api-mac.out"; ok "env-api cases on macOS"
+else cat "$T/env-api-mac.out"; bad "env-api cases on macOS"; fi
+if docker info >/dev/null 2>&1; then
+  if docker run --rm "${LT[@]}" --network none --name "envapi-$RANDOM-$RUN_ID" -v "$PKG:/pkg:ro" ubuntu:jammy bash /pkg/test/helpers/env-api-cases.sh /pkg > "$T/env-api-jammy.out" 2>&1; then
+    cat "$T/env-api-jammy.out"; ok "env-api cases on ubuntu:jammy (GNU sed and grep, mawk, bash 5.1)"
+  else cat "$T/env-api-jammy.out"; bad "env-api cases on ubuntu:jammy"; fi
+else bad "section 3d needs Docker Desktop"; fi
+# 40-up.sh checks .env.api.new against .env.rehearsal before it installs compose.yaml or .env.api.
+lchk=$(grep -n 'env_api_matches_rehearsal "$NEW_DIR/.env.api.new" "$NEW_DIR/.env.rehearsal"' "$PKG/40-up.sh" | head -n 1 | cut -d: -f1)
+lenv=$(grep -n 'install_copy "$NEW_DIR/.env.api.new" "$NEW_DIR/.env.api"' "$PKG/40-up.sh" | head -n 1 | cut -d: -f1)
+lcmp=$(grep -n 'install_copy "$HERE/compose.yaml" "$NEW_DIR/compose.yaml"' "$PKG/40-up.sh" | head -n 1 | cut -d: -f1)
+[ -n "$lchk" ] && [ -n "$lenv" ] && [ -n "$lcmp" ] && [ "$lchk" -lt "$lenv" ] && [ "$lchk" -lt "$lcmp" ] \
+  && [ "$(grep -c 'env_api_matches_rehearsal "$NEW_DIR/.env.api"' "$PKG/40-up.sh")" = 0 ] \
+  && ok "40-up.sh step 1b checks .env.api.new (line $lchk) before it installs compose.yaml (line $lcmp) and .env.api (line $lenv)" \
+  || bad "40-up.sh step 1b: the api env check does not come before the installs (check=$lchk compose=$lcmp env=$lenv)"
+
 echo; echo "== 4. nginx copies (30-nginx.sh render) from the SYNTHETIC vhost fixtures in test/fixtures/"
 NG="$T/nginx"; mkdir -p "$NG"
 if DDC_LOCAL_TEST=1 NEW_DIR="$T/ddcnew" bash "$PKG/30-nginx.sh" render "$PKG/test/fixtures/api.datadance.co" "$PKG/test/fixtures/app.datadance.co" "$NG" > "$T/render.out" 2>&1; then
@@ -576,14 +607,26 @@ done
   && ok "app copy: one /partner-info/ location (alias /srv/ddcnew/partner-info/, no-store, noindex, no-referrer, DENY, nosniff, the CSP with form-action 'none' and base-uri 'none', no Google Fonts); api copy: none" \
   || bad "partner-info location in the rendered copies; missing or repeated:$miss"
 # This package's vhost token location (common.sh host_checks): in both copies, once, with the token of vhost-token (32 hex
-# characters, mode 600), answered to 127.0.0.1 only.
+# characters, mode 600), answered to 127.0.0.1 only: its first statement is the 403 guard for every other address (nginx
+# runs `return` before allow/deny would apply, so the block has none; the real-nginx requests below prove it).
 TOK=$(cat "$T/ddcnew/vhost-token" 2>/dev/null || true); tl=0
 for f in "$NG/$D_API_HOST" "$NG/$D_APP_HOST"; do
+  blk=$(sed -n '/location = \/.well-known\/ddcnew-vhost-token {/,/^[[:space:]]*}[[:space:]]*$/p' "$f" | sed 's/^[[:space:]]*//')
   [ "$(grep -c 'location = /.well-known/ddcnew-vhost-token {' "$f")" = 1 ] && [ "$(grep -cF "return 200 \"$TOK\";" "$f")" = 1 ] \
-    && [ "$(grep -c 'allow 127.0.0.1;' "$f")" = 1 ] && [ "$(grep -c 'deny all;' "$f")" = 1 ] && tl=$((tl + 1))
+    && [ "$blk" = "$(printf 'location = /.well-known/ddcnew-vhost-token {\nif ($remote_addr != "127.0.0.1") { return 403; }\ndefault_type text/plain;\nreturn 200 "%s";\n}' "$TOK")" ] \
+    && [ "$(grep -cE '^[[:space:]]*(allow|deny)[[:space:]]' "$f")" = 0 ] && tl=$((tl + 1))
 done
 [[ "$TOK" =~ ^[0-9a-f]{32}$ ]] && [ "$tl" = 2 ] && [ "$(stat -f %Lp "$T/ddcnew/vhost-token")" = 600 ] \
-  && ok "both copies: one vhost token location (the 32-hex token of vhost-token, mode 600), answered to 127.0.0.1 only" || bad "vhost token location in the rendered copies (tl=$tl)"
+  && ok "both copies: one vhost token location (the 32-hex token of vhost-token, mode 600): the 403 guard for every address but 127.0.0.1, then the token; no allow/deny" || bad "vhost token location in the rendered copies (tl=$tl)"
+# render refuses a token location that lets other addresses through (here: the earlier allow/deny form, which nginx's
+# `return` bypasses), in a scratch copy of 30-nginx.sh.
+NGM="$T/nginx-mut"; mkdir -p "$NGM/pkg"; cp -p "$PKG"/*.sh "$NGM/pkg/"
+sed 's|^  printf .location = %s {\\n    %s\\n|  printf '"'"'location = %s {\\n    allow 127.0.0.1;\\n    deny all;%.0s\\n|' "$PKG/30-nginx.sh" > "$NGM/pkg/30-nginx.sh"
+if ! grep -q 'allow 127.0.0.1;' "$NGM/pkg/30-nginx.sh"; then bad "test setup: the token_location mutation did not apply"
+elif DDC_LOCAL_TEST=1 NEW_DIR="$NGM/ddcnew" bash "$NGM/pkg/30-nginx.sh" render "$PKG/test/fixtures/api.datadance.co" "$PKG/test/fixtures/app.datadance.co" "$NGM/out" > "$NGM/render.out" 2>&1; then
+  bad "render accepted a token location with allow/deny instead of the 403 guard"
+else grep -q 'the vhost token location must refuse every address but 127.0.0.1 (403) before it returns the token' "$NGM/render.out" \
+  && ok "render refuses a token location without the 403 guard (the allow/deny form)" || { cat "$NGM/render.out"; bad "render failed for another reason"; }; fi
 # Outcome B: other names and ports render the same way.
 NGB="$T/nginx-b"; mkdir -p "$NGB"
 if DDC_LOCAL_TEST=1 NEW_DIR="$T/nginx-b-new" API_HOST=api-coexist.datadance.ai APP_HOST=app-coexist.datadance.ai API_PORT=10031 WEB_PORT=9031 \
@@ -606,6 +649,10 @@ if docker info >/dev/null 2>&1; then
       else cat "$T/nginx-$variant.out"; bad "nginx -t $img ($variant)"; fi
     done
   done
+  # The token location on a REAL nginx: 200 with the token from 127.0.0.1, 403 without it from another container.
+  if bash "$PKG/test/helpers/vhost-token-nginx.sh" "$NG" "$D_API_HOST" "$D_APP_HOST" "$TOK" "$RUN_ID" "${LT[@]}" > "$T/token-nginx.out" 2>&1; then
+    cat "$T/token-nginx.out"; ok "nginx:stable answers this package's vhost token to 127.0.0.1 only (403 from another container's address)"
+  else cat "$T/token-nginx.out"; bad "the vhost token location on nginx:stable"; fi
 else
   echo "docker daemon not running: nginx -t on the rendered files skipped"
 fi
@@ -897,17 +944,17 @@ echo; echo "== 10b. money-path log fields (common.sh money_path_fields_check; 40
 GOOD="Partner SSO money-path assertions OK: nodeEnv=production web3authVerify=enforce legacyFallback=false allowedVerifiers=5 jwksPinMode=enforce jwksPins=2 sessionSecretSeparate=true issuer=https://$D_API_HOST consentOrigin=https://$D_APP_HOST publicClientRegistration=closed"
 mp() { ( DDC_LOCAL_TEST=1; . "$PKG/common.sh"; money_path_fields_check "$1" "$2" ) 2>&1; }
 out=$(mp "$GOOD" 2) && [ "$(printf '%s\n' "$out" | grep -c '^PASS log:')" = 10 ] && ok "complete line passes (9 required fields incl. sessionSecretSeparate=true + publicClientRegistration=closed)" || { echo "$out"; bad "good line"; }
-out=$(mp "${GOOD/publicClientRegistration=closed/publicClientRegistration=open}" 2) && printf '%s\n' "$out" | grep -q '^WARN publicClientRegistration' && ok "publicClientRegistration=open is a warning only (runbook 5.2 open)" || bad "open registration handling"
+out=$(mp "${GOOD/publicClientRegistration=closed/publicClientRegistration=open}" 2) && grep -q '^WARN publicClientRegistration' <<< "$out" && ok "publicClientRegistration=open is a warning only (runbook 5.2 open)" || bad "open registration handling"
 for c in "jwksPins=2|jwksPins=3" "allowedVerifiers=5|allowedVerifiers=50" "issuer=https://$D_API_HOST|issuer=https://$D_API_HOST.evil" "web3authVerify=enforce|web3authVerify=log" "legacyFallback=false|legacyFallback=true" "jwksPinMode=enforce|jwksPinMode=log" "consentOrigin=https://$D_APP_HOST|consentOrigin=https://app.datadance.ai" "nodeEnv=production|nodeEnv=development" "jwksPins=2 |" "sessionSecretSeparate=true|sessionSecretSeparate=false" "sessionSecretSeparate=true |" "issuer=https://$D_API_HOST|issuer=https://api-coexist.datadance.ai"; do
   from="${c%%|*}"; to="${c#*|}"; bad_line="${GOOD/"$from"/$to}"
   [ "$bad_line" != "$GOOD" ] || { bad "test setup: '$from' not replaced"; continue; }
   if out=$(mp "$bad_line" 2); then bad "accepted a line with '$to' instead of '$from'"
-  else printf '%s\n' "$out" | grep -q '^FAIL the money-path log line lacks:' && ok "stops when '$from' is '${to:-absent}'" || { echo "$out"; bad "wrong failure for $from"; }; fi
+  else grep -q '^FAIL the money-path log line lacks:' <<< "$out" && ok "stops when '$from' is '${to:-absent}'" || { echo "$out"; bad "wrong failure for $from"; }; fi
 done
 # The issuer and consent origin follow the settings: with API_HOST / APP_HOST overrides the overridden hosts are required.
 GOODB="${GOOD/issuer=https:\/\/$D_API_HOST/issuer=https://api-coexist.datadance.ai}"; GOODB="${GOODB/consentOrigin=https:\/\/$D_APP_HOST/consentOrigin=https://app-coexist.datadance.ai}"
 out=$( ( DDC_LOCAL_TEST=1; API_HOST=api-coexist.datadance.ai; APP_HOST=app-coexist.datadance.ai; . "$PKG/common.sh"; money_path_fields_check "$GOODB" 2 ) 2>&1) \
-  && printf '%s\n' "$out" | grep -q '^PASS log: issuer=https://api-coexist.datadance.ai$' && ! ( ( DDC_LOCAL_TEST=1; API_HOST=api-coexist.datadance.ai; APP_HOST=app-coexist.datadance.ai; . "$PKG/common.sh"; money_path_fields_check "$GOOD" 2 ) >/dev/null 2>&1 ) \
+  && grep -q '^PASS log: issuer=https://api-coexist.datadance.ai$' <<< "$out" && ! ( ( DDC_LOCAL_TEST=1; API_HOST=api-coexist.datadance.ai; APP_HOST=app-coexist.datadance.ai; . "$PKG/common.sh"; money_path_fields_check "$GOOD" 2 ) >/dev/null 2>&1 ) \
   && ok "with API_HOST/APP_HOST overrides the money-path check requires issuer/consentOrigin of those hosts (and refuses the default ones)" || { echo "$out"; bad "money-path check with host overrides"; }
 # Backend PR #38's startup line (40-up.sh step 5): checked whenever the image prints it; REQUIRED when 10-build.sh found
 # PR #38's commit in the backend commit (OLD_APP_SWITCHES=1), otherwise its absence is said, not failed.
@@ -924,6 +971,18 @@ grep -qF 'old_app_line_check "$LOG" "$(env_get_simple WEB3AUTH_RETIRED_CLIENT_ID
   && grep -q 'OLD_APP_SWITCHES=$(env_get_simple OLD_APP_SWITCHES "$NEW_DIR/.env")' "$PKG/40-up.sh" \
   && grep -qF 'OLD_APP_SWITCHES=$(old_app_switches "$BE_DIR" "$BE_REPO" "$BE_SHA")' "$PKG/10-build.sh" && grep -qF 'OLD_APP_SWITCHES=%s' "$PKG/10-build.sh" \
   && ok "40-up.sh checks that line against the first 8 characters of WEB3AUTH_RETIRED_CLIENT_IDS, required per OLD_APP_SWITCHES, which 10-build.sh records from an ancestor check of PR #38's commit" || bad "40-up.sh / 10-build.sh old-App wiring"
+# An api that stops before its boot lines (common.sh api_boot_check), and the field checks on inputs larger than a pipe
+# buffer, on macOS and ubuntu:jammy (mawk runs log_mask_long there).
+if bash "$PKG/test/helpers/boot-log-cases.sh" "$PKG" > "$T/boot-log-mac.out" 2>&1; then grep -E '^(PASS|FAIL|boot-log)' "$T/boot-log-mac.out"; ok "boot-log cases on macOS"
+else cat "$T/boot-log-mac.out"; bad "boot-log cases on macOS"; fi
+if docker info >/dev/null 2>&1; then
+  if docker run --rm "${LT[@]}" --network none --name "bootlog-$RANDOM-$RUN_ID" -v "$PKG:/pkg:ro" ubuntu:jammy bash /pkg/test/helpers/boot-log-cases.sh /pkg > "$T/boot-log-jammy.out" 2>&1; then
+    grep -E '^(PASS|FAIL|boot-log)' "$T/boot-log-jammy.out"; ok "boot-log cases on ubuntu:jammy (mawk, GNU grep and sed, bash 5.1)"
+  else cat "$T/boot-log-jammy.out"; bad "boot-log cases on ubuntu:jammy"; fi
+else bad "the ubuntu:jammy boot-log cases need Docker Desktop"; fi
+grep -qF 'LOG=$(dc logs --no-color --since "$API_STARTED" api 2>&1 || true)' "$PKG/40-up.sh" && grep -qx 'api_boot_check "$LOG"' "$PKG/40-up.sh" \
+  && grep -qF 'money_path_fields_check "$API_MONEY_PATH_LINE" "$(cnt "$served")"' "$PKG/40-up.sh" \
+  && ok "40-up.sh step 5 reads the api log with || true and runs api_boot_check before money_path_fields_check" || bad "40-up.sh step 5 wiring of api_boot_check"
 # The ancestor check itself, on this repository: PR #38's commit is in HEAD (main has it since 8ebfe5b), not in its parent of 10-04.
 REPO="$(cd "$PKG/../.." && pwd)"; OAC=$( . "$PKG/common.sh"; echo "$OLD_APP_COMMIT")
 if git -C "$REPO" cat-file -e "$OAC^{commit}" 2>/dev/null && git -C "$REPO" merge-base --is-ancestor "$OAC" HEAD \

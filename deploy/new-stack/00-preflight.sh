@@ -136,7 +136,7 @@ if [ -n "$API_HOST" ] && [ -n "$APP_HOST" ]; then
     for f in /etc/nginx/sites-enabled/* /etc/nginx/conf.d/*.conf; do
       [ -e "$f" ] || continue
       [ "$f" != "/etc/nginx/sites-enabled/$API_HOST" ] && [ "$f" != "/etc/nginx/sites-enabled/$APP_HOST" ] || continue
-      if names_in "$f" | grep -qxF -- "$h"; then fail "$f also declares server_name $h: 30-nginx.sh apply refuses until its owner removes or renames it"; fi
+      if grep -qxF -- "$h" <<< "$(names_in "$f")"; then fail "$f also declares server_name $h: 30-nginx.sh apply refuses until its owner removes or renames it"; fi
     done
   done
 else fail "no settings were passed: the vhost names are not checked"; fi

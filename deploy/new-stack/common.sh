@@ -351,13 +351,22 @@ env_get_simple() { # NAME FILE
 
 # The api env 40-up.sh installs: .env.rehearsal without any pins assignment, then one comment line and one pins line.
 # The test suite calls these two functions too, so the writer and the check below cannot drift apart.
+# Both refuse a rehearsal file that is missing, unreadable, empty or without any NAME=value line besides the pins
+# (env_rehearsal_usable): an api env made of nothing but the pins would otherwise pass the check.
 ENV_API_PINS_COMMENT='# 40-up.sh: Web3Auth JWKS pins computed in'
+env_rehearsal_usable() { # FILE
+  [ -f "$1" ] && [ -r "$1" ] && [ -s "$1" ] || return 1
+  awk '/^[[:space:]]*(export[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*[[:space:]]*=/ && !/^[[:space:]]*(export[[:space:]]+)?WEB3AUTH_JWKS_PINNED_THUMBPRINTS[[:space:]]*=/ { n++ } END { exit (n > 0 ? 0 : 1) }' "$1" 2>/dev/null
+}
 env_api_write() { # REHEARSAL OUT IMAGE PINS
-  grep -vE '^[[:space:]]*(export[[:space:]]+)?WEB3AUTH_JWKS_PINNED_THUMBPRINTS[[:space:]]*=' "$1" > "$2" || true
+  env_rehearsal_usable "$1" || die "$1 is missing, unreadable, empty or has no NAME=value line besides the pins: not writing $(basename "$2") (re-run 20-env.sh)"
+  grep -vE '^[[:space:]]*(export[[:space:]]+)?WEB3AUTH_JWKS_PINNED_THUMBPRINTS[[:space:]]*=' "$1" > "$2" || [ $? = 1 ] || die "cannot read $1"
   printf '\n%s %s (runbook 5.0)\nWEB3AUTH_JWKS_PINNED_THUMBPRINTS="%s"\n' "$ENV_API_PINS_COMMENT" "$3" "$4" >> "$2"
 }
-# True when API equals REHEARSAL apart from the pins lines, env_api_write's comment line and blank lines.
+# True when API equals REHEARSAL apart from every line that contains the name WEB3AUTH_JWKS_PINNED_THUMBPRINTS,
+# env_api_write's comment line and blank lines. False when either file is missing or empty, or REHEARSAL is not usable.
 env_api_matches_rehearsal() { # API REHEARSAL
+  [ -f "$1" ] && [ -s "$1" ] && env_rehearsal_usable "$2" || return 1
   local c; c=$(printf '%s' "$ENV_API_PINS_COMMENT" | sed 's/[][\\.*^$/]/\\&/g')
   [ "$(sed "/WEB3AUTH_JWKS_PINNED_THUMBPRINTS/d; /^$c /d" "$1" | grep -v '^$' | sha256)" = \
     "$(sed '/WEB3AUTH_JWKS_PINNED_THUMBPRINTS/d' "$2" | grep -v '^$' | sha256)" ]
@@ -535,7 +544,7 @@ server_name_users() { # <host> [skip path...]
   nginx_loaded_files | while IFS= read -r f; do
     skip=0; for s in "$@"; do [ "$f" != "$s" ] || skip=1; done
     [ "$skip" = 0 ] || continue
-    if server_names_in "$f" | grep -qxF -- "$h"; then printf '%s\n' "$f"; fi
+    if grep -qxF -- "$h" <<< "$(server_names_in "$f")"; then printf '%s\n' "$f"; fi   # here-string: see money_path_fields_check
   done
 }
 # The hosts whose answers a reload must not change: the production hosts and every exact server name nginx loads
@@ -902,6 +911,62 @@ jwks_pins_decide() {
 }
 
 # ---------------------------------------------------------------------------
+# A log on its way to the terminal and the run log (api_boot_check): lines that mention a secret, a password, a token,
+# a bearer or authorization header, a cookie, a credential, a private key, a mnemonic or an api/access key, PEM armour,
+# any postgres URL and any URL with credentials are left out, except the backend's own problem list (API_PROBLEM_LINE:
+# ' - SSO_...' and the like, names and reasons only; src/constants/partnerClient.js promises no secret values there); in
+# the lines left, every run of 32 or more base64/hex characters is replaced (log_mask_long); lines are cut at 300
+# characters. The full log stays on the server (docker compose -p ddcnew logs api).
+# ---------------------------------------------------------------------------
+# stdin -> stdout: every run of 32 or more of [A-Za-z0-9+/=_-] becomes <long value removed>, except an absolute path
+# (it starts with /, has no + or =, and each of its /-separated parts is shorter than 32), so stack traces stay readable.
+# Plain awk (mawk 1.3.4 has no {n} intervals).
+log_mask_long() {
+  awk 'function pathlike(t,   n, i, seg) {
+         if (substr(t, 1, 1) != "/" || t ~ /[+=]/) return 0
+         n = split(t, seg, "/"); for (i = 1; i <= n; i++) if (length(seg[i]) >= 32) return 0
+         return 1
+       }
+       { out = ""; s = $0
+         while (match(s, /[A-Za-z0-9+\/=_-]+/)) {
+           tok = substr(s, RSTART, RLENGTH); out = out substr(s, 1, RSTART - 1); s = substr(s, RSTART + RLENGTH)
+           if (length(tok) >= 32 && !pathlike(tok)) tok = "<long value removed>"
+           out = out tok
+         }
+         print out s }'
+}
+API_PROBLEM_LINE='^ - (SSO_|WEB3AUTH_|NODE_ENV|PUBLIC_BASE_URL|APP_PUBLIC_URL)'
+log_safe() {
+  awk -v keep="$API_PROBLEM_LINE" '$0 ~ keep { print; next }
+    tolower($0) ~ /postgres(ql)?:\/\/|:\/\/[^ \t\/]*@|secret|passw|token|bearer|authoriz|cookie|credential|private|mnemonic|api[_-]?key|access[_-]?key|-----(begin|end)/ { next }
+    { print }' | log_mask_long | cut -c1-300
+}
+# 40-up.sh step 5: the api's boot lines in its log since the container started (src/server.js).
+#   api_boot_check <api log since start>
+# Prints the 'Partner SSO enabled|disabled' line and sets API_MONEY_PATH_LINE to the 'Partner SSO money-path
+# assertions OK' line. Without the first, the api stopped (or keeps restarting) before src/server.js printed it (a
+# require, an init or assertPartnerConfig threw): FAIL with the last 20 lines of the log through log_safe. Without the
+# second: FAIL with its error lines (log_safe) and the env names the backend listed. Every diagnostic pipeline ends in
+# `|| true`, so set -e and pipefail can never end the script before its FAIL line.
+API_MONEY_PATH_LINE=""
+api_boot_check() {
+  local sso
+  sso=$(printf '%s\n' "$1" | grep -E 'Partner SSO (enabled|disabled)' | tail -n 1 | sed 's/^[^|]*| //' || true)
+  if [ -z "$sso" ]; then
+    say "the api log since its start, last 20 lines (lines naming a secret, password, token, key or credential and URLs with credentials left out, except the backend's own ' - SSO_...' problem list; long values removed):"
+    { printf '%s\n' "$1" | sed 's/^[^|]*| //' | log_safe | tail -n 20; } || true
+    die "the api did not boot: its log has no 'Partner SSO enabled|disabled' line (it stopped or keeps restarting before src/server.js printed it; the filtered tail is above, the full log stays on the server: docker compose -p ddcnew logs api). Fix the env and re-run, or ./99-teardown.sh"
+  fi
+  say "$sso"
+  API_MONEY_PATH_LINE=$(printf '%s\n' "$1" | grep 'Partner SSO money-path assertions OK' | tail -n 1 | sed 's/^[^|]*| //' || true)
+  if [ -z "$API_MONEY_PATH_LINE" ]; then
+    { printf '%s\n' "$1" | grep -iE 'error|invalid|refus' | sed 's/^[^|]*| //' | log_safe | tail -n 10; } || true
+    { printf '%s\n' "$1" | sed 's/^[^|]*| //' | grep -E "$API_PROBLEM_LINE" | log_mask_long | cut -c1-300 | tail -n 20; } || true
+    die "no money-path assertion line in the api log"
+  fi
+  say "$API_MONEY_PATH_LINE"; pass "startup log has 'Partner SSO money-path assertions OK'"
+}
+# ---------------------------------------------------------------------------
 # 40-up.sh step 5: the api's "Partner SSO money-path assertions OK" line (src/server.js lines 42-48, identical on
 # origin/main 47e6f74 and a779770, fetched 10-04). It prints sessionSecretSeparate=${moneyPath.sessionSecretSeparate},
 # which src/constants/partnerClient.js assertFinancialGradeConfig sets to true only after checking that
@@ -912,16 +977,19 @@ jwks_pins_decide() {
 # (partnerClient.js), so they must be https://$API_HOST and https://$APP_HOST of the settings. Any missing or
 # different field STOPS the script: these are pass criteria, not warnings.
 # publicClientRegistration stays a warning while runbook 5.2 is open (Sloan to confirm).
+# Field checks here and in old_app_line_check read the token list from a here-string, never from `printf | grep -q`:
+# under pipefail that pipe fails whenever grep -q exits on an early match while printf (bash line-buffers it: one
+# write per line) still writes, and a field that is in the line would read as missing.
 # ---------------------------------------------------------------------------
 money_path_fields_check() {
   local tokens want missing=""
   tokens=$(printf '%s\n' "$1" | tr ' ' '\n')
   for want in "nodeEnv=production" "allowedVerifiers=5" "issuer=https://$API_HOST" "consentOrigin=https://$APP_HOST" \
               "web3authVerify=enforce" "legacyFallback=false" "jwksPinMode=enforce" "jwksPins=$2" "sessionSecretSeparate=true"; do
-    if printf '%s\n' "$tokens" | grep -qxF -- "$want"; then pass "log: $want"; else missing="$missing $want"; fi
+    if grep -qxF -- "$want" <<< "$tokens"; then pass "log: $want"; else missing="$missing $want"; fi
   done
   [ -z "$missing" ] || die "the money-path log line lacks:$missing (exact fields expected; the api is running: ./99-teardown.sh, or fix the env and re-run)"
-  if printf '%s\n' "$tokens" | grep -qxF publicClientRegistration=closed; then pass "log: publicClientRegistration=closed"
+  if grep -qxF publicClientRegistration=closed <<< "$tokens"; then pass "log: publicClientRegistration=closed"
   else warn "publicClientRegistration is not closed (OAUTH_PUBLIC_REGISTRATION_ENABLED, runbook 5.2: Sloan to confirm)"; fi
 }
 
@@ -969,7 +1037,7 @@ old_app_line_check() { # <api log> <expected first8> <required: 1 when the backe
   say "$line"
   tokens=$(printf '%s\n' "${line#*:}" | tr ' ' '\n')
   for want in "count=1" "first8=$2" "LOGIN_MISSING_IDTOKEN_MEANS_OLD_APP=on"; do
-    printf '%s\n' "$tokens" | grep -qxF -- "$want" || missing="$missing $want"
+    grep -qxF -- "$want" <<< "$tokens" || missing="$missing $want"
   done
   [ -z "$missing" ] || die "the api's 'Old App update answer' line (backend PR #38 is in this image) lacks:$missing"
   pass "old-App switches (backend PR #38 in this image): WEB3AUTH_RETIRED_CLIENT_IDS count=1 first8=$2 LOGIN_MISSING_IDTOKEN_MEANS_OLD_APP=on"

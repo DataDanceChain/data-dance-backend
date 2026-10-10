@@ -11,7 +11,8 @@
 #           partner info page that 50-partner-page.sh writes to /srv/ddcnew/partner-info/ (static files, no-store,
 #           noindex, no referrer, no framing, nosniff, a strict Content-Security-Policy). Both copies also get, right
 #           after their server_name line, `location = /.well-known/ddcnew-vhost-token`: a random token (written once to
-#           /root/ddcnew/vhost-token) answered to 127.0.0.1 only (403 to anyone else). common.sh host_checks reads it
+#           /root/ddcnew/vhost-token) answered to 127.0.0.1 only (its first statement answers 403 to anyone else,
+#           before the `return 200`; allow/deny would not stop a `return`, see TOKEN_GUARD). common.sh host_checks reads it
 #           through the host nginx to prove that nginx really serves this package's vhosts (another stack behind the
 #           same names answers the same 401 and build marker, but not the token). Links both into sites-enabled,
 #           nginx -t, systemctl reload nginx.
@@ -301,8 +302,12 @@ add_block_after_server_name() { # <host> <block>
 }
 add_partner_location() { add_block_after_server_name "$APP_HOST" "$PARTNER_LOCATION"; }
 # This package's vhost token location (common.sh host_checks): the token to 127.0.0.1 only, 403 to anyone else.
+# The guard is an `if` with its own `return 403` as the block's first statement: nginx runs `return` in the rewrite
+# phase, before the access phase where allow/deny would apply, so allow/deny next to `return 200` never refuse anyone.
+# The rewrite module's directives run in order, so a client that is not 127.0.0.1 gets the 403 before the 200 is reached.
+TOKEN_GUARD='if ($remote_addr != "127.0.0.1") { return 403; }'
 token_location() { # <token>
-  printf 'location = %s {\n    allow 127.0.0.1;\n    deny all;\n    default_type text/plain;\n    return 200 "%s";\n}' "$VHOST_TOKEN_PATH" "$1"
+  printf 'location = %s {\n    %s\n    default_type text/plain;\n    return 200 "%s";\n}' "$VHOST_TOKEN_PATH" "$TOKEN_GUARD" "$1"
 }
 # $TOKEN_FILE: 32 hex characters from /dev/urandom, written once (600); every later render uses the same token.
 ensure_vhost_token() {
@@ -352,6 +357,10 @@ render() {
       got=$(awk -v p="location = $VHOST_TOKEN_PATH {" '!on && index($0, p) > 0 { on = 1; match($0, /^[ \t]*/); ind = RLENGTH }
                  on { print substr($0, ind + 1); if ($0 ~ /^[ \t]*}[ \t]*$/) exit }' "$f")
       [ "$got" = "$TOKEN_LOCATION" ] || die "copy $(basename "$f"): the vhost token location is not exactly the block in 30-nginx.sh"
+      # Its first statement is the loopback guard, before the 200, and it has no allow/deny (which `return` would bypass).
+      [ "$(printf '%s\n' "$got" | sed -n 2p)" = "    $TOKEN_GUARD" ] && [ "$(printf '%s\n' "$got" | awk '/return 200 / { n = NR } END { print n }')" = 4 ] \
+        && [ "$(printf '%s\n' "$got" | { grep -cE '^[[:space:]]*(allow|deny)[[:space:]]' || true; })" = 0 ] \
+        || die "copy $(basename "$f"): the vhost token location must refuse every address but 127.0.0.1 (403) before it returns the token"
     done
     say "both copies: the vhost token location added after their server_name line (127.0.0.1 only)"
     say "diff api.datadance.co -> $API_HOST:"; diff "$1" "$3" | grep '^[<>]' | redact || true
