@@ -4,14 +4,17 @@
 #
 # CHANGES ON THE SERVER
 #   /root/ddcnew/compose.yaml   installed from this package (a differing previous one kept as compose.yaml.prev), only
-#                               after the JWKS pin gate (step 1a) passed
+#                               after the JWKS pin gate (step 1a) and the api env check (step 1b) passed
 #   /root/ddcnew/.lock, /root/ddcnew/logs/<ts>-40-up-<pid>.log   run lock and server-side copy of the output (common.sh run_begin)
 #   /root/ddcnew/.env.api       .env.rehearsal with WEB3AUTH_JWKS_PINNED_THUMBPRINTS replaced by the thumbprints Web3Auth
 #                               serves now, computed INSIDE the new image (runbook 5.0: scripts/web3authJwksThumbprints.js,
 #                               `docker run --rm` with only the two public JWKS URLs, no env file, no secret). Refuses to
 #                               start the api if none of the pins configured in .env.rehearsal is served; a served key
 #                               that was never pinned must be confirmed from a second network first
-#                               (JWKS_NEW_PINS_VERIFIED=<thumbprint,...>). Previous file kept as .env.api.prev.
+#                               (JWKS_NEW_PINS_VERIFIED=<thumbprint,...>). Written to .env.api.new and installed only
+#                               after that file passed the check against .env.rehearsal (common.sh
+#                               env_api_matches_rehearsal; a missing or empty .env.rehearsal stops it). Previous file kept
+#                               as .env.api.prev.
 #   /root/ddcnew/pgdata/        new Postgres cluster (container ddcnew-db-1, 127.0.0.1:<DB_PORT>)
 #   database ddc_rehearsal      created EMPTY in the new cluster, then `prisma migrate deploy` creates the schema
 #   containers ddcnew-api-1 (127.0.0.1:<API_PORT>), ddcnew-web-1 (127.0.0.1:<WEB_PORT>), network ddcnew_default,
@@ -35,7 +38,9 @@
 #   jwksPins=<served>, sessionSecretSeparate=true) must match
 #   exactly, or the script STOPS (common.sh money_path_fields_check); publicClientRegistration=open is a warning while
 #   runbook 5.2 is open. The line is read from the api log since the api container's last start (State.StartedAt), so a
-#   re-run that leaves the container as it is still finds it.
+#   re-run that leaves the container as it is still finds it. An api that stops before it prints its 'Partner SSO
+#   enabled|disabled' line STOPS the script with a FAIL and the last lines of its log, filtered (common.sh
+#   api_boot_check, log_safe: no line that names a secret, password, token or key, no URL with credentials).
 # OTHER HOSTS: the production api/app/business/admin hosts and every other host nginx serves (Race's included) must
 #   answer with the same status codes at the end as at the start, or the script STOPS (after printing the old-stack
 #   integrity check).
@@ -98,17 +103,21 @@ cnt() { printf '%s\n' "$1" | grep -c . || true; }
 
 step "1b. compose file and the api env (the pin gate passed)"
 settings_record
-install_copy "$HERE/compose.yaml" "$NEW_DIR/compose.yaml"
-umask 077
-# The temporary file never outlives the script, also when a check below stops it.
+UMASK_BEFORE=$(umask); umask 077
+# The api env is written to .env.api.new and checked there; nothing is installed (compose.yaml and .env.api) until every
+# check of it has passed. The temporary file never outlives the script, also when a check below stops it.
 trap 'rm -f "$NEW_DIR/.env.api.new"' EXIT
 env_api_write "$NEW_DIR/.env.rehearsal" "$NEW_DIR/.env.api.new" "$API_IMAGE" "$PINS"
 chmod 600 "$NEW_DIR/.env.api.new"
 [ "$(env_get_simple WEB3AUTH_JWKS_PINNED_THUMBPRINTS "$NEW_DIR/.env.api.new")" = "$PINS" ] || die "pins were not written correctly"
-[ "$(grep -cE '^[[:space:]]*(export[[:space:]]+)?WEB3AUTH_JWKS_PINNED_THUMBPRINTS[[:space:]]*=' "$NEW_DIR/.env.api.new")" = 1 ] || die "more than one pins line in .env.api"
-install_copy "$NEW_DIR/.env.api.new" "$NEW_DIR/.env.api"; rm -f "$NEW_DIR/.env.api.new"; trap - EXIT; chmod 600 "$NEW_DIR/.env.api"
-env_api_matches_rehearsal "$NEW_DIR/.env.api" "$NEW_DIR/.env.rehearsal" \
-  && pass ".env.api = .env.rehearsal except WEB3AUTH_JWKS_PINNED_THUMBPRINTS ($(cnt "$served") pins), mode $(stat -c %a "$NEW_DIR/.env.api")" || die ".env.api differs from .env.rehearsal beyond the pins line"
+[ "$(grep -cE '^[[:space:]]*(export[[:space:]]+)?WEB3AUTH_JWKS_PINNED_THUMBPRINTS[[:space:]]*=' "$NEW_DIR/.env.api.new")" = 1 ] || die "more than one pins line in .env.api.new"
+env_api_matches_rehearsal "$NEW_DIR/.env.api.new" "$NEW_DIR/.env.rehearsal" \
+  || die ".env.api.new differs from .env.rehearsal beyond the pins line (or .env.rehearsal is missing or empty): nothing installed"
+( umask "$UMASK_BEFORE"; install_copy "$HERE/compose.yaml" "$NEW_DIR/compose.yaml" )   # the mode it always had
+install_copy "$NEW_DIR/.env.api.new" "$NEW_DIR/.env.api"; chmod 600 "$NEW_DIR/.env.api"
+cmp -s "$NEW_DIR/.env.api.new" "$NEW_DIR/.env.api" || die "$NEW_DIR/.env.api is not the checked .env.api.new after the install"
+rm -f "$NEW_DIR/.env.api.new"; trap - EXIT
+pass ".env.api = .env.rehearsal except WEB3AUTH_JWKS_PINNED_THUMBPRINTS ($(cnt "$served") pins), checked before the install, mode $(stat -c %a "$NEW_DIR/.env.api")"
 dc config -q || die "compose config invalid"
 ports=$(dc config --format json | python3 -c '
 import json, sys
@@ -144,7 +153,7 @@ say "tables before: $tables"
 dc run --rm --no-deps -T api npx prisma migrate status 2>&1 | grep -vE '^\s*$' | grep -viE 'postgres(ql)?://' | tail -8 || true
 dc run --rm --no-deps -T api npx prisma migrate deploy 2>&1 | grep -viE 'postgres(ql)?://' | grep -E 'migrations? (found|applied)|All migrations|Error|error' | tail -5 || true
 st=$(dc run --rm --no-deps -T api npx prisma migrate status 2>&1 || true)
-printf '%s\n' "$st" | grep -qi 'Database schema is up to date' && pass "migrate status: Database schema is up to date ($(printf '%s\n' "$st" | grep -oE '[0-9]+ migrations? found' | head -1))" || die "migrate status is not up to date"
+grep -qi 'Database schema is up to date' <<< "$st" && pass "migrate status: Database schema is up to date ($(printf '%s\n' "$st" | grep -oE '[0-9]+ migrations? found' | head -1))" || die "migrate status is not up to date"
 say "tables after: $(dc exec -T db sh -c 'psql -U "$POSTGRES_USER" -d "$0" -tAc "SELECT count(*) FROM information_schema.tables WHERE table_schema='"'"'public'"'"'"' "$REHEARSAL_DB") users=$(dc exec -T db sh -c 'psql -U "$POSTGRES_USER" -d "$0" -tAc "SELECT count(*) FROM \"User\""' "$REHEARSAL_DB")"
 
 step "5. start api and web"
@@ -152,13 +161,12 @@ dc up -d api web
 for _ in $(seq 1 60); do c=$(curl -s -o /dev/null -m 5 -w '%{http_code}' "http://127.0.0.1:$API_PORT/partner/tge/me" || true); [ "$c" = 401 ] && break; sleep 2; done
 dc ps --format '{{.Name}} {{.Status}} {{.Ports}}'
 API_CID=$(dc ps -q api); [ -n "$API_CID" ] || die "the api container is not running"
-API_STARTED=$(docker inspect --format '{{.State.StartedAt}}' "$API_CID")
+API_STARTED=$(docker inspect --format '{{.State.StartedAt}}' "$API_CID") || die "cannot read the api container's start time (it was removed while 40-up.sh ran)"
 say "api container started at $API_STARTED (log read from there)"
-LOG=$(dc logs --no-color --since "$API_STARTED" api 2>&1)
-printf '%s\n' "$LOG" | grep -E 'Partner SSO (enabled|disabled)' | tail -1 | sed 's/^[^|]*| //'
-line=$(printf '%s\n' "$LOG" | grep 'Partner SSO money-path assertions OK' | tail -1 | sed 's/^[^|]*| //' || true)
-[ -n "$line" ] && { say "$line"; pass "startup log has 'Partner SSO money-path assertions OK'"; } || { printf '%s\n' "$LOG" | grep -iE 'error|invalid|refus' | grep -viE 'postgres(ql)?://|secret|password|token' | tail -10; printf '%s\n' "$LOG" | sed 's/^[^|]*| //' | grep -E '^ - (SSO_|WEB3AUTH_|NODE_ENV|PUBLIC_BASE_URL|APP_PUBLIC_URL)' | tail -20; die "no money-path assertion line in the api log"; }
-money_path_fields_check "$line" "$(cnt "$served")"   # dies on any missing or different field (APPROVAL section 4, row 10)
+LOG=$(dc logs --no-color --since "$API_STARTED" api 2>&1 || true)
+# A FAIL with the filtered log tail when the api stopped before its boot lines; sets API_MONEY_PATH_LINE.
+api_boot_check "$LOG"
+money_path_fields_check "$API_MONEY_PATH_LINE" "$(cnt "$served")"   # dies on any missing or different field (APPROVAL section 4, row 10)
 old_app_line_check "$LOG" "$(env_get_simple WEB3AUTH_RETIRED_CLIENT_IDS "$NEW_DIR/.env.api" | cut -c1-8)" "$OLD_APP_SWITCHES"
 
 step "6. running api: JWKS pins, APNs key and pass signer"
