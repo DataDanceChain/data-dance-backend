@@ -349,6 +349,20 @@ env_get_simple() { # NAME FILE
   printf '%s' "$v"
 }
 
+# The api env 40-up.sh installs: .env.rehearsal without any pins assignment, then one comment line and one pins line.
+# The test suite calls these two functions too, so the writer and the check below cannot drift apart.
+ENV_API_PINS_COMMENT='# 40-up.sh: Web3Auth JWKS pins computed in'
+env_api_write() { # REHEARSAL OUT IMAGE PINS
+  grep -vE '^[[:space:]]*(export[[:space:]]+)?WEB3AUTH_JWKS_PINNED_THUMBPRINTS[[:space:]]*=' "$1" > "$2" || true
+  printf '\n%s %s (runbook 5.0)\nWEB3AUTH_JWKS_PINNED_THUMBPRINTS="%s"\n' "$ENV_API_PINS_COMMENT" "$3" "$4" >> "$2"
+}
+# True when API equals REHEARSAL apart from the pins lines, env_api_write's comment line and blank lines.
+env_api_matches_rehearsal() { # API REHEARSAL
+  local c; c=$(printf '%s' "$ENV_API_PINS_COMMENT" | sed 's/[][\\.*^$/]/\\&/g')
+  [ "$(sed "/WEB3AUTH_JWKS_PINNED_THUMBPRINTS/d; /^$c /d" "$1" | grep -v '^$' | sha256)" = \
+    "$(sed '/WEB3AUTH_JWKS_PINNED_THUMBPRINTS/d' "$2" | grep -v '^$' | sha256)" ]
+}
+
 # ---------------------------------------------------------------------------
 # Old-stack integrity: containers AND files, recorded at the start of every write script and compared at the end. Any
 # difference fails loudly. Prints paths and short hashes only, never file contents. "Old stack" is everything this
