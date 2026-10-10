@@ -102,13 +102,12 @@ install_copy "$HERE/compose.yaml" "$NEW_DIR/compose.yaml"
 umask 077
 # The temporary file never outlives the script, also when a check below stops it.
 trap 'rm -f "$NEW_DIR/.env.api.new"' EXIT
-grep -vE '^[[:space:]]*(export[[:space:]]+)?WEB3AUTH_JWKS_PINNED_THUMBPRINTS[[:space:]]*=' "$NEW_DIR/.env.rehearsal" > "$NEW_DIR/.env.api.new" || true
-printf '\n# 40-up.sh: Web3Auth JWKS pins computed in %s (runbook 5.0)\nWEB3AUTH_JWKS_PINNED_THUMBPRINTS="%s"\n' "$API_IMAGE" "$PINS" >> "$NEW_DIR/.env.api.new"
+env_api_write "$NEW_DIR/.env.rehearsal" "$NEW_DIR/.env.api.new" "$API_IMAGE" "$PINS"
 chmod 600 "$NEW_DIR/.env.api.new"
 [ "$(env_get_simple WEB3AUTH_JWKS_PINNED_THUMBPRINTS "$NEW_DIR/.env.api.new")" = "$PINS" ] || die "pins were not written correctly"
 [ "$(grep -cE '^[[:space:]]*(export[[:space:]]+)?WEB3AUTH_JWKS_PINNED_THUMBPRINTS[[:space:]]*=' "$NEW_DIR/.env.api.new")" = 1 ] || die "more than one pins line in .env.api"
 install_copy "$NEW_DIR/.env.api.new" "$NEW_DIR/.env.api"; rm -f "$NEW_DIR/.env.api.new"; trap - EXIT; chmod 600 "$NEW_DIR/.env.api"
-[ "$(sed '/WEB3AUTH_JWKS_PINNED_THUMBPRINTS/d; /^# 40-up.sh .*JWKS pins/d' "$NEW_DIR/.env.api" | grep -v '^$' | sha256)" = "$(sed '/WEB3AUTH_JWKS_PINNED_THUMBPRINTS/d' "$NEW_DIR/.env.rehearsal" | grep -v '^$' | sha256)" ] \
+env_api_matches_rehearsal "$NEW_DIR/.env.api" "$NEW_DIR/.env.rehearsal" \
   && pass ".env.api = .env.rehearsal except WEB3AUTH_JWKS_PINNED_THUMBPRINTS ($(cnt "$served") pins), mode $(stat -c %a "$NEW_DIR/.env.api")" || die ".env.api differs from .env.rehearsal beyond the pins line"
 dc config -q || die "compose config invalid"
 ports=$(dc config --format json | python3 -c '

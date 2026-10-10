@@ -381,12 +381,22 @@ echo; echo "== 3a. the backend's own boot code (src/server.js of this checkout) 
 # thumbprints here). Its money-path and old-App lines then go through the same checks as in 40-up.sh.
 REPO="$(cd "$PKG/../.." && pwd)"; BB="$T/boot"; mkdir -p "$BB"
 if [ -f "$REPO/src/server.js" ] && [ -d "$REPO/node_modules/dotenv" ] && command -v node >/dev/null 2>&1; then
-  mkapi() { # <.env.rehearsal> <out>
-    { grep -vE '^[[:space:]]*(export[[:space:]]+)?WEB3AUTH_JWKS_PINNED_THUMBPRINTS[[:space:]]*=' "$1"
-      printf '\n# 40-up.sh: Web3Auth JWKS pins (local test)\nWEB3AUTH_JWKS_PINNED_THUMBPRINTS="%s,%s"\n' "$(printf 'A%.0s' $(seq 1 43))" "$(printf 'b%.0s' $(seq 1 43))"; } > "$2"
+  mkapi() { # <.env.rehearsal> <out>: 40-up.sh's own writer (common.sh env_api_write) with two well-formed thumbprints
+    ( DDC_LOCAL_TEST=1; . "$PKG/common.sh"; env_api_write "$1" "$2" "ddcnew/backend:localtest" "$(printf 'A%.0s' $(seq 1 43)),$(printf 'b%.0s' $(seq 1 43))" )
   }
   boot() { (cd "$BB" && env -i PATH="$PATH" node "$PKG/test/helpers/backend-boot.js" "$REPO" "$1") > "$2" 2>&1; }
   mkapi "$T/ddcnew/.env.rehearsal" "$BB/env.api"
+  # 40-up.sh step 1b's own check (common.sh env_api_matches_rehearsal) on the file its own writer produced: it must
+  # accept it, and refuse an extra name, a changed value and a different comment line.
+  ( DDC_LOCAL_TEST=1; . "$PKG/common.sh"; ea="$BB/env.api"; er="$T/ddcnew/.env.rehearsal"
+    env_api_matches_rehearsal "$ea" "$er" || { echo "writer output refused"; exit 1; }
+    { cat "$ea"; echo 'EXTRA_NAME=1'; } > "$BB/ea.extra"; ! env_api_matches_rehearsal "$BB/ea.extra" "$er" || { echo "extra name accepted"; exit 1; }
+    awk 'BEGIN{d=0} !d && /^[A-Z_]+=/ && $0 !~ /WEB3AUTH_JWKS_PINNED_THUMBPRINTS/ {sub(/=.*/, "=changed"); d=1} {print}' "$ea" > "$BB/ea.changed"
+    ! env_api_matches_rehearsal "$BB/ea.changed" "$er" || { echo "changed value accepted"; exit 1; }
+    sed 's/^# 40-up\.sh: Web3Auth JWKS pins computed in .*/# another comment/' "$ea" > "$BB/ea.comment"
+    ! env_api_matches_rehearsal "$BB/ea.comment" "$er" || { echo "other comment accepted"; exit 1; } ) > "$BB/envapi.out" 2>&1 \
+    && ok "40-up.sh step 1b: its check accepts exactly what its writer produces (.env.rehearsal + pins comment + pins line) and refuses an extra name, a changed value and another comment" \
+    || bad "40-up.sh step 1b writer/check: $(tail -1 "$BB/envapi.out")"
   rc=0; boot "$BB/env.api" "$BB/out" || rc=$?
   grep -E '^(Partner SSO|Old App|BOOT CHECKS)' "$BB/out" | sed 's/^/  /'
   mp=$(grep 'Partner SSO money-path assertions OK' "$BB/out" | tail -1)
