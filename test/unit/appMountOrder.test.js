@@ -102,6 +102,12 @@ describe('src/app mount order', () => {
     prisma.ssoTicket.rows.splice(0, prisma.ssoTicket.rows.length, ...['j-1', 'j-2', 'j-3', 'j-4'].map(redeemedTicket));
   });
 
+  it('GET / on the API host redirects a browser to the developer docs next to the web app', async () => {
+    const res = await request(server).get('/');
+    assert.equal(res.status, 302);
+    assert.equal(res.headers.location, 'https://app.test.local/developers/docs.html');
+  });
+
   it('an unauthenticated POST /api/sso/ticket/exchange reaches its handler (400 TICKET_INVALID, not 401)', async () => {
     const res = await request(server).post('/api/sso/ticket/exchange').send({});
     assert.equal(res.status, 400, `got ${res.status} ${JSON.stringify(res.body)}`);
