@@ -16,6 +16,7 @@ const {
   hasRecordIdentity,
   isClientSmoothedRecord,
   isTitleBackedSourceId,
+  socialPostUrl,
   sourceIdentityKey,
 } = require('../utils/crawlerRecordIdentity');
 const { distributeUplineRewards } = require('./distributionService');
@@ -941,12 +942,14 @@ async function getCrawlerStats(userId) {
 }
 
 /**
- * Generate SHA256 hash of normalized payload data
+ * Generate SHA256 hash of normalized payload data.
+ * A social permalink hashes by that URL alone, so a new like count is the same post.
  */
 function generateContentHash(payload) {
-  // Normalize object: sort keys, remove null values, unify format
-  const normalized = normalizeObject(payload);
-  const content = JSON.stringify(normalized);
+  const postUrl = socialPostUrl(payload);
+  const content = postUrl
+    ? JSON.stringify({ postUrl })
+    : JSON.stringify(normalizeObject(payload));
   return crypto.createHash('sha256').update(content).digest('hex');
 }
 

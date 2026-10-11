@@ -68,6 +68,36 @@ function isClientSmoothedRecord(item) {
   return metadata.extract === 'generic' || metadata.cleaned === true;
 }
 
+const SOCIAL_POST_URL =
+  /(?:instagram\.com\/(?:p|reel|reels|tv)\/[^/?#]+|(?:x|twitter)\.com\/[^/]+\/status\/\d+|threads\.(?:net|com)\/@?[^/]+\/post\/[^/?#]+|tiktok\.com\/@[^/]+\/video\/\d+)/i;
+
+/** Permalink with host normalized and comment/query suffixes removed. Path case stays. */
+function socialPostUrl(payload) {
+  const row = asRecord(payload);
+  const candidates = [row.href, row.id, row.orderId, row.orderid];
+  for (const value of candidates) {
+    const text = String(value || '').trim();
+    if (!text || !SOCIAL_POST_URL.test(text)) continue;
+    try {
+      const url = new URL(text);
+      const host = url.hostname.replace(/^www\./, '').toLowerCase();
+      const parts = url.pathname.split('/').filter(Boolean);
+      const ig = parts.findIndex((part) => part === 'p' || part === 'reel' || part === 'reels' || part === 'tv');
+      if (host.endsWith('instagram.com') && ig >= 0 && parts[ig + 1]) {
+        return `https://${host}/${parts[ig]}/${parts[ig + 1]}`;
+      }
+      const status = parts.indexOf('status');
+      if ((host === 'x.com' || host === 'twitter.com') && status > 0 && parts[status + 1]) {
+        return `https://${host}/${parts[status - 1]}/status/${parts[status + 1]}`;
+      }
+      return `https://${host}${url.pathname.replace(/\/+$/, '')}`;
+    } catch {
+      return text.split('?')[0].split('#')[0];
+    }
+  }
+  return '';
+}
+
 function officialRecordId(source, payload) {
   const row = asRecord(payload);
   if (source === 'amazon') return String(row.orderid || row.orderId || '').trim() || null;
@@ -106,6 +136,12 @@ function allowsTitleBackedIdentity(source, metadata = {}) {
  * host (not collapsed into amazon).
  */
 function extractSourceId(source, payload, metadata = {}) {
+  const postUrl = socialPostUrl(payload);
+  if (postUrl) {
+    const host = hostFromMetadata(metadata) || source;
+    return `${TITLE_BACKED_PREFIX}${host}:${postUrl}`.slice(0, 190);
+  }
+
   const official = officialRecordId(source, payload);
   if (official) return official;
 
@@ -119,7 +155,7 @@ function extractSourceId(source, payload, metadata = {}) {
 }
 
 function hasRecordIdentity(source, payload) {
-  return Boolean(officialRecordId(source, payload) || payloadTitle(payload));
+  return Boolean(socialPostUrl(payload) || officialRecordId(source, payload) || payloadTitle(payload));
 }
 
 function calculateDataQuality(item) {
@@ -194,6 +230,7 @@ module.exports = {
   hostFromMetadata,
   isClientSmoothedRecord,
   officialRecordId,
+  socialPostUrl,
   isTitleBackedSourceId,
   sourceIdentityKey,
   extractSourceId,
