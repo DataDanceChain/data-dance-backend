@@ -146,6 +146,22 @@ function captureAudit() {
   return { lines, restore: () => { developerSsoRoutes.consoleAudit.write = original; } };
 }
 
+/** Collects the console's failure log lines until restored. */
+function captureConsoleLog() {
+  const lines = [];
+  const original = developerSsoRoutes.consoleLog.error;
+  developerSsoRoutes.consoleLog.error = (event, entry) => lines.push({ event, entry });
+  return { lines, restore: () => { developerSsoRoutes.consoleLog.error = original; } };
+}
+
+/** Swaps one method of the in-memory client registry; returns the undo. */
+function replaceRegistryMethod(name, impl) {
+  const model = prisma.ssoDeveloperClient;
+  const original = model[name];
+  model[name] = impl;
+  return () => { model[name] = original; };
+}
+
 /** No hash, no stored contact address, no owner id, no plaintext secret anywhere in a body. */
 function assertNoSecretMaterial(body) {
   const text = JSON.stringify(body);
@@ -491,6 +507,56 @@ describe('POST /api/developer/sso/clients/secret', () => {
     assert.equal(verifyClientSecret(client, SECRETS.ownPartner), false);
   });
 
+  it('reads the issuer before writing: when it cannot be read, the old secret stays and nothing is issued', async () => {
+    const audit = captureAudit();
+    const log = captureConsoleLog();
+    const saved = process.env.PUBLIC_BASE_URL;
+    delete process.env.PUBLIC_BASE_URL;
+    let res;
+    const before = rowsSnapshot();
+    try {
+      res = await rotate({ client_id: 'sso_owner_dev' }, signedIn());
+    } finally {
+      process.env.PUBLIC_BASE_URL = saved;
+      audit.restore();
+      log.restore();
+    }
+    assert.equal(res.status, 500);
+    assert.deepEqual(res.body, { error: 'server_error', error_description: 'Could not complete that request.' });
+    assert.equal(rowsSnapshot(), before, 'the stored hash is unchanged');
+    assert.equal(verifyClientSecret(await resolveClient('sso_owner_dev'), SECRETS.own), true, 'the old secret still works');
+    assert.deepEqual(audit.lines.map((l) => [l.event, l.entry.outcome]), [['developer_console.rotate_secret', 'server_error']]);
+    assert.deepEqual(log.lines, [{
+      event: 'Developer console secret rotation failed',
+      entry: { reqId: res.headers['x-request-id'], errorCode: null, errorName: 'Error' },
+    }]);
+    assert.equal(JSON.stringify(log.lines).includes('PUBLIC_BASE_URL'), false, 'the message is not logged');
+  });
+
+  it('a failing audit line after the write does not cost the caller the new secret', async () => {
+    const log = captureConsoleLog();
+    const original = developerSsoRoutes.consoleAudit.write;
+    developerSsoRoutes.consoleAudit.write = () => { throw new Error('audit sink down ddc_sso_secret_in-a-message'); };
+    let res;
+    try {
+      res = await rotate({ client_id: 'sso_owner_dev' }, signedIn());
+    } finally {
+      developerSsoRoutes.consoleAudit.write = original;
+      log.restore();
+    }
+    assert.equal(res.status, 200);
+    assert.match(res.body.client_secret, /^ddc_sso_secret_[A-Za-z0-9_-]{43}$/);
+    assert.equal(res.body.issuer, ISSUER);
+    assert.equal(row('sso_owner_dev').secretHash, sha256Hex(res.body.client_secret));
+    const client = await resolveClient('sso_owner_dev');
+    assert.equal(verifyClientSecret(client, res.body.client_secret), true);
+    assert.equal(verifyClientSecret(client, SECRETS.own), false);
+    assert.deepEqual(log.lines, [{
+      event: 'developer_console.audit_failed',
+      entry: { reqId: res.headers['x-request-id'], action: 'rotate_secret', errorName: 'Error' },
+    }]);
+  });
+
   it('is rate-limited per account, failed attempts included', async () => {
     for (let i = 0; i < 4; i += 1) assert.equal((await rotate({ client_id: 'sso_owner_dev' }, signedIn())).status, 200, `request ${i + 1}`);
     assert.equal((await rotate({ client_id: 'sso_other_dev' }, signedIn())).status, 404);
@@ -499,6 +565,104 @@ describe('POST /api/developer/sso/clients/secret', () => {
     assert.equal(limited.body.error, 'slow_down');
     assert.equal(limited.body.client_secret, undefined);
     assert.equal((await rotate({ client_id: 'sso_other_dev' }, signedIn(OTHER))).status, 200, 'another account keeps its own budget');
+  });
+});
+
+describe('a console failure is logged by request id, error code and name, never by message', () => {
+  const SERVER_ERROR = { error: 'server_error', error_description: 'Could not complete that request.' };
+
+  it('a Prisma validation error on the rotate write: the hash it printed is not logged, nothing changes', async () => {
+    const log = captureConsoleLog();
+    let attemptedHash = null;
+    const restoreWrite = replaceRegistryMethod('updateMany', async ({ data }) => {
+      attemptedHash = data.secretHash;
+      // How Prisma 5 reports a rejected call: the arguments, values included.
+      const error = new Error(
+        `Invalid \`prisma.ssoDeveloperClient.updateMany()\` invocation:\n\n{\n  data: {\n    secretHash: "${data.secretHash}"\n  }\n}\n\nUnknown argument \`secretHash\`.`,
+      );
+      error.name = 'PrismaClientValidationError';
+      throw error;
+    });
+    const before = rowsSnapshot();
+    let res;
+    try {
+      res = await rotate({ client_id: 'sso_owner_dev' }, signedIn());
+    } finally {
+      restoreWrite();
+      log.restore();
+    }
+    assert.equal(res.status, 500);
+    assert.deepEqual(res.body, SERVER_ERROR);
+    assert.equal(rowsSnapshot(), before);
+    assert.match(attemptedHash, /^[0-9a-f]{64}$/);
+    assert.match(res.headers['x-request-id'], /^[0-9a-f-]{36}$/);
+    assert.deepEqual(log.lines, [{
+      event: 'Developer console secret rotation failed',
+      entry: { reqId: res.headers['x-request-id'], errorCode: null, errorName: 'PrismaClientValidationError' },
+    }]);
+    const logged = JSON.stringify(log.lines);
+    assert.equal(logged.includes(attemptedHash), false, 'the attempted hash is not logged');
+    assert.doesNotMatch(logged, /secretHash|invocation/);
+  });
+
+  it('a known request error on the list: its code and name are logged, its message is not', async () => {
+    const log = captureConsoleLog();
+    const restoreRead = replaceRegistryMethod('findMany', async () => {
+      const error = new Error(`Foreign key constraint failed on ownerUserId = ${OWNER.id} (${OWNER.email})`);
+      error.name = 'PrismaClientKnownRequestError';
+      error.code = 'P2003';
+      throw error;
+    });
+    let res;
+    try {
+      res = await list(signedIn());
+    } finally {
+      restoreRead();
+      log.restore();
+    }
+    assert.equal(res.status, 500);
+    assert.deepEqual(res.body, SERVER_ERROR);
+    assert.deepEqual(log.lines, [{
+      event: 'Developer console list failed',
+      entry: { reqId: res.headers['x-request-id'], errorCode: 'P2003', errorName: 'PrismaClientKnownRequestError' },
+    }]);
+    const logged = JSON.stringify(log.lines);
+    assert.equal(logged.includes(OWNER.id), false);
+    assert.equal(logged.includes(OWNER.email), false);
+  });
+
+  it('a code or name that is not a plain identifier is dropped, not logged', async () => {
+    const hash = sha256Hex(SECRETS.own);
+    const hostile = [
+      [hash, hash],
+      ['ddc_sso_secret_abc', 'ddc_sso_secret_abc'],
+      [`P2025 ${hash}`, `Error: ${hash}`],
+      [{ value: hash }, ['TypeError']],
+    ];
+    for (const [code, name] of hostile) {
+      const log = captureConsoleLog();
+      const restoreRead = replaceRegistryMethod('findFirst', async () => {
+        const error = new Error(hash);
+        error.code = code;
+        error.name = name;
+        throw error;
+      });
+      let res;
+      try {
+        res = await update({ client_id: 'sso_owner_dev', redirect_uris: [OWN_REDIRECT] }, signedIn());
+      } finally {
+        restoreRead();
+        log.restore();
+      }
+      assert.equal(res.status, 500);
+      assert.deepEqual(res.body, SERVER_ERROR);
+      assert.deepEqual(log.lines, [{
+        event: 'Developer console update failed',
+        entry: { reqId: res.headers['x-request-id'], errorCode: null, errorName: null },
+      }], JSON.stringify(code).slice(0, 40));
+      assert.equal(JSON.stringify(log.lines).includes('ddc_sso_secret_'), false);
+      assert.equal(JSON.stringify(log.lines).includes(hash), false);
+    }
   });
 });
 

@@ -294,14 +294,17 @@ async function rotateOwnedSecret(ownerUserId, clientIdValue) {
   const clientId = requireClientId(clientIdValue);
   const row = await findOwnedClient(owner, clientId);
   refuseManaged(row);
+  // Built before the write: once the old secret is dead, nothing may fail before the caller has the new one.
+  const client = presentOwnedClient(row);
   // Same format as createDeveloperClient.
   const clientSecret = `ddc_sso_secret_${crypto.randomBytes(32).toString('base64url')}`;
+  const secretHash = sha256Hex(clientSecret);
   const { count } = await prisma.ssoDeveloperClient.updateMany({
     where: { clientId, ownerUserId: owner },
-    data: { secretHash: sha256Hex(clientSecret) },
+    data: { secretHash },
   });
   if (count !== 1) throw notOnThisAccount();
-  return { client: presentOwnedClient(row), clientSecret };
+  return { client, clientSecret };
 }
 
 module.exports = {

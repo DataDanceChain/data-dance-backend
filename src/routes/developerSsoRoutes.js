@@ -94,24 +94,78 @@ const consoleAudit = {
   write: (event, entry) => logger.info(event, entry),
 };
 
-function audit(req, action, clientId, outcome) {
-  consoleAudit.write(`developer_console.${action}`, {
-    reqId: req.reqId || null,
-    userId: req.user.id,
-    clientId: consoleClientId(clientId),
-    outcome,
-  });
+/**
+ * Where a console failure is logged. Replaceable for tests. Each line carries the request id and the
+ * error's code and name, never error.message: a Prisma validation message prints the call's
+ * arguments, and the rotate call's data is the new secret's hash.
+ */
+const consoleLog = {
+  error: (event, entry) => logger.error(event, entry),
+};
+
+// Constant-style codes (P2025, ECONNREFUSED) and class-style names (PrismaClientValidationError).
+// Both start with a capital, so a hex hash or a ddc_ secret can never pass as either.
+const ERROR_CODE = /^[A-Z][A-Z0-9_]{0,63}$/;
+const ERROR_NAME = /^[A-Z][A-Za-z0-9]{0,63}$/;
+
+function errorCode(value) {
+  if (Number.isInteger(value)) return value;
+  return typeof value === 'string' && ERROR_CODE.test(value) ? value : null;
 }
 
-function sendConsoleError(res, error, what) {
+function errorName(value) {
+  return typeof value === 'string' && ERROR_NAME.test(value) ? value : null;
+}
+
+function audit(req, action, clientId, outcome) {
+  // A failed audit line must not turn a change that was made into an error answer: after a rotation
+  // that answer would lose the only copy of the new secret.
+  try {
+    consoleAudit.write(`developer_console.${action}`, {
+      reqId: req.reqId || null,
+      userId: req.user.id,
+      clientId: consoleClientId(clientId),
+      outcome,
+    });
+  } catch (auditError) {
+    try {
+      consoleLog.error('developer_console.audit_failed', {
+        reqId: req.reqId || null,
+        action,
+        errorName: errorName(auditError && auditError.name),
+      });
+    } catch (_) {
+      // The logger itself failed: there is nowhere left to write.
+    }
+  }
+}
+
+function sendConsoleError(req, res, error, what) {
   if (error instanceof DeveloperClientError && error.status < 500) {
     return res.status(error.status).json({ error: error.code, error_description: error.message });
   }
-  logger.error(`Developer console ${what} failed`, { message: error && error.message });
+  consoleLog.error(`Developer console ${what} failed`, {
+    reqId: req.reqId || null,
+    errorCode: errorCode(error && error.code),
+    errorName: errorName(error && error.name),
+  });
   return res.status(500).json({
     error: 'server_error',
     error_description: 'Could not complete that request.',
   });
+}
+
+/** The registration answer's issuer and endpoints. Reads the configuration, so it can throw. */
+function issuerEndpoints(req) {
+  const issuer = publicBaseUrl(req);
+  return {
+    token_endpoint_auth_method: 'client_secret_post',
+    issuer,
+    authorization_endpoint: `${issuer}/oauth/authorize`,
+    token_endpoint: `${issuer}/oauth/token`,
+    userinfo_endpoint: `${issuer}/partner/sso/me`,
+    resource: partnerResourceUrl(req),
+  };
 }
 
 function outcomeOf(error) {
@@ -127,7 +181,7 @@ router.get('/clients', noStore, protect, rateLimiters.developerConsoleRead, asyn
     const clients = await listOwnedClients(req.user.id);
     return res.json({ email: req.user.email || null, clients });
   } catch (error) {
-    return sendConsoleError(res, error, 'list');
+    return sendConsoleError(req, res, error, 'list');
   }
 });
 
@@ -139,35 +193,35 @@ router.post('/clients/update', noStore, protect, rateLimiters.developerConsoleUp
     return res.json(client);
   } catch (error) {
     audit(req, 'update', body.client_id, outcomeOf(error));
-    return sendConsoleError(res, error, 'update');
+    return sendConsoleError(req, res, error, 'update');
   }
 });
 
 router.post('/clients/secret', noStore, protect, rateLimiters.developerClientRotate, async (req, res) => {
   const body = consoleBody(req);
   try {
+    // Everything the answer needs is read before the new hash is written (here, and the client's
+    // settings inside rotateOwnedSecret): once the old secret is dead, nothing may fail before the
+    // caller has the new one.
+    const endpoints = issuerEndpoints(req);
     const { client, clientSecret } = await rotateOwnedSecret(req.user.id, body.client_id);
-    audit(req, 'rotate_secret', body.client_id, 'ok');
-    const issuer = publicBaseUrl(req);
     // The registration answer's shape, so the console shows the new secret the same way.
-    return res.json({
+    const answer = {
       client_id: client.client_id,
       client_secret: clientSecret,
       client_name: client.client_name,
       redirect_uris: client.redirect_uris,
-      token_endpoint_auth_method: 'client_secret_post',
-      issuer,
-      authorization_endpoint: `${issuer}/oauth/authorize`,
-      token_endpoint: `${issuer}/oauth/token`,
-      userinfo_endpoint: `${issuer}/partner/sso/me`,
-      resource: partnerResourceUrl(req),
+      ...endpoints,
       scopes: client.scopes,
-    });
+    };
+    audit(req, 'rotate_secret', body.client_id, 'ok');
+    return res.json(answer);
   } catch (error) {
     audit(req, 'rotate_secret', body.client_id, outcomeOf(error));
-    return sendConsoleError(res, error, 'secret rotation');
+    return sendConsoleError(req, res, error, 'secret rotation');
   }
 });
 
 module.exports = router;
 module.exports.consoleAudit = consoleAudit;
+module.exports.consoleLog = consoleLog;
