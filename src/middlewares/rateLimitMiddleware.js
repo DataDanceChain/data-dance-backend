@@ -380,6 +380,36 @@ const rateLimiters = {
     errorFormat: 'oauth'
   }),
 
+  // GET /api/developer/sso/clients — the account console's list, per signed-in account (after protect)
+  developerConsoleRead: createRateLimiter({
+    name: 'developerConsoleRead',
+    windowMs: 60 * 1000,
+    max: 30,
+    message: 'Too many requests. Please wait a minute.',
+    keyGenerator: keyGenerators.userOrIp,
+    errorFormat: 'oauth'
+  }),
+
+  // POST /api/developer/sso/clients/update — per signed-in account (after protect)
+  developerConsoleUpdate: createRateLimiter({
+    name: 'developerConsoleUpdate',
+    windowMs: 10 * 60 * 1000,
+    max: 20,
+    message: 'Too many changes. Please wait a few minutes.',
+    keyGenerator: keyGenerators.userOrIp,
+    errorFormat: 'oauth'
+  }),
+
+  // POST /api/developer/sso/clients/secret — per signed-in account (after protect)
+  developerClientRotate: createRateLimiter({
+    name: 'developerClientRotate',
+    windowMs: 60 * 60 * 1000,
+    max: 5,
+    message: 'Too many secret rotations. Please wait an hour.',
+    keyGenerator: keyGenerators.userOrIp,
+    errorFormat: 'oauth'
+  }),
+
   // POST /api/sso/ticket/exchange — public, per IP (Phase 3)
   ssoExchange: createRateLimiter({
     name: 'ssoExchange',
