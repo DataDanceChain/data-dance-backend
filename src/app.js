@@ -5,6 +5,7 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const { errorHandler } = require('./middlewares/errorMiddleware');
+const { developerDocsUrl } = require('./utils/developerDocsUrl');
 const { requestIdMiddleware } = require('./middlewares/requestIdMiddleware');
 const { corsOrigins } = require('./constants/corsOrigins');
 const xRoutes = require('./routes/xRoutes'); // Updated import
@@ -228,6 +229,13 @@ app.use('/partner/sso', partnerSsoRoutes);
 app.use('/partner/tge', partnerSsoRoutes);
 // DDC NFT Metadata API - 需要后端权限控制
 app.use('/metadata/ddcnft', ddcNFTMetadataRoutes);
+
+// The API host has no page of its own: a person who opens it in a browser goes to the developer docs.
+app.get('/', (req, res, next) => {
+  const docs = developerDocsUrl();
+  if (!docs) return next();
+  return res.redirect(302, docs);
+});
 
 // Add error logging (must be before errorHandler)
 app.use(logger.errorLogger);
