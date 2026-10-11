@@ -184,6 +184,126 @@ async function loadPartnerClient(clientId, req) {
   return loadDeveloperPartnerClient(clientId, req);
 }
 
+// ---------------------------------------------------------------------------------------------
+// The account console: a signed-in account reads and changes only the rows whose ownerUserId is
+// its own id. A self-serve client belongs to the account that registered it; the first-party Data
+// Planet row belongs to the account an operator assigned as its manager (POST /api/ops/sso/planet-manager).
+// ---------------------------------------------------------------------------------------------
+
+const CONSOLE_CLIENT_ID = /^[A-Za-z0-9._-]{1,128}$/;
+
+/** The client_id a console request names, or null when it is not a plausible id (never a filter object). */
+function consoleClientId(value) {
+  return typeof value === 'string' && CONSOLE_CLIENT_ID.test(value) ? value : null;
+}
+
+function requireOwner(ownerUserId) {
+  // Prisma drops a filter whose value is undefined: without this, a missing owner would match every row.
+  if (typeof ownerUserId !== 'string' || !ownerUserId) {
+    throw new DeveloperClientError(401, 'login_required', 'Sign in with DataDance first.');
+  }
+  return ownerUserId;
+}
+
+function requireClientId(value) {
+  const clientId = consoleClientId(value);
+  if (!clientId) throw new DeveloperClientError(400, 'invalid_request', 'client_id is required.');
+  return clientId;
+}
+
+/** One answer for "no such client" and "someone else's client", so an id reveals nothing. */
+function notOnThisAccount() {
+  return new DeveloperClientError(404, 'not_found', 'This client is not on this account.');
+}
+
+/**
+ * The environment's partner (SSO_TGE_CLIENT_ID) wins over a registry row with the same id
+ * (loadPartnerClient), so its redirect URIs and secret are not the row's to change: a secret
+ * rotated on the row would never be accepted.
+ */
+function environmentClient(clientId) {
+  return clientId ? getPartnerClient(clientId) : null;
+}
+
+/** What the console shows for one client: the settings in effect. Never the secret or its hash. */
+function presentOwnedClient(row) {
+  const configured = environmentClient(row.clientId);
+  const kind = configured || row.kind === 'partner' ? 'partner' : 'developer';
+  return {
+    client_id: row.clientId,
+    client_name: configured ? configured.clientName : row.clientName,
+    kind,
+    redirect_uris: configured
+      ? [...configured.redirectUris]
+      : (Array.isArray(row.redirectUris) ? [...row.redirectUris] : []),
+    enabled: configured ? Boolean(configured.enabled) : Boolean(row.enabled),
+    scopes: kind === 'partner' ? [...availablePartnerScopes()] : [...DEVELOPER_SCOPES],
+    managed: Boolean(configured),
+    created_at: row.createdAt || null,
+  };
+}
+
+async function findOwnedClient(ownerUserId, clientId) {
+  const row = await prisma.ssoDeveloperClient.findFirst({ where: { clientId, ownerUserId } });
+  if (!row) throw notOnThisAccount();
+  return row;
+}
+
+function refuseManaged(row) {
+  if (environmentClient(row.clientId)) {
+    throw new DeveloperClientError(409, 'managed_client', 'DataDance manages this client. Contact DataDance to change it.');
+  }
+}
+
+async function listOwnedClients(ownerUserId) {
+  const owner = requireOwner(ownerUserId);
+  const rows = await prisma.ssoDeveloperClient.findMany({
+    where: { ownerUserId: owner },
+    orderBy: { createdAt: 'asc' },
+  });
+  return rows.map(presentOwnedClient);
+}
+
+/** Redirect URIs (the registration rules) and, when sent, enabled. Nothing else on the row changes. */
+async function updateOwnedClient(ownerUserId, body = {}) {
+  const owner = requireOwner(ownerUserId);
+  const input = body && typeof body === 'object' && !Array.isArray(body) ? body : {};
+  const clientId = requireClientId(input.client_id);
+  const redirectUris = cleanRedirects(input.redirect_uris);
+  if (input.enabled !== undefined && typeof input.enabled !== 'boolean') {
+    throw new DeveloperClientError(400, 'invalid_request', 'enabled must be true or false.');
+  }
+  const row = await findOwnedClient(owner, clientId);
+  refuseManaged(row);
+  const enabled = typeof input.enabled === 'boolean' ? input.enabled : Boolean(row.enabled);
+  // The owner is part of the write as well as the read.
+  const { count } = await prisma.ssoDeveloperClient.updateMany({
+    where: { clientId, ownerUserId: owner },
+    data: { redirectUris, enabled },
+  });
+  if (count !== 1) throw notOnThisAccount();
+  return presentOwnedClient({ ...row, redirectUris, enabled });
+}
+
+/**
+ * A new secret for one owned client. The old one stops working at once. The plaintext is returned
+ * to the caller once; only its sha256 is stored.
+ */
+async function rotateOwnedSecret(ownerUserId, clientIdValue) {
+  const owner = requireOwner(ownerUserId);
+  const clientId = requireClientId(clientIdValue);
+  const row = await findOwnedClient(owner, clientId);
+  refuseManaged(row);
+  // Same format as createDeveloperClient.
+  const clientSecret = `ddc_sso_secret_${crypto.randomBytes(32).toString('base64url')}`;
+  const { count } = await prisma.ssoDeveloperClient.updateMany({
+    where: { clientId, ownerUserId: owner },
+    data: { secretHash: sha256Hex(clientSecret) },
+  });
+  if (count !== 1) throw notOnThisAccount();
+  return { client: presentOwnedClient(row), clientSecret };
+}
+
 module.exports = {
   DeveloperClientError,
   DEVELOPER_SCOPES,
@@ -192,4 +312,8 @@ module.exports = {
   createDeveloperClient,
   loadDeveloperPartnerClient,
   loadPartnerClient,
+  consoleClientId,
+  listOwnedClients,
+  updateOwnedClient,
+  rotateOwnedSecret,
 };
