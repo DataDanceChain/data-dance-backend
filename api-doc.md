@@ -18,13 +18,6 @@
 8. [Promotions API](#promotions-api)
 9. [组织交易 API](#组织交易-api)
 
-## 测试账号
-为了方便测试，我们提供了一个测试账号，可以使用账号密码登录：
-- 邮箱：test@example.com
-- 密码：password123
-
-该账号可以绕过 Web3Auth 的限制，直接使用账号密码登录，并返回 token。
-
 ## 认证 API
 
 ### 用户注册
@@ -37,7 +30,7 @@ POST /auth/register
 ```json
 {
   "email": "user@example.com",
-  "password": "password123",
+  "password": "<password>",
   "name": "User Name"
 }
 ```
@@ -67,7 +60,7 @@ POST /auth/login
 ```json
 {
   "email": "user@example.com",
-  "password": "password123"
+  "password": "<password>"
 }
 ```
 
@@ -111,7 +104,7 @@ POST /api/auth/register-with-wallet
     "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
     "user": {
       "id": "user-uuid",
-      "email": "0x1234567890abcdef1234567890abcdef12345678@wallet.user",
+      "email": "user@example.com",
       "name": "User_123456",
       "walletAddress": "0x1234567890abcdef1234567890abcdef12345678",
       "chainId": 1
