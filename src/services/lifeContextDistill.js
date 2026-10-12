@@ -21,6 +21,12 @@ function cleanTitle(raw) {
     .replace(/\b(?:usd|eur|gbp|cny|hkd|sgd|jpy)\s*[\d,.]+\b/gi, ' ')
     .replace(/\b[\d,.]+\s*(?:usd|eur|gbp|cny|hkd|sgd|jpy)\b/gi, ' ')
     .replace(/\b\d{5,}\b/g, ' ')
+    .replace(/(?:内容)?更多选项|已静音|查看翻译|更多查看翻译/g, ' ')
+    .replace(/(?:赞|讚|评论|評論|留言|转发|轉發|分享|收藏)(?:赞|讚|评论|評論|留言|转发|轉發|分享|收藏)+/g, ' ')
+    .replace(/(?:[\d,.]+\s*)?[万萬]\s*(?:评论|評論|转发|轉發|赞|讚|分享|收藏)/g, ' ')
+    .replace(/(?:评论|評論|转发|轉發|赞|讚|分享|收藏)\s*[\d,.]+/g, ' ')
+    .replace(/\d+\s*(?:小时|小時|分钟|分鐘|天|周|週|星期)前/g, ' ')
+    .replace(/更多\s*\d{1,2}\s*月\s*\d{1,2}\s*日/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
 }
@@ -54,6 +60,10 @@ function themeTokens(title) {
     .toLowerCase()
     .split(/[^a-z0-9\u4e00-\u9fff]+/)
     .filter((w) => w.length > 2 && !STOP_WORDS.has(w))
+    .filter((w) => !/(?:查看翻译|更多选项|已静音)/.test(w))
+    .filter((w) => !(/^(?:赞|讚|评论|評論|转发|轉發|分享|收藏|留言)+$/.test(w)))
+    .filter((w) => !((/(?:评论|評論|转发|轉發|赞|讚|分享|收藏)/.test(w) && /[\d万萬]/.test(w))))
+    .filter((w) => !(/^更多\d+月\d+日$/.test(w) || /^\d+(?:小时|小時|分钟|分鐘|天|周|週)前$/.test(w)))
     .slice(0, 3);
 }
 
