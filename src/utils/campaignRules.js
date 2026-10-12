@@ -242,7 +242,10 @@ function parseRedeemSaleConfig(body) {
 }
 
 function parseFirstActionConfig(body) {
-  const action = String(body.action || body.config?.action || '').trim();
+  // A publish request uses body.action for schedule/live. The bonus type stays on config.action.
+  const fromBody = String(body.action || '').trim();
+  const fromConfig = String(body.config?.action || '').trim();
+  const action = FIRST_ACTIONS.has(fromBody) ? fromBody : fromConfig || fromBody;
   if (!FIRST_ACTIONS.has(action)) return { error: 'Choose a first-action type' };
   const points = asInt(body.points ?? body.config?.points, 1, 100);
   if (points == null) return { error: 'Bonus points must be 1–100' };
