@@ -79,6 +79,18 @@ function isClientSmoothedRecord(item) {
 const SHORTCODE = /^[A-Za-z0-9_-]{4,64}$/;
 const NUMERIC_ID = /^\d{1,25}$/;
 
+/**
+ * The post id after a keyword segment, with its keyword: the handle form (/<handle>/<keyword>/<id>,
+ * the first keyword after the first segment) first, and the canonical form (/<keyword>/<id>) only
+ * when the handle form gives no id. null when neither does.
+ */
+function keywordPost(parts, keywords, idPattern) {
+  const isKeyword = (part) => keywords.includes(String(part || '').toLowerCase());
+  const after = (at) =>
+    at >= 0 && idPattern.test(parts[at + 1] || '') ? { keyword: parts[at].toLowerCase(), id: parts[at + 1] } : null;
+  return after(parts.findIndex((part, i) => i > 0 && isKeyword(part))) || (isKeyword(parts[0]) ? after(0) : null);
+}
+
 const SOCIAL_PERMALINKS = {
   x: {
     hosts: ['x.com', 'twitter.com'],
@@ -103,18 +115,16 @@ const SOCIAL_PERMALINKS = {
     hosts: ['threads.net', 'threads.com'],
     canonical(parts) {
       // /@<handle>/post/<code>, and the canonical /post/<code> itself
-      const at = parts.findIndex((part) => part.toLowerCase() === 'post');
-      const code = at >= 0 ? parts[at + 1] : '';
-      return SHORTCODE.test(code || '') ? `https://threads.net/post/${code}` : '';
+      const post = keywordPost(parts, ['post'], SHORTCODE);
+      return post ? `https://threads.net/post/${post.id}` : '';
     },
   },
   tiktok: {
     hosts: ['tiktok.com'],
     canonical(parts) {
       // /@<handle>/video/<id>, /@<handle>/photo/<id>, and the canonical /video/<id>, /photo/<id>
-      const at = parts.findIndex((part) => ['video', 'photo'].includes(part.toLowerCase()));
-      const id = at >= 0 ? parts[at + 1] : '';
-      return NUMERIC_ID.test(id || '') ? `https://tiktok.com/${parts[at].toLowerCase()}/${id}` : '';
+      const post = keywordPost(parts, ['video', 'photo'], NUMERIC_ID);
+      return post ? `https://tiktok.com/${post.keyword}/${post.id}` : '';
     },
   },
 };

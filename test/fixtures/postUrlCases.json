@@ -246,6 +246,41 @@
       "source": "amazon",
       "href": "https://threads.net/post/DAbc123x",
       "canonical": ""
+    },
+    {
+      "source": "threads",
+      "href": "https://threads.net/post/post/DAbc123x",
+      "canonical": "https://threads.net/post/DAbc123x",
+      "note": "a post / video / photo segment after the first one (the handle form) is read before one in first place"
+    },
+    {
+      "source": "tiktok",
+      "href": "https://www.tiktok.com/video/@datadance/video/7312345678901234567",
+      "canonical": "https://tiktok.com/video/7312345678901234567",
+      "note": "a post / video / photo segment after the first one (the handle form) is read before one in first place"
+    },
+    {
+      "source": "tiktok",
+      "href": "https://tiktok.com/photo/@datadance/video/7312345678901234567",
+      "canonical": "https://tiktok.com/video/7312345678901234567",
+      "note": "a post / video / photo segment after the first one (the handle form) is read before one in first place"
+    },
+    {
+      "source": "threads",
+      "href": "https://threads.net/@datadance/post/post",
+      "canonical": "https://threads.net/post/post"
+    },
+    {
+      "source": "threads",
+      "href": "https://threads.net/post/post",
+      "canonical": "https://threads.net/post/post",
+      "note": "the canonical form in first place is read when the handle form gives no id"
+    },
+    {
+      "source": "threads",
+      "href": "https://threads.net/post/DAbc123x/post",
+      "canonical": "https://threads.net/post/DAbc123x",
+      "note": "the canonical form in first place is read when the handle form gives no id"
     }
   ]
 }
