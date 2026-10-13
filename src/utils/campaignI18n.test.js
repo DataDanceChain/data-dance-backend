@@ -3,7 +3,9 @@ const assert = require('node:assert/strict');
 const {
   LOCALES,
   normalizeLocale,
+  sourceLocale,
   asMap,
+  mergeMaps,
   pickFromMap,
   pickQuestion,
   buildCampaignI18n,
@@ -55,11 +57,65 @@ describe('campaign i18n', () => {
       { titleEn: 'Summer map', titleZh: '夏季地图' },
     );
     assert.equal(i18n.title['zh-TW'], '夏季地圖');
+    assert.equal(i18n.title.zh, '夏季地图');
     const kept = buildCampaignI18n(
       { i18n: { title: { en: 'Summer map', zh: '夏季地图' } } },
       { titleEn: 'Summer map', titleZh: '夏季地图' },
     );
-    assert.equal(kept.title['zh-TW'], '夏季地图');
+    assert.equal(kept.title['zh-TW'], '');
+    assert.equal(kept.title.zh, '夏季地图');
+    assert.equal(pickFromMap(kept.title, 'zh-TW'), '夏季地图');
+  });
+
+  it('stores Simplified copy in its own zh slot, never under zh-TW', () => {
+    for (const tag of ['zh', 'zh-CN', 'zh-Hans', 'zh_SG']) {
+      const map = mergeMaps({ [tag]: '夏天' });
+      assert.equal(map['zh-TW'], '', tag);
+      assert.equal(map.zh, '夏天', tag);
+    }
+    assert.deepEqual(mergeMaps({ 'zh-Hant': '夏季', zh: '夏天' }), { en: '', 'zh-TW': '夏季', ja: '', ko: '', zh: '夏天' });
+    assert.equal(firstFilled({ zh: '夏天' }), '夏天');
+  });
+
+  it('stores the copy source by the translate rule: a Simplified pick stays zh', () => {
+    for (const tag of ['zh', 'zh-CN', 'zh-Hans']) assert.equal(sourceLocale(tag), 'zh', tag);
+    for (const tag of ['zh-TW', 'zh-Hant', 'zh-HK']) assert.equal(sourceLocale(tag), 'zh-TW', tag);
+    assert.equal(sourceLocale(''), 'en');
+    assert.equal(sourceLocale('fr'), 'en');
+    assert.equal(buildCampaignI18n({ copySource: 'zh', titleZh: '夏天' }).source, 'zh');
+    assert.equal(buildCampaignI18n({ copySource: 'zh-CN', titleZh: '夏天' }).source, 'zh');
+    assert.equal(buildCampaignI18n({ copySource: 'zh-TW', titleZhTw: '夏季' }).source, 'zh-TW');
+    assert.equal(buildCampaignI18n({ titleZh: '夏天', i18n: { source: 'zh', title: { zh: '夏天' } } }).source, 'zh');
+  });
+
+  it('form fields outrank the stored copy; an empty field keeps it', () => {
+    const stored = { source: 'en', title: { en: 'Old', 'zh-TW': '舊', ja: '古い' }, shareText: { en: 'Old share' } };
+    const i18n = buildCampaignI18n(
+      { titleEn: 'New', titleZhTw: '新', titleJa: '', shareTextEn: 'New share', i18n: stored },
+      { titleEn: 'New' },
+    );
+    assert.equal(i18n.title.en, 'New');
+    assert.equal(i18n.title['zh-TW'], '新');
+    assert.equal(i18n.title.ja, '古い');
+    assert.equal(i18n.shareText.en, 'New share');
+  });
+
+  it('a one-language field that only echoes another language is not kept as copy', () => {
+    const stored = { title: { en: 'Old' }, question1: { en: 'Where to?' } };
+    const i18n = buildCampaignI18n(
+      { titleEn: 'New', titleZh: 'Old', question1En: 'Where next?', question1Zh: 'Where to?', i18n: stored },
+      { titleEn: 'New', titleZh: 'Old' },
+    );
+    assert.equal(i18n.title.en, 'New');
+    assert.equal(i18n.title.zh, undefined);
+    assert.equal(pickFromMap(i18n.title, 'zh-TW'), 'New');
+    assert.equal(i18n.question1.zh, undefined);
+    assert.equal(pickFromMap(i18n.question1, 'zh-TW'), 'Where next?');
+    const typed = buildCampaignI18n({ titleZh: '夏天', i18n: stored }, { titleZh: '夏天' });
+    assert.equal(typed.title.zh, '夏天');
+    const long = 'あ'.repeat(90);
+    const trimmed = buildCampaignI18n({ titleEn: long, i18n: { title: { ja: long } } }, { titleEn: long.slice(0, 80) });
+    assert.equal(trimmed.title.en, '');
   });
 
   it('reads Korean form fields', () => {
@@ -151,7 +207,8 @@ describe('live campaign copy patch', () => {
     assert.equal(patched.data.titleEn, 'Summer map');
     assert.equal(patched.data.config.i18n.title.ja, '夏の地図');
     assert.equal(patched.data.config.i18n.title['zh-TW'], '夏季地圖');
-    assert.equal(patched.data.titleZh, '夏季地圖');
+    assert.equal(patched.data.config.i18n.title.zh, '夏季地图');
+    assert.equal(patched.data.titleZh, '夏季地图');
     assert.equal(patched.data.config.shareTextEn, 'Share this');
   });
 

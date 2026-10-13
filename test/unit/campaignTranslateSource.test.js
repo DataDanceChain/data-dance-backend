@@ -1,7 +1,7 @@
 /**
  * Campaign copy translation by source language. Copy written in Simplified Chinese (zh, zh-CN,
- * zh-Hans) is not the zh-TW text: zh-TW is still translated, and the Simplified text only fills
- * zh-TW when the model returns no Traditional copy. The model is a stand-in.
+ * zh-Hans) is not the zh-TW text: zh-TW is still translated, and the Simplified text keeps its
+ * own zh slot and never fills zh-TW. The model is a stand-in.
  */
 const { describe, it, beforeEach } = require('node:test');
 const assert = require('node:assert/strict');
@@ -67,10 +67,11 @@ describe('campaign copy translated from Simplified Chinese', () => {
     assert.equal(bundle.title['zh-TW'], TRADITIONAL);
   });
 
-  it('falls back to the Simplified source only when the model returns no Traditional copy', async () => {
+  it('keeps the Simplified source in zh, and zh-TW empty when the model returns no Traditional copy', async () => {
     reply = { title: { en: 'Light up your summer', zh: '别的简体' } };
     const bundle = await translateCampaignCopy({ source: 'zh', strings: { title: SIMPLIFIED } });
-    assert.equal(bundle.title['zh-TW'], SIMPLIFIED);
+    assert.equal(bundle.title['zh-TW'], '');
+    assert.equal(bundle.title.zh, SIMPLIFIED);
     assert.equal(bundle.title.en, 'Light up your summer');
   });
 

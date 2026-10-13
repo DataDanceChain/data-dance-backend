@@ -7,7 +7,7 @@ const {
   LIFE_SOURCES,
   normalizeCrawlerSource,
 } = require('../constants/crawlerSources');
-const { buildCampaignI18n, firstFilled } = require('./campaignI18n');
+const { buildCampaignI18n, firstFilled, SIMPLIFIED } = require('./campaignI18n');
 const { readPartnerConfig, isRetiredPartnerClientId } = require('../constants/partnerClient');
 
 const TEMPLATES = new Set([
@@ -421,25 +421,17 @@ function parseDraft(body = {}) {
     pillEn: stripText(body.pillEn, 40),
     pillZh: stripText(body.pillZh, 40),
   });
-  const titleEn = i18n.title.en || firstFilled(i18n.title);
-  const titleZh = i18n.title['zh-TW'] || firstFilled(i18n.title);
-  const blurbEn = i18n.blurb.en || firstFilled(i18n.blurb);
-  const blurbZh = i18n.blurb['zh-TW'] || firstFilled(i18n.blurb);
   if (!firstFilled(i18n.title) || !firstFilled(i18n.blurb)) {
     return { error: 'A title and blurb are required in at least one language' };
   }
+  const columns = copyColumns(i18n);
   const parsed = parseTemplateFields(template, body);
   if (parsed.error) return parsed;
   return {
     data: {
       slug,
-      internalName: stripText(body.internalName, 80) || titleEn,
-      titleEn,
-      titleZh,
-      blurbEn,
-      blurbZh,
-      pillEn: i18n.pill.en || null,
-      pillZh: i18n.pill['zh-TW'] || null,
+      internalName: stripText(body.internalName, 80) || columns.titleEn,
+      ...columns,
       template,
       startsAt,
       endsAt,
@@ -505,10 +497,27 @@ function findScheduleConflict(existingRows, next, excludeId) {
   });
 }
 
+/**
+ * The one-language columns of a campaign row from its i18n block. The Chinese columns hold the
+ * Simplified copy when there is one (what the admin's Simplified field shows), else Traditional.
+ */
+function copyColumns(i18n) {
+  const chinese = (map) => map[SIMPLIFIED] || map['zh-TW'];
+  return {
+    titleEn: i18n.title.en || firstFilled(i18n.title),
+    titleZh: chinese(i18n.title) || firstFilled(i18n.title),
+    blurbEn: i18n.blurb.en || firstFilled(i18n.blurb),
+    blurbZh: chinese(i18n.blurb) || firstFilled(i18n.blurb),
+    pillEn: i18n.pill.en || null,
+    pillZh: chinese(i18n.pill) || null,
+  };
+}
+
 function mergeLocaleConfig(config, i18n) {
   const next = { ...config, i18n };
   const write = (prefix, map) => {
     if (map.en) next[`${prefix}En`] = map.en;
+    if (map[SIMPLIFIED]) next[`${prefix}Zh`] = map[SIMPLIFIED];
     if (map['zh-TW']) next[`${prefix}ZhTw`] = map['zh-TW'];
     if (map.ja) next[`${prefix}Ja`] = map.ja;
     if (map.ko) next[`${prefix}Ko`] = map.ko;
@@ -552,12 +561,7 @@ function applyCopyFields(existing, body = {}) {
   }
   return {
     data: {
-      titleEn: i18n.title.en || firstFilled(i18n.title),
-      titleZh: i18n.title['zh-TW'] || firstFilled(i18n.title),
-      blurbEn: i18n.blurb.en || firstFilled(i18n.blurb),
-      blurbZh: i18n.blurb['zh-TW'] || firstFilled(i18n.blurb),
-      pillEn: i18n.pill.en || null,
-      pillZh: i18n.pill['zh-TW'] || null,
+      ...copyColumns(i18n),
       config,
     },
   };
