@@ -1,0 +1,176 @@
+{
+  "about": "Social post permalinks and their canonical form. Server: socialPostUrl(source, { href }) in src/utils/crawlerRecordIdentity.js. Client: canonicalPostUrl(href, source) in src/crawler/connect/postUrl.ts. An empty canonical means the link is not a post of that source.",
+  "cases": [
+    {
+      "source": "x",
+      "href": "https://x.com/DataDance/status/1845000000000000001",
+      "canonical": "https://x.com/i/status/1845000000000000001"
+    },
+    {
+      "source": "x",
+      "href": "https://x.com/datadance/status/1845000000000000001?s=20",
+      "canonical": "https://x.com/i/status/1845000000000000001"
+    },
+    {
+      "source": "x",
+      "href": "https://twitter.com/DATADANCE/status/1845000000000000001",
+      "canonical": "https://x.com/i/status/1845000000000000001"
+    },
+    {
+      "source": "x",
+      "href": "https://mobile.twitter.com/datadance/status/1845000000000000001/photo/1",
+      "canonical": "https://x.com/i/status/1845000000000000001"
+    },
+    {
+      "source": "x",
+      "href": "https://www.twitter.com/datadance/status/1845000000000000001#reply",
+      "canonical": "https://x.com/i/status/1845000000000000001"
+    },
+    {
+      "source": "x",
+      "href": "https://mobile.x.com/datadance/status/1845000000000000001",
+      "canonical": "https://x.com/i/status/1845000000000000001"
+    },
+    {
+      "source": "x",
+      "href": "https://x.com/i/web/status/1845000000000000001",
+      "canonical": "https://x.com/i/status/1845000000000000001"
+    },
+    {
+      "source": "x",
+      "href": "http://twitter.com/datadance/statuses/1845000000000000001",
+      "canonical": "https://x.com/i/status/1845000000000000001"
+    },
+    {
+      "source": "twitter",
+      "href": "https://x.com/DataDance/status/1845000000000000001",
+      "canonical": "https://x.com/i/status/1845000000000000001",
+      "note": "twitter is an alias of x"
+    },
+    {
+      "source": "x",
+      "href": "https://netflix.com/a/status/1",
+      "canonical": ""
+    },
+    {
+      "source": "x",
+      "href": "https://evilx.com/a/status/1",
+      "canonical": ""
+    },
+    {
+      "source": "x",
+      "href": "https://x.com.example.net/a/status/1",
+      "canonical": ""
+    },
+    {
+      "source": "x",
+      "href": "https://example.com/redirect?u=https://x.com/a/status/1",
+      "canonical": ""
+    },
+    {
+      "source": "x",
+      "href": "https://example.com/x.com/a/status/1",
+      "canonical": ""
+    },
+    {
+      "source": "x",
+      "href": "javascript://x.com/a/status/1",
+      "canonical": ""
+    },
+    {
+      "source": "x",
+      "href": "x.com/a/status/1",
+      "canonical": ""
+    },
+    {
+      "source": "x",
+      "href": "https://x.com/a/status/not-a-number",
+      "canonical": ""
+    },
+    {
+      "source": "x",
+      "href": "https://x.com/status/1",
+      "canonical": ""
+    },
+    {
+      "source": "instagram",
+      "href": "https://x.com/DataDance/status/1845000000000000001",
+      "canonical": "",
+      "note": "a post on another platform is not this platform's post"
+    },
+    {
+      "source": "x",
+      "href": "https://www.instagram.com/p/ABC123def/",
+      "canonical": "",
+      "note": "a post on another platform is not this platform's post"
+    },
+    {
+      "source": "instagram",
+      "href": "https://www.instagram.com/p/ABC123def/",
+      "canonical": "https://instagram.com/p/ABC123def"
+    },
+    {
+      "source": "instagram",
+      "href": "https://instagram.com/reel/ABC123def/?igsh=1",
+      "canonical": "https://instagram.com/p/ABC123def"
+    },
+    {
+      "source": "instagram",
+      "href": "https://www.instagram.com/someone/p/ABC123def/comments/",
+      "canonical": "https://instagram.com/p/ABC123def"
+    },
+    {
+      "source": "instagram",
+      "href": "https://m.instagram.com/reels/ABC123def",
+      "canonical": "https://instagram.com/p/ABC123def"
+    },
+    {
+      "source": "instagram",
+      "href": "https://www.instagram.com/p/ABC123def/comments/?hl=en",
+      "canonical": "https://instagram.com/p/ABC123def"
+    },
+    {
+      "source": "instagram",
+      "href": "https://www.instagram.com/tv/ABC123def/",
+      "canonical": "https://instagram.com/p/ABC123def"
+    },
+    {
+      "source": "instagram",
+      "href": "https://instagram.com/p/abc123DEF/",
+      "canonical": "https://instagram.com/p/abc123DEF",
+      "note": "shortcode case is significant"
+    },
+    {
+      "source": "threads",
+      "href": "https://www.threads.com/@DataDance/post/DAbc123x",
+      "canonical": "https://threads.net/post/DAbc123x"
+    },
+    {
+      "source": "threads",
+      "href": "https://threads.net/@datadance/post/DAbc123x?xmt=1",
+      "canonical": "https://threads.net/post/DAbc123x"
+    },
+    {
+      "source": "tiktok",
+      "href": "https://www.tiktok.com/@DataDance/video/7312345678901234567?lang=en",
+      "canonical": "https://tiktok.com/video/7312345678901234567"
+    },
+    {
+      "source": "tiktok",
+      "href": "https://m.tiktok.com/@datadance/photo/7312345678901234568",
+      "canonical": "https://tiktok.com/photo/7312345678901234568"
+    },
+    {
+      "source": "facebook",
+      "href": "https://x.com/a/status/1",
+      "canonical": "",
+      "note": "only X, Instagram, Threads and TikTok have post permalinks"
+    },
+    {
+      "source": "amazon",
+      "href": "https://www.instagram.com/p/ABC123def/",
+      "canonical": "",
+      "note": "only X, Instagram, Threads and TikTok have post permalinks"
+    }
+  ]
+}
