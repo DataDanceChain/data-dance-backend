@@ -5,13 +5,15 @@
  */
 const { describe, it, before, beforeEach, after } = require('node:test');
 const assert = require('node:assert/strict');
+const http = require('http');
+const { once } = require('events');
 const request = require('supertest');
 
 const { installOpsApp, listenLoopback, seedUser, grant, bearer, tokens, settle } = require('../helpers/opsApp');
 
 const { prisma, app } = installOpsApp();
 const { clearRateLimitStore } = require('../../src/middlewares/rateLimitMiddleware');
-const { writeAudit, auditLog, _internals } = require('../../src/services/opsAudit');
+const { writeAudit, auditLog, auditOpsWrites, _internals } = require('../../src/services/opsAudit');
 
 let server;
 before(async () => { server = await listenLoopback(app); });
@@ -162,6 +164,87 @@ describe('the generic ops.write row', () => {
     assert.equal(patch.targetId, id);
     assert.deepEqual(patch.detail, { method: 'PATCH', route: '/api/ops/links/:id', params: { id }, status: 200 });
     assert.ok(!JSON.stringify(rows).includes('SECRET-BODY-MARKER'), 'the request body is never recorded');
+  });
+
+  it('a client that hangs up mid-request still leaves the row for the change it made', async () => {
+    const original = prisma.trackedLink.create;
+    let enter;
+    const entered = new Promise((resolve) => { enter = resolve; });
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    // The handler stops inside its change until the client has gone.
+    prisma.trackedLink.create = async (args) => {
+      enter();
+      await gate;
+      return original(args);
+    };
+    const serverSockets = [];
+    const onConnection = (socket) => serverSockets.push(socket);
+    server.on('connection', onConnection);
+    const within = (promise, what) => Promise.race([
+      promise,
+      new Promise((_, reject) => { setTimeout(() => reject(new Error(`timed out: ${what}`)), 2000).unref(); }),
+    ]);
+    try {
+      const payload = JSON.stringify(LINK);
+      const client = http.request({
+        host: '127.0.0.1',
+        port: server.address().port,
+        method: 'POST',
+        path: '/api/ops/links',
+        agent: false,
+        headers: {
+          Authorization: auth.operator,
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(payload),
+        },
+      });
+      let answered = false;
+      client.on('response', () => { answered = true; });
+      client.on('error', () => {}); // the hang-up below
+      client.end(payload);
+      await within(entered, 'the handler reached its change');
+
+      const local = client.socket.localPort;
+      const serverSocket = serverSockets.find((socket) => socket.remotePort === local);
+      assert.ok(serverSocket, 'the server side of the connection');
+      const closed = once(serverSocket, 'close');
+      client.destroy();
+      await within(closed, 'the server saw the hang-up');
+      release();
+      await settle();
+      assert.equal(answered, false, 'the client never got an answer');
+    } finally {
+      release();
+      prisma.trackedLink.create = original;
+      server.off('connection', onConnection);
+    }
+
+    assert.equal(prisma.store.trackedLink.length, 1, 'the change was made');
+    const rows = prisma.store.opsAuditLog;
+    assert.equal(rows.length, 1, 'and it is in the audit log');
+    assert.equal(rows[0].action, 'ops.write');
+    assert.equal(rows[0].actorUserId, operator.id);
+    assert.equal(rows[0].targetType, 'links');
+    assert.deepEqual(rows[0].detail, { method: 'POST', route: '/api/ops/links', params: {}, status: 201 });
+  });
+
+  it('res.end called twice still leaves one row, and the real end runs each time', async () => {
+    const req = {
+      method: 'POST',
+      opsAdmin: { kind: 'user', userId: operator.id, username: 'op@example.test', role: 'operator' },
+      reqId: 'r-twice',
+      opsRoute: { baseUrl: '/api/ops', path: '/links', params: {} },
+    };
+    const ends = [];
+    const res = { statusCode: 201, end(...args) { ends.push(args); return this; } };
+    auditOpsWrites(req, res, () => {});
+    assert.equal(res.end('{}'), res);
+    res.end();
+    await req.auditPending;
+    assert.deepEqual(ends, [['{}'], []]);
+    assert.equal(prisma.store.opsAuditLog.length, 1);
+    assert.equal(prisma.store.opsAuditLog[0].requestId, 'r-twice');
   });
 
   it('a shared session is recorded as actor "shared"', async () => {

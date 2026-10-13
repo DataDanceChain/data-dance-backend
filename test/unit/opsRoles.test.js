@@ -171,6 +171,59 @@ describe('revoke', () => {
     assert.equal(third.status, 200);
   });
 
+  it('LAST_ADMIN holds when the target is re-enabled between its first read and the lock', async () => {
+    const { revokeRole: revoke } = require('../../src/services/userRoles');
+    const { enableAccount } = require('../../src/services/opsAccounts');
+    const { SCRIPT_ACTOR } = require('../../src/services/opsAudit');
+    // admin (A) is an enabled ddc_admin; former (B) is a disabled one.
+    const former = await seedUser(prisma, { disabledAt: new Date(), disabledBy: 'script', disabledReason: 'on leave' });
+    await grant(prisma, former.id, 'ddc_admin');
+
+    // A real database hands back a fresh object per read (the in-memory stand-in hands back the
+    // stored row, which would follow later changes). revoke(B) is held after its first read.
+    let arrived;
+    const atTransaction = new Promise((resolve) => { arrived = resolve; });
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    const db = {
+      ...prisma,
+      user: {
+        ...prisma.user,
+        findUnique: async (args) => {
+          const row = await prisma.user.findUnique(args);
+          return row && structuredClone(row);
+        },
+      },
+      $transaction: async (fn) => {
+        arrived();
+        await gate;
+        return prisma.$transaction(fn);
+      },
+    };
+    const asScript = { actor: SCRIPT_ACTOR, surface: 'script' };
+    const slow = revoke({ userId: former.id, role: 'ddc_admin', reason: 'clean up', ...asScript }, db);
+    slow.catch(() => {});
+    await atTransaction;
+
+    // Meanwhile B is re-enabled (under the admin lock) and A's grant goes: B is now the other admin.
+    const statements = prisma.rawStatements.length;
+    await enableAccount({ userId: former.id, reason: 'back from leave', ...asScript });
+    assert.ok(
+      prisma.rawStatements.slice(statements).some((row) => /pg_advisory_xact_lock/.test(row.sql)),
+      're-enable runs under the admin lock',
+    );
+    await revoke({ userId: admin.id, role: 'ddc_admin', reason: 'rotation test', ...asScript });
+
+    // revoke(B) resumes: under the lock it reads B as enabled now, and B is the last admin.
+    release();
+    await assert.rejects(slow, (error) => error.code === 'LAST_ADMIN' && error.status === 409);
+    assert.deepEqual(grantsOf(former.id), ['ddc_admin']);
+    const enabledAdmins = prisma.store.userRoleGrant.filter(
+      (row) => row.role === 'ddc_admin' && !prisma.store.user.find((u) => u.id === row.userId).disabledAt,
+    );
+    assert.equal(enabledAdmins.length, 1, 'one enabled ddc_admin remains');
+  });
+
   it('a failed audit write leaves the grant in place', async () => {
     const user = await seedUser(prisma);
     await grant(prisma, user.id, 'operator');

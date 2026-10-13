@@ -96,7 +96,7 @@ const tokens = {
   demo: () => jwt.sign({ type: 'ops_admin', sub: 'demo-viewer', role: 'demo' }, JWT_SECRET, { expiresIn: '5m' }),
 };
 
-/** Lets `res.on('finish')` work (the generic audit row) land before asserting on it. */
+/** Lets background work (the generic audit row) land before asserting on it. */
 function settle(ms = 25) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }

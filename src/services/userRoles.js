@@ -3,8 +3,9 @@
  * scripts/opsRoles.js. See src/constants/opsRoles.js for what each role allows.
  *
  * Grant and revoke write their audit row in the same transaction as the change. Anything that can
- * lower the number of enabled ddc_admin accounts (revoke, disable) takes one transaction-scoped
- * advisory lock first and refuses with LAST_ADMIN when none would be left.
+ * lower the number of enabled ddc_admin accounts (revoke, disable), and a re-enable, takes one
+ * transaction-scoped advisory lock first; revoke and disable then read the accounts again under
+ * the lock and refuse with LAST_ADMIN when no enabled ddc_admin would be left.
  */
 const prisma = require('../utils/prisma');
 const { ROLES, isRole, staffRole, cleanReason } = require('../constants/opsRoles');
@@ -181,8 +182,14 @@ async function revokeRole({ userId, role, reason, actor, surface = 'ops', reques
       where: { userId_role: { userId: target.id, role: wanted } },
     });
     if (!grant) throw new OpsError(404, 'NOT_GRANTED', 'This account does not have that role.');
-    if (wanted === 'ddc_admin' && !target.disabledAt && (await otherEnabledAdmins(tx, target.id)) === 0) {
-      throw new OpsError(409, 'LAST_ADMIN', 'At least one enabled ddc_admin must remain.');
+    if (wanted === 'ddc_admin') {
+      // Whether the target counts as an enabled admin is read again under the lock: the read in
+      // findTarget came before it, and a re-enable in between would otherwise go unseen.
+      const current = await tx.user.findUnique({ where: { id: target.id }, select: { disabledAt: true } });
+      if (!current) throw new OpsError(404, 'USER_NOT_FOUND', 'User not found.');
+      if (!current.disabledAt && (await otherEnabledAdmins(tx, target.id)) === 0) {
+        throw new OpsError(409, 'LAST_ADMIN', 'At least one enabled ddc_admin must remain.');
+      }
     }
     await tx.userRoleGrant.delete({ where: { userId_role: { userId: target.id, role: wanted } } });
     const audit = await writeAudit(tx, {

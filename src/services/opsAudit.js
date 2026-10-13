@@ -215,33 +215,48 @@ const auditLog = {
   error: (event, entry) => logger.error(event, entry),
 };
 
+/** Start the generic row for a finished write, unless it needs none. */
+function recordGenericWrite(req, res) {
+  if (req.auditWritten) return;
+  if (res.statusCode < 200 || res.statusCode >= 300) return;
+  const kind = req.opsAdmin && req.opsAdmin.kind;
+  if (kind !== 'user' && kind !== 'shared') return;
+  let row;
+  try {
+    row = genericWriteRow(req, res);
+  } catch (error) {
+    auditLog.error('ops_audit_write_failed', { reqId: req.reqId || null, errorName: error && error.name });
+    return;
+  }
+  req.auditPending = writeAudit(prisma, row).catch((error) => {
+    auditLog.error('ops_audit_write_failed', {
+      reqId: req.reqId || null,
+      action: 'ops.write',
+      errorName: error && error.name,
+    });
+  });
+}
+
 /**
- * Mounted after protectOps: one `ops.write` row for each non-GET request that finished 2xx and
+ * Mounted after protectOps: one `ops.write` row for each non-GET request that ended 2xx and
  * did not write its own row (`req.auditWritten`). A failed write is logged as an error only: the
  * change it describes has already been made and answered.
+ *
+ * The row starts when the handler ends the response (`res.end`), not on 'finish': a client that
+ * hangs up before the answer is sent never gets a 'finish', but the handler still made its change
+ * and still calls `res.end` (with the status already set), so the change is still recorded.
  */
 function auditOpsWrites(req, res, next) {
   if (req.method === 'GET' || req.method === 'HEAD' || req.method === 'OPTIONS') return next();
-  res.on('finish', () => {
-    if (req.auditWritten) return;
-    if (res.statusCode < 200 || res.statusCode >= 300) return;
-    const kind = req.opsAdmin && req.opsAdmin.kind;
-    if (kind !== 'user' && kind !== 'shared') return;
-    let row;
-    try {
-      row = genericWriteRow(req, res);
-    } catch (error) {
-      auditLog.error('ops_audit_write_failed', { reqId: req.reqId || null, errorName: error && error.name });
-      return;
+  const originalEnd = res.end;
+  let recorded = false;
+  res.end = function auditedEnd(...args) {
+    if (!recorded) {
+      recorded = true;
+      recordGenericWrite(req, res);
     }
-    req.auditPending = writeAudit(prisma, row).catch((error) => {
-      auditLog.error('ops_audit_write_failed', {
-        reqId: req.reqId || null,
-        action: 'ops.write',
-        errorName: error && error.name,
-      });
-    });
-  });
+    return originalEnd.apply(this, args);
+  };
   return next();
 }
 

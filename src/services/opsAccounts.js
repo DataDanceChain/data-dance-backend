@@ -62,6 +62,9 @@ async function enableAccount({ userId, reason, actor, surface = 'ops', requestId
   const target = await findTarget(db, userId);
   if (!target.disabledAt) throw new OpsError(409, 'NOT_DISABLED', 'This account is not disabled.');
   return db.$transaction(async (tx) => {
+    // A re-enable changes which accounts count as enabled admins; it runs under the same lock as
+    // revoke and disable so their LAST_ADMIN check never reads it half way.
+    await lockAdmins(tx);
     const before = await tx.user.findUnique({
       where: { id: target.id },
       select: { id: true, disabledAt: true, disabledBy: true, disabledReason: true },
