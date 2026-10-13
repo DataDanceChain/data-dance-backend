@@ -7,7 +7,7 @@ const { describe, it, before, beforeEach, after } = require('node:test');
 const assert = require('node:assert/strict');
 const request = require('supertest');
 
-const { installOpsApp, listenLoopback, seedUser, grant, bearer, tokens, settle } = require('../helpers/opsApp');
+const { installOpsApp, listenLoopback, seedUser, grant, bearer, tokens, settle, recordLabel } = require('../helpers/opsApp');
 
 const { prisma, app } = installOpsApp();
 const { clearRateLimitStore } = require('../../src/middlewares/rateLimitMiddleware');
@@ -41,7 +41,7 @@ describe('grant', () => {
     assert.equal(res.status, 201, JSON.stringify(res.body));
     assert.equal(res.body.data.grant.userId, user.id);
     assert.equal(res.body.data.grant.role, 'developer');
-    assert.equal(res.body.data.grant.grantedBy, `ops:${admin.id.slice(0, 8)}`, 'the record label, never the e-mail');
+    assert.equal(res.body.data.grant.grantedBy, recordLabel(admin.id), 'the record label, never the e-mail');
     assert.equal(res.body.data.grant.reason, 'TGE partner integration');
     assert.deepEqual(grantsOf(user.id), ['developer']);
     const row = prisma.store.userRoleGrant.find((r) => r.userId === user.id);

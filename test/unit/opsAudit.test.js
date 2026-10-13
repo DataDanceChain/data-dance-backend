@@ -9,7 +9,7 @@ const http = require('http');
 const { once } = require('events');
 const request = require('supertest');
 
-const { installOpsApp, listenLoopback, seedUser, grant, bearer, tokens, settle } = require('../helpers/opsApp');
+const { installOpsApp, listenLoopback, seedUser, grant, bearer, tokens, settle, recordLabel, JWT_SECRET } = require('../helpers/opsApp');
 
 const { prisma, app } = installOpsApp();
 const { clearRateLimitStore } = require('../../src/middlewares/rateLimitMiddleware');
@@ -302,7 +302,7 @@ describe('the generic ops.write row', () => {
       .set('Authorization', auth.operator)
       .send({ amount: -4, note: 'duplicate grant' });
     assert.equal(res.status, 200, JSON.stringify(res.body));
-    const label = `ops:${operator.id.slice(0, 8)}`;
+    const label = recordLabel(operator.id);
     const [point] = prisma.store.point;
     assert.ok(point.sourceId.endsWith(`__${label}`), point.sourceId);
     assert.equal(res.body.data.adjustedBy, label);
@@ -448,15 +448,40 @@ describe('money routes write their row inside the change', () => {
 });
 
 describe('who acted, inside and outside the audit log', () => {
-  it('a personal session: the audit label is its e-mail, the record label is ops:<first 8 of its id>', () => {
-    const ops = { kind: 'user', userId: '0f1e2d3c-aaaa-bbbb-cccc-000000000000', username: 'ops:0f1e2d3c', email: 'person@example.test', role: 'operator' };
+  it('a personal session: the audit label is its e-mail, the record label is a keyed hash of its id', () => {
+    const userId = '0f1e2d3c-aaaa-bbbb-cccc-000000000000';
+    const ops = { kind: 'user', userId, username: recordLabel(userId), email: 'person@example.test', role: 'operator' };
     const actor = actorFromOps(ops);
     assert.equal(actor.label, 'person@example.test');
-    assert.equal(actor.recordLabel, 'ops:0f1e2d3c');
-    assert.equal(recordLabelOf(actor), 'ops:0f1e2d3c');
+    assert.equal(actor.recordLabel, recordLabel(userId));
+    assert.match(actor.recordLabel, /^ops:[0-9a-f]{10}$/);
+    assert.equal(recordLabelOf(actor), recordLabel(userId));
     // Even an actor built with only an e-mail label writes no e-mail into a record.
-    assert.equal(recordLabelOf({ kind: 'user', userId: '0f1e2d3c-1', label: 'person@example.test' }), 'ops:0f1e2d3c');
-    assert.equal(recordLabelOf(actorFromUser({ id: 'abcdef012345', email: 'dev@example.test' }, 'developer')), 'ops:abcdef01');
+    assert.equal(recordLabelOf({ kind: 'user', userId: '0f1e2d3c-1', label: 'person@example.test' }), recordLabel('0f1e2d3c-1'));
+    assert.equal(recordLabelOf(actorFromUser({ id: 'abcdef012345', email: 'dev@example.test' }, 'developer')), recordLabel('abcdef012345'));
+  });
+
+  it('the record label holds no part of the id, is stable per account and depends on the server key', () => {
+    const ids = ['0f1e2d3c-aaaa-bbbb-cccc-000000000000', 'abcdef012345', 'cm0000000000000000000001', 'cm0000000000000000000002'];
+    const labels = ids.map((id) => staffRecordLabel(id));
+    labels.forEach((label, i) => {
+      assert.match(label, /^ops:[0-9a-f]{10}$/);
+      assert.ok(!label.includes(ids[i].slice(0, 6)), `${label} carries no prefix of ${ids[i]}`);
+      assert.equal(staffRecordLabel(ids[i]), label, 'the same account gets the same label');
+    });
+    assert.equal(new Set(labels).size, ids.length, 'ids that share a prefix get different labels');
+
+    const saved = process.env.JWT_SECRET;
+    try {
+      process.env.JWT_SECRET = 'another-server-key';
+      assert.equal(staffRecordLabel(ids[0]), recordLabel(ids[0], 'another-server-key'));
+      assert.notEqual(staffRecordLabel(ids[0]), labels[0], 'another key gives another label');
+      delete process.env.JWT_SECRET;
+      assert.equal(staffRecordLabel(ids[0]), 'ops', 'no key: no label that could be computed from the id');
+    } finally {
+      process.env.JWT_SECRET = saved;
+    }
+    assert.equal(process.env.JWT_SECRET, JWT_SECRET);
   });
 
   it('the shared login and the script keep their names; an empty id gives "ops"', () => {

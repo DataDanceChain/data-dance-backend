@@ -39,7 +39,7 @@ node scripts/opsRoles.js revoke --email <e> --role <role> --reason "<why>" [--ap
 |---|---|---|---|---|
 | `ops.read` (every GET) | yes | yes | yes | yes |
 | `ops.write` (campaigns, links, merchants, orders, payments, data requests, privacy requests, points) | yes | yes | yes | – |
-| `ops.support` (sign-in issues, the user view's history) | yes | yes | – | – |
+| `ops.support` (sign-in issues; the user view's identity, roles and history) | yes | yes | – | – |
 | `ops.payouts` (disbursement process / disburse) | yes | – | – | – |
 | `ops.admin` (roles, disable / enable, audit, Data Planet manager) | yes | – | – | – |
 
@@ -49,8 +49,10 @@ while self-serve registration is closed. A missing permission answers 403 `FORBI
 ### Who acted, outside the audit log
 
 Records that users, merchants or the demo login can read name the actor by a label, never by
-e-mail: a personal session writes `ops:` and the first 8 characters of the account id (the shared
-login writes `shared`, the role script `script`). This covers a point's source id,
+e-mail or account id: a personal session writes `ops:` and the first 10 hex characters of
+HMAC-SHA256 over the account id, keyed with HMAC-SHA256(`JWT_SECRET`, `ops-record-label`). The
+same account always gets the same label; rotating `JWT_SECRET` changes the labels written from then
+on (the shared login writes `shared`, the role script `script`). This covers a point's source id,
 `PrivacyRequest.resolvedBy`, `kycReviewedBy`, the ledger metadata of a payment decision or merchant
 credit (`confirmedBy`, `rejectedBy`, `operator`), a campaign's `createdBy` / `updatedBy` /
 `publishedBy` and events, data request events, `UserRoleGrant.grantedBy` and `User.disabledBy`.
@@ -108,7 +110,7 @@ JWT_SECRET=<existing-jwt-secret>
 | GET | `/api/ops/points` | Ledger totals + paginated member balances. Query: `q`, `min`, `max`, `zeros=0`, `sort`, `order`, `page`, `limit` |
 | GET | `/api/ops/points/export` | Same filters, CSV download |
 | GET | `/api/ops/users/search?q=` | Ops Bearer token |
-| GET | `/api/ops/users/:userId` | The full user view: account, roles, points, referrals, data licence, privacy requests, developer clients, merchant. With `ops.support` also: identity (Web3Auth verifier ids, the network rebind's addresses and evidence), sign-in issues, history, and who acted (`account.disabledBy` / `disabledReason`, `roles[].grantedBy`, `privacyRequests[].resolvedBy`); without it these are `null` |
+| GET | `/api/ops/users/:userId` | The full user view: account, points, referrals, data licence, privacy requests, developer clients, merchant. With `ops.support` also: identity (Web3Auth verifier ids, the network rebind's addresses and evidence), roles (with `grantedBy`), sign-in issues, history, and who acted (`account.disabledBy` / `disabledReason`, `privacyRequests[].resolvedBy`); without it these are `null` |
 | POST | `/api/ops/users/:userId/points` | `ops.write`, body: `{ amount, note }` (the note is the audit reason). A deduction is checked against the balance inside the change, so deductions at once never go below zero |
 | GET | `/api/ops/campaigns` | List campaign drafts / scheduled / live / ended |
 | POST | `/api/ops/campaigns` | Create draft. Slot-filled fields only, no HTML |

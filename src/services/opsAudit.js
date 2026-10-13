@@ -13,6 +13,7 @@
  * - `detail` never holds a token, a secret, a code or a request body.
  * - Rows are append-only: nothing here updates or deletes one.
  */
+const crypto = require('crypto');
 const prisma = require('../utils/prisma');
 const { createLogger } = require('../utils/logger');
 const { AUDIT_ACTIONS, ACTOR_KINDS, SURFACES } = require('../constants/opsRoles');
@@ -29,15 +30,27 @@ class OpsError extends Error {
   }
 }
 
+/** The sub-key of record labels: HMAC-SHA256(JWT_SECRET, 'ops-record-label'), or null without a secret. */
+function recordLabelKey() {
+  const secret = String(process.env.JWT_SECRET || '');
+  if (!secret) return null;
+  return crypto.createHmac('sha256', secret).update('ops-record-label').digest();
+}
+
 /**
  * Who acted, as written into records that people outside staff can read (a point's source id, a
  * privacy request's resolvedBy, a ledger row's metadata, a campaign's createdBy, a role grant's
- * grantedBy, ...): `ops:` and the first 8 characters of the staff account's id, never its e-mail.
- * The person behind it is kept only in OpsAuditLog (actorUserId, actorLabel).
+ * grantedBy, ...): `ops:` and the first 10 hex characters of HMAC-SHA256 over the staff account's
+ * id, keyed with a sub-key of JWT_SECRET (recordLabelKey). Never the e-mail and never the id: the
+ * same account always gets the same label, and only the server can tell whose it is. The person
+ * behind it is kept only in OpsAuditLog (actorUserId, actorLabel). Without JWT_SECRET (no ops
+ * session can exist then) the label is plain `ops`.
  */
 function staffRecordLabel(userId) {
-  const short = String(userId || '').slice(0, 8);
-  return short ? `ops:${short}` : 'ops';
+  const id = String(userId || '');
+  const key = id ? recordLabelKey() : null;
+  if (!key) return 'ops';
+  return `ops:${crypto.createHmac('sha256', key).update(id).digest('hex').slice(0, 10)}`;
 }
 
 /** The actor of scripts/opsRoles.js. */

@@ -34,8 +34,8 @@ function sessionInvalid(res, status = 401) {
  * req.opsAdmin = { kind, userId, username, role, roles }. `username` fills the existing "by"
  * fields (a point's source id, resolvedBy, kycReviewedBy, ledger metadata, campaign createdBy /
  * updatedBy / publishedBy and events, data request events), which users, merchants and the demo
- * login can read. A personal session's is therefore `ops:<first 8 of the user id>`, never its
- * e-mail; the e-mail is kept only in OpsAuditLog (actorUserId, actorLabel).
+ * login can read. A personal session's is therefore its record label (opsAudit.staffRecordLabel),
+ * never its e-mail or id; the person is kept only in OpsAuditLog (actorUserId, actorLabel).
  */
 async function protectOps(req, res, next) {
   const header = req.headers.authorization;

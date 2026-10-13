@@ -11,7 +11,8 @@
  * Calls that race each other are run at once: two attests (or a confirm and an attest) send one
  * chain attestation; two reconciles of a confirmed payout attest it once; two deductions never take
  * a balance below zero; two credits with one Idempotency-Key credit once; two fulfilments for one
- * buyer never overdraw it; a repeat reject changes nothing.
+ * buyer never overdraw it; a repeat reject changes nothing. An attestation or reconcile claim newer
+ * than 15 minutes blocks the next call; an older one (left by a crash) is taken over.
  *
  * The refusal is a CHECK constraint this file adds for its own run only (it refuses the rows of one
  * per-run admin) and drops afterwards. The chain is the in-memory fake (test/helpers/fakeAttestChain.js)
@@ -632,6 +633,36 @@ describe('order attestation: one chain send at a time', () => {
     assert.ok((await prisma.purchaseOrder.findUnique({ where: { id: order.id } })).attestationTxHash);
   });
 
+  it('a live claim (1 or 14 minutes old) refuses with 409 and sends and writes nothing; one older than 15 minutes is taken over', async () => {
+    const { order } = await unattestedOrder('attest-stale');
+    const sent = chain.sent.length;
+    const minutesAgo = (minutes) => new Date(Date.now() - minutes * 60 * 1000);
+
+    for (const minutes of [1, 14]) {
+      const claimedAt = minutesAgo(minutes);
+      await prisma.purchaseOrder.update({ where: { id: order.id }, data: { attestationClaimedAt: claimedAt } });
+      const blocked = await post(`/orders/${order.id}/attest`, auth.admin);
+      assert.equal(blocked.status, 409, `${minutes} min: ${JSON.stringify(blocked.body)}`);
+      assert.equal(blocked.body.code, 'ATTESTATION_IN_FLIGHT');
+      assert.equal(chain.sent.length, sent, `${minutes} min: nothing sent`);
+      const held = await prisma.purchaseOrder.findUnique({ where: { id: order.id } });
+      assert.equal(held.attestationTxHash, null);
+      assert.equal(held.attestationClaimedAt.getTime(), claimedAt.getTime(), `${minutes} min: the claim stays as it was`);
+    }
+    await settle();
+    assert.equal((await rowsFor(order.id)).length, 0, 'a refused call writes no row');
+
+    await prisma.purchaseOrder.update({ where: { id: order.id }, data: { attestationClaimedAt: minutesAgo(16) } });
+    const taken = await post(`/orders/${order.id}/attest`, auth.admin);
+    assert.equal(taken.status, 200, JSON.stringify(taken.body));
+    assert.equal(chain.sent.length, sent + 1, 'the stale claim is taken over and the attestation sent once');
+    const saved = await prisma.purchaseOrder.findUnique({ where: { id: order.id } });
+    assert.ok(saved.attestationTxHash);
+    assert.equal(saved.attestationClaimedAt, null, 'the claim is released');
+    await settle();
+    assert.deepEqual((await rowsFor(order.id)).map((r) => r.action), ['order.attest']);
+  });
+
   it('without an ops session (the buyer paths) the same claim holds: two at once send once', async () => {
     const { order } = await unattestedOrder('attest-race-plain');
     const { attestPaidOrder } = require('../../src/services/commerceAttest');
@@ -810,6 +841,54 @@ describe('payouts', () => {
     assert.equal(again.status, 200);
     assert.equal(chain.sent.length, sent + 1);
     assert.equal((await rowsFor(item.id)).length, 1, 'an attested payout needs nothing more');
+  });
+
+  it('process: a live reconcile claim (1 or 14 minutes old) leaves the payout alone; one older than 15 minutes is taken over', async () => {
+    const item = await prisma.disbursementItem.create({
+      data: {
+        payoutId: id('reconcile-stale'),
+        origin: 'internal_reward',
+        recordClass: recordClassForOrigin('internal_reward'),
+        walletAddress: wallet(),
+        amount: 2,
+        asset: 'USDT',
+        chainId: chainId(),
+        tokenAddress: tokenAddress(),
+        reason: 'db test',
+        status: 'confirmed',
+        txHash: ethers.hexlify(ethers.randomBytes(32)),
+        submittedAt: new Date(),
+        confirmedAt: new Date(),
+      },
+    });
+    const sent = chain.sent.length;
+    const before = transfers.length;
+    const minutesAgo = (minutes) => new Date(Date.now() - minutes * 60 * 1000);
+
+    for (const minutes of [1, 14]) {
+      const claimedAt = minutesAgo(minutes);
+      await prisma.disbursementItem.update({ where: { id: item.id }, data: { reconcileClaimedAt: claimedAt } });
+      const res = await post(`/disbursements/items/${item.id}/process`, auth.admin);
+      assert.equal(res.status, 200, `${minutes} min: ${JSON.stringify(res.body)}`);
+      assert.equal(chain.sent.length, sent, `${minutes} min: no attestation while the claim is live`);
+      const held = await prisma.disbursementItem.findUnique({ where: { id: item.id } });
+      assert.equal(held.attestationTxHash, null);
+      assert.equal(held.reconcileClaimedAt.getTime(), claimedAt.getTime(), `${minutes} min: the claim stays as it was`);
+    }
+    await settle();
+    assert.equal((await rowsFor(item.id)).length, 0, 'a call that lost the claim writes no row');
+
+    await prisma.disbursementItem.update({ where: { id: item.id }, data: { reconcileClaimedAt: minutesAgo(16) } });
+    const taken = await post(`/disbursements/items/${item.id}/process`, auth.admin);
+    assert.equal(taken.status, 200, JSON.stringify(taken.body));
+    assert.equal(chain.sent.length, sent + 1, 'the stale claim is taken over and the payout attested once');
+    assert.equal(transfers.length, before, 'a confirmed payout is never sent again');
+    const saved = await prisma.disbursementItem.findUnique({ where: { id: item.id } });
+    assert.ok(saved.attestationTxHash);
+    assert.equal(saved.status, 'confirmed');
+    assert.equal(saved.reconcileClaimedAt, null, 'the claim is released');
+    await settle();
+    assert.deepEqual((await rowsFor(item.id)).map((r) => [r.action, r.detail.step]), [['disbursement.process', 'reconcile']]);
   });
 
   async function redemption(name) {

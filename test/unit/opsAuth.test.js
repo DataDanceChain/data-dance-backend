@@ -8,7 +8,7 @@ const assert = require('node:assert/strict');
 const jwt = require('jsonwebtoken');
 const request = require('supertest');
 
-const { installOpsApp, listenLoopback, seedUser, grant, bearer, tokens, JWT_SECRET } = require('../helpers/opsApp');
+const { installOpsApp, listenLoopback, seedUser, grant, bearer, tokens, JWT_SECRET, recordLabel } = require('../helpers/opsApp');
 
 const SHARED = { username: 'shared-ops', password: 'shared-ops-password-for-tests' };
 const DEMO = { username: 'demo-viewer', password: 'demo-password-for-tests' };
@@ -50,7 +50,7 @@ describe('personal ops session (kind: user)', () => {
       email: 'admin@example.test',
       name: 'Admin',
       // Records outside the audit log get this label, never the e-mail.
-      username: `ops:${admin.id.slice(0, 8)}`,
+      username: recordLabel(admin.id),
       role: 'ddc_admin',
       roles: ['ddc_admin'],
       permissions: ['ops.read', 'ops.write', 'ops.support', 'ops.payouts', 'ops.admin'],

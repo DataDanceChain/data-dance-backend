@@ -5,7 +5,7 @@
  * "test").
  *
  *   - A points adjust and a privacy-request resolve by an operator: the end user's own answers and
- *     the demo login's answers carry the operator's record label (`ops:<first 8 of the id>`), never
+ *     the demo login's answers carry the operator's record label (`ops:` and a keyed hash), never
  *     the operator's e-mail or name; the audit row keeps who acted (actorUserId, actorLabel).
  *   - After a round of ops writes by an operator and a ddc_admin (points, privacy, merchant credit,
  *     payment confirm and reject, KYC review, campaign create / update / go live / end, data request
@@ -83,7 +83,11 @@ async function staff(name, role) {
   return row;
 }
 
-const recordLabel = (row) => `ops:${row.id.slice(0, 8)}`;
+/** The record label, computed here on its own: `ops:` and 10 hex of a keyed hash of the id (see opsAudit). */
+const recordLabel = (row) => {
+  const key = crypto.createHmac('sha256', process.env.JWT_SECRET).update('ops-record-label').digest();
+  return `ops:${crypto.createHmac('sha256', key).update(row.id).digest('hex').slice(0, 10)}`;
+};
 
 let operator;
 let admin;
@@ -129,7 +133,8 @@ describe("an operator's points adjust and privacy resolve, seen by the user and 
     const res = await request(app).post(`/api/ops/users/${member.id}/points`).set('Authorization', opsToken(operator)).send({ amount: 7, note: 'goodwill credit' });
     assert.equal(res.status, 200, JSON.stringify(res.body));
     assert.ok(res.body.data.sourceId.endsWith(`__${recordLabel(operator)}`), res.body.data.sourceId);
-    const identity = [operator.email, operator.name];
+    // Nor a label built from the id itself.
+    const identity = [operator.email, operator.name, `ops:${operator.id.slice(0, 8)}`];
 
     const answers = {
       userPoints: await request(app).get('/api/users/points').set('Authorization', walletToken(member)),

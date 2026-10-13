@@ -101,6 +101,15 @@ const tokens = {
   demo: () => jwt.sign({ type: 'ops_admin', sub: 'demo-viewer', role: 'demo' }, JWT_SECRET, { expiresIn: '5m' }),
 };
 
+/**
+ * The record label staff writes outside the audit log, computed here on its own so the tests check
+ * the server's: `ops:` and the first 10 hex of HMAC-SHA256(HMAC-SHA256(JWT_SECRET, 'ops-record-label'), id).
+ */
+function recordLabel(userId, secret = process.env.JWT_SECRET) {
+  const key = crypto.createHmac('sha256', secret).update('ops-record-label').digest();
+  return `ops:${crypto.createHmac('sha256', key).update(String(userId)).digest('hex').slice(0, 10)}`;
+}
+
 /** Lets background work (the generic audit row) land before asserting on it. */
 function settle(ms = 25) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -116,4 +125,5 @@ module.exports = {
   bearer,
   tokens,
   settle,
+  recordLabel,
 };

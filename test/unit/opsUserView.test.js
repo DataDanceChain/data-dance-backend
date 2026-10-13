@@ -1,7 +1,8 @@
 /**
  * The full user view (admin issue #2): GET /api/ops/users/:userId keeps its existing keys and adds
  * account, identity, roles, data licence, privacy requests, developer clients, merchant, sign-in
- * issues and history. The last two need ops.support (null otherwise, e.g. for demo). Search rows
+ * issues and history. Identity, roles, sign-in issues and history need ops.support (null otherwise,
+ * e.g. for demo). Search rows
  * gain disabledAt. Through the REAL application on the in-memory Prisma stand-in.
  */
 const { describe, it, before, beforeEach, after } = require('node:test');
@@ -186,14 +187,26 @@ describe('GET /api/ops/users/:userId', () => {
       assert.equal(data.account.disabledAt, '2026-10-10T00:00:00.000Z', `${name}: the status itself stays`);
       assert.equal(data.account.disabledBy, null, name);
       assert.equal(data.account.disabledReason, null, name);
-      assert.equal(data.roles.length, 1, `${name}: the rest of the view is readable`);
-      assert.equal(data.roles[0].grantedBy, null, name);
-      assert.equal(data.privacyRequests[0].status, 'resolved', name);
+      assert.equal(data.roles, null, `${name}: who holds which role is withheld`);
+      assert.equal(data.privacyRequests[0].status, 'resolved', `${name}: the rest of the view is readable`);
       assert.equal(data.privacyRequests[0].resolvedBy, null, name);
       const text = JSON.stringify(data);
-      for (const hidden of ['fraud report #12', '0x2222222222222222222222222222222222222222', 'devnet_pair', 'web3auth-google-sapphire-mainnet']) {
+      for (const hidden of ['fraud report #12', '0x2222222222222222222222222222222222222222', 'devnet_pair', 'web3auth-google-sapphire-mainnet', 'TGE partner integration']) {
         assert.ok(!text.includes(hidden), `${name}: ${hidden} is not in the answer`);
       }
+    }
+  });
+
+  it('a staff account viewed without ops.support: its roles are withheld, not an empty list', async () => {
+    const staffView = (await view(admin.id, auth.operator)).body.data;
+    assert.deepEqual(staffView.roles.map((row) => row.role), ['ddc_admin'], 'ops.support sees the role');
+
+    process.env.OPS_SHARED_LOGIN = 'on';
+    for (const [name, authorization] of [['demo', auth.demo], ['shared', bearer(tokens.shared())]]) {
+      const res = await view(admin.id, authorization);
+      assert.equal(res.status, 200, name);
+      assert.equal(res.body.data.roles, null, name);
+      assert.ok(!JSON.stringify(res.body.data).includes('ddc_admin'), `${name}: the role name is not in the answer`);
     }
   });
 

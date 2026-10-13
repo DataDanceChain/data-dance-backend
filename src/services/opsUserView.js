@@ -3,11 +3,11 @@
  * account, identity, roles, data licence, privacy requests, developer clients, merchant, sign-in
  * issues and the audit history.
  *
- * Only a session with ops.support (ddc_admin, operator) sees who acted and the sign-in identity:
- *   - identity (web3auth verifier ids, the network rebind's addresses and evidence), sign-in
+ * Only a session with ops.support (ddc_admin, operator) sees who acted, who holds which role and
+ * the sign-in identity:
+ *   - identity (web3auth verifier ids, the network rebind's addresses and evidence), roles, sign-in
  *     issues and the audit history: null otherwise;
- *   - account.disabledBy / disabledReason, roles[].grantedBy and privacyRequests[].resolvedBy:
- *     null otherwise.
+ *   - account.disabledBy / disabledReason and privacyRequests[].resolvedBy: null otherwise.
  * The demo (read-only) and shared logins get the rest.
  */
 const prisma = require('../utils/prisma');
@@ -28,7 +28,7 @@ const VIEW_USER_SELECT = Object.freeze({
 async function userViewSections(user, { canSupport = false } = {}, db = prisma) {
   const userId = user.id;
   const [grants, licence, privacy, clients, legalEntity, rebind, conflicts, audit] = await Promise.all([
-    db.userRoleGrant.findMany({ where: { userId }, orderBy: { grantedAt: 'asc' } }),
+    canSupport ? db.userRoleGrant.findMany({ where: { userId }, orderBy: { grantedAt: 'asc' } }) : null,
     db.dataLicenceConsent.findUnique({ where: { userId } }),
     db.privacyRequest.findMany({
       where: { userId },
@@ -82,12 +82,12 @@ async function userViewSections(user, { canSupport = false } = {}, db = prisma) 
           }
         : null,
     },
-    roles: grants
+    roles: !canSupport ? null : grants
       .filter((grant) => ROLES.includes(grant.role))
       .map((grant) => ({
         role: grant.role,
         grantedAt: grant.grantedAt,
-        grantedBy: canSupport ? grant.grantedBy : null,
+        grantedBy: grant.grantedBy,
         reason: grant.reason,
       })),
     dataLicence: licence
