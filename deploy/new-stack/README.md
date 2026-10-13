@@ -57,14 +57,17 @@ Without the flag nothing changes. Order and pass criteria: [APPROVAL.md](APPROVA
 
 `60-rehearsal.sh` rehearses the cutover (runbook 4.2 and 4.3) inside the new stack, on a copy: it restores the newest
 verified P1 daily dump into the database `ddc_rehearsal_copy` of the new stack's Postgres, migrates it with the release
-image, reports on it, runs the user migration's `--apply` and then its `--rollback` on it, times every step and drops it.
+image, reports on it, runs the user migration's `--apply`, the record repair (`backfillSocialPostIdentity.js --apply`,
+twice: the second run must change nothing) and then the user migration's `--rollback` on it, times every step and drops
+it.
 The subcommands, in order:
 
     ./remote.sh run 60-rehearsal.sh preflight REHEARSAL_G8=scrub    # read-only
     DDC_APPROVED=yes ./remote.sh run 60-rehearsal.sh restore REHEARSAL_G8=scrub   # or keep (gate G8); newest daily dump, or a dump path
     DDC_APPROVED=yes ./remote.sh run 60-rehearsal.sh migrate ddcnew/backend:<12 hex>   # default: the running api's image
     DDC_APPROVED=yes ./remote.sh run 60-rehearsal.sh report
-    DDC_APPROVED=yes ./remote.sh run 60-rehearsal.sh apply-switch
+    DDC_APPROVED=yes ./remote.sh run 60-rehearsal.sh apply-switch   # --apply, the record repair (timed), --rollback
+    DDC_APPROVED=yes ./remote.sh run 60-rehearsal.sh record offsite_copy <seconds>   # a part measured by hand
     ./remote.sh run 60-rehearsal.sh summary                         # read-only: timings and the window estimate
     DDC_APPROVED=yes ./remote.sh run 60-rehearsal.sh cleanup        # drops the copy and the records with ids
 
@@ -72,12 +75,15 @@ The copy is never the database the running api uses, a database named in the new
 `ddc_prod`, `ddc_rehearsal`, `ddc_rehearsal2`, `postgres` and the templates; `restore` marks it, and every later step
 works on it only while it carries that mark. psql connects only to the copy and to the maintenance database; each
 one-off container checks, before its command starts, that its `DATABASE_URL` names the copy. The old stack is only read
-(the size of its database). `report` makes the copy read-only while it runs and prints counts only. `restore` needs the
+(the size of its database). `report` makes the copy read-only while it runs and prints counts only (the record
+repair's per-user and row lines stay in the records on the server, as in `apply-switch`). `restore` needs the
 G8 decision: `scrub` replaces the sensitive User columns' values after the restore, `keep` leaves them as in the dump.
 Once the new stack is production (its api on `ddc_prod`), `restore`, `migrate`, `report` and `apply-switch` refuse and
 `cleanup` still drops the copy. Run `restore` and `migrate` at low traffic, away from the 03:15 nightly dump, and
 **`cleanup` before the cutover window** (the copy takes about 1-1.5 x the database on the disk the window needs).
-`summary` prints no PASS while a part of the window is neither measured nor given a runbook figure. What each step
+`summary` prints no PASS while a part of the window is neither measured nor given a runbook figure (today the off-site
+copy of the final dump, measured by hand and entered with `record offsite_copy <seconds>`); it names each missing part
+once and compares the total as printed, with two decimals. What each step
 changes, its pass criteria and its undo: [APPROVAL.md](APPROVAL.md) section 10.
 
 ## Files
@@ -91,7 +97,7 @@ changes, its pass criteria and its undo: [APPROVAL.md](APPROVAL.md) section 10.
 | `p1-backup.sh`, `p2-disk.sh` | P1 backups (dump, verify, nightly cron) and P2 disk cleanup and expansion check |
 | `10-build.sh`, `20-env.sh`, `30-nginx.sh`, `40-up.sh`, `compose.yaml` | build, rehearsal env, nginx vhosts (apply, undo, restore after a take-over) and start of `ddcnew` |
 | `50-partner-page.sh`, `partner-info/index.html` | the partner info page: the template, filled and published to `/srv/ddcnew/partner-info/` with client_secret as AES-256-GCM ciphertext; the page password comes from 1Password on stdin ([APPROVAL.md](APPROVAL.md) section 8) |
-| `60-rehearsal.sh` | the rehearsal on a copy of production data (above): preflight, restore, migrate, report, apply-switch, summary, cleanup |
+| `60-rehearsal.sh` | the rehearsal on a copy of production data (above): preflight, restore, migrate, report, apply-switch, summary, record, cleanup |
 | `99-teardown.sh` | removes the new stack only (the undo) |
 | `common.sh` | the settings (hosts, ports) and shared guards: write allowlist, old-stack fingerprint, run lock, build watchdog |
 | `survey/` | read-only survey scripts and the read-only SSH runner; their outputs never go into the repository |

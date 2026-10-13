@@ -15,6 +15,9 @@
 #               | run 50-partner-page.sh status | run 60-rehearsal.sh preflight [dump] | run 60-rehearsal.sh summary
 #                                             (read-only, no flag needed)
 #   DDC_APPROVED=yes ./remote.sh run 60-rehearsal.sh restore REHEARSAL_G8=scrub|keep   the rehearsal's restore (gate G8)
+#   DDC_APPROVED=yes ./remote.sh run 60-rehearsal.sh record offsite_copy <seconds>     a window part measured by hand
+#                                             (key and seconds checked here before connecting: common.sh
+#                                             rehearsal_record_check)
 #   op read "op://<vault>/<item>/password" | DDC_APPROVED=yes ./remote.sh run 50-partner-page.sh apply PARTNER_ALLOWED_IP=<ip>
 #                                             the page password: piped, forwarded on ssh's stdin, never typed or printed
 # The server login (DDC_SSH_TARGET) and the 1Password reference (DDC_OP_SECRET_REF) come from local.env (untracked;
@@ -176,6 +179,12 @@ case "$cmd" in
     # The same checks the server applies to the settings, the client id and TAKE_OVER_VHOSTS, here, before connecting.
     chk=$(env -i PATH="$PATH" ${ovr[@]+"${ovr[@]}"} bash -c '. "$1/common.sh" && remote_overrides_check' _ "$PKG" 2>&1) \
       || { echo "refusing before connecting: $(printf '%s' "$chk" | tail -n 1)"; exit 2; }
+    # 60-rehearsal.sh record <key> <seconds>: only a part measured by hand, and a whole number of seconds.
+    if [ "$s ${1:-}" = "60-rehearsal.sh record" ]; then
+      [ "$#" = 3 ] && [ "${#ovr[@]}" = 0 ] || { echo "refusing before connecting: 60-rehearsal.sh record takes <key> <seconds> and nothing else"; exit 2; }
+      chk=$(env -i PATH="$PATH" bash -c '. "$1/common.sh" && rehearsal_record_check "$2" "$3"' _ "$PKG" "$2" "$3" 2>&1) \
+        || { echo "refusing before connecting: $(printf '%s' "$chk" | tail -n 1)"; exit 2; }
+    fi
     rssh "cd /root/ddcnew/deploy && env$envs ./$s$args" 2>&1 | tee "$PKG/logs/$TS-${s%.sh}.txt";;
-  *) sed -n '2,19p' "$0"; exit 2;;
+  *) sed -n '2,22p' "$0"; exit 2;;
 esac

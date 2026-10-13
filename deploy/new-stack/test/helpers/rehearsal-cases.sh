@@ -57,6 +57,16 @@ plan_json() {
 J
   [ "$go" = true ] || exit 1
 }
+# backfillSocialPostIdentity.js's record part: <restore verb> <supersede verb> <link-key rows> <restored> <superseded> <earlier>
+records_part() {
+  printf 'other sources: %s rows stored under a post link key, %s records (%s rows read)\n' "$3" "$(( $4 + 1 ))" "$3"
+  printf '  %s own identity: %s (order id %s, title key 0, content only 0; content hash kept, held by another row: 0)\n' "$1" "$4" "$4"
+  printf '  earliest copy already holds the identity: %s\n  %s superseded (later copies): %s (stored under a link key %s, under the identity itself 0)\n' "$([ "$4" = 0 ] && echo 0 || echo 1)" "$2" "$5" "$5"
+  printf '  already superseded by an earlier run: %s\n    amazon: restore %s, supersede %s\n  conflicts (left unchanged, nothing deleted): 0\n' "$6" "$4" "$5"
+  printf "superseded rows per user, this run and earlier runs (points unchanged; each row's share of its upload batch):\n"
+  printf '  user uid-secret-5: rows 6, points 60.00 (base 60.00, bonus 0.00), upline 0.00, no batch 0\n'
+  printf '  total: users 1, rows 6, points 60.00 (base 60.00, bonus 0.00), upline 0.00, no batch 0\n'
+}
 case "$1" in
   ps) if [[ "$*" == *'{{.Names}}'* ]]; then printf '%s\n' ddc-backend-ddc-backend-db-1 ddcnew-api-1 ddcnew-db-1 ddcnew-web-1; fi; exit 0;;
   image)
@@ -109,7 +119,7 @@ case "$1" in
     case "$sql" in
       *"SELECT 'db:'"*) case "$copy" in marked) echo "db:ddcnew-rehearsal-copy: restored by deploy/new-stack/60-rehearsal.sh, never production x.dump";; foreign) echo "db:";; esac;;
       *"CREATE DATABASE"*) [ "$copy" = absent ] || { echo 'ERROR:  database exists' >&2; exit 3; }; echo marked > "$S/copy";;
-      *"DROP DATABASE"*) echo absent > "$S/copy"; rm -f "$S/migrated" "$S/run" "$S/rolledback" "$S/snap" "$S/scrubbed";;
+      *"DROP DATABASE"*) echo absent > "$S/copy"; rm -f "$S/migrated" "$S/run" "$S/rolledback" "$S/snap" "$S/scrubbed" "$S/repaired";;
       *"SET default_transaction_read_only = on"*) echo on > "$S/ro";;
       *"RESET default_transaction_read_only"*) echo off > "$S/ro";;
       *"SHOW default_transaction_read_only"*) st ro off;;
@@ -192,7 +202,16 @@ case "$1" in
         rm -f "$S/run"; touch "$S/rolledback"
         printf '{"mode": "rollback", "go": true, "rolled_back": true, "run_id": "20261013120000_ab12", "backup_table": "mainnet_switch_backup_20261013120000_ab12", "accounts_restored": %s, "rebinds_reverted": 0, "records_deleted": 1200}\n' "${STUB_ROLLBACK_RESTORED:-1200}";;
       "node scripts/backfillSocialPostIdentity.js")
-        printf 'mode dry-run: scanned 50 social rows\n  would update: 7\n  already current: 40\n  no permalink (unchanged): 3\n  conflicts (left unchanged, nothing deleted): 1\n    row r-uid-secret-1 user uid-secret-9: identity kept by r-2\nDry run: nothing was written. Re-run with --apply to write.\n';;
+        printf 'mode dry-run: scanned 50 social rows\n  would update: 7\n  already current: 40\n  no permalink (unchanged): 3\n  conflicts (left unchanged, nothing deleted): 1\n    row r-uid-secret-1 user uid-secret-9: identity kept by r-2\n'
+        records_part 'would restore' 'would mark' 10 4 6 0
+        printf 'Dry run: nothing was written. Re-run with --apply to write.\n';;
+      "node scripts/backfillSocialPostIdentity.js --apply")   # the record repair: changes on the first run, none after
+        [ "$(st ro off)" = off ] || { echo 'error: cannot execute UPDATE in a read-only transaction' >&2; exit 3; }
+        [ "${STUB_REPAIR:-ok}" != fail ] || { echo 'Error: record repair failed (row of someone@example.com)' >&2; exit 1; }
+        if [ -f "$S/repaired" ] && [ "${STUB_REPAIR:-ok}" != again ]; then u=0; l=0; r=0; sp=0; e=6; else u=7; l=10; r=4; sp=6; e=0; fi
+        touch "$S/repaired"
+        printf 'mode apply: scanned 50 social rows\n  updated: %s\n  already current: 40\n  no permalink (unchanged): 3\n  conflicts (left unchanged, nothing deleted): 1\n    row r-uid-secret-1 user uid-secret-9: identity kept by r-2\n' "$u"
+        [ "${STUB_REPAIR:-ok}" = nopart2 ] || records_part 'restored' 'marked' "$l" "$r" "$sp" "$e";;
       "node scripts/reportDuplicateCampaignGrants.js")
         printf 'one-time campaign grants written more than once: 2 group(s)\n  user uid-secret-2 first_action fa-1: 2 rows, 200 points, 2026-10-01T00:00:00.000Z .. 2026-10-02T00:00:00.000Z\n  user uid-secret-3 referral_boost rb-9: 3 rows, 150 points, 2026-10-03T00:00:00.000Z .. 2026-10-04T00:00:00.000Z\n';;
       *) echo "stub compose: unexpected command $*" >&2; exit 1;;
@@ -261,11 +280,13 @@ has_timings() { local s; for s in "$@"; do grep -q "$(printf '^%s\t' "$s")" "$W/
 
 echo "-- arguments: refused before any docker call"
 for a in "" "bogus" "restore a b" "migrate postgres:17" "migrate ddcnew/backend:0123456789ab-infra" "migrate ddcnew/backend:0123456789AB" "report ddcnew/web:tge-0123456789ab" \
-         "apply-switch ddcnew/backend:abc" "summary x" "cleanup now" "restore /etc/hosts" "restore $W/ddcnew/.env.db"; do
+         "apply-switch ddcnew/backend:abc" "summary x" "cleanup now" "restore /etc/hosts" "restore $W/ddcnew/.env.db" \
+         "record" "record offsite_copy" "record offsite_copy 600 x" "record restore 600" "record points_repair 600" "record offsite_copy 0" \
+         "record offsite_copy 86401" "record offsite_copy 6m" "record offsite_copy -5" "record offsite_copy 060"; do
   fresh
   # shellcheck disable=SC2086  # the arguments of each case are split on purpose
   reh $a
-  if [ "$RC" = 1 ] && grep -q '^FAIL ' "$W/out" && [ "$(ncalls)" = 0 ]; then ok "60-rehearsal.sh ${a:-<none>}: $(grep -m1 '^FAIL' "$W/out" | cut -c1-110)"
+  if [ "$RC" = 1 ] && grep -q '^FAIL ' "$W/out" && [ "$(ncalls)" = 0 ] && [ ! -e "$W/ddcnew/rehearsal/timings.tsv" ]; then ok "60-rehearsal.sh ${a:-<none>}: $(grep -m1 '^FAIL' "$W/out" | cut -c1-110)"
   else show; bad "60-rehearsal.sh ${a:-<none>} (rc=$RC, docker calls $(ncalls))"; fi
 done
 fresh; ln -sfn "$DUMP_NEW" "$W/backup/pg/ddc-daily-20261013-0400.dump"
@@ -398,8 +419,10 @@ fresh_keep; reh report
   && grep -q '^ *conflicts (left unchanged, nothing deleted): 1$' "$W/out" && grep -q 'in all: 2 group(s), 5 rows, 350 points' "$W/out" \
   && grep -q 'keep.txt: 2 user id(s)' "$W/out" && grep -q 'vols= .*keep.txt:/tmp/keep.txt:ro' "$W/s/oneoffs" && grep -q '^cmd node scripts/mainnetSwitch.js --plan --json --keep-wallet-ids /tmp/keep.txt$' "$W/s/oneoffs" \
   && has_timings counts_report plan backfill duplicates && ! grep -q 'uid-secret' "$W/out" \
+  && grep -q '^ *would restore own identity: 4 (order id 4' "$W/out" && grep -q '^ *total: users 1, rows 6, points 60.00 (base 60.00, bonus 0.00), upline 0.00, no batch 0$' "$W/out" \
+  && ! grep -qE '^ *(user|row) ' "$W/out" && grep -q '^  user uid-secret-5: ' "$W/ddcnew/rehearsal/"*-report-backfill.out \
   && grep -q "^GO/NO-GO here follows the rehearsal api's WEB3AUTH_\* settings (.env.api); in the window --plan runs with .env.cutover's" "$W/out" \
-  && ok "report: read-only during the report and reset after it; counts against the dump's; --plan as counts by reason (keep.txt passed); backfill dry run; duplicates in all; each timed" || { show 50; bad "report (rc=$RC)"; }
+  && ok "report: read-only during the report and reset after it; counts against the dump's; --plan as counts by reason (keep.txt passed); backfill dry run as counts (its per-user and row lines only in the record); duplicates in all; each timed" || { show 50; bad "report (rc=$RC)"; }
 fresh_keep; STUB_LOST=1 reh report
 [ "$RC" = 1 ] && grep -q '^  LOST Point dump=5000 now=4990' "$W/out" && grep -q '^FAIL 1 table(s) of the dump are missing or have fewer rows' "$W/out" && [ "$(cat "$W/s/ro")" = off ] \
   && ok "report: a table with fewer rows than the dump -> FAIL at the end, and the copy is writable again" || { show 20; bad "report with lost rows (rc=$RC)"; }
@@ -415,6 +438,35 @@ fresh_keep; reh apply-switch
   && grep -q '^updatedAt differs from before --apply on 1200 users: --apply sets it (Prisma @updatedAt) and --rollback does not restore it' "$W/out" && [ ! -f "$W/s/snap" ] \
   && grep -q "$(printf '^apply\t')" "$W/ddcnew/rehearsal/timings.tsv" && grep -q "$(printf '^rollback\t')" "$W/ddcnew/rehearsal/timings.tsv" \
   && ok "apply-switch (after a report left the copy read-only): resets it, --apply timed, --rollback timed; the plan and every user against its state before --apply prove the apply and the rollback (updatedAt counted apart); the kept users dropped" || { show 40; bad "apply-switch (rc=$RC)"; }
+# The record repair inside apply-switch: after --apply and its --plan, before --rollback; two runs, the second changes nothing.
+order=$(sed -nE 's/^cmd node scripts\/(mainnetSwitch.js --apply|mainnetSwitch.js --rollback|backfillSocialPostIdentity.js --apply).*/\1/p' "$W/s/oneoffs" | tr '\n' '|')
+[ "$RC" = 0 ] && [ "$order" = "mainnetSwitch.js --apply|backfillSocialPostIdentity.js --apply|backfillSocialPostIdentity.js --apply|mainnetSwitch.js --rollback|" ] \
+  && grep -q "$(printf '^points_repair\t[0-9]*\t.*\trecord repair (backfill --apply): social rows updated, records restored, copies superseded: 7 4 6$')" "$W/ddcnew/rehearsal/timings.tsv" \
+  && grep -q "$(printf '^repair_check\t[0-9]*\t.*\trecord repair check (backfill --apply again): no change$')" "$W/ddcnew/rehearsal/timings.tsv" \
+  && grep -q '^PASS the second --apply changed nothing (social rows updated, records restored, copies superseded: 0 0 0)$' "$W/out" \
+  && grep -q '^ *restored own identity: 4 (order id 4' "$W/out" && ! grep -q 'uid-secret' "$W/out" && ! grep -qE '^ *(user|row) uid' "$W/out" \
+  && grep -q '^REPAIRED_FOR=' "$W/ddcnew/rehearsal/state.env" && ! grep -q '^WARN ' "$W/out" \
+  && ok "apply-switch: the record repair runs after --apply and before --rollback, twice: the first timed as points_repair (counts in its note), the second changes nothing (repair_check); counts only in the output" || { show 40; bad "apply-switch record repair (rc=$RC, order $order)"; }
+nrep() { cnt "$(printf '^points_repair\t')" "$W/ddcnew/rehearsal/timings.tsv"; }
+fresh_keep; reh apply-switch
+[ "$RC" = 0 ] && grep -q "^WARN an earlier apply-switch repaired this copy's records (restored .*): this run finds them done (0 0 0), so points_repair keeps that run's time" "$W/out" \
+  && [ "$(nrep)" = 1 ] && [ "$(cnt "$(printf '^repair_check\t')" "$W/ddcnew/rehearsal/timings.tsv")" = 2 ] \
+  && ok "apply-switch again on the same copy: the records are already repaired, so points_repair is not recorded again (a WARN says why); the check still runs" || { show 30; bad "apply-switch on a repaired copy (rc=$RC, points_repair lines $(nrep))"; }
+fresh_keep; STUB_REPAIR=again reh apply-switch
+[ "$RC" = 1 ] && grep -q '^FAIL the second backfillSocialPostIdentity.js --apply still changed rows or printed no counts (social rows updated, records restored, copies superseded: 7 4 6)' "$W/out" \
+  && ! grep -q -- '--rollback' "$W/s/oneoffs" && ok "apply-switch: a second record repair run that still changes rows -> FAIL" || { show 20; bad "repair that does not settle (rc=$RC)"; }
+rm -f "$W/s/run"; touch "$W/s/rolledback"
+fresh_keep; STUB_REPAIR=fail reh apply-switch
+[ "$RC" = 1 ] && grep -q '^FAIL backfillSocialPostIdentity.js --apply failed on the copy' "$W/out" && ! grep -q 'someone@example.com' "$W/out" \
+  && ok "apply-switch: a record repair that fails -> FAIL (its e-mail address masked in the output)" || { show 20; bad "failed repair (rc=$RC)"; }
+rm -f "$W/s/run"; touch "$W/s/rolledback"
+fresh_keep; STUB_SCRIPTS="scripts/mainnetSwitch.js scripts/reportDuplicateCampaignGrants.js" reh apply-switch
+[ "$RC" = 1 ] && grep -q '^FAIL scripts/backfillSocialPostIdentity.js is not in ddcnew/backend:abcdef012345: the window runs the record repair after --apply' "$W/out" && [ ! -s "$W/s/oneoffs" ] \
+  && ok "apply-switch with an image without backfillSocialPostIdentity.js: refused before any one-off container" || { show 20; bad "image without the backfill (rc=$RC)"; }
+fresh_keep; STUB_REPAIR=nopart2 reh apply-switch
+[ "$RC" = 0 ] && grep -q "^WARN this image's backfillSocialPostIdentity.js has no record part (other sources): the time covers the social posts only" "$W/out" \
+  && grep -q '^PASS the second --apply changed nothing (social rows updated, records restored, copies superseded: 0 - -)$' "$W/out" \
+  && ok "apply-switch with a backfill without the record part: a WARN (the time covers the social posts only), the check on the social part" || { show 20; bad "backfill without the record part (rc=$RC)"; }
 fresh_keep; STUB_DIGEST_BAD=1 reh apply-switch
 [ "$RC" = 1 ] && grep -q "after --rollback 3 users differ from before --apply in a column other than updatedAt" "$W/out" && ok "apply-switch: a rollback that leaves 3 users different from before --apply -> FAIL" || { show 20; bad "rollback leaves users different (rc=$RC)"; }
 fresh_keep; STUB_DIFF_APPLIED="1199 0" reh apply-switch
@@ -439,27 +491,49 @@ TT="$W/ddcnew/rehearsal/timings.tsv"
 # counts_restore and plan count twice) with the runbook figures (F<min>: 5 + 10 + 15 + 20 + 40 + 10 = 100 min).
 window() { sed -n '/^cutover window estimate/,/ in all: /p' "$W/out" | sed '1d;$d'; }
 total() { sed -n 's/^ *\([0-9.]*\) min  in all: .*/\1/p' "$W/out"; }
-want() { awk -F'\t' '{ s[$1] = $2 } END { n = split("F5 dump_est counts_restore sha256 offsite_copy restore counts_restore F10 migrate F15 plan apply plan backfill points_repair F20 F40 F10", k, " ")
-  for (i = 1; i <= n; i++) { if (k[i] ~ /^F/) t += substr(k[i], 2); else if (k[i] in s) t += s[k[i]] / 60 }; printf "%.1f", t }' "$TT"; }
+want() { awk -F'\t' '{ s[$1] = $2 } END { n = split("F5 dump_est counts_restore sha256 offsite_copy restore counts_restore F10 migrate F15 plan apply plan backfill points_repair repair_check F20 F40 F10", k, " ")
+  for (i = 1; i <= n; i++) { if (k[i] ~ /^F/) t += substr(k[i], 2); else if (k[i] in s) t += s[k[i]] / 60 }; printf "%.2f", t }' "${1:-$TT}"; }
 [ "$RC" = 0 ] && grep -qE '^restore +[0-9]+ s' "$W/out" && grep -qE '^apply +[0-9]+ s' "$W/out" && grep -qE '^sha256 +[0-9]+ s' "$W/out" && grep -qE '^scrub +[0-9]+ s' "$W/out" \
-  && [ "$(window | grep -c .)" = 18 ] && [ "$(window | grep -c '(runbook figure)$')" = 6 ] && [ "$(grep -c 'NOT MEASURED' "$W/out")" = 2 ] \
+  && grep -qE '^points_repair +[0-9]+ s' "$W/out" && grep -qE '^repair_check +[0-9]+ s' "$W/out" \
+  && [ "$(window | grep -c .)" = 19 ] && [ "$(window | grep -c '(runbook figure)$')" = 6 ] && [ "$(grep -c 'NOT MEASURED' "$W/out")" = 1 ] \
   && grep -q '^ *- *encrypted off-site copy of the final dump and its sha256 there (step 2): NOT MEASURED (offsite_copy)$' "$W/out" \
-  && grep -q '^ *- *points record repair after the restore (no script yet): NOT MEASURED (points_repair)$' "$W/out" \
-  && [ "$(grep -c 'social post backfill' "$W/out")" = 1 ] && grep -q 'social post backfill after the release (dry-run time, the --apply run writes and takes longer)$' "$W/out" \
-  && grep -q '^ *5.0 min  freeze the old stack (step 1) (runbook figure)$' "$W/out" && grep -q '^ *20.0 min  web image and domain switch (step 7) (runbook figure)$' "$W/out" \
-  && grep -q '^ *10.0 min  opening (step 9) (runbook figure)$' "$W/out" && [ "$(total)" = "$(want)" ] \
-  && grep -q '^WARN the estimate is incomplete: 2 part(s) neither measured nor given a runbook figure (offsite_copy points_repair): no PASS until each is measured$' "$W/out" \
+  && grep -qE '^ *[0-9]+\.[0-9]{2} min  record repair dry run \(backfillSocialPostIdentity.js, writes nothing; step 6\)$' "$W/out" \
+  && grep -qE '^ *[0-9]+\.[0-9]{2} min  record repair \(backfill --apply\)$' "$W/out" \
+  && grep -qE '^ *[0-9]+\.[0-9]{2} min  record repair check \(backfill --apply again, changes nothing\)$' "$W/out" \
+  && grep -q '^ *5.00 min  freeze the old stack (step 1) (runbook figure)$' "$W/out" && grep -q '^ *20.00 min  web image and domain switch (step 7) (runbook figure)$' "$W/out" \
+  && grep -q '^ *10.00 min  opening (step 9) (runbook figure)$' "$W/out" && [ "$(total)" = "$(want)" ] \
+  && grep -q '^WARN the estimate is incomplete: 1 part(s) neither measured nor given a runbook figure (offsite_copy): no PASS until each is measured$' "$W/out" \
   && ! grep -q '^PASS the estimate' "$W/out" && [ "$(ncalls)" = 0 ] && ! grep -qE '^(run|lock):' "$W/out" \
-  && ok "summary: every timing; the window estimate has its 18 parts (steps 1-9: 6 at the runbook figure), the backfill row whole, total $(total) min = the measured parts + 100 min; the off-site copy and the points repair NOT MEASURED, so WARN incomplete and no PASS; read-only (no docker call, no lock)" || { show 50; bad "summary (rc=$RC, total $(total), want $(want))"; }
-# Every part measured: no NOT MEASURED, no WARN, PASS. Then one part too long: WARN, no PASS.
-printf 'offsite_copy\t600\t2026-10-13T20:00:00+0800\tmeasured outside the script\npoints_repair\t900\t2026-10-13T20:00:00+0800\tmeasured outside the script\n' >> "$TT"
+  && ok "summary: every timing; the window estimate has its 19 parts (steps 1-9: 6 at the runbook figure; the record repair's dry run, --apply and check measured), total $(total) min = the measured parts + 100 min (two decimals); only the off-site copy NOT MEASURED, so WARN incomplete and no PASS; read-only (no docker call, no lock)" || { show 50; bad "summary (rc=$RC, total $(total), want $(want))"; }
+# A part measured by hand: record writes it (run lock and log), then every part is measured: no NOT MEASURED, no WARN, PASS.
+fresh_keep; reh record offsite_copy 600
+[ "$RC" = 0 ] && grep -q "$(printf '^offsite_copy\t600\t.*\tmeasured by hand (./60-rehearsal.sh record)$')" "$TT" && grep -q '^PASS time: offsite_copy 600s (10 min 00 s)' "$W/out" \
+  && [ "$(ncalls)" = 0 ] && ls "$W/ddcnew/logs/"*-60-rehearsal-record-*.log >/dev/null 2>&1 \
+  && ok "record offsite_copy 600: one line in timings.tsv (with its note), under the run lock and log, no docker call" || { show 20; bad "record (rc=$RC)"; }
 fresh_keep; reh summary
-[ "$RC" = 0 ] && ! grep -q 'NOT MEASURED' "$W/out" && ! grep -q '^WARN' "$W/out" && grep -q '^PASS the estimate fits the 180-minute window$' "$W/out" && [ "$(window | grep -c .)" = 18 ] && [ "$(total)" = "$(want)" ] \
+[ "$RC" = 0 ] && ! grep -q 'NOT MEASURED' "$W/out" && ! grep -q '^WARN' "$W/out" && grep -q '^PASS the estimate fits the 180-minute window$' "$W/out" && [ "$(window | grep -c .)" = 19 ] && [ "$(total)" = "$(want)" ] \
   && ok "summary with every part measured: no NOT MEASURED, no WARN, PASS (total $(total) min)" || { show 30; bad "summary fully measured (rc=$RC, total $(total), want $(want))"; }
 printf 'restore\t5400\t2026-10-13T20:00:00+0800\ta slower restore\n' >> "$TT"
 fresh_keep; reh summary
-[ "$RC" = 0 ] && grep -q '^WARN the estimate is longer than the 180-minute window: lengthen the window and the notice$' "$W/out" && ! grep -q '^PASS the estimate' "$W/out" && [ "$(total)" = "$(want)" ] \
-  && ok "summary with a 90-minute restore: total $(total) min > 180 -> WARN, no PASS" || { show 30; bad "summary too long (rc=$RC, total $(total), want $(want))"; }
+[ "$RC" = 0 ] && grep -q "^WARN the estimate is longer than the 180-minute window ($(want) min): lengthen the window and the notice$" "$W/out" && ! grep -q '^PASS the estimate' "$W/out" && [ "$(total)" = "$(want)" ] \
+  && ok "summary with a 90-minute restore: total $(total) min > 180 -> WARN with the total, no PASS" || { show 30; bad "summary too long (rc=$RC, total $(total), want $(want))"; }
+# Hand-made timings (the real file kept aside): a part used twice and missing is listed once; the total is printed with
+# two decimals and that figure is compared: 180.00 passes, 180.03 (one second more than 80 min measured) does not.
+cp "$TT" "$TT.keep"
+tsv() { : > "$TT"; for k in dump_est sha256 offsite_copy restore migrate plan apply backfill points_repair repair_check counts_restore; do
+  case " $* " in *" -$k "*) continue;; esac
+  v=0; [ "$k" = restore ] && v="${RESTORE_S:-0}"; printf '%s\t%s\t2026-10-13T20:00:00+0800\thand-made\n' "$k" "$v" >> "$TT"; done; }
+tsv -counts_restore -offsite_copy; fresh_keep; reh summary
+[ "$RC" = 0 ] && [ "$(grep -c 'NOT MEASURED (counts_restore)' "$W/out")" = 2 ] \
+  && grep -q '^WARN the estimate is incomplete: 2 part(s) neither measured nor given a runbook figure (counts_restore offsite_copy): no PASS until each is measured$' "$W/out" \
+  && ok "summary: counts_restore (used twice) and offsite_copy missing -> two NOT MEASURED rows for counts_restore, but each part named once in the WARN (2 parts)" || { show 30; bad "summary missing list (rc=$RC)"; }
+RESTORE_S=4800 tsv; fresh_keep; reh summary
+[ "$RC" = 0 ] && [ "$(total)" = 180.00 ] && grep -q '^PASS the estimate fits the 180-minute window$' "$W/out" && ! grep -q '^WARN' "$W/out" \
+  && ok "summary at exactly 180.00 min: PASS" || { show 30; bad "summary at 180.00 (rc=$RC, total $(total))"; }
+RESTORE_S=4802 tsv; fresh_keep; reh summary
+[ "$RC" = 0 ] && [ "$(total)" = 180.03 ] && grep -q '^WARN the estimate is longer than the 180-minute window (180.03 min): lengthen the window and the notice$' "$W/out" && ! grep -q '^PASS the estimate' "$W/out" \
+  && ok "summary at 180.03 min: printed as 180.03 and WARN, no PASS (the printed figure is the one compared)" || { show 30; bad "summary at 180.03 (rc=$RC, total $(total))"; }
+mv -f "$TT.keep" "$TT"
 recs() { find "$W/ddcnew/rehearsal" -maxdepth 1 -type f \( -name '[0-9]*-[0-9]*-*.out' -o -name '[0-9]*-[0-9]*-*.err' \); }   # the records with ids
 outs=$(recs | grep -c . || true)
 fresh_keep; reh cleanup

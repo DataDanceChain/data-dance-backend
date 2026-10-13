@@ -35,17 +35,24 @@
 #   report [image]        the copy is made read-only for the report (ALTER DATABASE ... SET default_transaction_read_only),
 #                         then: exact row counts per table against the dump's; scripts/mainnetSwitch.js --plan (GO/NO-GO,
 #                         and the accounts that will not re-bind automatically, by reason: counts only);
-#                         scripts/backfillSocialPostIdentity.js dry run; scripts/reportDuplicateCampaignGrants.js. Each
-#                         timed. Then the read-only setting is reset. <image>: default the one migrate used.
-#   apply-switch [image]  mainnetSwitch --plan, --apply --yes (timed), --plan, --rollback --run <id> --yes (timed),
+#                         scripts/backfillSocialPostIdentity.js dry run (counts only: its row and user lines stay in the
+#                         records); scripts/reportDuplicateCampaignGrants.js. Each timed. Then the read-only setting is
+#                         reset. <image>: default the one migrate used.
+#   apply-switch [image]  mainnetSwitch --plan, --apply --yes (timed), --plan; then the record repair as in the window:
+#                         scripts/backfillSocialPostIdentity.js --apply (timed: points_repair), and --apply once more
+#                         (timed: repair_check), which must change nothing; then --rollback --run <id> --yes (timed),
 #                         --plan, on the copy only. Before --apply a digest of every User row without updatedAt is kept
 #                         in the copy (table rehearsal_users_before); after --apply exactly the users whose old-network
 #                         pair it reports cleared differ from it, after --rollback none does (updatedAt, set by Prisma's
-#                         @updatedAt and not restored by --rollback, is counted apart).
+#                         @updatedAt and not restored by --rollback, is counted apart; the record repair changes no
+#                         user). The record repair is not rolled back: a second apply-switch on the same copy finds it
+#                         done and keeps the first run's points_repair time.
 #   summary               read-only: the timings of every step and the estimate of the cutover window, runbook section
 #                         6 steps 1-9 (limit 180 min): each part measured here or, where the runbook gives one, at the
-#                         runbook's figure. A part with neither (the off-site copy of the final dump, the points record
-#                         repair) is listed as NOT MEASURED, and then no PASS is printed.
+#                         runbook's figure. A part with neither (the off-site copy of the final dump) is listed as NOT
+#                         MEASURED, and then no PASS is printed.
+#   record <key> <seconds> a part of the window measured by hand, outside this script (REHEARSAL_HAND_KEYS in
+#                         common.sh: offsite_copy), into timings.tsv. <seconds>: a whole number, 1-86400.
 #   cleanup               DROP DATABASE ddc_rehearsal_copy WITH (FORCE) (only while it carries the mark; timed), then
 #                         the records that hold user or row ids (<ts>-*.out/.err) are removed.
 #   The new stack as production: once the running api uses ddc_prod (or the database .env.cutover names), restore,
@@ -66,6 +73,7 @@
 #   the run lock /root/ddcnew/.lock and logs to /root/ddcnew/logs/<ts>-60-rehearsal-<step>-<pid>.log (common.sh
 #   run_begin), and fingerprints the old stack (common.sh old_snapshot_begin/assert) and the new stack's api, db and web
 #   containers (same ids, state, start time and restarts at the end, or FAIL).
+#   record: one line in timings.tsv (with the run lock and log).
 #   preflight and summary: nothing.
 # DISK: restore needs, before it starts, free space for 1.5 x the restore size (the old database's size, or 3 x the dump
 #   when that cannot be read) plus what the nightly P1 dump itself requires (database size + 3G, ddc-pgdump.sh), and stops
@@ -82,7 +90,7 @@
 #   window plan); rm -rf /root/ddcnew/rehearsal removes the rest. 99-teardown.sh does not drop the copy (it lives in
 #   pgdata): run cleanup before it.
 # Usage: ./60-rehearsal.sh preflight [dump] | restore [dump] | migrate [image] | report [image] | apply-switch [image]
-#        | summary | cleanup        (dump: a ddc-*.dump in /root/backup/pg; image: ddcnew/backend:<12 hex>)
+#        | summary | record <key> <seconds> | cleanup   (dump: a ddc-*.dump in /root/backup/pg; image: ddcnew/backend:<12 hex>)
 #        restore also needs REHEARSAL_G8=scrub|keep in its environment (remote.sh passes it as an override).
 set -euo pipefail
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -114,7 +122,7 @@ SCRUB_PLACEHOLDER=rehearsal-scrubbed
 USERS_BEFORE=rehearsal_users_before
 G=1073741824
 RUN_TS=$(date +%Y%m%d-%H%M%S)
-USAGE="usage: $0 preflight [dump] | restore [dump] | migrate [image] | report [image] | apply-switch [image] | summary | cleanup"
+USAGE="usage: $0 preflight [dump] | restore [dump] | migrate [image] | report [image] | apply-switch [image] | summary | record <key> <seconds> | cleanup"
 
 # ---------------------------------------------------------------------------
 # Small helpers (portable: the local test runs them on macOS too)
@@ -747,6 +755,22 @@ run_plan() { # <label>: mainnetSwitch --plan --json on the copy; prints the coun
   PLAN_FACTS=$(grep '^facts ' <<< "$v" | head -n 1)
   [ -n "$PLAN_FACTS" ] || cx_fail "mainnetSwitch --plan: no result"
 }
+# The scripts this report and apply-switch run, as far as they are in $IMAGE (a throwaway container, no network).
+image_scripts() {
+  docker run --rm --pull never --network none --name "$PROJECT-rehearsal-probe-$$" --entrypoint sh "$IMAGE" -c 'for f in "$@"; do if [ -f "$f" ]; then echo "$f"; fi; done' probe \
+    scripts/mainnetSwitch.js scripts/backfillSocialPostIdentity.js scripts/reportDuplicateCampaignGrants.js 2>/dev/null | tr '\n' ' ' || true
+}
+# backfillSocialPostIdentity.js output, counts only: its row lines ('    row <id> user <id>: ...') and per-user lines
+# ('  user <id>: ...') stay in the records; the totals are printed.
+backfill_counts() { { grep -vE '^    row |^  user ' "$1" || true; } | sed 's/^/  /'; }
+# "<social rows updated> <records restored> <copies superseded>" from a --apply output; '-' for a part the output does not
+# have (an image whose script has no record part), '?' when the social part's line is missing.
+repair_changes() {
+  awk '/^  updated: [0-9]+$/ { u = $2 }
+    /^  restored own identity: [0-9]+/ { r = $4 }
+    /^  marked superseded \(later copies\): [0-9]+/ { s = $5 }
+    END { printf "%s %s %s\n", (u == "" ? "?" : u), (r == "" ? "-" : r), (s == "" ? "-" : s) }' "$1"
+}
 fact() { # <n>: field n of PLAN_FACTS (1 go, 2 to_record, 3 pending, 4 rebound, 5 open runs, 6 newest open run)
   local a
   read -r -a a <<< "$PLAN_FACTS"
@@ -789,8 +813,7 @@ do_report() {
   if [ "${line[4]}" = 0 ]; then pass "every table of the dump is on the copy with at least the dump's rows"
   else printf 'FAIL %s table(s) of the dump are missing or have fewer rows on the copy (listed above)\n' "${line[4]}"; bad=1; fi
   step "3. the scripts in $IMAGE"
-  present=$(docker run --rm --pull never --network none --name "$PROJECT-rehearsal-probe-$$" --entrypoint sh "$IMAGE" -c 'for f in "$@"; do if [ -f "$f" ]; then echo "$f"; fi; done' probe \
-    scripts/mainnetSwitch.js scripts/backfillSocialPostIdentity.js scripts/reportDuplicateCampaignGrants.js 2>/dev/null | tr '\n' ' ') || present=""
+  present=$(image_scripts)
   say "present: ${present:-none}"
   step "4. mainnetSwitch --plan (timed): GO / NO-GO and the accounts that will not re-bind automatically"
   if [[ " $present " == *" scripts/mainnetSwitch.js "* ]]; then
@@ -804,7 +827,7 @@ do_report() {
     t0=$(date +%s); copy_exec report-backfill node scripts/backfillSocialPostIdentity.js; t1=$(date +%s)
     [ "$CX_RC" = 0 ] || cx_fail "backfillSocialPostIdentity.js dry run failed on the copy"
     grep -q '^mode dry-run:' "$CX_OUT" || cx_fail "backfillSocialPostIdentity.js did not run as a dry run"
-    grep -vE '^    row ' "$CX_OUT" | sed 's/^/  /'
+    backfill_counts "$CX_OUT"
     timing_add backfill $((t1 - t0)) "dry run"
   else warn "scripts/backfillSocialPostIdentity.js is not in $IMAGE (an image before backend PR #54): skipped"; fi
   step "6. reportDuplicateCampaignGrants.js (timed)"
@@ -824,8 +847,39 @@ do_report() {
   [ "$bad" = 0 ] || die "the report found the problems above"
 }
 
+# The record repair of the window (after the user migration): backfillSocialPostIdentity.js --apply, timed
+# (points_repair), then --apply once more, timed (repair_check), which must change nothing. Counts only are printed; the
+# whole outputs (row and user ids) stay in the records. The repair is not rolled back with the user migration: on a copy
+# it already repaired (REPAIRED_FOR = this copy's RESTORED_AT) the first run finds nothing to do, so its time is not
+# recorded.
+record_repair() {
+  local t0 t1 first again done_for
+  done_for=$(state_get REPAIRED_FOR)
+  step "4. record repair: backfillSocialPostIdentity.js --apply (timed), then --apply again (timed), which must change nothing"
+  t0=$(date +%s); copy_exec repair-apply node scripts/backfillSocialPostIdentity.js --apply; t1=$(date +%s)
+  [ "$CX_RC" = 0 ] || cx_fail "backfillSocialPostIdentity.js --apply failed on the copy (the user migration's --apply stays on it: cleanup, restore and migrate for the next try)"
+  grep -q '^mode apply:' "$CX_OUT" || cx_fail "backfillSocialPostIdentity.js --apply did not run in apply mode"
+  backfill_counts "$CX_OUT"
+  first=$(repair_changes "$CX_OUT")
+  grep -q '^other sources: ' "$CX_OUT" || warn "this image's backfillSocialPostIdentity.js has no record part (other sources): the time covers the social posts only"
+  if [ -n "$done_for" ] && [ "$done_for" = "$(state_get RESTORED_AT)" ]; then
+    warn "an earlier apply-switch repaired this copy's records (restored $done_for): this run finds them done ($first), so points_repair keeps that run's time; for a new time: cleanup, restore, migrate"
+  else
+    timing_add points_repair $((t1 - t0)) "record repair (backfill --apply): social rows updated, records restored, copies superseded: $first"
+    state_set REPAIRED_FOR "$(state_get RESTORED_AT)"
+  fi
+  t0=$(date +%s); copy_exec repair-check node scripts/backfillSocialPostIdentity.js --apply; t1=$(date +%s)
+  [ "$CX_RC" = 0 ] || cx_fail "the second backfillSocialPostIdentity.js --apply failed on the copy"
+  again=$(repair_changes "$CX_OUT")
+  case "$again" in
+    "0 0 0"|"0 - -") pass "the second --apply changed nothing (social rows updated, records restored, copies superseded: $again)";;
+    *) die "the second backfillSocialPostIdentity.js --apply still changed rows or printed no counts (social rows updated, records restored, copies superseded: $again): the repair does not settle on this copy (whole outputs in the records)";;
+  esac
+  timing_add repair_check $((t1 - t0)) "record repair check (backfill --apply again): no change"
+}
+
 do_apply_switch() {
-  local t0 t1 kept acc run runid restored deleted cleared
+  local t0 t1 kept acc run runid restored deleted cleared present
   local -a dd=()
   new_db_ok || die "$NEW_WHY"
   copy_guard
@@ -833,6 +887,9 @@ do_apply_switch() {
   copy_require_marked
   [ "$(rebind_tables)" = 2 ] || die "the copy has no Web3AuthNetworkRebind tables: run ./60-rehearsal.sh migrate first"
   resolve_image "${1:-}" other
+  present=$(image_scripts)
+  [[ " $present " == *" scripts/backfillSocialPostIdentity.js "* ]] \
+    || die "scripts/backfillSocialPostIdentity.js is not in $IMAGE: the window runs the record repair after --apply (build the image from a backend with it); nothing ran"
   rh_dir_init
   cx_prepare
   integrity_begin
@@ -864,7 +921,8 @@ do_apply_switch() {
   run_plan switch-plan-applied
   [ "$(fact 2)" = 0 ] && [ "$(fact 3)" = "$acc" ] && pass "after --apply: nothing left to record, $acc pending re-binds" \
     || die "after --apply --plan shows to_record $(fact 2) and pending $(fact 3), expected 0 and $acc"
-  step "4. --rollback (timed)"
+  record_repair
+  step "5. --rollback (timed)"
   t0=$(date +%s); copy_exec switch-rollback node scripts/mainnetSwitch.js --rollback --run "$runid" --yes --json; t1=$(date +%s)
   [ "$CX_RC" = 0 ] || cx_fail "mainnetSwitch --rollback failed on the copy"
   [ "$(json_field "$CX_OUT" rolled_back)" = true ] || die "mainnetSwitch --rollback did not roll the run back"
@@ -872,7 +930,7 @@ do_apply_switch() {
   timing_add rollback $((t1 - t0)) "$restored accounts restored"
   [ "$restored" = "$acc" ] && [ "$deleted" = "$acc" ] && pass "--rollback restored $restored accounts and deleted $deleted records" \
     || die "--rollback restored $restored accounts and deleted $deleted records, expected $acc each"
-  step "5. --plan after the rollback, and every user against its state before --apply"
+  step "6. --plan after the rollback, and every user against its state before --apply"
   run_plan switch-plan-rolled-back
   [ "$(fact 2)" = "$acc" ] && [ "$(fact 3)" = 0 ] && [ "$(fact 5)" = 0 ] && pass "after --rollback: $acc accounts to record again, no pending record, no open run" \
     || die "after --rollback --plan shows to_record $(fact 2), pending $(fact 3), open runs $(fact 5); expected $acc, 0, 0"
@@ -885,11 +943,12 @@ do_apply_switch() {
   say "next: ./60-rehearsal.sh summary; when done: ./60-rehearsal.sh cleanup"
 }
 
-# The cutover window estimate, runbook section 6 steps 1-9, one row per part (window_parts below, in the order of the
-# steps): meas <key> <label> takes the latest measured time of <key> from timings.tsv, fig <minutes> <label> the runbook's
-# figure. A part with neither (offsite_copy: the encrypted off-site copy of the final dump, measured with gate G6's
-# tooling; points_repair: the repair of the points records after the restore, no script yet) shows NOT MEASURED, and
-# then no PASS is printed. Such a part counts once its time is in timings.tsv (<key> TAB <seconds> TAB <time> TAB <note>).
+# The cutover window estimate, runbook section 6 steps 1-9, one row per part (in the order of the steps): meas <key>
+# <label> takes the latest measured time of <key> from timings.tsv, fig <minutes> <label> the runbook's figure. A part
+# with neither (offsite_copy: the encrypted off-site copy of the final dump, measured by hand with gate G6's tooling and
+# entered with ./60-rehearsal.sh record offsite_copy <seconds>) shows NOT MEASURED, and then no PASS is printed; the WARN
+# names each missing part once, also when it is used twice. The total is printed with two decimals, and that rounded
+# figure is the one compared with the limit.
 do_summary() {
   local f
   settings_say
@@ -901,13 +960,16 @@ do_summary() {
     { s[$1] = $2; w[$1] = $3; nt[$1] = $4; c[$1]++ }
     function row(k) { if (k in s) printf "%-16s %8d s %7.1f min  runs %-3d %s  %s\n", k, s[k], s[k] / 60, c[k], w[k], nt[k]; else printf "%-16s %10s %11s\n", k, "-", "-" }
     function meas(k, label) {
-      if (k in s) { printf "  %7.1f min  %s\n", s[k] / 60, label; total += s[k] / 60 }
-      else { printf "  %11s  %s: NOT MEASURED (%s)\n", "-", label, k; miss++; missing = missing " " k }
+      if (k in s) { printf "  %8.2f min  %s\n", s[k] / 60, label; total += s[k] / 60 }
+      else {
+        printf "  %12s  %s: NOT MEASURED (%s)\n", "-", label, k
+        if (!(k in listed)) { listed[k] = 1; miss++; missing = missing " " k }
+      }
     }
-    function fig(m, label) { printf "  %7.1f min  %s (runbook figure)\n", m, label; total += m }
+    function fig(m, label) { printf "  %8.2f min  %s (runbook figure)\n", m, label; total += m }
     END {
       printf "%-16s %10s %11s  %s\n", "step", "seconds", "minutes", "runs, when, note"
-      n = split("dump_est sha256 restore counts_restore scrub migrate counts_report plan backfill duplicates apply rollback cleanup offsite_copy points_repair", k, " ")
+      n = split("dump_est sha256 restore counts_restore scrub migrate counts_report plan backfill duplicates apply points_repair repair_check rollback cleanup offsite_copy", k, " ")
       for (i = 1; i <= n; i++) row(k[i])
       printf "\ncutover window estimate (runbook section 6, steps 1-9):\n"
       total = 0; miss = 0; missing = ""
@@ -924,16 +986,26 @@ do_summary() {
       meas("plan", "--plan (step 6)")
       meas("apply", "--apply (step 6)")
       meas("plan", "--plan again (step 6)")
-      meas("backfill", "social post backfill after the release (dry-run time, the --apply run writes and takes longer)")
-      meas("points_repair", "points record repair after the restore (no script yet)")
+      meas("backfill", "record repair dry run (backfillSocialPostIdentity.js, writes nothing; step 6)")
+      meas("points_repair", "record repair (backfill --apply)")
+      meas("repair_check", "record repair check (backfill --apply again, changes nothing)")
       fig(sw, "web image and domain switch (step 7)")
       fig(smoke, "smoke tests behind the gate (step 8)")
       fig(open, "opening (step 9)")
-      printf "  %7.1f min  in all: the measured parts and the runbook figures (limit %d min)\n", total, lim
+      shown = sprintf("%.2f", total)
+      printf "  %8s min  in all: the measured parts and the runbook figures (limit %d min)\n", shown, lim
       if (miss) printf "WARN the estimate is incomplete: %d part(s) neither measured nor given a runbook figure (%s): no PASS until each is measured\n", miss, substr(missing, 2)
-      else if (total <= lim) printf "PASS the estimate fits the %d-minute window\n", lim
-      if (total > lim) printf "WARN the estimate is longer than the %d-minute window: lengthen the window and the notice\n", lim
+      else if (shown + 0 <= lim) printf "PASS the estimate fits the %d-minute window\n", lim
+      if (shown + 0 > lim) printf "WARN the estimate is longer than the %d-minute window (%s min): lengthen the window and the notice\n", lim, shown
     }' "$TIMINGS"
+}
+
+# record <key> <seconds>: a part of the window measured by hand (REHEARSAL_HAND_KEYS, common.sh), into timings.tsv.
+do_record() {
+  rehearsal_record_check "$1" "$2"
+  rh_dir_init
+  timing_add "$1" "$2" "measured by hand (./60-rehearsal.sh record)"
+  say "next: ./60-rehearsal.sh summary"
 }
 
 # The per-run outputs that hold user and row ids (<ts>-<step>.out/.err, <ts>-restore.err): removed by cleanup.
@@ -974,15 +1046,17 @@ do_cleanup() {
 
 # ---------------------------------------------------------------------------
 cmd="${1:-}"
-[ "$#" -le 2 ] || die "$USAGE"
+if [ "$cmd" = record ]; then [ "$#" -eq 3 ] || die "usage: $0 record <key> <seconds> (key: $REHEARSAL_HAND_KEYS)"
+else [ "$#" -le 2 ] || die "$USAGE"; fi
 arg="${2:-}"
 case "$cmd" in
   preflight|restore) [ -z "$arg" ] || dump_arg_check "$arg";;
   migrate|report|apply-switch) [ -z "$arg" ] || image_check_name "$arg";;
   summary|cleanup) [ -z "$arg" ] || die "$cmd takes no argument";;
+  record) rehearsal_record_check "$2" "$3";;
   *) die "$USAGE";;
 esac
-case "$cmd" in restore|migrate|report|apply-switch|cleanup) run_begin "60-rehearsal-$cmd" "$@";; esac
+case "$cmd" in restore|migrate|report|apply-switch|cleanup|record) run_begin "60-rehearsal-$cmd" "$@";; esac
 case "$cmd" in
   preflight) do_preflight "$arg";;
   restore) do_restore "$arg";;
@@ -990,5 +1064,6 @@ case "$cmd" in
   report) do_report "$arg";;
   apply-switch) do_apply_switch "$arg";;
   summary) do_summary;;
+  record) do_record "$2" "$3";;
   cleanup) do_cleanup;;
 esac
