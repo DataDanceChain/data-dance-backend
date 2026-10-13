@@ -187,7 +187,8 @@ function consentPrincipal(fallback) {
         return ssoSessionExpired(res);
       }
       const user = await prisma.user.findUnique({ where: { id: claims.userId } });
-      if (!user) return ssoSessionExpired(res);
+      // A disabled account's session ends here, like a missing one (the consent would refuse it anyway).
+      if (!user || user.disabledAt) return ssoSessionExpired(res);
       req.user = user;
       // Consumed by decideConsent as ctx.clientId: the session may only answer for its client.
       req.ssoSession = { clientId: claims.clientId, jti: claims.jti };

@@ -1,9 +1,11 @@
 /**
  * Self-serve SSO client registration switch: SSO_DEVELOPER_REGISTRATION = off | on.
  *
- *   off  the default, also when unset or blank. POST /api/developer/sso/clients answers every
- *        caller, signed in or not, 403 registration_closed before any database access, so it
- *        writes nothing. Clients that already exist keep working: sign-in, the token exchange and
+ *   off  the default, also when unset or blank. POST /api/developer/sso/clients answers a caller
+ *        without a token 403 registration_closed before any database access, so it writes nothing.
+ *        A caller with a token goes through the login check: an account with the developer or
+ *        ddc_admin role (src/services/userRoles.js) may still register; any other account gets
+ *        the same 403. Clients that already exist keep working: sign-in, the token exchange and
  *        the partner API never consult this switch.
  *   on   a signed-in DataDance account may register a client: the route requires a user JWT
  *        (anonymous: 401) and is rate-limited per IP. A self-serve console must send the user's token.

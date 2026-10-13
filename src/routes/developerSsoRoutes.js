@@ -12,8 +12,16 @@
  *   POST /api/developer/sso/clients/secret  { client_id } -> a new secret, shown once
  * Each requires a user JWT (`protect`) and is rate-limited per account. A client that is not the
  * account's own answers 404, the same as one that does not exist.
+ *
+ * Roles (src/services/userRoles.js, admin issue #2):
+ *   GET /api/developer/sso/me                   { user_id, email, roles, admin, can_register }
+ *   GET /api/developer/sso/admin/clients        ddc_admin: every client, read-only, never a secret
+ *   GET /api/developer/sso/admin/staff-unlock   ddc_admin: the staff network unlock (audited)
+ * While registration is closed, a signed-in account with the developer or ddc_admin role may
+ * still register a client; anyone else, and every caller without a token, gets registration_closed.
  */
 const express = require('express');
+const prisma = require('../utils/prisma');
 const { protect } = require('../middlewares/authMiddleware');
 const { rateLimiters } = require('../middlewares/rateLimitMiddleware');
 const { publicBaseUrl } = require('../constants/lifeContext');
@@ -25,24 +33,51 @@ const {
   DeveloperClientError,
   consoleClientId,
   listOwnedClients,
+  listAllClients,
   updateOwnedClient,
   rotateOwnedSecret,
 } = require('../services/ssoDeveloperClient');
+const { activeRoles } = require('../services/userRoles');
+const { writeAudit, actorFromUser } = require('../services/opsAudit');
 
 const router = express.Router();
 const logger = createLogger('developerSso');
 
-// First on the route, before the login check, the rate limiter and any database access: a closed
-// endpoint gives everyone the same answer and writes nothing.
-function registrationOpen(req, res, next) {
-  if (developerRegistrationOpen()) return next();
+function registrationClosed(res) {
   return res.status(403).json({
     error: 'registration_closed',
     error_description: 'Self-serve client registration is closed. Contact DataDance to register a client.',
   });
 }
 
-router.post('/clients', registrationOpen, protect, rateLimiters.developerClientCreate, async (req, res) => {
+function hasBearer(req) {
+  return /^Bearer\s+\S+/i.test(String(req.headers.authorization || ''));
+}
+
+// First on the route, before the login check, the rate limiter and any database access: while
+// registration is closed, a caller without a token gets the same answer as before and nothing is
+// read or written. A caller with a token goes on to `protect` and the role check below.
+function registrationOpen(req, res, next) {
+  if (developerRegistrationOpen()) return next();
+  if (!hasBearer(req)) return registrationClosed(res);
+  req.registrationNeedsRole = true;
+  return next();
+}
+
+// After `protect`, while registration is closed: the developer or ddc_admin role may register.
+async function registrationRole(req, res, next) {
+  if (!req.registrationNeedsRole) return next();
+  try {
+    const roles = await activeRoles(req.user.id);
+    if (roles.includes('developer') || roles.includes('ddc_admin')) return next();
+    return registrationClosed(res);
+  } catch (error) {
+    logger.error('Developer registration role check failed', { errorName: error && error.name });
+    return res.status(500).json({ error: 'server_error', error_description: 'Could not create the client.' });
+  }
+}
+
+router.post('/clients', registrationOpen, protect, registrationRole, rateLimiters.developerClientCreate, async (req, res) => {
   try {
     // `protect` set req.user: the client belongs to the account that registered it.
     const created = await createDeveloperClient(req.body || {}, { ownerUserId: req.user.id });
@@ -182,6 +217,75 @@ router.get('/clients', noStore, protect, rateLimiters.developerConsoleRead, asyn
     return res.json({ email: req.user.email || null, clients });
   } catch (error) {
     return sendConsoleError(req, res, error, 'list');
+  }
+});
+
+// ---------------------------------------------------------------------------------------------
+// Roles: who the signed-in account is to the console, and the DDC admin view
+// ---------------------------------------------------------------------------------------------
+
+router.get('/me', noStore, protect, rateLimiters.developerConsoleRead, async (req, res) => {
+  try {
+    const roles = await activeRoles(req.user.id);
+    const admin = roles.includes('ddc_admin');
+    return res.json({
+      user_id: req.user.id,
+      email: req.user.email || null,
+      roles,
+      admin,
+      can_register: developerRegistrationOpen() || admin || roles.includes('developer'),
+    });
+  } catch (error) {
+    return sendConsoleError(req, res, error, 'me');
+  }
+});
+
+/** ddc_admin only; anyone else gets 403 forbidden and no data. */
+async function requireConsoleAdmin(req, res, next) {
+  try {
+    const roles = await activeRoles(req.user.id);
+    if (!roles.includes('ddc_admin')) {
+      return res.status(403).json({ error: 'forbidden', error_description: 'This view is for DataDance admins.' });
+    }
+    return next();
+  } catch (error) {
+    return sendConsoleError(req, res, error, 'admin check');
+  }
+}
+
+router.get('/admin/clients', noStore, protect, rateLimiters.developerConsoleRead, requireConsoleAdmin, async (req, res) => {
+  try {
+    const issuer = publicBaseUrl(req);
+    const clients = await listAllClients();
+    return res.json({ issuer, clients });
+  } catch (error) {
+    return sendConsoleError(req, res, error, 'admin client list');
+  }
+});
+
+const STAFF_UNLOCK_TOKEN = /^[0-9a-f]{64}$/;
+
+/**
+ * The staff network unlock the wallet stores (keccak256 of the staff code), handed to a DDC admin's
+ * console so the environment switch needs no code typed in. Each hand-out is audited.
+ */
+router.get('/admin/staff-unlock', noStore, protect, rateLimiters.developerConsoleRead, requireConsoleAdmin, async (req, res) => {
+  const unlock = String(process.env.STAFF_UNLOCK_TOKEN || '').trim();
+  if (!STAFF_UNLOCK_TOKEN.test(unlock)) {
+    return res.status(404).json({ error: 'not_configured', error_description: 'The staff unlock is not configured here.' });
+  }
+  try {
+    // Written before the answer: an unlock that cannot be recorded is not handed out.
+    await writeAudit(prisma, {
+      actor: actorFromUser(req.user, 'ddc_admin'),
+      action: 'console.staff_unlock',
+      target: { type: 'console', id: null, label: 'staff_unlock' },
+      surface: 'console',
+      requestId: req.reqId || null,
+    });
+    return res.json({ unlock_token: unlock });
+  } catch (error) {
+    return sendConsoleError(req, res, error, 'staff unlock');
   }
 });
 

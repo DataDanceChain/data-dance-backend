@@ -307,8 +307,48 @@ async function rotateOwnedSecret(ownerUserId, clientIdValue) {
   return { client, clientSecret };
 }
 
+/**
+ * The DDC admin view (GET /api/developer/sso/admin/clients): every registry row, plus the
+ * environment's partner when it has no row. Read-only; never a secret or a secret hash.
+ */
+async function listAllClients() {
+  const rows = await prisma.ssoDeveloperClient.findMany({ orderBy: { createdAt: 'asc' } });
+  const ownerIds = [...new Set(rows.map((row) => row.ownerUserId).filter(Boolean))];
+  const owners = ownerIds.length
+    ? await prisma.user.findMany({ where: { id: { in: ownerIds } }, select: { id: true, email: true } })
+    : [];
+  const ownerEmail = new Map(owners.map((owner) => [owner.id, owner.email]));
+  const clients = rows.map((row) => ({
+    ...presentOwnedClient(row),
+    source: 'registry',
+    contact_email: row.contactEmail || null,
+    owner_user_id: row.ownerUserId || null,
+    owner_email: row.ownerUserId ? ownerEmail.get(row.ownerUserId) || null : null,
+  }));
+  const cfg = readPartnerConfig();
+  const configured = cfg.clientId ? getPartnerClient(cfg.clientId) : null;
+  if (configured && !rows.some((row) => row.clientId === configured.clientId)) {
+    clients.push({
+      client_id: configured.clientId,
+      client_name: configured.clientName,
+      kind: 'partner',
+      redirect_uris: [...configured.redirectUris],
+      enabled: Boolean(configured.enabled),
+      scopes: [...availablePartnerScopes()],
+      managed: true,
+      created_at: null,
+      source: 'environment',
+      contact_email: null,
+      owner_user_id: null,
+      owner_email: null,
+    });
+  }
+  return clients;
+}
+
 module.exports = {
   DeveloperClientError,
+  listAllClients,
   DEVELOPER_SCOPES,
   DEVELOPER_STATUS_FIELDS,
   PARTNER_STATUS_FIELDS,

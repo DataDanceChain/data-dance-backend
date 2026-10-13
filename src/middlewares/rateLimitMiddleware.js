@@ -360,6 +360,16 @@ const rateLimiters = {
     keyGenerator: keyGenerators.ip
   }),
 
+  // POST /api/ops/auth/code — ops sign-in codes, per signed-in account (after protect)
+  opsSignInCode: createRateLimiter({
+    name: 'opsSignInCode',
+    windowMs: 60 * 1000,
+    max: 5,
+    message: 'Too many sign-in attempts. Please wait a minute.',
+    keyGenerator: keyGenerators.userOrIp,
+    code: 'RATE_LIMITED'
+  }),
+
   // POST /api/sso/app-ticket — per user (Phase 3)
   ssoTicket: createRateLimiter({
     name: 'ssoTicket',

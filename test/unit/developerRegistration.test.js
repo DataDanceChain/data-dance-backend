@@ -196,23 +196,28 @@ describe('registration closed (the default)', () => {
     assert.equal(written, false, 'nothing written');
   });
 
-  it('off + signed-in: 403 registration_closed as well, no database call, nothing written', async () => {
-    const { res, dbCalls, written } = await observe(() => register(registration(), signedIn()));
+  // A signed-in caller is looked up (`protect`, then its roles): the developer and ddc_admin roles
+  // may register while registration is closed (test/unit/developerConsoleAdmin.test.js). An account
+  // with neither gets the same 403 and nothing is written.
+  it('off + signed-in without a role: 403 registration_closed as well, nothing written', async () => {
+    const { res, written } = await observe(() => register(registration(), signedIn()));
     assert.equal(res.status, 403);
     assert.deepEqual(res.body, CLOSED);
-    assert.equal(dbCalls, 0, 'the switch answers before the login check looks the account up');
     assert.equal(written, false, 'nothing written');
   });
 
-  it('answers every request the same way, before validation, the login check and the rate limiter', async () => {
+  it('answers every request the same way, before validation and the rate limiter', async () => {
     const bodies = [registration(), {}, registration({ redirect_uris: ['http://example.com/cb'] }), registration({ contact_email: 'x' })];
-    const auths = [undefined, signedIn(), 'Bearer not-a-jwt'];
+    const auths = [undefined, signedIn()];
     // Seven in a row: the per-IP limit is 5 an hour, so a 429 here would mean the limiter ran first.
     for (let i = 0; i < 7; i += 1) {
       const res = await register(bodies[i % bodies.length], auths[i % auths.length]);
       assert.equal(res.status, 403, `request ${i + 1}`);
       assert.deepEqual(res.body, CLOSED);
     }
+    // A token that does not verify is the login check's 401, as on every other signed-in route.
+    const bad = await register(registration(), 'Bearer not-a-jwt');
+    assert.equal(bad.status, 401);
     assert.equal(prisma.store.ssoDeveloperClient.length, 0);
   });
 

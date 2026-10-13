@@ -1,7 +1,11 @@
 const fs = require('fs');
 const jwt = require('jsonwebtoken');
 const prisma = require('../utils/prisma');
-const { OPS_TOKEN_TYPE } = require('../middlewares/opsAuthMiddleware');
+const { OPS_TOKEN_TYPE, opsCan } = require('../middlewares/opsAuthMiddleware');
+const { sharedLoginOn, signSharedOpsToken } = require('../services/opsSignIn');
+const { writeAudit, actorFromOps } = require('../services/opsAudit');
+const { VIEW_USER_SELECT, userViewSections } = require('../services/opsUserView');
+const { permissionsFor } = require('../constants/opsRoles');
 const { getUsersWithValidUploads } = require('../utils/firstValidUpload');
 const {
   bareDisplayReferralCode,
@@ -34,7 +38,12 @@ const USER_SELECT = {
   createdAt: true,
   xid: true,
   xUsername: true,
+  disabledAt: true,
 };
+
+function pickUserColumns(row) {
+  return Object.fromEntries(Object.keys(USER_SELECT).map((key) => [key, row[key] === undefined ? null : row[key]]));
+}
 
 function getOpsCredentials() {
   const username = process.env.OPS_ADMIN_USERNAME;
@@ -68,6 +77,13 @@ function signOpsToken(username, role) {
   return { token, expiresIn };
 }
 
+/**
+ * POST /api/ops/auth/login. The demo credentials are always accepted when configured (read-only,
+ * 7-day token, unchanged). The shared credentials are the emergency fallback: accepted only while
+ * OPS_SHARED_LOGIN=on (otherwise the same 401 as a wrong password), with a session as long as a
+ * personal one, and each use is audited as `auth.shared_sign_in`. Operators normally sign in with
+ * their own DataDance account (POST /auth/code + /auth/exchange).
+ */
 exports.login = async (req, res) => {
   try {
     const creds = getOpsCredentials();
@@ -79,17 +95,50 @@ exports.login = async (req, res) => {
       });
     }
     const { username, password } = req.body || {};
-    const match = [creds, demo].find((row) => row && username === row.username && password === row.password);
+    const shared = sharedLoginOn() ? creds : null;
+    const match = [shared, demo].find((row) => row && username === row.username && password === row.password);
     if (!match) {
       return res.status(401).json({ status: 'fail', message: 'Invalid username or password' });
     }
-    const signed = signOpsToken(match.username, match.role);
-    if (!signed) {
+    if (match.role === 'demo') {
+      const signed = signOpsToken(match.username, match.role);
+      if (!signed) {
+        return res.status(500).json({ status: 'error', message: 'JWT_SECRET is not configured' });
+      }
+      return res.json({
+        status: 'success',
+        data: {
+          token: signed.token,
+          expiresIn: signed.expiresIn,
+          username: match.username,
+          role: 'demo',
+          kind: 'demo',
+          permissions: permissionsFor('demo'),
+        },
+      });
+    }
+    if (!process.env.JWT_SECRET) {
       return res.status(500).json({ status: 'error', message: 'JWT_SECRET is not configured' });
     }
+    // Written before the token exists: a sign-in that cannot be recorded does not happen.
+    await writeAudit(prisma, {
+      actor: actorFromOps({ kind: 'shared' }),
+      action: 'auth.shared_sign_in',
+      target: { type: 'ops_session', id: null, label: 'shared' },
+      surface: 'ops',
+      requestId: req.reqId || null,
+    });
+    const signed = signSharedOpsToken();
     return res.json({
       status: 'success',
-      data: { token: signed.token, expiresIn: signed.expiresIn, username: match.username, role: match.role },
+      data: {
+        token: signed.token,
+        expiresIn: signed.expiresIn,
+        username: 'shared',
+        role: 'shared',
+        kind: 'shared',
+        permissions: permissionsFor('shared'),
+      },
     });
   } catch (error) {
     console.error('Ops login error:', error);
@@ -127,13 +176,14 @@ exports.searchUsers = async (req, res) => {
 exports.getUserDetail = async (req, res) => {
   try {
     const { userId } = req.params;
-    const user = await prisma.user.findUnique({
+    const row = await prisma.user.findUnique({
       where: { id: userId },
-      select: USER_SELECT,
+      select: { ...USER_SELECT, ...VIEW_USER_SELECT },
     });
-    if (!user) {
-      return res.status(404).json({ status: 'fail', message: 'User not found' });
+    if (!row) {
+      return res.status(404).json({ status: 'fail', code: 'USER_NOT_FOUND', message: 'User not found' });
     }
+    const user = pickUserColumns(row);
 
     const [
       pointsSum,
@@ -143,6 +193,7 @@ exports.getUserDetail = async (req, res) => {
       asInvitee,
       invitees,
       campaignInvitees,
+      sections,
     ] = await Promise.all([
       prisma.point.aggregate({ where: { userId }, _sum: { amount: true } }),
       prisma.point.groupBy({
@@ -180,6 +231,7 @@ exports.getUserDetail = async (req, res) => {
         orderBy: { createdAt: 'desc' },
         take: 50,
       }),
+      userViewSections(row, { canSupport: opsCan(req, 'ops.support') }),
     ]);
 
     const inviteeIds = invitees.map((r) => r.inviteeId);
@@ -231,6 +283,7 @@ exports.getUserDetail = async (req, res) => {
           })),
           inviteeCount: invitees.length,
         },
+        ...sections,
       },
     });
   } catch (error) {
@@ -274,6 +327,8 @@ exports.adjustPoints = async (req, res) => {
     const admin = req.opsAdmin?.username || 'ops';
     const sourceId = `ops-manual-${Date.now()}-${slug}__${admin}`;
 
+    const actor = actorFromOps(req.opsAdmin);
+    const balanceBefore = user.totalPoints;
     const result = await prisma.$transaction(async (tx) => {
       const point = await tx.point.create({
         data: {
@@ -288,8 +343,25 @@ exports.adjustPoints = async (req, res) => {
         data: { totalPoints: { increment: delta } },
         select: { totalPoints: true, email: true },
       });
-      return { point, user: updated };
+      // Same transaction: if the audit row cannot be written, the points do not move.
+      const audit = await writeAudit(tx, {
+        actor,
+        action: 'points.adjust',
+        target: { type: 'user', id: userId, label: user.email },
+        reason,
+        detail: {
+          amount: delta,
+          balanceBefore,
+          balanceAfter: updated.totalPoints,
+          pointId: point.id,
+          sourceId,
+        },
+        surface: 'ops',
+        requestId: req.reqId || null,
+      });
+      return { point, user: updated, audit };
     });
+    req.auditWritten = true;
 
     return res.json({
       status: 'success',
@@ -299,10 +371,11 @@ exports.adjustPoints = async (req, res) => {
         source: 'OPS_ADJUSTMENT',
         sourceId,
         note: reason,
-        balanceBefore: user.totalPoints,
+        balanceBefore,
         balanceAfter: result.user.totalPoints,
         email: result.user.email,
         adjustedBy: req.opsAdmin?.username,
+        auditId: result.audit.id,
       },
     });
   } catch (error) {
