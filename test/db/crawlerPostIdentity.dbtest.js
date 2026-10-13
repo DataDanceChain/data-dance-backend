@@ -48,7 +48,7 @@ const {
 
 const RUN = `cp${crypto.randomBytes(3).toString('hex')}`;
 const id = (name) => `${RUN}-${name}`;
-const USERS = ['alice', 'bob', 'carol', 'dave', 'erin', 'frank'];
+const USERS = ['alice', 'bob', 'carol', 'dave', 'erin', 'frank', 'gail'];
 const TWEET = '18450000000000' + String(Date.now()).slice(-5);
 
 async function user(name) {
@@ -222,6 +222,52 @@ describe('Connect upload identity (Postgres)', () => {
       assert.deepEqual([report.updated, report.current, report.conflicts.length], [0, 2, 1]);
       assert.equal(report.conflicts[0].keptBy, id('frank-1'));
     });
+
+    it('a post a sync stores during the run is left as a conflict; the rest of the page is written', async () => {
+      const posts = [1, 2].map((n) => `https://x.com/gail/status/${TWEET}${n + 2}`);
+      const gailTask = await prisma.crawlerTask.create({
+        data: { id: id('task-gail'), title: 'X Posts', source: 'x', taskId: 'x_posts', userId: id('gail') },
+      });
+      for (const [i, href] of posts.entries()) {
+        const payload = { href, title: `Gail ${i} 5 likes` };
+        await prisma.crawlerData.create({
+          data: {
+            id: id(`gail-${i}`), source: 'x', type: 'post', timestamp: new Date('2026-10-01T10:00:00Z'), metadata: { host: 'x.com' },
+            payload, taskId: gailTask.id, userId: id('gail'), contentHash: generateContentHash(payload), sourceId: href,
+            createdAt: new Date(`2026-10-02T00:00:0${i}Z`),
+          },
+        });
+      }
+      // Right before the page is written, a sync stores the first post under its new identity.
+      let synced = false;
+      const client = new Proxy(prisma, {
+        get(target, prop) {
+          if (prop !== '$queryRaw') return target[prop];
+          return async (strings, ...values) => {
+            if (!synced && strings.join('').includes('UPDATE "CrawlerData"')) {
+              synced = true;
+              const payload = { href: posts[0], title: 'Gail 0 6 likes' };
+              await prisma.crawlerData.create({
+                data: {
+                  id: id('gail-sync'), source: 'x', type: 'post', timestamp: new Date(), metadata: { host: 'x.com' }, payload,
+                  taskId: gailTask.id, userId: id('gail'), contentHash: generateContentHash(payload, { source: 'x', userId: id('gail') }),
+                  sourceId: `title:post:https://x.com/i/status/${TWEET}3`,
+                },
+              });
+            }
+            return target.$queryRaw(strings, ...values);
+          };
+        },
+      });
+      const report = await backfillSocialPostIdentity({ client, apply: true, userIds: [id('gail')] });
+      assert.equal(synced, true);
+      // the synced row is read on the next page, already current
+      assert.deepEqual([report.scanned, report.updated, report.current], [3, 1, 1]);
+      assert.deepEqual(report.conflicts.map((c) => [c.id, c.keptBy]), [[id('gail-0'), 'row stored or changed during the run']]);
+      const rows = Object.fromEntries((await rowsOf('gail')).map((r) => [r.id, r.sourceId]));
+      assert.equal(rows[id('gail-0')], posts[0]);
+      assert.equal(rows[id('gail-1')], `title:post:https://x.com/i/status/${TWEET}4`);
+    });
   });
 
   describe('backfill of records stored under a post link key', () => {
@@ -237,6 +283,15 @@ describe('Connect upload identity (Postgres)', () => {
     const bookingPayload = (href) => ({ bookingId: `BK-${RUN}`, hotelName: 'Harbour Hotel', checkIn: '2026-09-01', href });
     const temuMeta = { sourceUrl: 'https://www.temu.com/bgt_order.html' };
     const temuPayload = { title: `Socks ${RUN}`, href: 'https://x.com/t/status/7' };
+    // Metadata with a host of its own: the key uses that host.
+    const amazonPostMeta = { ...amazonMeta, host: 'post' };
+    const sheinMeta = { sourceUrl: 'https://m.shein.com/user/orders', host: 'superseded' };
+    const sheinPayload = (href) => ({ orderId: `SH-20-${RUN}`, title: 'Linen shirt', price: '20.00', href });
+    // Social rows whose link is not a post permalink (a redirect link): a record with a title key.
+    const xMeta = { sourceUrl: 'https://x.com/home' };
+    const xRedirect = { href: 'https://t.co/r1?u=https://x.com/a/status/41', title: `Morning run ${RUN}` };
+    const xPostMeta = { ...xMeta, host: 'post' };
+    const xRedirectPost = { href: 'https://t.co/r2?u=https://x.com/a/status/42', title: `Evening run ${RUN}` };
     const task = {};
 
     // A row exactly as stored: under a post link key with the hash of the link, or under its order
@@ -254,7 +309,7 @@ describe('Connect upload identity (Postgres)', () => {
       });
     }
     const linked = (rowId, name, source, payload, metadata, link, createdAt) => {
-      const host = new URL(metadata.sourceUrl).hostname.replace(/^www\./, '');
+      const host = metadata.host || new URL(metadata.sourceUrl).hostname.replace(/^www\./, '');
       return stored(rowId, name, source, payload, metadata, `title:${host}:${link}`, sha(JSON.stringify({ postUrl: link })), createdAt);
     };
     // The Point rows of one upload carry the same createdAt as its rows.
@@ -297,6 +352,19 @@ describe('Connect upload identity (Postgres)', () => {
       await linked('ann-o3', 'ann', 'amazon', amazonPayload(order(3), 'https://x.com/z/status/6'), amazonMeta, 'https://x.com/z/status/6', at(8));
       // a social post under the same kind of key belongs to the social backfill and stays as it is here
       await linked('ann-post', 'ann', 'x', { href: 'https://x.com/ann/status/123', caption: 'hi' }, { sourceUrl: 'https://x.com/' }, 'https://x.com/ann/status/123', at(9));
+
+      // orders whose metadata names the host 'post' or 'superseded'
+      await linked('ben-o7-1', 'ben', 'amazon', amazonPayload(order(7), 'https://x.com/p/status/71'), amazonPostMeta, 'https://x.com/p/status/71', at(10));
+      await paid('ben', 10, 'crawler', 'data_upload', at(10));
+      await linked('ben-o7-2', 'ben', 'amazon', amazonPayload(order(7), 'https://x.com/p/status/72'), amazonPostMeta, 'https://x.com/p/status/72', at(11));
+      await paid('ben', 10, 'crawler', 'data_upload', at(11));
+      await linked('cat-sh-1', 'cat', 'shein', sheinPayload('https://www.instagram.com/p/Shirt01/'), sheinMeta, 'https://instagram.com/p/Shirt01', at(12));
+      await paid('cat', 10, 'crawler', 'data_upload', at(12));
+      await linked('cat-sh-2', 'cat', 'shein', sheinPayload('https://www.instagram.com/p/Shirt02/'), sheinMeta, 'https://instagram.com/p/Shirt02', at(13));
+      await paid('cat', 10, 'crawler', 'data_upload', at(13));
+
+      await linked('dan-x-1', 'dan', 'x', xRedirect, xMeta, 'https://t.co/r1', at(14));
+      await linked('dan-x-2', 'dan', 'x', xRedirectPost, xPostMeta, 'https://t.co/r2', at(15));
     });
 
     after(async () => {
@@ -313,12 +381,12 @@ describe('Connect upload identity (Postgres)', () => {
       supersededStored: r.supersededStored, conflicts: r.conflicts.length,
     });
     const expected = {
-      linkKeyRows: 7, records: 5, restored: 4, restoredByKind: { order: 3, title: 1, content: 0 },
-      heldAlready: 1, superseded: 4, supersededLinkKey: 3, supersededStored: 1, conflicts: 0,
+      linkKeyRows: 13, records: 9, restored: 8, restoredByKind: { order: 5, title: 3, content: 0 },
+      heldAlready: 1, superseded: 6, supersededLinkKey: 5, supersededStored: 1, conflicts: 0,
     };
     // per user: [superseded rows, base points, bonus points, upline points, rows without a batch Point]
     const perUser = (r) => Object.fromEntries(r.users.map((u) => [short(u.userId), [u.rows, u.base, u.bonus, u.upline, u.noBatch]]));
-    const expectedPoints = { ben: [1, 10, 10, 1, 0], dan: [2, 20, 0, 0, 0], cat: [1, 10, 0, 0, 0] };
+    const expectedPoints = { ben: [2, 20, 10, 1, 0], dan: [2, 20, 0, 0, 0], cat: [2, 20, 0, 0, 0] };
 
     it('a dry run reports the plan and writes nothing', async () => {
       const rows = await snapshot();
@@ -326,6 +394,8 @@ describe('Connect upload identity (Postgres)', () => {
       const report = await backfillRecordIdentity({ userIds: ids });
       assert.equal(report.mode, 'dry-run');
       assert.deepEqual(counts(report), expected);
+      // exact match for superseded rows
+      assert.equal(report.alreadySuperseded, 0);
       assert.deepEqual(perUser(report), expectedPoints);
       assert.deepEqual(await snapshot(), rows);
       assert.deepEqual(await pointsSnapshot(), points);
@@ -346,9 +416,13 @@ describe('Connect upload identity (Postgres)', () => {
       assert.equal(by['ann-o3'].sourceId, order(3));
       assert.equal(by['cat-temu'].sourceId, `title:temu.com:socks ${RUN}:`);
       assert.equal(by['cat-bk-1'].sourceId, `BK-${RUN}`);
-      for (const name of ['ben-o1', 'dan-o2-link', 'dan-o2', 'cat-bk-2']) {
+      for (const name of ['ben-o1', 'dan-o2-link', 'dan-o2', 'cat-bk-2', 'ben-o7-2', 'cat-sh-2']) {
         assert.deepEqual({ sourceId: by[name].sourceId, contentHash: by[name].contentHash }, supersededIdentity(id(name)), name);
       }
+      assert.equal(by['ben-o7-1'].sourceId, order(7));
+      assert.equal(by['cat-sh-1'].sourceId, `SH-20-${RUN}`);
+      assert.equal(by['dan-x-1'].sourceId, `title:x.com:morning run ${RUN.toLowerCase()}:`);
+      assert.equal(by['dan-x-2'].sourceId, `title:post:evening run ${RUN.toLowerCase()}:`);
       assert.equal(by['ann-post'].sourceId, 'title:x.com:https://x.com/ann/status/123');
       assert.equal(await prisma.crawlerData.count({ where: { source: 'amazon', sourceId: order(2) } }), 1);
       assert.deepEqual(await pointsSnapshot(), points);
@@ -358,7 +432,7 @@ describe('Connect upload identity (Postgres)', () => {
       const rows = await snapshot();
       const report = await backfillRecordIdentity({ userIds: ids, apply: true });
       assert.deepEqual([report.linkKeyRows, report.records, report.restored, report.superseded], [0, 0, 0, 0]);
-      assert.equal(report.alreadySuperseded, 4);
+      assert.equal(report.alreadySuperseded, 6);
       assert.deepEqual(perUser(report), expectedPoints);
       assert.deepEqual(await snapshot(), rows);
     });
@@ -372,6 +446,10 @@ describe('Connect upload identity (Postgres)', () => {
         await upload('ben', [item('amazon', amazonMeta, amazonPayload(order(3), 'https://x.com/other/status/1'))]),
         await upload('cat', [item('temu', temuMeta, temuPayload)]),
         await upload('cat', [item('booking', bookingMeta, bookingPayload('https://www.tiktok.com/@h/video/1003'))]),
+        await upload('ann', [item('amazon', amazonMeta, amazonPayload(order(7)))]),
+        await upload('ann', [item('shein', { sourceUrl: 'https://m.shein.com/user/orders' }, { orderId: `SH-20-${RUN}`, title: 'Linen shirt' })]),
+        await upload('dan', [item('x', xMeta, xRedirect)]),
+        await upload('dan', [item('x', xPostMeta, xRedirectPost)]),
       ];
       for (const result of again) assert.deepEqual([result.uploadedCount, result.duplicatesCount, result.pointsEarned], [0, 1, 0]);
 

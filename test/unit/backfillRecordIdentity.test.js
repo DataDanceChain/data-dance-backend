@@ -8,6 +8,7 @@ const assert = require('node:assert/strict');
 const crypto = require('crypto');
 
 const { generateContentHash } = require('../../src/services/crawlerService');
+const { socialPostUrl } = require('../../src/utils/crawlerRecordIdentity');
 const {
   legacyLinkKey,
   isRecordLinkKeyRow,
@@ -15,6 +16,7 @@ const {
   planRecord,
   supersededIdentity,
   SUPERSEDED_PREFIX,
+  CERTAIN_PERMALINK_SQL,
   parseArgs,
 } = require('../../scripts/backfillSocialPostIdentity');
 
@@ -66,6 +68,81 @@ describe('previous release post link key', () => {
       sourceId: 'title:reddit.com:https://x.com/a/status/9',
     };
     assert.equal(isRecordLinkKeyRow(reddit), true);
+  });
+
+  it('rebuilds the key with the host named in the metadata', () => {
+    const link = 'https://x.com/someone/status/222';
+    for (const host of ['post', 'superseded']) {
+      const row = { ...amazon('111-1', link, `title:${host}:${link}`), metadata: { ...amazonMeta, host } };
+      assert.equal(legacyLinkKey(row), `title:${host}:${link}`);
+      assert.equal(isRecordLinkKeyRow(row), true, host);
+    }
+  });
+
+  it('picks a social row whose link is not a post permalink', () => {
+    const redirect = (host, link) => ({
+      userId: 'user-d', source: 'x', metadata: { sourceUrl: 'https://x.com/home', ...(host ? { host } : {}) },
+      payload: { href: `${link}?u=https://x.com/a/status/1`, title: 'Morning run' },
+      sourceId: `title:${host || 'x.com'}:${link}`,
+    });
+    assert.equal(isRecordLinkKeyRow(redirect('', 'https://t.co/r')), true);
+    assert.equal(isRecordLinkKeyRow(redirect('post', 'https://t.co/r')), true);
+    assert.equal(recordIdentity(redirect('', 'https://t.co/r')).sourceId, 'title:x.com:morning run:');
+  });
+});
+
+describe('social rows the candidate query skips', () => {
+  // The SQL patterns, read the way Postgres reads them (~*: case-insensitive, '.' matches newline).
+  const certain = (source, text) =>
+    Buffer.byteLength(text) <= 2048 &&
+    new RegExp(CERTAIN_PERMALINK_SQL[source === 'twitter' ? 'x' : source], 'is').test(text);
+  const sources = ['x', 'twitter', 'instagram', 'threads', 'tiktok'];
+  const hosts = [
+    'x.com', 'twitter.com', 'www.x.com', 'mobile.twitter.com', 'm.x.com', 'www.m.x.com', 'X.COM', 'x.com.evil.example',
+    'instagram.com', 'www.instagram.com', 'threads.net', 'threads.com', 'www.threads.net', 'tiktok.com', 'm.tiktok.com',
+    'evil.example', 't.co', 'x.com:443', 'user@x.com',
+  ];
+  const paths = [
+    '/someone/status/1845', '/i/web/status/1845', '/someone/statuses/1845', '/status/status/1845', '/someone/status/abc',
+    '/someone/status/1845/photo/1', '/someone/status/1845/../../b', '/a/../status/1845', '/./status/1845', '/%2e%2e/status/1845',
+    '/p/AbC123', '/reel/AbC1_-x', '/reels/AbCd', '/tv/AbC', '/handle/p/AbC123', '/reel/p/AbC123', '/p/AbC123/../x',
+    '/@h/post/XyZ9', '/h/post/XyZ9', '/../post/XyZ9', '/post/post/XyZ9', '/@h/post/XyZ', '/@a.b/post/XyZ9a',
+    '/@h/video/1001', '/@h/photo/1001', '/h/video/1001', '/@../video/1001', '/@h/video/10x',
+    '', '/', '//someone/status/1845',
+  ];
+  const tails = ['', '/', '?s=20', '#frag', '/?x=1#y', '?q=' + 'a'.repeat(2100), '\n', ' ', '/x y'];
+  const schemes = ['https://', 'http://', 'HTTPS://', 'ftp://', 'https:/', ' https://'];
+
+  it('every link they match is a permalink of that platform (no false skip)', () => {
+    let matched = 0;
+    for (const source of sources) {
+      for (const scheme of schemes) {
+        for (const host of hosts) {
+          for (const path of paths) {
+            for (const tail of tails) {
+              const href = `${scheme}${host}${path}${tail}`;
+              if (!certain(source, href)) continue;
+              matched += 1;
+              for (const field of ['href', 'id', 'orderId', 'orderid']) {
+                assert.notEqual(socialPostUrl(source, { [field]: href }), '', `${source} ${field} ${JSON.stringify(href)}`);
+              }
+            }
+          }
+        }
+      }
+    }
+    assert.ok(matched > 100, `only ${matched} links matched`);
+  });
+
+  it('match the usual permalink of each platform', () => {
+    assert.ok(certain('x', 'https://x.com/DataDance/status/1845000000000000001?s=20'));
+    assert.ok(certain('twitter', 'https://twitter.com/DataDance/status/1845000000000000001'));
+    assert.ok(certain('instagram', 'https://www.instagram.com/p/AbC123/'));
+    assert.ok(certain('threads', 'https://www.threads.net/@h/post/XyZ9'));
+    assert.ok(certain('tiktok', 'https://www.tiktok.com/@h/video/1001'));
+    // a redirect link, or another platform's link, is left to the code
+    assert.equal(certain('x', 'https://t.co/r?u=https://x.com/a/status/1'), false);
+    assert.equal(certain('x', 'https://www.instagram.com/p/AbC123/'), false);
   });
 });
 

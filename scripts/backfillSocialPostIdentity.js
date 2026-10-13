@@ -21,7 +21,9 @@
  *
  * Run it right after the release that ships the new identity, before users sync again. Rows a user
  * syncs in between are stored under the new identity; the older row of the same post then keeps
- * its old identity and is listed as a conflict.
+ * its old identity and is listed as a conflict. With --apply, part 2 reads and writes in one
+ * transaction that holds a write lock on CrawlerData, so uploads wait until it commits (seconds on
+ * a few million rows).
  *
  * Usage (where the API runs, so DATABASE_URL is the server's):
  *   node scripts/backfillSocialPostIdentity.js                # dry run (default): counts, writes nothing
@@ -29,7 +31,7 @@
  *   node scripts/backfillSocialPostIdentity.js --user=<id>    # only this user's rows (repeatable); in
  *                                                             # part 2 every record holding a row of this
  *                                                             # user is repaired as a whole
- *   node scripts/backfillSocialPostIdentity.js --batch=500    # rows read per page and written per transaction
+ *   node scripts/backfillSocialPostIdentity.js --batch=500    # rows read per page and written per statement
  *
  * It never deletes a row and never touches points. Safe to re-run: rows that already carry their
  * identity are left alone, and a second --apply writes nothing. Output holds row and user ids,
@@ -42,6 +44,7 @@ const businessRules = require('../config/business-rules.json');
 const { generateContentHash } = require('../src/services/crawlerService');
 const { POINT_SOURCE_CONNECT_BOOST } = require('../src/utils/campaignRules');
 const { POINT_SOURCE_SUMMER_TRAVEL_BONUS } = require('../src/constants/referralCampaigns');
+const { normalizeCrawlerSource } = require('../src/constants/crawlerSources');
 const {
   TITLE_BACKED_PREFIX,
   SOCIAL_PERMALINK_SOURCES,
@@ -84,10 +87,50 @@ function parseArgs(argv) {
 
 const identityKey = (userId, source, sourceId) => `${userId}\u0000${source}\u0000${sourceId}`;
 
+/** A unique index refused the write (P2010 is how a raw statement reports it). */
+const isUniqueViolation = (error) =>
+  Boolean(error && (error.code === 'P2002' || (error.code === 'P2010' && error.meta && error.meta.code === '23505')));
+
 /**
- * Walks the social rows oldest first and gives each the new identity unless another row already
- * holds it (in the database, or claimed earlier in this run). Returns a report; writes only with
- * `apply: true`.
+ * Rewrites sourceId / contentHash of these rows in one statement, each only if it still holds the
+ * identity read (compare and set). Returns the ids written.
+ */
+async function updateRows(db, writes) {
+  if (writes.length === 0) return new Set();
+  const rows = JSON.stringify(
+    writes.map((w) => ({ id: w.id, from_sid: w.from.sourceId, from_hash: w.from.contentHash, to_sid: w.to.sourceId, to_hash: w.to.contentHash })),
+  );
+  const done = await db.$queryRaw`
+    UPDATE "CrawlerData" AS c
+    SET "sourceId" = w.to_sid, "contentHash" = w.to_hash, "updatedAt" = (now() AT TIME ZONE 'UTC')
+    FROM jsonb_to_recordset(${rows}::jsonb) AS w(id text, from_sid text, from_hash text, to_sid text, to_hash text)
+    WHERE c.id = w.id AND c."sourceId" IS NOT DISTINCT FROM w.from_sid AND c."contentHash" = w.from_hash
+    RETURNING c.id`;
+  return new Set(done.map((row) => row.id));
+}
+
+/**
+ * One page of social rows, in (userId, createdAt, id) order after the given row: keyset paging on
+ * the (userId, createdAt) index, so each page reads only its own rows.
+ */
+async function socialRowsPage(client, { userIds, batch, after }) {
+  const users = userIds.length > 0 ? Prisma.sql`AND "userId" IN (${Prisma.join(userIds)})` : Prisma.empty;
+  const from = after
+    ? Prisma.sql`AND ("userId", "createdAt", id) > (${after.userId}, ${after.createdKey}::timestamp, ${after.id})`
+    : Prisma.empty;
+  return client.$queryRaw`
+    SELECT id, "userId", source, "sourceId", "contentHash", payload, metadata,
+      to_char("createdAt", 'YYYY-MM-DD"T"HH24:MI:SS.US') AS "createdKey"
+    FROM "CrawlerData"
+    WHERE source IN (${Prisma.join(STORED_SOURCES)}) ${users} ${from}
+    ORDER BY "userId", "createdAt", id
+    LIMIT ${batch}`;
+}
+
+/**
+ * Walks each user's social rows oldest first and gives each the new identity unless another row
+ * already holds it (in the database, or claimed earlier in this run). A social identity is per user,
+ * so the order across users does not matter. Returns a report; writes only with `apply: true`.
  */
 async function backfillSocialPostIdentity({ client = prisma, apply = false, userIds = [], batch = DEFAULT_BATCH } = {}) {
   const report = {
@@ -101,20 +144,12 @@ async function backfillSocialPostIdentity({ client = prisma, apply = false, user
   // Identities taken during this run, so a dry run reports what --apply would do.
   const claimedHashes = new Set();
   const claimedKeys = new Set();
-  const where = { source: { in: STORED_SOURCES } };
-  if (userIds.length > 0) where.userId = { in: userIds };
 
-  let cursor = null;
+  let after = null;
   for (;;) {
-    const rows = await client.crawlerData.findMany({
-      where,
-      select: { id: true, userId: true, source: true, sourceId: true, contentHash: true, payload: true, metadata: true },
-      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
-      take: batch,
-      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
-    });
+    const rows = await socialRowsPage(client, { userIds, batch, after });
     if (rows.length === 0) break;
-    cursor = rows[rows.length - 1].id;
+    after = rows[rows.length - 1];
     report.scanned += rows.length;
 
     const planned = [];
@@ -146,6 +181,7 @@ async function backfillSocialPostIdentity({ client = prisma, apply = false, user
       select: { id: true, userId: true, source: true, sourceId: true, contentHash: true },
     });
 
+    const writes = [];
     for (const { row, sourceId, contentHash } of planned) {
       const key = identityKey(row.userId, row.source, sourceId);
       const holder = holders.find(
@@ -157,21 +193,33 @@ async function backfillSocialPostIdentity({ client = prisma, apply = false, user
         report.conflicts.push({ id: row.id, userId: row.userId, keptBy: holder ? holder.id : 'earlier row in this run' });
         continue;
       }
-      if (apply) {
-        try {
-          await client.crawlerData.update({ where: { id: row.id }, data: { sourceId, contentHash } });
-        } catch (error) {
-          // A sync stored the same post between the read above and this write.
-          if (error && error.code === 'P2002') {
-            report.conflicts.push({ id: row.id, userId: row.userId, keptBy: 'row stored during the run' });
-            continue;
-          }
-          throw error;
-        }
-      }
       claimedHashes.add(contentHash);
       claimedKeys.add(key);
-      report.updated += 1;
+      writes.push({ id: row.id, from: { sourceId: row.sourceId, contentHash: row.contentHash }, to: { sourceId, contentHash }, row });
+    }
+    if (!apply) {
+      report.updated += writes.length;
+      continue;
+    }
+    // The page in one statement; if a sync stored one of these posts since the read above (a unique
+    // index refuses the statement), row by row instead.
+    let written;
+    try {
+      written = await updateRows(client, writes);
+    } catch (error) {
+      if (!isUniqueViolation(error)) throw error;
+      written = new Set();
+      for (const write of writes) {
+        try {
+          if ((await updateRows(client, [write])).size === 1) written.add(write.id);
+        } catch (single) {
+          if (!isUniqueViolation(single)) throw single;
+        }
+      }
+    }
+    for (const write of writes) {
+      if (written.has(write.id)) report.updated += 1;
+      else report.conflicts.push({ id: write.id, userId: write.row.userId, keptBy: 'row stored or changed during the run' });
     }
   }
   return report;
@@ -308,54 +356,83 @@ function planRecord(record, storedHolders) {
 
 const ROW_SELECT = { id: true, userId: true, source: true, sourceId: true, contentHash: true, createdAt: true };
 
+const PAYLOAD_LINK_FIELDS = ['href', 'id', 'orderId', 'orderid'];
+
+/*
+ * Links that socialPostUrl() always reads as a post permalink of that platform (a strict subset of
+ * what it accepts: plain host, fixed path shape, no dot segments). The query below skips a social
+ * row only when one of its link fields has this shape; every other row is decided in code.
+ */
+const TAIL_SQL = '(/[a-z0-9_-]*)*([?#].*)?$';
+const HOST_SQL = (hosts) => `^https?://((www|m|mobile)\\.)?${hosts}`;
+const CERTAIN_PERMALINK_SQL = {
+  x: `${HOST_SQL('(x|twitter)\\.com')}/[a-z0-9_]{1,50}/status(es)?/[0-9]{1,25}${TAIL_SQL}`,
+  instagram: `${HOST_SQL('instagram\\.com')}/(p|reel|reels|tv)/[a-z0-9_-]{4,64}${TAIL_SQL}`,
+  threads: `${HOST_SQL('threads\\.(net|com)')}/@?[a-z0-9_][a-z0-9_.]{0,63}/post/[a-z0-9_-]{4,64}${TAIL_SQL}`,
+  tiktok: `${HOST_SQL('tiktok\\.com')}/@[a-z0-9_.]{1,64}/(video|photo)/[0-9]{1,25}${TAIL_SQL}`,
+};
+
+/** SQL: this social row holds a link that socialPostUrl() reads as a permalink. Never NULL. */
+function certainPermalinkSql() {
+  return Prisma.join(
+    STORED_SOURCES.map((source) => {
+      const pattern = CERTAIN_PERMALINK_SQL[normalizeCrawlerSource(source)];
+      const fields = PAYLOAD_LINK_FIELDS.map(
+        (field) => Prisma.sql`coalesce(octet_length(payload->>${field}) <= 2048 AND payload->>${field} ~* ${pattern}, false)`,
+      );
+      return Prisma.sql`(source = ${source} AND (${Prisma.join(fields, ' OR ')}))`;
+    }),
+    ' OR ',
+  );
+}
+
 /**
  * Ids of the rows that may hold the previous release's key, in one pass over the table: the key
- * itself looks like a post link, or (other sources) the payload holds one.
+ * itself or a payload link field looks like a post link. Skipped here: rows this script marked
+ * superseded (exact match for superseded rows), and social rows that hold a post permalink (part
+ * 1's). isRecordLinkKeyRow() makes the final decision on each row read.
  */
 async function linkKeyCandidateIds(client) {
+  const link = LEGACY_POST_LINK_SQL;
   const rows = await client.$queryRaw`
     SELECT id FROM "CrawlerData"
     WHERE "sourceId" LIKE 'title:%'
-      AND "sourceId" NOT LIKE 'title:post:%'
-      AND "sourceId" NOT LIKE 'title:superseded:%'
-      AND ("sourceId" ~* ${LEGACY_POST_LINK_SQL}
-        OR (source NOT IN (${Prisma.join(STORED_SOURCES)})
-          AND (payload->>'href' ~* ${LEGACY_POST_LINK_SQL} OR payload->>'id' ~* ${LEGACY_POST_LINK_SQL}
-            OR payload->>'orderId' ~* ${LEGACY_POST_LINK_SQL} OR payload->>'orderid' ~* ${LEGACY_POST_LINK_SQL})))
+      AND "sourceId" <> ('title:superseded:' || id)
+      AND ("sourceId" ~* ${link} OR payload->>'href' ~* ${link} OR payload->>'id' ~* ${link}
+        OR payload->>'orderId' ~* ${link} OR payload->>'orderid' ~* ${link})
+      AND NOT (${certainPermalinkSql()})
     ORDER BY id`;
   return rows.map((row) => row.id);
 }
 
-class ChangedDuringRun extends Error {}
-
-const RETRYABLE = new Set(['P2002', 'P2034']);
-
-/** Writes a set of planned records in one transaction; every write is checked against the row read. */
-async function writePlans(client, plans, linkIds) {
-  await client.$transaction(
-    async (tx) => {
-      // Nothing stored or changed since the read: the same stored rows hold each identity.
-      const now = await tx.crawlerData.findMany({ where: { OR: plans.map((p) => scopeWhere(p.record)) }, select: ROW_SELECT });
-      for (const plan of plans) {
-        const ids = now
-          .filter((row) => !linkIds.has(row.id) && storedScope(row) === plan.record.scope)
-          .map((row) => row.id)
-          .sort();
-        if (ids.join(',') !== plan.storedIds.join(',')) throw new ChangedDuringRun();
-      }
-      for (const plan of plans) {
-        for (const write of plan.writes) {
-          const { count } = await tx.crawlerData.updateMany({
-            where: { id: write.id, sourceId: write.from.sourceId, contentHash: write.from.contentHash },
-            data: write.to,
-          });
-          if (count !== 1) throw new ChangedDuringRun();
-        }
-      }
-    },
-    { isolationLevel: Prisma.TransactionIsolationLevel.Serializable, maxWait: 10000, timeout: 120000 },
-  );
+/**
+ * Stored rows holding one of these order ids. No index leads with source, so this is one pass over
+ * the table for all records together (a hash join), never one per batch.
+ */
+async function orderIdHolders(client, records) {
+  if (records.length === 0) return [];
+  const keys = JSON.stringify(records.map((record) => ({ source: record.source, sourceId: record.sourceId })));
+  return client.$queryRaw`
+    SELECT c.id, c."userId", c.source, c."sourceId", c."contentHash", c."createdAt"
+    FROM "CrawlerData" c
+    JOIN (SELECT DISTINCT k.source, k."sourceId" FROM jsonb_to_recordset(${keys}::jsonb) AS k(source text, "sourceId" text)) k
+      ON c.source = k.source AND c."sourceId" = k."sourceId"`;
 }
+
+/**
+ * Writes planned rows in one statement (compare and set). The caller holds the table lock, so a row
+ * that no longer holds what was read means something is wrong: it throws and the whole transaction
+ * rolls back.
+ */
+async function writeRows(tx, writes) {
+  const written = await updateRows(tx, writes);
+  if (written.size !== writes.length) {
+    throw new Error(`record repair: ${writes.length - written.size} of ${writes.length} rows changed during the run; nothing was written`);
+  }
+}
+
+// --apply: the whole of part 2 runs in one transaction; long enough for a large table.
+const APPLY_TIMEOUT_MS = 60 * 60 * 1000;
 
 const roundPoints = (value) => Math.round(value * 100) / 100;
 
@@ -435,9 +512,110 @@ async function supersededPoints(client, rows, batch) {
 }
 
 /**
+ * Plans part 2 from what `db` reads (the client for a dry run, the locked transaction for --apply):
+ * the link-key rows grouped by record, the stored rows already holding each record's identity, and
+ * the writes. Reads the whole table at most three times (superseded rows, candidates, order-id
+ * holders); every other lookup uses an index.
+ */
+async function planRecordRepair(db, { userIds, batch }) {
+  const userWhere = userIds.length > 0 ? { userId: { in: userIds } } : {};
+  const earlier = (
+    await db.crawlerData.findMany({
+      where: { ...userWhere, sourceId: { startsWith: SUPERSEDED_PREFIX } },
+      select: { id: true, userId: true, createdAt: true, sourceId: true },
+    })
+  ).filter((row) => row.sourceId === `${SUPERSEDED_PREFIX}${row.id}`);
+
+  // 1. The link-key rows (all users, so a record is always repaired as a whole), grouped by the
+  //    record they are a copy of.
+  const ids = await linkKeyCandidateIds(db);
+  const records = new Map();
+  let scanned = 0;
+  for (let i = 0; i < ids.length; i += batch) {
+    const rows = await db.crawlerData.findMany({
+      where: { id: { in: ids.slice(i, i + batch) } },
+      select: { ...ROW_SELECT, payload: true, metadata: true },
+    });
+    scanned += rows.length;
+    for (const row of rows) {
+      if (!isRecordLinkKeyRow(row)) continue;
+      const target = recordIdentity(row);
+      if (target.sourceId === row.sourceId) continue; // already its own identity
+      if (!records.has(target.scope)) {
+        records.set(target.scope, { ...target, source: row.source, userId: row.userId, rows: [] });
+      }
+      const { payload, metadata, ...kept } = row;
+      records.get(target.scope).rows.push({ ...kept, targetHash: target.contentHash });
+    }
+  }
+  const users = new Set(userIds);
+  const list = [...records.values()]
+    .filter((record) => users.size === 0 || record.rows.some((row) => users.has(row.userId)))
+    .map((record) => ({ ...record, rows: record.rows.sort(byAge) }))
+    .sort((a, b) => byAge(a.rows[0], b.rows[0]));
+  const linkIds = new Set([...records.values()].flatMap((record) => record.rows.map((row) => row.id)));
+
+  // 2. Stored rows already holding each record's identity (never a link-key row: those hold a link
+  //    key). Order ids in one pass; title keys and content hashes by their unique indexes.
+  const holdersOf = new Map(list.map((record) => [record.scope, []]));
+  const blocked = new Set();
+  const addHolder = (row) => {
+    const scope = storedScope(row);
+    if (!holdersOf.has(scope)) return;
+    // A row of another record still under its link key holds this title key: left for a re-run.
+    if (linkIds.has(row.id)) blocked.add(scope);
+    else holdersOf.get(scope).push(row);
+  };
+  (await orderIdHolders(db, list.filter((record) => record.kind === 'order'))).forEach(addHolder);
+  const indexed = list.filter((record) => record.kind !== 'order');
+  for (let i = 0; i < indexed.length; i += batch) {
+    const rows = await db.crawlerData.findMany({ where: { OR: indexed.slice(i, i + batch).map(scopeWhere) }, select: ROW_SELECT });
+    rows.forEach(addHolder);
+  }
+  const plans = list.map((record) => ({ ...planRecord(record, holdersOf.get(record.scope)), blocked: blocked.has(record.scope) }));
+
+  // 3. A restored holder takes its content hash unless a row outside its record already holds it.
+  const restoring = plans.filter((plan) => plan.restore && !plan.blocked);
+  const hashHeldBy = new Map();
+  for (let i = 0; i < restoring.length; i += batch) {
+    const rows = await db.crawlerData.findMany({
+      where: { contentHash: { in: restoring.slice(i, i + batch).map((plan) => plan.restore.targetHash) } },
+      select: { id: true, contentHash: true },
+    });
+    for (const row of rows) hashHeldBy.set(row.contentHash, [...(hashHeldBy.get(row.contentHash) || []), row.id]);
+  }
+  const claimedHashes = new Set();
+  for (const plan of plans) {
+    if (plan.blocked) continue;
+    plan.writes = plan.supersede.map(({ row }) => ({
+      id: row.id,
+      from: { sourceId: row.sourceId, contentHash: row.contentHash },
+      to: supersededIdentity(row.id),
+    }));
+    plan.restoreWrite = null;
+    if (plan.restore) {
+      const own = new Set([plan.restore.id, ...plan.supersede.map(({ row }) => row.id)]);
+      const hash = plan.restore.targetHash;
+      plan.hashKept = claimedHashes.has(hash) || (hashHeldBy.get(hash) || []).some((id) => !own.has(id));
+      if (!plan.hashKept) claimedHashes.add(hash);
+      plan.restoreWrite = {
+        id: plan.restore.id,
+        from: { sourceId: plan.restore.sourceId, contentHash: plan.restore.contentHash },
+        to: { sourceId: plan.record.sourceId, contentHash: plan.hashKept ? plan.restore.contentHash : hash },
+      };
+    }
+  }
+  return { earlier, scanned, plans };
+}
+
+/**
  * Part 2. Finds the rows of other sources stored under the previous release's post link key,
  * groups them by the record they are a copy of, and gives each record its identity back (earliest
  * copy) or marks the copy superseded. Returns a report; writes only with `apply: true`.
+ *
+ * --apply plans and writes in one serializable transaction that first locks CrawlerData against
+ * writes (SHARE ROW EXCLUSIVE; reads go on): nothing can store a copy between the read and the
+ * write, and an error rolls back everything.
  */
 async function backfillRecordIdentity({ client = prisma, apply = false, userIds = [], batch = DEFAULT_BATCH } = {}) {
   const report = {
@@ -457,49 +635,39 @@ async function backfillRecordIdentity({ client = prisma, apply = false, userIds 
     conflicts: [],
     users: [],
   };
-  const userWhere = userIds.length > 0 ? { userId: { in: userIds } } : {};
-  const earlier = await client.crawlerData.findMany({
-    where: { ...userWhere, sourceId: { startsWith: SUPERSEDED_PREFIX } },
-    select: { id: true, userId: true, createdAt: true },
-  });
-  report.alreadySuperseded = earlier.length;
 
-  // 1. The link-key rows (all users, so a record is always repaired as a whole), grouped by the
-  //    record they are a copy of.
-  const ids = await linkKeyCandidateIds(client);
-  const records = new Map();
-  for (let i = 0; i < ids.length; i += batch) {
-    const rows = await client.crawlerData.findMany({
-      where: { id: { in: ids.slice(i, i + batch) } },
-      select: { ...ROW_SELECT, payload: true, metadata: true },
-    });
-    report.scanned += rows.length;
-    for (const row of rows) {
-      if (!isRecordLinkKeyRow(row)) continue;
-      const target = recordIdentity(row);
-      if (target.sourceId === row.sourceId) continue; // already its own identity
-      if (!records.has(target.scope)) {
-        records.set(target.scope, { ...target, source: row.source, userId: row.userId, rows: [] });
-      }
-      const { payload, metadata, ...kept } = row;
-      records.get(target.scope).rows.push({ ...kept, targetHash: target.contentHash });
-    }
-  }
-  const users = new Set(userIds);
-  const list = [...records.values()]
-    .filter((record) => users.size === 0 || record.rows.some((row) => users.has(row.userId)))
-    .map((record) => ({ ...record, rows: record.rows.sort(byAge) }))
-    .sort((a, b) => byAge(a.rows[0], b.rows[0]));
-  const linkIds = new Set([...records.values()].flatMap((record) => record.rows.map((row) => row.id)));
-  report.records = list.length;
-  report.linkKeyRows = list.reduce((sum, record) => sum + record.rows.length, 0);
+  const opts = { userIds, batch };
+  const planned = apply
+    ? await client.$transaction(
+        async (tx) => {
+          await tx.$executeRaw`LOCK TABLE "CrawlerData" IN SHARE ROW EXCLUSIVE MODE`;
+          const result = await planRecordRepair(tx, opts);
+          const ready = result.plans.filter((plan) => !plan.blocked);
+          // Batches of about `batch` rows; superseded copies first, so a holder can take the
+          // identity a later copy gives up.
+          for (let i = 0; i < ready.length; i += batch) {
+            const chunk = ready.slice(i, i + batch);
+            await writeRows(tx, chunk.flatMap((plan) => plan.writes));
+            await writeRows(tx, chunk.filter((plan) => plan.restoreWrite).map((plan) => plan.restoreWrite));
+          }
+          return result;
+        },
+        { isolationLevel: Prisma.TransactionIsolationLevel.Serializable, maxWait: 10000, timeout: APPLY_TIMEOUT_MS },
+      )
+    : await planRecordRepair(client, opts);
 
-  const claimedHashes = new Set();
+  report.scanned = planned.scanned;
+  report.alreadySuperseded = planned.earlier.length;
+  report.records = planned.plans.length;
+  report.linkKeyRows = planned.plans.reduce((sum, plan) => sum + plan.record.rows.length, 0);
   const superseded = [];
-  const conflict = (plan, reason) => {
-    for (const row of plan.record.rows) report.conflicts.push({ id: row.id, userId: row.userId, reason });
-  };
-  const count = (plan) => {
+  for (const plan of planned.plans) {
+    if (plan.blocked) {
+      for (const row of plan.record.rows) {
+        report.conflicts.push({ id: row.id, userId: row.userId, reason: 'identity held by a row of another record; run again' });
+      }
+      continue;
+    }
     const tally = (report.bySource[plan.record.source] ||= { restore: 0, supersede: 0 });
     if (plan.restore) {
       report.restored += 1;
@@ -516,79 +684,9 @@ async function backfillRecordIdentity({ client = prisma, apply = false, userIds 
       tally.supersede += 1;
       superseded.push(row);
     }
-  };
-
-  // 2. Records in chunks of about `batch` link-key rows: plan, then write in one transaction.
-  for (let i = 0; i < list.length; ) {
-    const chunk = [];
-    let size = 0;
-    while (i < list.length && (chunk.length === 0 || size + list[i].rows.length <= batch)) {
-      size += list[i].rows.length;
-      chunk.push(list[i]);
-      i += 1;
-    }
-
-    // Stored rows already holding each record's identity (never a link-key row: those hold a link key).
-    const stored = await client.crawlerData.findMany({ where: { OR: chunk.map(scopeWhere) }, select: ROW_SELECT });
-    const holdersOf = new Map(chunk.map((record) => [record.scope, []]));
-    for (const row of stored) {
-      const scope = storedScope(row);
-      if (!linkIds.has(row.id) && holdersOf.has(scope)) holdersOf.get(scope).push(row);
-    }
-    const plans = chunk.map((record) => planRecord(record, holdersOf.get(record.scope)));
-
-    // A restored holder takes its content hash unless a row outside its record already holds it.
-    const restoring = plans.filter((plan) => plan.restore);
-    const hashHolders = restoring.length
-      ? await client.crawlerData.findMany({
-          where: { contentHash: { in: restoring.map((plan) => plan.restore.targetHash) } },
-          select: { id: true, contentHash: true },
-        })
-      : [];
-    for (const plan of plans) {
-      const writes = plan.supersede.map(({ row }) => ({
-        id: row.id,
-        from: { sourceId: row.sourceId, contentHash: row.contentHash },
-        to: supersededIdentity(row.id),
-      }));
-      if (plan.restore) {
-        const own = new Set([plan.restore.id, ...plan.supersede.map(({ row }) => row.id)]);
-        const hash = plan.restore.targetHash;
-        plan.hashKept =
-          claimedHashes.has(hash) || hashHolders.some((row) => row.contentHash === hash && !own.has(row.id));
-        if (!plan.hashKept) claimedHashes.add(hash);
-        writes.push({
-          id: plan.restore.id,
-          from: { sourceId: plan.restore.sourceId, contentHash: plan.restore.contentHash },
-          to: { sourceId: plan.record.sourceId, contentHash: plan.hashKept ? plan.restore.contentHash : hash },
-        });
-      }
-      plan.writes = writes;
-    }
-
-    if (!apply) {
-      plans.forEach(count);
-      continue;
-    }
-    try {
-      await writePlans(client, plans, linkIds);
-      plans.forEach(count);
-    } catch (error) {
-      if (!(error instanceof ChangedDuringRun) && !RETRYABLE.has(error && error.code)) throw error;
-      // Something changed under one of the records: retry them one by one, skip the changed ones.
-      for (const plan of plans) {
-        try {
-          await writePlans(client, [plan], linkIds);
-          count(plan);
-        } catch (single) {
-          if (!(single instanceof ChangedDuringRun) && !RETRYABLE.has(single && single.code)) throw single;
-          conflict(plan, 'changed during the run');
-        }
-      }
-    }
   }
 
-  report.users = await supersededPoints(client, [...superseded, ...earlier], batch);
+  report.users = await supersededPoints(client, [...superseded, ...planned.earlier], batch);
   return report;
 }
 
@@ -663,4 +761,5 @@ module.exports = {
   planRecord,
   supersededIdentity,
   SUPERSEDED_PREFIX,
+  CERTAIN_PERMALINK_SQL,
 };
