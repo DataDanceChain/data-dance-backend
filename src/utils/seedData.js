@@ -29,7 +29,7 @@ async function seedData() {
         referralCode: generateReferralCode(),
         profile: {
           create: {
-            language: 'zh'
+            language: 'en'
           }
         }
       }

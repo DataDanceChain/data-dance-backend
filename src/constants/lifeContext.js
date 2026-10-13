@@ -13,6 +13,12 @@ Prefer get_life_capsule for a portrait, then search_life_signals for a specific 
 Never invent purchases, trips, or relationships the tools did not return.
 Never recite prices, order IDs, or street addresses.`;
 
+/**
+ * POST /api/life-context/clean reviews one batch of records with the AI model. The App sends
+ * batches of 60, and the server asks the model about 60 at a time, so one call is one model request.
+ */
+const CLEAN_MAX_TRACES = 60;
+
 function isLifePrivacyLevel(value) {
   return LIFE_PRIVACY_LEVELS.includes(value);
 }
@@ -55,6 +61,7 @@ const MCP_SCOPES = ['openid', 'email', 'profile', 'life_capsule'];
 
 module.exports = {
   LIFE_PRIVACY_LEVELS,
+  CLEAN_MAX_TRACES,
   DEFAULT_BOUNDARIES,
   MCP_SERVER_NAME,
   MCP_SERVER_VERSION,

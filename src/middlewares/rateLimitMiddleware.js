@@ -370,6 +370,28 @@ const rateLimiters = {
     keyGenerator: keyGenerators.userOrIp
   }),
 
+  // POST /api/life-context/refine — a distillation, per signed-in user (after protect). One call
+  // reviews up to 400 records and writes the portrait with the AI model; a person distils a few
+  // times in a sitting, so six in ten minutes is enough.
+  lifeContextRefine: createRateLimiter({
+    name: 'lifeContextRefine',
+    windowMs: 10 * 60 * 1000,
+    max: 6,
+    message: 'Too many distillations. Please wait a few minutes.',
+    keyGenerator: keyGenerators.userOrIp
+  }),
+
+  // POST /api/life-context/clean — one batch of records reviewed by the AI model, per signed-in
+  // user (after protect). The App sends a 400-record distillation in seven batches and a Connect
+  // pass in up to four; sixty in ten minutes covers several of those in a row.
+  lifeContextClean: createRateLimiter({
+    name: 'lifeContextClean',
+    windowMs: 10 * 60 * 1000,
+    max: 60,
+    message: 'Too many clean requests. Please wait a few minutes.',
+    keyGenerator: keyGenerators.userOrIp
+  }),
+
   // POST /api/sso/app-ticket — per user (Phase 3)
   ssoTicket: createRateLimiter({
     name: 'ssoTicket',

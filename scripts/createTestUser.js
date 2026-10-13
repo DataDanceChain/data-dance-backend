@@ -32,7 +32,7 @@ async function createTestUser() {
         referralCode: generateReferralCode(),
         profile: {
           create: {
-            language: 'zh'
+            language: 'en'
           }
         }
       },
