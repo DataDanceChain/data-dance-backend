@@ -422,9 +422,9 @@ function parseDraft(body = {}) {
     pillZh: stripText(body.pillZh, 40),
   });
   const titleEn = i18n.title.en || firstFilled(i18n.title);
-  const titleZh = i18n.title.zh || firstFilled(i18n.title);
+  const titleZh = i18n.title['zh-TW'] || firstFilled(i18n.title);
   const blurbEn = i18n.blurb.en || firstFilled(i18n.blurb);
-  const blurbZh = i18n.blurb.zh || firstFilled(i18n.blurb);
+  const blurbZh = i18n.blurb['zh-TW'] || firstFilled(i18n.blurb);
   if (!firstFilled(i18n.title) || !firstFilled(i18n.blurb)) {
     return { error: 'A title and blurb are required in at least one language' };
   }
@@ -439,7 +439,7 @@ function parseDraft(body = {}) {
       blurbEn,
       blurbZh,
       pillEn: i18n.pill.en || null,
-      pillZh: i18n.pill.zh || null,
+      pillZh: i18n.pill['zh-TW'] || null,
       template,
       startsAt,
       endsAt,
@@ -509,9 +509,9 @@ function mergeLocaleConfig(config, i18n) {
   const next = { ...config, i18n };
   const write = (prefix, map) => {
     if (map.en) next[`${prefix}En`] = map.en;
-    if (map.zh) next[`${prefix}Zh`] = map.zh;
-    if (map.ja) next[`${prefix}Ja`] = map.ja;
     if (map['zh-TW']) next[`${prefix}ZhTw`] = map['zh-TW'];
+    if (map.ja) next[`${prefix}Ja`] = map.ja;
+    if (map.ko) next[`${prefix}Ko`] = map.ko;
   };
   write('shareText', i18n.shareText);
   write('perkNote', i18n.perkNote);
@@ -553,11 +553,11 @@ function applyCopyFields(existing, body = {}) {
   return {
     data: {
       titleEn: i18n.title.en || firstFilled(i18n.title),
-      titleZh: i18n.title.zh || firstFilled(i18n.title),
+      titleZh: i18n.title['zh-TW'] || firstFilled(i18n.title),
       blurbEn: i18n.blurb.en || firstFilled(i18n.blurb),
-      blurbZh: i18n.blurb.zh || firstFilled(i18n.blurb),
+      blurbZh: i18n.blurb['zh-TW'] || firstFilled(i18n.blurb),
       pillEn: i18n.pill.en || null,
-      pillZh: i18n.pill.zh || null,
+      pillZh: i18n.pill['zh-TW'] || null,
       config,
     },
   };

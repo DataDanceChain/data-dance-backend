@@ -112,7 +112,7 @@ exports.register = async (req, res) => {
         referralCode: newUsersOwnReferralCode, // Assign the newly generated code to the user
         profile: {
           create: {
-            language: 'zh'
+            language: 'en'
           }
         }
       },

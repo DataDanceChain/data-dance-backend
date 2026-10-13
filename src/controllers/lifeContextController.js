@@ -1,5 +1,10 @@
 const { createLogger } = require('../utils/logger');
-const { isLifePrivacyLevel, mcpEndpointUrl, publicBaseUrl } = require('../constants/lifeContext');
+const {
+  CLEAN_MAX_TRACES,
+  isLifePrivacyLevel,
+  mcpEndpointUrl,
+  publicBaseUrl,
+} = require('../constants/lifeContext');
 const { getSettings, upsertSettings, saveRefined } = require('../services/lifeContextSettings');
 const { asRefined, cleanCrawlerTraces } = require('../services/lifeContextGemini');
 const { loadPortrait, loadVault, refinePortrait } = require('../services/lifeContextDistill');
@@ -111,12 +116,17 @@ async function postClean(req, res) {
   try {
     const language = typeof req.body?.language === 'string' ? req.body.language : 'en';
     const traces = Array.isArray(req.body?.traces) ? req.body.traces : [];
+    if (traces.length > CLEAN_MAX_TRACES) {
+      return res
+        .status(400)
+        .json({ status: 'error', message: `Send at most ${CLEAN_MAX_TRACES} records per request.` });
+    }
     const cleaned = await cleanCrawlerTraces(
       traces
         .map((row) => ({
-          id: String(row?.id || ''),
-          source: String(row?.source || ''),
-          title: String(row?.title || ''),
+          id: String(row?.id || '').slice(0, 200),
+          source: String(row?.source || '').slice(0, 40),
+          title: String(row?.title || '').slice(0, 300),
         }))
         .filter((row) => row.id),
       language,

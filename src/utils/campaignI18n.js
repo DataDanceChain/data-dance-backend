@@ -1,39 +1,70 @@
-const LOCALES = ['en', 'zh', 'zh-TW', 'ja'];
+/**
+ * Campaign copy in the product's languages. Every Chinese tag (zh, zh-CN, zh-Hans, zh-SG, zh-TW,
+ * zh-Hant, zh-HK) is zh-TW. Simplified copy saved before (a `zh` key, titleZh) is only a fallback
+ * for zh-TW: copy under a Traditional tag always wins over it.
+ */
+const LOCALES = ['en', 'zh-TW', 'ja', 'ko'];
 
 const LOCALE_NAMES = {
   en: 'English',
-  zh: 'Simplified Chinese',
   'zh-TW': 'Traditional Chinese (Taiwan)',
   ja: 'Japanese',
+  ko: 'Korean',
 };
 
-function normalizeLocale(raw) {
-  const text = String(raw || '')
+function localeTag(raw) {
+  return String(raw || '')
     .trim()
-    .replace('_', '-');
-  const lower = text.toLowerCase();
-  if (lower.startsWith('zh-tw') || lower.startsWith('zh-hant') || lower.startsWith('zh-hk')) return 'zh-TW';
-  if (lower === 'ja' || lower.startsWith('ja-')) return 'ja';
-  if (lower === 'zh' || lower.startsWith('zh-cn') || lower.startsWith('zh-hans') || lower.startsWith('zh-sg')) {
-    return 'zh';
-  }
-  if (lower === 'en' || lower.startsWith('en-')) return 'en';
+    .replace(/_/g, '-')
+    .toLowerCase();
+}
+
+function normalizeLocale(raw) {
+  const primary = localeTag(raw).split('-')[0];
+  if (primary === 'zh') return 'zh-TW';
+  if (primary === 'ja' || primary === 'ko' || primary === 'en') return primary;
   return '';
 }
 
+/** A Chinese tag that names Traditional script (zh-TW, zh-Hant, zh-HK, zh-MO and longer forms). */
+function isTraditionalTag(raw) {
+  return /^zh-(?:tw|hant|hk|mo)(?:-|$)/.test(localeTag(raw));
+}
+
 function emptyMap() {
-  return { en: '', zh: '', 'zh-TW': '', ja: '' };
+  return { en: '', 'zh-TW': '', ja: '', ko: '' };
+}
+
+function cleanCopy(raw) {
+  return String(raw || '').replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * One locale map from several, keyed by any language tag: per locale the first filled value
+ * wins. For zh-TW a Traditional-tagged value from any of the maps wins over a Simplified one.
+ */
+function mergeMaps(...maps) {
+  const out = emptyMap();
+  let simplified = '';
+  maps.forEach((map) => {
+    if (!map || typeof map !== 'object' || Array.isArray(map)) return;
+    Object.entries(map).forEach(([key, raw]) => {
+      const locale = normalizeLocale(key);
+      const text = cleanCopy(raw);
+      if (!locale || !text) return;
+      if (locale === 'zh-TW' && !isTraditionalTag(key)) {
+        if (!simplified) simplified = text;
+        return;
+      }
+      if (!out[locale]) out[locale] = text;
+    });
+  });
+  if (!out['zh-TW']) out['zh-TW'] = simplified;
+  return out;
 }
 
 function asMap(value) {
-  const out = emptyMap();
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return out;
-  Object.entries(value).forEach(([key, raw]) => {
-    const locale = normalizeLocale(key);
-    const text = String(raw || '').replace(/\s+/g, ' ').trim();
-    if (locale && text) out[locale] = text;
-  });
-  return out;
+  return mergeMaps(value);
 }
 
 function firstFilled(map) {
@@ -43,33 +74,24 @@ function firstFilled(map) {
 function pickFromMap(map, language, fallback = '') {
   const locale = normalizeLocale(language) || 'en';
   const row = asMap(map);
-  if (locale === 'ja') return row.ja || row.en || fallback;
-  if (locale === 'zh-TW') return row['zh-TW'] || row.zh || row.en || fallback;
-  if (locale === 'zh') return row.zh || row.en || fallback;
-  return row.en || row.zh || fallback;
+  if (locale === 'en') return row.en || row['zh-TW'] || fallback;
+  return row[locale] || row.en || fallback;
 }
 
+/** `${prefix}En`, `${prefix}ZhTw`, ... fields of a form body, keyed by their language tags. */
 function readSuffixed(body, prefix) {
-  const map = emptyMap();
-  map.en = String(body[`${prefix}En`] || body[`${prefix}_en`] || '').replace(/\s+/g, ' ').trim();
-  map.zh = String(body[`${prefix}Zh`] || body[`${prefix}_zh`] || '').replace(/\s+/g, ' ').trim();
-  map.ja = String(body[`${prefix}Ja`] || body[`${prefix}_ja`] || '').replace(/\s+/g, ' ').trim();
-  map['zh-TW'] = String(body[`${prefix}ZhTw`] || body[`${prefix}ZhTW`] || body[`${prefix}_zhTw`] || '').replace(/\s+/g, ' ').trim();
-  return map;
-}
-
-function mergeMaps(...maps) {
-  const out = emptyMap();
-  maps.forEach((map) => {
-    LOCALES.forEach((locale) => {
-      if (map?.[locale] && !out[locale]) out[locale] = map[locale];
-    });
-  });
-  return out;
+  const read = (...suffixes) => cleanCopy(suffixes.map((suffix) => body[`${prefix}${suffix}`]).find(Boolean));
+  return {
+    en: read('En', '_en'),
+    'zh-TW': read('ZhTw', 'ZhTW', '_zhTw'),
+    zh: read('Zh', '_zh'),
+    ja: read('Ja', '_ja'),
+    ko: read('Ko', '_ko'),
+  };
 }
 
 function bodyHasPrefix(body, prefix) {
-  return ['En', 'Zh', 'Ja', 'ZhTw', 'ZhTW'].some((suffix) =>
+  return ['En', 'Zh', 'Ja', 'ZhTw', 'ZhTW', 'Ko'].some((suffix) =>
     Object.prototype.hasOwnProperty.call(body || {}, `${prefix}${suffix}`),
   );
 }
@@ -77,31 +99,25 @@ function bodyHasPrefix(body, prefix) {
 function buildCampaignI18n(body = {}, core = {}) {
   const existing = body.i18n && typeof body.i18n === 'object' ? body.i18n : body.config?.i18n || {};
   const source = normalizeLocale(body.copySource || existing.source) || 'en';
-  const title = mergeMaps(asMap(existing.title), readSuffixed(body, 'title'), {
+  const title = mergeMaps(existing.title, readSuffixed(body, 'title'), {
     en: core.titleEn || '',
     zh: core.titleZh || '',
-    ja: '',
-    'zh-TW': '',
   });
-  const blurb = mergeMaps(asMap(existing.blurb), readSuffixed(body, 'blurb'), {
+  const blurb = mergeMaps(existing.blurb, readSuffixed(body, 'blurb'), {
     en: core.blurbEn || '',
     zh: core.blurbZh || '',
-    ja: '',
-    'zh-TW': '',
   });
   const pillExplicit = {
     en: core.pillEn || '',
     zh: core.pillZh || '',
-    ja: '',
-    'zh-TW': '',
   };
   const pill = bodyHasPrefix(body, 'pill')
     ? mergeMaps(readSuffixed(body, 'pill'), pillExplicit)
-    : mergeMaps(asMap(existing.pill), readSuffixed(body, 'pill'), pillExplicit);
-  const shareText = mergeMaps(asMap(existing.shareText), readSuffixed(body, 'shareText'), readSuffixed(body.config || {}, 'shareText'));
-  const perkNote = mergeMaps(asMap(existing.perkNote), readSuffixed(body, 'perkNote'), readSuffixed(body.config || {}, 'perkNote'));
+    : mergeMaps(existing.pill, readSuffixed(body, 'pill'), pillExplicit);
+  const shareText = mergeMaps(existing.shareText, readSuffixed(body, 'shareText'), readSuffixed(body.config || {}, 'shareText'));
+  const perkNote = mergeMaps(existing.perkNote, readSuffixed(body, 'perkNote'), readSuffixed(body.config || {}, 'perkNote'));
   const questions = [1, 2, 3].map((index) =>
-    mergeMaps(asMap(existing[`question${index}`]), readSuffixed(body, `question${index}`), readSuffixed(body.config || {}, `question${index}`)),
+    mergeMaps(existing[`question${index}`], readSuffixed(body, `question${index}`), readSuffixed(body.config || {}, `question${index}`)),
   );
   return {
     source,
@@ -118,15 +134,21 @@ function buildCampaignI18n(body = {}, core = {}) {
 
 function pickQuestion(config, index, language) {
   const i18n = config?.i18n || {};
-  return pickFromMap(i18n[`question${index}`], language, String(language || '').toLowerCase().includes('zh') ? config[`question${index}Zh`] : config[`question${index}En`]);
+  const legacy =
+    normalizeLocale(language) === 'zh-TW'
+      ? config?.[`question${index}ZhTw`] || config?.[`question${index}Zh`]
+      : config?.[`question${index}En`];
+  return pickFromMap(i18n[`question${index}`], language, legacy);
 }
 
 module.exports = {
   LOCALES,
   LOCALE_NAMES,
   normalizeLocale,
+  isTraditionalTag,
   emptyMap,
   asMap,
+  mergeMaps,
   firstFilled,
   pickFromMap,
   buildCampaignI18n,

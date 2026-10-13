@@ -1,15 +1,5 @@
 const { callGeminiJson, defaultGeminiModel } = require('./lifeContextGemini');
-const { LOCALES, LOCALE_NAMES, normalizeLocale, asMap, emptyMap } = require('../utils/campaignI18n');
-
-function mergeLocaleMaps(...maps) {
-  const out = emptyMap();
-  maps.forEach((map) => {
-    LOCALES.forEach((locale) => {
-      if (map?.[locale] && !out[locale]) out[locale] = map[locale];
-    });
-  });
-  return out;
-}
+const { LOCALES, LOCALE_NAMES, normalizeLocale, asMap, emptyMap, mergeMaps } = require('../utils/campaignI18n');
 
 const STRING_KEYS = ['title', 'blurb', 'pill', 'shareText', 'perkNote', 'question1', 'question2', 'question3'];
 
@@ -54,7 +44,7 @@ function applyParsed(parsed, source, strings, prizeLabels) {
   const nested = parsed?.strings && typeof parsed.strings === 'object' ? parsed.strings : {};
   const bundle = emptyBundle();
   STRING_KEYS.forEach((key) => {
-    const map = mergeLocaleMaps(asMap(parsed?.[key]), asMap(nested[key]));
+    const map = mergeMaps(parsed?.[key], nested[key]);
     if (!strings[key]) {
       delete bundle[key];
       return;
@@ -79,12 +69,13 @@ function translatePrompt(source, strings, prizeLabels) {
     `Fill these locales: ${targets.map((locale) => `${LOCALE_NAMES[locale]} (${locale})`).join(', ')}.`,
     'Keep meaning, tone, and length close to the source.',
     'Keep brand and product names: DataDance, Wallet, Airbnb, Booking, Amazon, Connect, Life Capsule.',
-    'zh is Simplified Chinese. zh-TW is Traditional Chinese used in Taiwan, not a character-by-character conversion if a natural Taiwan phrase is better.',
+    'zh-TW is Traditional Chinese used in Taiwan, not a character-by-character conversion if a natural Taiwan phrase is better.',
     'ja is natural Japanese, not Chinese characters copied over.',
+    'ko is natural Korean.',
     'Do not add claims, discounts, or points that are not in the source.',
     'Return JSON only at the top level with keys title, blurb, pill, shareText, perkNote, question1, question2, question3.',
     'Do not wrap those keys inside strings or source.',
-    'Each value must be an object with keys en, zh, zh-TW, ja. zh-TW must use Traditional Chinese characters.',
+    `Each value must be an object with keys ${LOCALES.join(', ')}. zh-TW must use Traditional Chinese characters.`,
     prizeLabels.length ? 'prizeLabels is a top-level array of those locale objects, same order.' : '',
     '',
     JSON.stringify({ source, strings, prizeLabels }),
