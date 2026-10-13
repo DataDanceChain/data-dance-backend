@@ -83,6 +83,19 @@
 #      it); a REAL nginx:stable answers the token to 127.0.0.1 and 403 to another container (test/helpers/vhost-token-nginx.sh).
 #   10b. api_boot_check: an api that stops before its boot lines ends with a FAIL line and a filtered log tail; the field
 #      checks find a field in inputs larger than a pipe buffer; macOS and ubuntu:jammy (test/helpers/boot-log-cases.sh).
+# The rehearsal on a copy of production data (10-13):
+#   12d. 60-rehearsal.sh against stub docker, curl and df (test/helpers/rehearsal-cases.sh), on macOS (bash 3.2; the
+#      one-off containers' gate through the real node, the compose override through the real docker compose) and on
+#      ubuntu:jammy (bash 5.1, GNU tools, the real run lock): the argument handling; the copy is never the running api's
+#      database, a database of an env file or a reserved one, never on another container, never a database without its
+#      mark; the dump, disk and memory checks; a failed or stopped restore leaves no partial copy; a whole rehearsal
+#      (preflight, restore, migrate, report, apply-switch, summary, cleanup) with its timings; the cases that stop it;
+#      psql only ever on postgres and the copy; no secret, user id or e-mail address in the output or the logs. Then
+#      the script's SQL on a REAL postgres:17 (test/helpers/rehearsal-pg.sh: its sessions forwarded to a throwaway
+#      container): the mark, the restore and counts, read-only for the report, the users' digest, the gate refusing a
+#      session that lands on the live database, the mark check refusing DROP DATABASE of an unmarked copy, and the
+#      synthetic live database exactly as before.
+#   10d. remote.sh: 60-rehearsal.sh preflight and summary need no approval, every other subcommand does.
 # Every SSH test uses scratch COPIES of the scripts with a test local.env (loopback only): the package's own local.env,
 # if one exists, is never used to connect, and the real 1Password CLI is never called.
 # Containers and images: every docker run and docker build of this run carries the label ddcnew-localtest=<run id>
@@ -1353,6 +1366,23 @@ for c in apply verify remove; do
   printf '%s\n' "$out" | grep -q 'refusing: this call changes the server' || bad "50-partner-page.sh $c without DDC_APPROVED=yes: $out"
 done
 ok "50-partner-page.sh apply, verify and remove without DDC_APPROVED=yes: refused"
+# 60-rehearsal.sh (10-13): preflight and summary are read-only; restore, migrate, report, apply-switch and cleanup change the
+# server. A dump path and an image name pass the argument check.
+for c in "preflight" "preflight /root/backup/pg/ddc-daily-20261013-0315.dump" "summary"; do
+  # shellcheck disable=SC2086  # the subcommand and its argument are split on purpose
+  out=$(bash "$R/remote.sh" run 60-rehearsal.sh $c 2>&1 < /dev/null || true)
+  printf '%s\n' "$out" | grep -q STUB || bad "60-rehearsal.sh $c without DDC_APPROVED=yes: $out"
+done
+ok "60-rehearsal.sh preflight [dump] and summary need no approval (read-only)"
+for c in "restore" "restore /root/backup/pg/ddc-daily-20261013-0315.dump" "migrate ddcnew/backend:0123456789ab" "report" "apply-switch" "cleanup"; do
+  # shellcheck disable=SC2086
+  out=$(bash "$R/remote.sh" run 60-rehearsal.sh $c 2>&1 < /dev/null || true)
+  printf '%s\n' "$out" | grep -q 'refusing: this call changes the server' && ! printf '%s\n' "$out" | grep -q STUB || bad "60-rehearsal.sh $c without DDC_APPROVED=yes: $out"
+  # shellcheck disable=SC2086
+  out=$(DDC_APPROVED=yes bash "$R/remote.sh" run 60-rehearsal.sh $c 2>&1 < /dev/null || true)
+  printf '%s\n' "$out" | grep -q STUB || bad "60-rehearsal.sh $c with DDC_APPROVED=yes did not reach the (stubbed) connection: $out"
+done
+ok "60-rehearsal.sh restore, migrate, report, apply-switch and cleanup without DDC_APPROVED=yes: refused before connecting; with it they pass (a dump path and an image name are safe arguments)"
 for a in PARTNER_CRYPT_IMAGE=node:22-alpine SRV_DIR=/tmp/x DDC_TEST_RUN_ID=lt1 NGINX_LOCAL_URL=http://x MAINNET_DIR=/tmp/x NGINX_CONFD=/tmp/x; do
   rc=0; out=$(DDC_APPROVED=yes bash "$R/remote.sh" run 50-partner-page.sh apply "$a" 2>&1 < /dev/null) || rc=$?
   [ "$rc" = 2 ] && printf '%s\n' "$out" | grep -q "override ${a%%=*} is not allowed" && ! printf '%s\n' "$out" | grep -q STUB || bad "override ${a%%=*} (50-partner-page.sh): rc=$rc $out"
@@ -1461,9 +1491,9 @@ printf 'DDC_SSH_TARGET=root@127.0.0.1\nDDC_OP_SECRET_REF=%s\n' "$TREF" > "$UP/lo
 rm -f "$LE/calls" "$LE/ssh.stdin"; RC=0
 DDC_APPROVED=yes PATH="$LE/bin:$PATH" bash "$UP/remote.sh" upload > "$LE/out" 2>&1 < /dev/null || RC=$?
 got=$(tar -tzf "$LE/ssh.stdin" 2>/dev/null | LC_ALL=C sort | tr '\n' ' ')
-want="00-preflight.sh 10-build.sh 20-env.sh 30-nginx.sh 40-up.sh 50-partner-page.sh 99-teardown.sh common.sh compose.yaml p1-backup.sh p2-disk.sh partner-info/index.html "
+want="00-preflight.sh 10-build.sh 20-env.sh 30-nginx.sh 40-up.sh 50-partner-page.sh 60-rehearsal.sh 99-teardown.sh common.sh compose.yaml p1-backup.sh p2-disk.sh partner-info/index.html "
 [ "$RC" = 0 ] && [ "$got" = "$want" ] && cmp -s <(tar -xzOf "$LE/ssh.stdin" partner-info/index.html) "$PKG/partner-info/index.html" \
-  && ok "remote.sh upload: the tarball holds the 10 scripts, compose.yaml and partner-info/index.html (the server then lists 12 entries in /root/ddcnew/deploy)" \
+  && ok "remote.sh upload: the tarball holds the 11 scripts, compose.yaml and partner-info/index.html (the server then lists 13 entries in /root/ddcnew/deploy)" \
   || { sed 's/^/    /' "$LE/out"; bad "upload tarball (rc=$RC): $got"; }
 # 00-preflight.sh itself, as root in a throwaway ubuntu:jammy (no network, stub docker, a fake old tree): the apn_key.p8
 # line reports yes / no / not checked and nothing else; the CORS counts use the neutral labels. With Race's stand-ins
@@ -2038,6 +2068,29 @@ if docker info >/dev/null 2>&1; then
     sig_results "bash 5.1 (ubuntu:jammy)" "$T/sig-bash5.out" "$rc"
   else bad "could not build $SIG_IMG (ubuntu:jammy with python3)"; fi
 else bad "section 12c (bash 5.1) needs Docker Desktop"; fi
+
+echo; echo "== 12d. 60-rehearsal.sh, the rehearsal on a copy of production data: guards, arguments, a whole rehearsal, stop cases (stub docker): macOS (bash 3.2) and ubuntu:jammy (bash 5.1)"
+# test/helpers/rehearsal-cases.sh: on macOS the one-off containers' gate runs through the real node and the override
+# through the real docker compose; on ubuntu:jammy the server's GNU tools and the real run lock (flock) are used.
+rh_results() { # <label> <helper output file> <helper exit status> <minimum number of results>
+  local l n=0
+  while IFS= read -r l; do
+    case "$l" in "PASS "*) n=$((n + 1));; "FAIL "*) bad "$1: ${l#FAIL }"; n=$((n + 1));; esac
+  done < "$2"
+  if [ "$3" = 0 ] && [ "$n" -ge "$4" ]; then ok "$1: $(grep -c '^PASS ' "$2") checks passed ($(tail -n 1 "$2"))"
+  else grep -vE '^(PASS|FAIL) ' "$2" | tail -n 20 | sed 's/^/    /'; bad "$1: rehearsal-cases.sh exit $3, $n results (at least $4 expected)"; fi
+}
+rc=0; timeout 600 bash "$PKG/test/helpers/rehearsal-cases.sh" "$PKG" "$T/rehearsal-mac" > "$T/rehearsal-mac.out" 2>&1 || rc=$?
+rh_results "60-rehearsal.sh on macOS (bash 3.2, the real node and docker compose)" "$T/rehearsal-mac.out" "$rc" 66
+if docker info >/dev/null 2>&1 && [ -n "${SIG_IMG:-}" ] && docker image inspect "$SIG_IMG" >/dev/null 2>&1; then
+  rc=0; timeout 600 docker run --rm "${LT[@]}" --name "rehearsal-$RANDOM-$RUN_ID" --user 1000:1000 -v "$PKG:/pkg:ro" "$SIG_IMG" \
+    bash /pkg/test/helpers/rehearsal-cases.sh /pkg /tmp/rehearsal > "$T/rehearsal-jammy.out" 2>&1 || rc=$?
+  rh_results "60-rehearsal.sh on ubuntu:jammy (bash 5.1, GNU tools, flock)" "$T/rehearsal-jammy.out" "$rc" 60
+else bad "section 12d (ubuntu:jammy) needs Docker Desktop and the image of section 12c (${SIG_IMG:-not built})"; fi
+if docker info >/dev/null 2>&1; then
+  rc=0; timeout 600 bash "$PKG/test/helpers/rehearsal-pg.sh" "$PKG" "$T/rehearsal-pg" "$RUN_ID" > "$T/rehearsal-pg.out" 2>&1 || rc=$?
+  rh_results "60-rehearsal.sh's SQL on a real postgres:17" "$T/rehearsal-pg.out" "$rc" 13
+else bad "section 12d (real Postgres) needs Docker Desktop"; fi
 
 # ---------------------------------------------------------------------------
 echo; echo "== 13. public repository: no server address, 1Password reference or id, hash or key, or server finding in any committable file"

@@ -12,7 +12,8 @@
 #   DDC_APPROVED=yes ./remote.sh upload-api <backend-sha>    copies out/ddc-backend-<sha>.tar.gz(+.old-app, .sha256) to /root/ddcnew/src/
 #   DDC_APPROVED=yes ./remote.sh run <script> [args...]      runs /root/ddcnew/deploy/<script> on the server
 #   ./remote.sh run p2-disk.sh preview | run p2-disk.sh expand-check | run p1-backup.sh status | run 30-nginx.sh status
-#               | run 50-partner-page.sh status   (read-only, no flag needed)
+#               | run 50-partner-page.sh status | run 60-rehearsal.sh preflight [dump] | run 60-rehearsal.sh summary
+#                                             (read-only, no flag needed)
 #   op read "op://<vault>/<item>/password" | DDC_APPROVED=yes ./remote.sh run 50-partner-page.sh apply PARTNER_ALLOWED_IP=<ip>
 #                                             the page password: piped, forwarded on ssh's stdin, never typed or printed
 # The server login (DDC_SSH_TARGET) and the 1Password reference (DDC_OP_SECRET_REF) come from local.env (untracked;
@@ -136,7 +137,7 @@ case "$cmd" in
     echo "packed $(basename "$f") $(( $(stat -f %z "$f")/1024/1024 ))MB sha256=$(head -n 1 "$f.sha256" | cut -c1-16)... commit-id=$(gzip -dc "$f" | git get-tar-commit-id) signature=$sig old-App record=$(basename "$f").old-app";;
   upload)
     need_approval
-    COPYFILE_DISABLE=1 tar --no-mac-metadata --no-xattrs -C "$PKG" -czf - common.sh 00-preflight.sh p1-backup.sh p2-disk.sh 10-build.sh 20-env.sh 30-nginx.sh 40-up.sh 50-partner-page.sh 99-teardown.sh compose.yaml partner-info/index.html \
+    COPYFILE_DISABLE=1 tar --no-mac-metadata --no-xattrs -C "$PKG" -czf - common.sh 00-preflight.sh p1-backup.sh p2-disk.sh 10-build.sh 20-env.sh 30-nginx.sh 40-up.sh 50-partner-page.sh 60-rehearsal.sh 99-teardown.sh compose.yaml partner-info/index.html \
       | rssh 'install -d -m 700 /root/ddcnew /root/ddcnew/deploy && tar --no-same-owner -xzf - -C /root/ddcnew/deploy && chmod 700 /root/ddcnew/deploy/*.sh && ls -l /root/ddcnew/deploy | tail -n +2 | wc -l | sed "s/^/files=/"' \
       | tee "$PKG/logs/$TS-upload.txt";;
   upload-web)
@@ -156,8 +157,8 @@ case "$cmd" in
   run)
     s="${1:-}"; shift || true
     [ "$s" != 00-preflight.sh ] || { echo "refusing: run the preflight with ./remote.sh preflight [API_HOST=... ...]: it prepends the settings and the git-tree hash that 00-preflight.sh checks"; exit 2; }
-    [[ "$s" =~ ^(p1-backup|p2-disk|10-build|20-env|30-nginx|40-up|50-partner-page|99-teardown)\.sh$ ]] || { echo "unknown script $s"; exit 2; }
-    case "$s ${1:-}" in "p2-disk.sh preview"|"p2-disk.sh expand-check"|"p1-backup.sh status"|"30-nginx.sh status"|"50-partner-page.sh status") ;; *) need_approval;; esac
+    [[ "$s" =~ ^(p1-backup|p2-disk|10-build|20-env|30-nginx|40-up|50-partner-page|60-rehearsal|99-teardown)\.sh$ ]] || { echo "unknown script $s"; exit 2; }
+    case "$s ${1:-}" in "p2-disk.sh preview"|"p2-disk.sh expand-check"|"p1-backup.sh status"|"30-nginx.sh status"|"50-partner-page.sh status"|"60-rehearsal.sh preflight"|"60-rehearsal.sh summary") ;; *) need_approval;; esac
     # Read-only modes run without the run lock; an override there only changes what they look at.
     case "$s ${1:-}" in
       "50-partner-page.sh apply"|"50-partner-page.sh verify")
@@ -175,5 +176,5 @@ case "$cmd" in
     chk=$(env -i PATH="$PATH" ${ovr[@]+"${ovr[@]}"} bash -c '. "$1/common.sh" && remote_overrides_check' _ "$PKG" 2>&1) \
       || { echo "refusing before connecting: $(printf '%s' "$chk" | tail -n 1)"; exit 2; }
     rssh "cd /root/ddcnew/deploy && env$envs ./$s$args" 2>&1 | tee "$PKG/logs/$TS-${s%.sh}.txt";;
-  *) sed -n '2,17p' "$0"; exit 2;;
+  *) sed -n '2,18p' "$0"; exit 2;;
 esac

@@ -15,7 +15,8 @@ from a Mac through `remote.sh`. **No CI job and no deploy runs them**, and nothi
    `local.env` is gitignored. `remote.sh` and `survey/ro-ssh.sh` refuse to connect, and do not ask 1Password, while it
    is missing, a value is empty, a value is still `CHANGE_ME`, or a value has the wrong shape.
 2. Read-only calls need no flag: `./remote.sh preflight`, `./remote.sh run p2-disk.sh preview` (or `expand-check`),
-   `./remote.sh run p1-backup.sh status`, `./remote.sh run 30-nginx.sh status`, `./remote.sh run 50-partner-page.sh status`.
+   `./remote.sh run p1-backup.sh status`, `./remote.sh run 30-nginx.sh status`, `./remote.sh run 50-partner-page.sh status`,
+   `./remote.sh run 60-rehearsal.sh preflight` and `./remote.sh run 60-rehearsal.sh summary`.
 3. **Every call that writes to the server needs Sloan's approval**, given per call as `DDC_APPROVED=yes`; `remote.sh`
    refuses a write call without it. The order of the steps is in [APPROVAL.md](APPROVAL.md) section 4.
 
@@ -52,6 +53,28 @@ the commit id in the tarball and the record (it stops when the record is missing
 archive), unpacks into a fresh `/root/ddcnew/src/backend-<sha12>/` and runs every later check unchanged on that tree.
 Without the flag nothing changes. Order and pass criteria: [APPROVAL.md](APPROVAL.md) section 4, step 7b.
 
+## Rehearsal on a copy of production data
+
+`60-rehearsal.sh` rehearses the cutover (runbook 4.2 and 4.3) inside the new stack, on a copy: it restores the newest
+verified P1 daily dump into the database `ddc_rehearsal_copy` of the new stack's Postgres, migrates it with the release
+image, reports on it, runs the user migration's `--apply` and then its `--rollback` on it, times every step and drops it.
+The subcommands, in order:
+
+    ./remote.sh run 60-rehearsal.sh preflight                       # read-only
+    DDC_APPROVED=yes ./remote.sh run 60-rehearsal.sh restore        # newest ddc-daily-*.dump, or a dump path
+    DDC_APPROVED=yes ./remote.sh run 60-rehearsal.sh migrate ddcnew/backend:<12 hex>   # default: the running api's image
+    DDC_APPROVED=yes ./remote.sh run 60-rehearsal.sh report
+    DDC_APPROVED=yes ./remote.sh run 60-rehearsal.sh apply-switch
+    ./remote.sh run 60-rehearsal.sh summary                         # read-only: timings and the window estimate
+    DDC_APPROVED=yes ./remote.sh run 60-rehearsal.sh cleanup        # drops the copy
+
+The copy is never the database the running api uses, a database named in the new stack's env files, or `ddc`,
+`ddc_prod`, `ddc_rehearsal`, `ddc_rehearsal2`, `postgres` and the templates; `restore` marks it, and every later step
+works on it only while it carries that mark. psql connects only to the copy and to the maintenance database; each
+one-off container checks, before its command starts, that its `DATABASE_URL` names the copy. The old stack is only read
+(the size of its database). `report` makes the copy read-only while it runs and prints counts only. What each step
+changes, its pass criteria and its undo: [APPROVAL.md](APPROVAL.md) section 10.
+
 ## Files
 
 | File | What it is |
@@ -63,6 +86,7 @@ Without the flag nothing changes. Order and pass criteria: [APPROVAL.md](APPROVA
 | `p1-backup.sh`, `p2-disk.sh` | P1 backups (dump, verify, nightly cron) and P2 disk cleanup and expansion check |
 | `10-build.sh`, `20-env.sh`, `30-nginx.sh`, `40-up.sh`, `compose.yaml` | build, rehearsal env, nginx vhosts (apply, undo, restore after a take-over) and start of `ddcnew` |
 | `50-partner-page.sh`, `partner-info/index.html` | the partner info page: the template, filled and published to `/srv/ddcnew/partner-info/` with client_secret as AES-256-GCM ciphertext; the page password comes from 1Password on stdin ([APPROVAL.md](APPROVAL.md) section 8) |
+| `60-rehearsal.sh` | the rehearsal on a copy of production data (above): preflight, restore, migrate, report, apply-switch, summary, cleanup |
 | `99-teardown.sh` | removes the new stack only (the undo) |
 | `common.sh` | the settings (hosts, ports) and shared guards: write allowlist, old-stack fingerprint, run lock, build watchdog |
 | `survey/` | read-only survey scripts and the read-only SSH runner; their outputs never go into the repository |

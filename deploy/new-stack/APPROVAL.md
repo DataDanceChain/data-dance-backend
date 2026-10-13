@@ -11,7 +11,8 @@ the rehearsal hosts `API_HOST` and `APP_HOST`, with the password-protected partn
 and `app-rehearsal.datadance.ai`, the names Race gave the rehearsal on 10-05, and ports 10020, 9021 and 15434. Race runs
 his own rehearsal stack under those names today; which stack serves them is being decided (section 9).
 **Out of scope, each with its own approval:** the disk expansion, the hardening gate (section 7), copying production
-data into the new stack, and the cutover. Section 7 lists what must be done **before any production data lands on the
+data into the new stack (the rehearsal copy of section 10 has its own approvals, and section 7's gate applies to it), and
+the cutover. Section 7 lists what must be done **before any production data lands on the
 new stack**.
 
 ## 1. Approvals and inputs needed before execution
@@ -34,6 +35,7 @@ new stack**.
 | N | Partner info page (section 8): the page password, created once in 1Password; the partner server's address (`PARTNER_ALLOWED_IP`, also in the WAF rule of item F); the partner's callback and start-login addresses in `20-env.sh`. Sloan shares the page password with the partner. | Sloan | `50-partner-page.sh` |
 | O | Which stack serves the rehearsal hosts (section 9): **A**, this stack takes over Race's names (`TAKE_OVER_VHOSTS=yes`, his vhost entries backed up first), or **B**, both stacks run side by side, this one under other names (their DNS, WAF rule, Web3Auth allow-list entry and a frontend commit built for them). | Sloan + Race | `30-nginx.sh apply` (A), or everything from `10-build.sh` on (B) |
 | P | `REHEARSAL_CLIENT_ID`: the partner's client id for the rehearsal (`SSO_TGE_CLIENT_ID`). **Required, no default:** since backend fd2d4e9 the api refuses to boot with `tge` or `tge-rehearsal`, and any id that is not `[A-Za-z0-9._-]{1,64}`. Given on the first `20-env.sh` run, recorded, reused afterwards. | Sloan (with the partner) | `20-env.sh` |
+| Q | The rehearsal on a copy of production data (`60-rehearsal.sh`, section 10): approve `restore`, `migrate`, `report`, `apply-switch` and `cleanup`, each on its own; name the release image for `migrate`. Section 7's gate applies (the script itself checks G1, the disk, and G2, `INFRA_ONLY=0`). | Sloan | the rehearsal |
 
 ## 2. Decisions taken in this package
 
@@ -278,19 +280,19 @@ log's file name (that one is the parent shell); for `10-build.sh` the TERM trap 
 write script runs at a time (`flock` on `/root/ddcnew/.lock`); a second one stops at once and names the running one.
 **Every write path fingerprints the old stack at start and end**: `p1-backup.sh` dump / verify / install-cron /
 uninstall-cron, `p2-disk.sh apply`, `10-build.sh`, `20-env.sh`, `30-nginx.sh apply/undo/restore`, `40-up.sh`,
-`50-partner-page.sh apply/remove` and `99-teardown.sh`. The fingerprint covers every `ddc-*` container (Race's
+`50-partner-page.sh apply/remove`, `60-rehearsal.sh restore/migrate/report/apply-switch/cleanup` and `99-teardown.sh`. The fingerprint covers every `ddc-*` container (Race's
 `ddc-mainnet-*` included) plus the sha256 of `backend.env`, every file in `overlays/`, both compose files, every entry of
 `sites-available` and `sites-enabled` that this package did not write (Race's at the rehearsal names included; a link
 counts with its target), and every file under `/root/ddc-mainnet` except `.git/`, `node_modules/` and the directories a
 container mounts read-write (data it writes itself). The script FAILs loudly if anything changed and tells the operator
 a teammate may have changed it (paths and 12-character hashes only). Read-only calls (`preflight`,
-`p2-disk.sh preview/expand-check`, `p1-backup.sh status`, `30-nginx.sh status`, `50-partner-page.sh status`) do not
-fingerprint.
+`p2-disk.sh preview/expand-check`, `p1-backup.sh status`, `30-nginx.sh status`, `50-partner-page.sh status`,
+`60-rehearsal.sh preflight/summary`) do not fingerprint.
 
 | # | Command | Changes on the server | Pass criteria | Time | Undo |
 |---|---|---|---|---|---|
 | 0 | `./remote.sh preflight` (add the overrides of section 9 if the hosts or ports differ from the defaults) | nothing | `PREFLIGHT PASS`; the settings printed; `API_PORT`/`DB_PORT`/`WEB_PORT` free (or held by this stack's own containers); 6 old containers Up and the `ddc-mainnet-*` containers listed apart; the entries at `API_HOST`/`APP_HOST` (`absent`, `written by this package`, or a WARN naming what sits there) and no FAIL for a `server_name` clash; disk layout and old-file fingerprints (`/root/ddc-mainnet` included) printed; `cgroup_driver=... cgroup_version=...` and `buildx_driver=docker` printed; `keys_fixed/apn_key.p8 identical to the git-tree copy:` printed with yes or no (reported, not judged here; the private runbook says what follows from it) | 2 min | - |
-| 1 | `./remote.sh upload` | creates `/root/ddcnew/deploy` (700) with the scripts, `compose.yaml` and `partner-info/index.html` | `files=12` (tar sent with `COPYFILE_DISABLE=1 --no-mac-metadata --no-xattrs`, extracted with `--no-same-owner`) | 1 min | `rm -rf /root/ddcnew/deploy` |
+| 1 | `./remote.sh upload` | creates `/root/ddcnew/deploy` (700) with the scripts, `compose.yaml` and `partner-info/index.html` | `files=13` (tar sent with `COPYFILE_DISABLE=1 --no-mac-metadata --no-xattrs`, extracted with `--no-same-owner`) | 1 min | `rm -rf /root/ddcnew/deploy` |
 | 2 | `./remote.sh run p1-backup.sh dump pre-refresh` | `/root/backup/pg/ddc-pre-refresh-<ts>.dump` (+ .sha256), 600; read-only `pg_dump` of `ddc` | `PASS dump ... mode=600`; refuses unless free disk > db size + 2G; a failed dump removes its `.part` | 5-10 min | `rm` the dump |
 | 3 | `./remote.sh run p1-backup.sh verify P1_USERS_MIN=<n>` (`<n>` from the private runbook) | throwaway `ddcnew-restore-test-20261004` (`--network none`, 1.5 GB), removed with its volume | refuses without a valid `P1_USERS_MIN` and below 6G free disk; sha256 match; `pg_restore --list` exit 0 with toc > 0; `pg_restore exit=0`; restored users >= `P1_USERS_MIN`; container removed. **Stops** on a failing or empty `pg_restore --list` and on a restored user count that is not a number or below `P1_USERS_MIN`; only a count above the live one is a warning (users deleted since the dump) | 15-25 min | none left behind |
 | 4 | `./remote.sh run p1-backup.sh install-cron` | `/root/backup/ddc-pgdump.sh`, `/etc/cron.d/ddc-pgdump` (03:15 CST, keeps 7 days of `ddc-daily-*`) | syntax ok (`bash -n` runs **before** the cron entry is written; a failure removes the script and writes no entry); installed; next day `p1-backup.sh status` shows an `ok` line | 1 min | `p1-backup.sh uninstall-cron` |
@@ -397,7 +399,8 @@ Consequences the data step (separate approval) must honour:
 - **Ports and database names:** ports (`API_PORT`, `WEB_PORT`, `DB_PORT`) are loopback-only, disjoint from 10000,
   9000-9003 and 15432, and refused while anything but this stack's own container listens on them (`30-nginx.sh` checks
   the two it points the vhosts at, `40-up.sh` all three, `00-preflight.sh` reports them). The database names `ddc`,
-  `postgres` and the templates are refused.
+  `postgres` and the templates are refused. `60-rehearsal.sh` works on one database only, `ddc_rehearsal_copy`, and
+  only while it carries the mark its `restore` set (section 10).
 - **Never used:** no `docker system/image -a/volume prune`, no image deletion other than `ddcnew/*` in teardown, and no
   restart of an old container.
 - **Output:** scripts print names, counts, sizes, hashes and pass/fail only.
@@ -478,6 +481,27 @@ by side. It must end with `summary: fails=0`. It covers:
   refused), `require_server` (settings validated, the record honoured), the run lock and the server-side log, and
   `50-partner-page.sh`'s refusals as root (page directory under `/root` or a symlink, overrides).
 - `p1-backup.sh verify` stop cases (synthetic counts) and the `99-teardown.sh` label fallback.
+- Section 12d, the rehearsal on a copy (`test/helpers/rehearsal-cases.sh`, stub docker, curl and df; macOS bash 3.2 and
+  ubuntu:jammy bash 5.1 with the real run lock): every subcommand refuses bad arguments (an image that is not
+  `ddcnew/backend:<12 hex>`, an `-infra` image, a dump outside `/root/backup/pg`, a symlink or a badly named file) before
+  any docker call; `ddc_rehearsal_copy` is refused when the running api uses it, when an env file names it, when the
+  api's database cannot be read or is on another host; nothing runs on a db container of another project, an unhealthy
+  one, with `INFRA_ONLY=1`, or on a copy without the mark (no step drops, alters or writes it); `restore` refuses a
+  sha256 mismatch, a failing or User-less table of contents, too little disk (the need printed) and too little memory
+  before it creates anything; a failed `pg_restore` and the disk watchdog each drop the partial copy, and no e-mail
+  address of an error reaches the output or the log; a one-off container whose `DATABASE_URL` is the live database
+  (override not applied) is stopped by its gate before its command; a whole rehearsal passes with every timing; a lost
+  row, a NO-GO plan, an open run, an `--apply` with nothing to do, a rollback one account short or with different user
+  columns, and a restarted new-stack container each stop it; psql only ever connects to `postgres` and the copy; no
+  secret, user id or e-mail address in the output or the server-side logs; records 700/600; the old database container
+  is only inspected and asked for its size. On macOS also: the gate through the real node (9 URLs), and the override
+  through the real docker compose (the api service gets the release image and the copy's `DATABASE_URL` over `.env.api`'s,
+  keeps everything else, and compose refuses to run without the URL). Then the script's SQL on a real postgres:17
+  (`test/helpers/rehearsal-pg.sh`, its sessions forwarded to a throwaway container with a small synthetic live database):
+  the mark set by `restore`, the real dump restored with counts equal to the live database's, `report` making new
+  sessions read-only (a write is refused) and resetting it, the users' digest, the gate inside Postgres refusing a copy
+  session that lands on the live database, the mark check inside Postgres refusing `DROP DATABASE` of an unmarked copy
+  even when the script is told it is marked, and the live database exactly as before.
 - Section 13: `test/helpers/public-repo-scan.sh` on every committable file of the package, with a negative control.
 - Section 14, the partner info page: `50-partner-page.sh` on a `20-env.sh` output (its generated secret) with dummy
   32-character page passwords: `apply` writes the two files (modes, `secret.json` fields, a new salt and IV per run),
@@ -578,7 +602,7 @@ partner.
 
 | # | Command | Changes on the server | Pass criteria | Undo |
 |---|---|---|---|---|
-| P1 | `DDC_APPROVED=yes ./remote.sh upload` | this package's scripts and `partner-info/index.html` in `/root/ddcnew/deploy` | `files=12` | `rm -rf /root/ddcnew/deploy` |
+| P1 | `DDC_APPROVED=yes ./remote.sh upload` | this package's scripts and `partner-info/index.html` in `/root/ddcnew/deploy` | `files=13` | `rm -rf /root/ddcnew/deploy` |
 | P2 | Only while the rehearsal env still has the `.invalid` placeholder (P4 says so): `DDC_APPROVED=yes ./remote.sh run 20-env.sh REHEARSAL_REDIRECT_URIS=<partner callback> REHEARSAL_INITIATE_LOGIN_URI=<partner start-login URL>`, then `DDC_APPROVED=yes ./remote.sh run 40-up.sh` | `.env.rehearsal`; the api runs with it | section 4, steps 9 and 10 | as there |
 | P3 | `DDC_APPROVED=yes ./remote.sh run 30-nginx.sh apply` (with section 9's flag or overrides) | both vhosts written again, the app one with `/partner-info/`; nginx reload | section 4, step 11; the printed diff adds the location to the app copy only | `./remote.sh run 30-nginx.sh undo` (approved) |
 | P4 | `op read "op://<vault>/<item>/password" \| DDC_APPROVED=yes ./remote.sh run 50-partner-page.sh apply PARTNER_ALLOWED_IP=<partner server IP>` | `/srv/ddcnew/partner-info/index.html` and `secret.json`; one throwaway container, removed | `PASS sha256(secrets/tge_rehearsal_client_secret) = SSO_TGE_CLIENT_SECRET_SHA256`, `PASS secret.json: v=1 kdf=PBKDF2-SHA256 iter=600000 ...`, the two paths with their mode and sha256, old stack unchanged | `50-partner-page.sh remove` |
@@ -660,3 +684,38 @@ already declares one of the new names. In both outcomes the partner page follows
 `DDC_APPROVED=yes ./remote.sh run 99-teardown.sh`. To move from B to A
 later: `99-teardown.sh` (it removes the record), then the A sequence from `10-build.sh` on (the web image must be built
 for `api-rehearsal`).
+
+## 10. Rehearsal on a copy of production data (`60-rehearsal.sh`)
+
+Runbook 4.2 (rehearsal A) and 4.3 (rehearsal B, timed), inside the new stack, on a copy. The copy is the database
+`ddc_rehearsal_copy` in the new stack's Postgres (`ddcnew-db-1`, checked by its compose labels). Before every step the
+script reads which database the running api uses (from the api container's environment: host and database name only)
+and refuses when the copy's name is that one, one named by `DATABASE_URL` in `/root/ddcnew/.env.api`, `.env.rehearsal`
+or `.env.cutover`, `ddc`, `ddc_prod`, `ddc_rehearsal`, `ddc_rehearsal2`, the cluster's own database, `postgres` or a
+template; it also refuses when the api's database cannot be read or is not on `db`. `restore` creates the copy and marks
+it (`COMMENT ON DATABASE`); every later step works on it only while it carries the mark:
+- psql connects to two databases only: the copy, and `postgres` for `CREATE`, `COMMENT`, `ALTER` and `DROP DATABASE` of
+  the copy; every session on the copy first checks inside Postgres that it is the marked copy, and every `ALTER` or
+  `DROP DATABASE` session that the copy carries the mark;
+- the one-off containers are `docker compose run --rm --no-deps -T api` with an override written by the script
+  (`/root/ddcnew/rehearsal/compose.copy.yaml`, no secret in it) that sets only the image and `DATABASE_URL` (the api's
+  `.env.api` URL with the database name replaced by the copy's; never printed or written to a file). Each one first runs
+  a gate that prints `db_target=<host>:<port>/<database> schema=<schema>` and stops the container (exit 97) before its
+  command unless that is `db:5432/ddc_rehearsal_copy schema=public`;
+- nothing is written to the old stack (its database is only asked for its size) or to the new stack's live database
+  (never connected to). Each write run takes the run lock and logs on the server, fingerprints the old stack, and checks
+  that the new stack's api, db and web containers were not restarted (same ids, state, start time and restart count).
+
+| # | Command | Changes on the server | Pass criteria | Time | Undo |
+|---|---|---|---|---|---|
+| R0 | `./remote.sh run 60-rehearsal.sh preflight` (read-only; add a dump path to check that one) | nothing | `REHEARSAL PREFLIGHT PASS`: the db container healthy, the api answers 401, `INFRA_ONLY=0`, the copy is none of the protected databases (listed) and does not exist yet; the newest `ddc-daily-*.dump` with its `.sha256` (or the one given) matches its sidecar; free disk >= the need it prints (1.5 x the old database's size for the copy + the nightly P1 dump's own floor, database size + 3G); MemAvailable >= 2000 MB. A dump older than 26 h is a WARN | 1 min | - |
+| R1 | `DDC_APPROVED=yes ./remote.sh run 60-rehearsal.sh restore` (or `restore /root/backup/pg/<dump>`) | database `ddc_rehearsal_copy` (created, marked, restored); `/root/ddcnew/rehearsal/` (700) with `timings.tsv`, `state.env`, `counts-dump.txt` (600); one `pg_restore --list` container (`--rm --network none`) | the same checks as R0 (each stops it before anything is created), `pg_restore --list` ok with the User table's data; `pg_restore exit=0`; `tables=<n> rows=<n> User=<n>`; `time: restore`, `dump_est` (from the dump's name and modification time), `counts_restore`; both stacks unchanged. A failed restore, or free disk below 3 GB during it (the watchdog ends its session inside Postgres), drops the partial copy | measured | `cleanup` |
+| R2 | `DDC_APPROVED=yes ./remote.sh run 60-rehearsal.sh migrate ddcnew/backend:<12 hex>` (default: the running api's image; the image must be on the host) | the copy's schema (`prisma migrate deploy`) | `PASS db_target=db:5432/ddc_rehearsal_copy schema=public`; `time: migrate`; `migrate status: Database schema is up to date`; the rebind tables present; the image recorded | measured | `cleanup`, then R1 |
+| R3 | `DDC_APPROVED=yes ./remote.sh run 60-rehearsal.sh report` (default image: R2's) | nothing in the copy (read-only while it runs, reset at the end); records `<ts>-report-*.out/.err` (600, with user and row ids) | the row count of every table against the dump's (`missing or fewer rows 0`; more rows or new tables come from the migrations); `mainnetSwitch --plan`: GO or NO-GO, the counts per authType, login key and pair state, what `--apply` would record, and the accounts that will not re-bind automatically, by reason (counts only); `backfillSocialPostIdentity.js` dry run (counts); `reportDuplicateCampaignGrants.js` (groups, rows and points in all); each timed | measured | - |
+| R4 | `DDC_APPROVED=yes ./remote.sh run 60-rehearsal.sh apply-switch` (with `/root/mainnet-switch/keep.txt` when it exists, mounted read-only) | the copy: one `--apply` run (its backup table stays), rolled back | `--plan` GO with no open run; `--apply` records exactly what `--plan` announced (`time: apply`); `--plan` then 0 to record and that many pending; `--rollback` restores and deletes that many (`time: rollback`); `--plan` back to the start; the digest of the four User columns the switch changes identical before `--apply` and after `--rollback` | measured | `cleanup`, then R1 |
+| R5 | `./remote.sh run 60-rehearsal.sh summary` (read-only) | nothing | the timings of every step, and the window estimate of runbook section 6 (dump + counts + restore + counts + migrate + plan, apply, plan + the social post backfill + smoke tests 40 min + domain switch 15 min) against 180 min | 1 min | - |
+| R6 | `DDC_APPROVED=yes ./remote.sh run 60-rehearsal.sh cleanup` | `DROP DATABASE ddc_rehearsal_copy WITH (FORCE)` (only with the mark); the override removed; the records kept | `PASS ddc_rehearsal_copy dropped`; `time: cleanup`; both stacks unchanged | 1 min | R1 again |
+
+Not covered here (the cutover's own steps): the old stack's freeze and final dump (the estimate takes the daily dump's
+time), the `public/` files, the web image and the domain switch. `99-teardown.sh` does not drop the copy (it lives in
+`pgdata`): run R6 first. `rm -rf /root/ddcnew/rehearsal` removes the records.

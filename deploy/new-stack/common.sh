@@ -1,11 +1,12 @@
 # shellcheck shell=bash disable=SC2034
 # common.sh - shared constants, settings and guards for the ddcnew (new production stack) scripts.
-# Sourced by p1-backup.sh, p2-disk.sh, 10-build.sh, 20-env.sh, 30-nginx.sh, 40-up.sh, 50-partner-page.sh, 99-teardown.sh.
+# Sourced by p1-backup.sh, p2-disk.sh, 10-build.sh, 20-env.sh, 30-nginx.sh, 40-up.sh, 50-partner-page.sh, 60-rehearsal.sh,
+# 99-teardown.sh.
 # The rehearsal host names and host ports are settings (API_HOST, APP_HOST, API_PORT, WEB_PORT, DB_PORT), defined
 # below and resolved by require_server.
 # Every write path (p1-backup.sh dump/verify/install-cron/uninstall-cron, p2-disk.sh apply, 10-build.sh, 20-env.sh,
-# 30-nginx.sh apply/undo/restore, 40-up.sh, 50-partner-page.sh apply/remove, 99-teardown.sh) calls old_snapshot_begin at
-# start and old_snapshot_assert at end.
+# 30-nginx.sh apply/undo/restore, 40-up.sh, 50-partner-page.sh apply/remove, 60-rehearsal.sh restore/migrate/report/
+# apply-switch/cleanup, 99-teardown.sh) calls old_snapshot_begin at start and old_snapshot_assert at end.
 # Every write run also calls run_begin (one write run at a time, server-side copy of its output).
 # CHANGES ON THE SERVER: nothing by itself (definitions only).
 # Portable to bash 3.2 (the local test sources it on macOS): no associative arrays; awk programs run on mawk 1.3.4
