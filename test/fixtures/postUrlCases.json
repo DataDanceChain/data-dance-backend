@@ -171,6 +171,116 @@
       "href": "https://www.instagram.com/p/ABC123def/",
       "canonical": "",
       "note": "only X, Instagram, Threads and TikTok have post permalinks"
+    },
+    {
+      "source": "x",
+      "href": "https://x.com/i/status/1845000000000000001",
+      "canonical": "https://x.com/i/status/1845000000000000001"
+    },
+    {
+      "source": "x",
+      "href": "https://www.x.com/i/status/1845000000000000001?s=20",
+      "canonical": "https://x.com/i/status/1845000000000000001"
+    },
+    {
+      "source": "twitter",
+      "href": "https://x.com/i/status/1845000000000000001",
+      "canonical": "https://x.com/i/status/1845000000000000001"
+    },
+    {
+      "source": "instagram",
+      "href": "https://instagram.com/p/ABC123def",
+      "canonical": "https://instagram.com/p/ABC123def"
+    },
+    {
+      "source": "instagram",
+      "href": "https://www.instagram.com/p/ABC123def/?igsh=1",
+      "canonical": "https://instagram.com/p/ABC123def"
+    },
+    {
+      "source": "threads",
+      "href": "https://threads.net/post/DAbc123x",
+      "canonical": "https://threads.net/post/DAbc123x"
+    },
+    {
+      "source": "threads",
+      "href": "https://www.threads.com/post/DAbc123x?xmt=1",
+      "canonical": "https://threads.net/post/DAbc123x"
+    },
+    {
+      "source": "threads",
+      "href": "https://threads.net/post",
+      "canonical": ""
+    },
+    {
+      "source": "threads",
+      "href": "https://threads.net/post/a",
+      "canonical": ""
+    },
+    {
+      "source": "tiktok",
+      "href": "https://tiktok.com/video/7312345678901234567",
+      "canonical": "https://tiktok.com/video/7312345678901234567"
+    },
+    {
+      "source": "tiktok",
+      "href": "https://www.tiktok.com/video/7312345678901234567?lang=en",
+      "canonical": "https://tiktok.com/video/7312345678901234567"
+    },
+    {
+      "source": "tiktok",
+      "href": "https://tiktok.com/photo/7312345678901234568",
+      "canonical": "https://tiktok.com/photo/7312345678901234568"
+    },
+    {
+      "source": "tiktok",
+      "href": "https://tiktok.com/video/not-a-number",
+      "canonical": ""
+    },
+    {
+      "source": "x",
+      "href": "https://instagram.com/p/ABC123def",
+      "canonical": ""
+    },
+    {
+      "source": "amazon",
+      "href": "https://threads.net/post/DAbc123x",
+      "canonical": ""
+    },
+    {
+      "source": "threads",
+      "href": "https://threads.net/post/post/DAbc123x",
+      "canonical": "https://threads.net/post/DAbc123x",
+      "note": "a post / video / photo segment after the first one (the handle form) is read before one in first place"
+    },
+    {
+      "source": "tiktok",
+      "href": "https://www.tiktok.com/video/@datadance/video/7312345678901234567",
+      "canonical": "https://tiktok.com/video/7312345678901234567",
+      "note": "a post / video / photo segment after the first one (the handle form) is read before one in first place"
+    },
+    {
+      "source": "tiktok",
+      "href": "https://tiktok.com/photo/@datadance/video/7312345678901234567",
+      "canonical": "https://tiktok.com/video/7312345678901234567",
+      "note": "a post / video / photo segment after the first one (the handle form) is read before one in first place"
+    },
+    {
+      "source": "threads",
+      "href": "https://threads.net/@datadance/post/post",
+      "canonical": "https://threads.net/post/post"
+    },
+    {
+      "source": "threads",
+      "href": "https://threads.net/post/post",
+      "canonical": "https://threads.net/post/post",
+      "note": "the canonical form in first place is read when the handle form gives no id"
+    },
+    {
+      "source": "threads",
+      "href": "https://threads.net/post/DAbc123x/post",
+      "canonical": "https://threads.net/post/DAbc123x",
+      "note": "the canonical form in first place is read when the handle form gives no id"
     }
   ]
 }

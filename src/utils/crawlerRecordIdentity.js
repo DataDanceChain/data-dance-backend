@@ -72,10 +72,24 @@ function isClientSmoothedRecord(item) {
  * A social post's permalink, reduced to the id the platform itself uses for that post, so the same
  * post seen through another host (twitter.com, mobile.x.com), another handle spelling, or with a
  * comment / query suffix is one record. Only the social sources below use it, and only with a link
- * on that platform's own hosts: every other source keeps its order id or title identity.
+ * on that platform's own hosts: every other source keeps its order id or title identity. Each
+ * canonical form reads back as itself, so a row that carries the canonical link gets the same key
+ * as one that carries the original link.
  */
 const SHORTCODE = /^[A-Za-z0-9_-]{4,64}$/;
 const NUMERIC_ID = /^\d{1,25}$/;
+
+/**
+ * The post id after a keyword segment, with its keyword: the handle form (/<handle>/<keyword>/<id>,
+ * the first keyword after the first segment) first, and the canonical form (/<keyword>/<id>) only
+ * when the handle form gives no id. null when neither does.
+ */
+function keywordPost(parts, keywords, idPattern) {
+  const isKeyword = (part) => keywords.includes(String(part || '').toLowerCase());
+  const after = (at) =>
+    at >= 0 && idPattern.test(parts[at + 1] || '') ? { keyword: parts[at].toLowerCase(), id: parts[at + 1] } : null;
+  return after(parts.findIndex((part, i) => i > 0 && isKeyword(part))) || (isKeyword(parts[0]) ? after(0) : null);
+}
 
 const SOCIAL_PERMALINKS = {
   x: {
@@ -100,17 +114,17 @@ const SOCIAL_PERMALINKS = {
   threads: {
     hosts: ['threads.net', 'threads.com'],
     canonical(parts) {
-      const at = parts.findIndex((part, i) => i > 0 && part.toLowerCase() === 'post');
-      const code = at > 0 ? parts[at + 1] : '';
-      return SHORTCODE.test(code || '') ? `https://threads.net/post/${code}` : '';
+      // /@<handle>/post/<code>, and the canonical /post/<code> itself
+      const post = keywordPost(parts, ['post'], SHORTCODE);
+      return post ? `https://threads.net/post/${post.id}` : '';
     },
   },
   tiktok: {
     hosts: ['tiktok.com'],
     canonical(parts) {
-      const at = parts.findIndex((part, i) => i > 0 && ['video', 'photo'].includes(part.toLowerCase()));
-      const id = at > 0 ? parts[at + 1] : '';
-      return NUMERIC_ID.test(id || '') ? `https://tiktok.com/${parts[at].toLowerCase()}/${id}` : '';
+      // /@<handle>/video/<id>, /@<handle>/photo/<id>, and the canonical /video/<id>, /photo/<id>
+      const post = keywordPost(parts, ['video', 'photo'], NUMERIC_ID);
+      return post ? `https://tiktok.com/${post.keyword}/${post.id}` : '';
     },
   },
 };
