@@ -72,7 +72,9 @@ function isClientSmoothedRecord(item) {
  * A social post's permalink, reduced to the id the platform itself uses for that post, so the same
  * post seen through another host (twitter.com, mobile.x.com), another handle spelling, or with a
  * comment / query suffix is one record. Only the social sources below use it, and only with a link
- * on that platform's own hosts: every other source keeps its order id or title identity.
+ * on that platform's own hosts: every other source keeps its order id or title identity. Each
+ * canonical form reads back as itself, so a row that carries the canonical link gets the same key
+ * as one that carries the original link.
  */
 const SHORTCODE = /^[A-Za-z0-9_-]{4,64}$/;
 const NUMERIC_ID = /^\d{1,25}$/;
@@ -100,16 +102,18 @@ const SOCIAL_PERMALINKS = {
   threads: {
     hosts: ['threads.net', 'threads.com'],
     canonical(parts) {
-      const at = parts.findIndex((part, i) => i > 0 && part.toLowerCase() === 'post');
-      const code = at > 0 ? parts[at + 1] : '';
+      // /@<handle>/post/<code>, and the canonical /post/<code> itself
+      const at = parts.findIndex((part) => part.toLowerCase() === 'post');
+      const code = at >= 0 ? parts[at + 1] : '';
       return SHORTCODE.test(code || '') ? `https://threads.net/post/${code}` : '';
     },
   },
   tiktok: {
     hosts: ['tiktok.com'],
     canonical(parts) {
-      const at = parts.findIndex((part, i) => i > 0 && ['video', 'photo'].includes(part.toLowerCase()));
-      const id = at > 0 ? parts[at + 1] : '';
+      // /@<handle>/video/<id>, /@<handle>/photo/<id>, and the canonical /video/<id>, /photo/<id>
+      const at = parts.findIndex((part) => ['video', 'photo'].includes(part.toLowerCase()));
+      const id = at >= 0 ? parts[at + 1] : '';
       return NUMERIC_ID.test(id || '') ? `https://tiktok.com/${parts[at].toLowerCase()}/${id}` : '';
     },
   },
