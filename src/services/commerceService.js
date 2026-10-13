@@ -773,87 +773,122 @@ function mergeLedgerMeta(existing, extra) {
   return { ...base, ...extra };
 }
 
-async function confirmPaymentByOps(paymentId, operator = 'ops') {
-  const payment = await prisma.payment.findUnique({
-    where: { id: paymentId },
-    include: { invoice: true },
-  });
-  if (!payment) {
-    throw Object.assign(new Error('Payment not found'), { statusCode: 404 });
-  }
-  if (payment.status === 'confirmed') {
-    return loadOpsPayment(paymentId);
-  }
-
-  if (payment.invoiceId) {
-    const confirmedPaid = await confirmedPaidForInvoice(prisma, payment.invoiceId, payment.id);
-    payment.matchStatus = computeMatchStatus(payment.invoice.total, confirmedPaid, payment.amount);
-  } else if (payment.method === 'top_up') {
-    payment.matchStatus = 'matched';
-  }
-
-  const confirmedAt = new Date();
-  await prisma.payment.update({
-    where: { id: paymentId },
-    data: {
-      status: 'confirmed',
-      matchStatus: payment.matchStatus,
-      paidAt: payment.paidAt || confirmedAt,
+/** The audit detail of an ops payment decision (no free text, no party details). */
+function paymentAuditEntry(payment, statusAfter, reason = null) {
+  return {
+    target: { type: 'payment', id: payment.id, label: payment.paymentNumber || null },
+    reason,
+    detail: {
+      statusBefore: payment.status,
+      statusAfter,
+      amount: payment.amount,
+      currency: payment.currency || 'USD',
+      method: payment.method,
+      payerId: payment.payerId || null,
+      orderId: payment.orderId || null,
+      invoiceId: payment.invoiceId || null,
+      organizationTransactionId: payment.organizationTransactionId || null,
     },
-  });
+  };
+}
 
-  if (payment.organizationTransactionId) {
-    const row = await prisma.organizationTransaction.findUnique({
-      where: { id: payment.organizationTransactionId },
+/**
+ * Ops confirms a payment: the payment, its top-up ledger row, the invoice settlement and (when
+ * `audit` is given) the audit row commit together. An already confirmed payment is left as it is
+ * and writes no row; of two confirmations at once, only one changes it.
+ */
+async function confirmPaymentByOps(paymentId, operator = 'ops', { audit } = {}) {
+  const confirmedAt = new Date();
+  await prisma.$transaction(async (tx) => {
+    const payment = await tx.payment.findUnique({
+      where: { id: paymentId },
+      include: { invoice: true },
     });
-    await prisma.organizationTransaction.update({
-      where: { id: payment.organizationTransactionId },
+    if (!payment) {
+      throw Object.assign(new Error('Payment not found'), { statusCode: 404 });
+    }
+    if (payment.status === 'confirmed') return;
+
+    let { matchStatus } = payment;
+    if (payment.invoiceId) {
+      const confirmedPaid = await confirmedPaidForInvoice(tx, payment.invoiceId, payment.id);
+      matchStatus = computeMatchStatus(payment.invoice.total, confirmedPaid, payment.amount);
+    } else if (payment.method === 'top_up') {
+      matchStatus = 'matched';
+    }
+
+    const claimed = await tx.payment.updateMany({
+      where: { id: paymentId, status: { not: 'confirmed' } },
       data: {
-        status: 'COMPLETED',
-        metadata: mergeLedgerMeta(row?.metadata, {
-          confirmedBy: operator,
-          confirmedAt: confirmedAt.toISOString(),
-        }),
+        status: 'confirmed',
+        matchStatus,
+        paidAt: payment.paidAt || confirmedAt,
       },
     });
-  }
-  if (payment.invoiceId) {
-    await refreshInvoiceSettlement(prisma, payment.invoiceId);
-  }
+    if (claimed.count !== 1) return;
+
+    if (payment.organizationTransactionId) {
+      const row = await tx.organizationTransaction.findUnique({
+        where: { id: payment.organizationTransactionId },
+      });
+      await tx.organizationTransaction.update({
+        where: { id: payment.organizationTransactionId },
+        data: {
+          status: 'COMPLETED',
+          metadata: mergeLedgerMeta(row?.metadata, {
+            confirmedBy: operator,
+            confirmedAt: confirmedAt.toISOString(),
+          }),
+        },
+      });
+    }
+    if (payment.invoiceId) {
+      await refreshInvoiceSettlement(tx, payment.invoiceId);
+    }
+    if (audit) await audit(tx, paymentAuditEntry(payment, 'confirmed'));
+  });
   return loadOpsPayment(paymentId);
 }
 
-async function rejectPaymentByOps(paymentId, notes, operator = 'ops') {
-  const payment = await prisma.payment.findUnique({ where: { id: paymentId } });
-  if (!payment) {
-    throw Object.assign(new Error('Payment not found'), { statusCode: 404 });
-  }
-  await prisma.payment.update({
-    where: { id: paymentId },
-    data: {
-      status: 'rejected',
-      matchStatus: 'unmatched',
-      notes: notes || payment.notes,
-    },
-  });
-  if (payment.organizationTransactionId) {
-    const row = await prisma.organizationTransaction.findUnique({
-      where: { id: payment.organizationTransactionId },
-    });
-    await prisma.organizationTransaction.update({
-      where: { id: payment.organizationTransactionId },
+/**
+ * Ops rejects a payment: the payment, its ledger row (FAILED), the invoice settlement and (when
+ * `audit` is given) the audit row commit together.
+ */
+async function rejectPaymentByOps(paymentId, notes, operator = 'ops', { audit } = {}) {
+  await prisma.$transaction(async (tx) => {
+    const payment = await tx.payment.findUnique({ where: { id: paymentId } });
+    if (!payment) {
+      throw Object.assign(new Error('Payment not found'), { statusCode: 404 });
+    }
+    await tx.payment.update({
+      where: { id: paymentId },
       data: {
-        status: 'FAILED',
-        metadata: mergeLedgerMeta(row?.metadata, {
-          rejectedBy: operator,
-          rejectedAt: new Date().toISOString(),
-        }),
+        status: 'rejected',
+        matchStatus: 'unmatched',
+        notes: notes || payment.notes,
       },
     });
-  }
-  if (payment.invoiceId) {
-    await refreshInvoiceSettlement(prisma, payment.invoiceId);
-  }
+    if (payment.organizationTransactionId) {
+      const row = await tx.organizationTransaction.findUnique({
+        where: { id: payment.organizationTransactionId },
+      });
+      await tx.organizationTransaction.update({
+        where: { id: payment.organizationTransactionId },
+        data: {
+          status: 'FAILED',
+          metadata: mergeLedgerMeta(row?.metadata, {
+            rejectedBy: operator,
+            rejectedAt: new Date().toISOString(),
+          }),
+        },
+      });
+    }
+    if (payment.invoiceId) {
+      await refreshInvoiceSettlement(tx, payment.invoiceId);
+    }
+    const reason = typeof notes === 'string' && notes.trim() ? notes.trim() : null;
+    if (audit) await audit(tx, paymentAuditEntry(payment, 'rejected', reason));
+  });
   return loadOpsPayment(paymentId);
 }
 

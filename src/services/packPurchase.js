@@ -8,7 +8,12 @@ function httpError(statusCode, code, message) {
   return Object.assign(new Error(message), { statusCode, code });
 }
 
-async function purchasePublishedPack({ buyerId, dataNFTId, quantity = 1, metadata = {} }) {
+/**
+ * Buy a published pack from the buyer's USD balance. `inTransaction(tx, { purchase, commerce,
+ * totalAmount })` runs inside the purchase transaction (a throw rolls the purchase back); its
+ * result is returned as `inTransactionResult`.
+ */
+async function purchasePublishedPack({ buyerId, dataNFTId, quantity = 1, metadata = {}, inTransaction }) {
   const qty = Math.max(1, Number(quantity) || 1);
   const dataNFT = await prisma.dataNFT.findUnique({
     where: { id: dataNFTId },
@@ -108,7 +113,10 @@ async function purchasePublishedPack({ buyerId, dataNFTId, quantity = 1, metadat
       organizationTransactionId: buyerTransaction.id,
     });
 
-    return { purchase, commerce };
+    const inTransactionResult = inTransaction
+      ? await inTransaction(tx, { purchase, commerce, totalAmount })
+      : undefined;
+    return { purchase, commerce, inTransactionResult };
   });
 
   const commerceAttest = require('./commerceAttest');
@@ -131,6 +139,7 @@ async function purchasePublishedPack({ buyerId, dataNFTId, quantity = 1, metadat
     purchaseCount: purchaseCount + 1,
     totalAmount,
     packPrice: dataNFT.price,
+    inTransactionResult: result.inTransactionResult,
   };
 }
 

@@ -335,7 +335,7 @@ exports.drawRaffle = async (req, res) => {
     const campaign = await prisma.campaign.findUnique({ where: { id: req.params.id } });
     if (!campaign) return fail(res, 404, 'Campaign not found');
     if (campaign.template !== 'RAFFLE') return fail(res, 400, 'Not a raffle');
-    const result = await drawRaffle(campaign, actorOf(req));
+    const result = await drawRaffle(campaign, actorOf(req), { audit: req.auditChange });
     if (result.error) return fail(res, 400, result.error);
     return res.json({ status: 'success', data: { created: result.created } });
   } catch (error) {

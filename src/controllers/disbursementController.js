@@ -92,7 +92,7 @@ async function opsList(req, res) {
 
 async function opsRetry(req, res) {
   try {
-    const processed = await processItem(req.params.id);
+    const processed = await processItem(req.params.id, { audit: req.auditChange });
     res.json({ status: 'success', data: publicItem(processed) });
   } catch (error) {
     sendError(res, error);
@@ -120,6 +120,7 @@ async function opsDisburse(req, res) {
   try {
     const result = await disburseRedemption(null, req.params.id, {
       walletAddress: req.body?.walletAddress,
+      audit: req.auditChange,
     });
     res.status(201).json({
       status: 'success',

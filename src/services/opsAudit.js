@@ -5,6 +5,10 @@
  * - A management action (role grant/revoke, disable/enable, points adjust, Data Planet manager,
  *   sign-in) writes its row with `writeAudit(tx, ...)` inside the transaction of the change, so a
  *   failed audit write leaves nothing changed, and sets `req.auditWritten`.
+ * - A route that moves money or balances (payments, merchant credit, order attestation, payouts,
+ *   data-request fulfilment, raffle draw) is mounted with `auditInChange(action)`: its handler
+ *   writes the row with `req.auditChange(tx, ...)` inside the transaction of the change, one row
+ *   per change, and a call that changes nothing writes none.
  * - Every other successful ops write gets one generic `ops.write` row from `auditOpsWrites`.
  * - `detail` never holds a token, a secret, a code or a request body.
  * - Rows are append-only: nothing here updates or deletes one.
@@ -215,9 +219,33 @@ const auditLog = {
   error: (event, entry) => logger.error(event, entry),
 };
 
+/**
+ * Route middleware for an ops route that moves money or balances: the handler writes its own
+ * `action` row with `req.auditChange(tx, { target, reason, detail })` inside the transaction of
+ * the change, and the generic row is skipped (also when the call changed nothing).
+ */
+function auditInChange(action) {
+  if (!AUDIT_ACTIONS.includes(action)) throw new Error(`Unknown audit action: ${action}`);
+  return function markAuditInChange(req, res, next) {
+    let actor;
+    try {
+      actor = actorFromOps(req.opsAdmin);
+    } catch (error) {
+      return res.status(error.status || 403).json({ status: 'fail', code: error.code, message: error.message });
+    }
+    req.auditInChange = action;
+    req.auditChange = async (tx, { target, reason = null, detail }) => {
+      const row = await writeAudit(tx, { actor, action, target, reason, detail, surface: 'ops', requestId: req.reqId || null });
+      req.auditWritten = true;
+      return row;
+    };
+    return next();
+  };
+}
+
 /** Start the generic row for a finished write, unless it needs none. */
 function recordGenericWrite(req, res) {
-  if (req.auditWritten) return;
+  if (req.auditWritten || req.auditInChange) return;
   if (res.statusCode < 200 || res.statusCode >= 300) return;
   const kind = req.opsAdmin && req.opsAdmin.kind;
   if (kind !== 'user' && kind !== 'shared') return;
@@ -271,6 +299,7 @@ module.exports = {
   listAudit,
   auditForUser,
   auditOpsWrites,
+  auditInChange,
   auditLog,
   parsePaging,
   createdAtRange,

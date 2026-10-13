@@ -219,7 +219,11 @@ function pickWeightedWinner(entries) {
   return entries[entries.length - 1] || null;
 }
 
-async function drawRaffle(campaign, actor) {
+/**
+ * Draw the raffle's open seats. The wins, the points they grant, the campaign event and (with
+ * `audit`, the ops route) the audit row commit in one transaction.
+ */
+async function drawRaffle(campaign, actor, { audit } = {}) {
   if (!campaign || campaign.template !== 'RAFFLE') return { error: 'Not a raffle' };
   const rules = raffleRules(campaign);
   const existing = await prisma.campaignRaffleWin.findMany({
@@ -288,6 +292,16 @@ async function drawRaffle(campaign, actor) {
         note: `drew ${created.length} prize${created.length === 1 ? '' : 's'}`,
       },
     });
+    if (audit) {
+      await audit(tx, {
+        target: { type: 'campaign', id: campaign.id, label: campaign.slug || null },
+        detail: {
+          wins: created.length,
+          pointsAwarded: created.reduce((sum, win) => sum + (Number(win.points) || 0), 0),
+          winIds: created.map((win) => win.id),
+        },
+      });
+    }
   });
   return { created };
 }

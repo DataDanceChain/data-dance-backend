@@ -235,6 +235,7 @@ exports.confirmPayment = async (req, res) => {
     const payment = await commerceService.confirmPaymentByOps(
       req.params.id,
       req.opsAdmin?.username || 'ops',
+      { audit: req.auditChange },
     );
     const orderId = payment?.orderId || payment?.order?.id;
     if (orderId) {
@@ -254,6 +255,7 @@ exports.rejectPayment = async (req, res) => {
       req.params.id,
       req.body?.notes,
       req.opsAdmin?.username || 'ops',
+      { audit: req.auditChange },
     );
     return res.json({ status: 'success', data: payment });
   } catch (error) {
@@ -393,18 +395,27 @@ exports.creditMerchant = async (req, res) => {
     if (!user || !user.isOrganization) {
       return res.status(404).json({ status: 'fail', message: 'Merchant not found' });
     }
-    const transaction = await prisma.organizationTransaction.create({
-      data: {
-        userId: user.id,
-        amount,
-        type: 'DEPOSIT',
-        status: 'COMPLETED',
-        description: note,
-        metadata: {
-          source: 'ops_credit',
-          operator: req.opsAdmin?.username || 'ops',
+    // Same transaction: if the audit row cannot be written, the merchant is not credited.
+    const transaction = await prisma.$transaction(async (tx) => {
+      const row = await tx.organizationTransaction.create({
+        data: {
+          userId: user.id,
+          amount,
+          type: 'DEPOSIT',
+          status: 'COMPLETED',
+          description: note,
+          metadata: {
+            source: 'ops_credit',
+            operator: req.opsAdmin?.username || 'ops',
+          },
         },
-      },
+      });
+      await req.auditChange(tx, {
+        target: { type: 'user', id: user.id },
+        reason: note,
+        detail: { organizationTransactionId: row.id, type: 'DEPOSIT', amount, currency: 'USD' },
+      });
+      return row;
     });
     return res.json({
       status: 'success',
@@ -553,6 +564,7 @@ exports.attestOrder = async (req, res) => {
     const data = await commerceAttest.attestPaidOrder(req.params.id, {
       txHash: req.body?.txHash,
       submittedBy: `ops:${req.opsAdmin?.username || 'unknown'}`,
+      audit: req.auditChange,
     });
     return res.json({ status: 'success', data });
   } catch (error) {

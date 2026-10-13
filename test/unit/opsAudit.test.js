@@ -13,7 +13,8 @@ const { installOpsApp, listenLoopback, seedUser, grant, bearer, tokens, settle }
 
 const { prisma, app } = installOpsApp();
 const { clearRateLimitStore } = require('../../src/middlewares/rateLimitMiddleware');
-const { writeAudit, auditLog, auditOpsWrites, _internals } = require('../../src/services/opsAudit');
+const { writeAudit, auditLog, auditOpsWrites, auditInChange, _internals } = require('../../src/services/opsAudit');
+const { opsRoutes } = require('../../src/routes/opsAdminRoutes');
 
 let server;
 before(async () => { server = await listenLoopback(app); });
@@ -341,5 +342,44 @@ describe('the generic ops.write row', () => {
       { statusCode: 200 },
     );
     assert.deepEqual(idRow.target, { type: 'campaigns', id: 'c-1' });
+  });
+});
+
+describe('money routes write their row inside the change', () => {
+  it('the route table marks exactly the routes that move money or balances, each with its action', () => {
+    const marked = opsRoutes.filter((route) => route.audit).map((route) => `${route.method} ${route.path} ${route.audit}`).sort();
+    assert.deepEqual(marked, [
+      'post /campaigns/:id/raffle/draw raffle.draw',
+      'post /demands/:id/fulfill demand.fulfill',
+      'post /disbursements/items/:id/process disbursement.process',
+      'post /disbursements/redemptions/:id/disburse disbursement.disburse',
+      'post /merchants/:userId/credit merchant.credit',
+      'post /orders/:id/attest order.attest',
+      'post /payments/:id/confirm payment.confirm',
+      'post /payments/:id/reject payment.reject',
+    ]);
+  });
+
+  it('an unknown action is refused when the route is declared', () => {
+    assert.throws(() => auditInChange('payment.anything'), /Unknown audit action/);
+  });
+
+  it('a marked route gets no generic row, also when it changed nothing', async () => {
+    const req = { method: 'POST', opsAdmin: { kind: 'user', userId: admin.id, username: admin.email, role: 'ddc_admin' }, reqId: 'r-money' };
+    let nextCalled = false;
+    auditInChange('payment.confirm')(req, {}, () => { nextCalled = true; });
+    assert.ok(nextCalled);
+    assert.equal(typeof req.auditChange, 'function');
+    const res = { statusCode: 200, end() {} };
+    auditOpsWrites(req, res, () => {});
+    res.end();
+    await settle();
+    assert.equal(prisma.store.opsAuditLog.length, 0);
+
+    const row = await req.auditChange(prisma, { target: { type: 'payment', id: 'pay-1' }, detail: { amount: 1 } });
+    assert.equal(row.action, 'payment.confirm');
+    assert.equal(row.actorUserId, admin.id);
+    assert.equal(row.requestId, 'r-money');
+    assert.equal(row.surface, 'ops');
   });
 });

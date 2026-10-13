@@ -198,7 +198,69 @@ async function markRewardPaid(item) {
   }
 }
 
-async function processItem(itemId) {
+/** The audit row of an ops call on a payout: what it was, what it becomes, where the money goes. */
+function payoutAuditEntry(item, step, statusAfter, extra = {}) {
+  return {
+    target: { type: 'disbursement_item', id: item.id, label: item.payoutId || null },
+    detail: {
+      step,
+      statusBefore: item.status,
+      statusAfter,
+      amount: item.amount,
+      asset: item.asset,
+      chainId: item.chainId,
+      walletAddress: item.walletAddress,
+      redemptionId: item.redemptionId || null,
+      txHash: item.txHash || null,
+      ...extra,
+    },
+  };
+}
+
+/**
+ * With `audit` (an ops route), a write and its audit row commit in one transaction: `write(db)`
+ * makes the change, `changed(result)` says whether it changed anything (no change, no row), and
+ * `entry` is the row (or a function of the result). Without `audit` the write runs as before.
+ */
+async function auditedWrite(audit, entry, write, changed = () => true) {
+  if (!audit) return write(prisma);
+  return prisma.$transaction(async (tx) => {
+    const result = await write(tx);
+    if (changed(result)) await audit(tx, typeof entry === 'function' ? entry(result) : entry);
+    return result;
+  });
+}
+
+/**
+ * An audited call on a payout that already has a transaction hash claims the payout as it was read
+ * and writes its audit row in that claim, before the hash is re-checked or the payout attested.
+ * False when the payout moved meanwhile.
+ */
+async function claimForAudit(audit, existing, step) {
+  if (!audit) return true;
+  const claimed = await auditedWrite(
+    audit,
+    payoutAuditEntry(existing, step, existing.status),
+    (db) => db.disbursementItem.updateMany({
+      where: { id: existing.id, status: existing.status, txHash: existing.txHash },
+      data: { failureReason: existing.failureReason },
+    }),
+    (result) => result.count === 1,
+  );
+  return claimed.count === 1;
+}
+
+function reloadItem(id) {
+  return prisma.disbursementItem.findUnique({ where: { id }, include: { partner: true } });
+}
+
+/**
+ * Process one payout. With `audit` (the ops route), the call's first change to the payout is
+ * written in one transaction with its audit row, before any transfer is sent: one row per call
+ * that changes the payout, none for a call that changes nothing. A failed audit write changes
+ * nothing and sends nothing.
+ */
+async function processItem(itemId, { audit } = {}) {
   const existing = await prisma.disbursementItem.findFirst({
     where: { OR: [{ id: itemId }, { payoutId: String(itemId) }] },
     include: { partner: true },
@@ -209,6 +271,9 @@ async function processItem(itemId) {
   }
 
   if (existing.status === 'confirmed' && existing.txHash) {
+    // Attested and not a redemption: nothing left to do (no change, no audit row).
+    if (existing.attestationTxHash && !existing.redemptionId) return existing;
+    if (!(await claimForAudit(audit, existing, 'reconcile'))) return reloadItem(existing.id);
     const attested = existing.attestationTxHash
       ? existing
       : await attestConfirmedItem(existing, existing.partner?.slug || null);
@@ -217,6 +282,7 @@ async function processItem(itemId) {
   }
 
   if (existing.txHash && existing.status === 'submitted') {
+    if (!(await claimForAudit(audit, existing, 'recheck'))) return reloadItem(existing.id);
     const sent = await sendBscUsdt({
       to: existing.walletAddress,
       amount: existing.amount,
@@ -246,11 +312,15 @@ async function processItem(itemId) {
     if (age < IN_FLIGHT_MS) {
       throw httpError(409, 'disbursement_in_flight', 'This payout is already being submitted');
     }
-    return prisma.disbursementItem.update({
-      where: { id: existing.id },
-      data: { status: 'held', failureReason: RECONCILE_REASON },
-      include: { partner: true },
-    });
+    return auditedWrite(
+      audit,
+      payoutAuditEntry(existing, 'hold', 'held', { holdCode: 'reconcile' }),
+      (db) => db.disbursementItem.update({
+        where: { id: existing.id },
+        data: { status: 'held', failureReason: RECONCILE_REASON },
+        include: { partner: true },
+      }),
+    );
   }
 
   const spent = await monthToDateTotal();
@@ -262,21 +332,35 @@ async function processItem(itemId) {
     chain: existing.chainId,
   });
   if (!decision.ok) {
-    return prisma.disbursementItem.update({
-      where: { id: existing.id },
-      data: { status: 'held', failureReason: decision.message },
-      include: { partner: true },
-    });
+    return auditedWrite(
+      audit,
+      payoutAuditEntry(existing, 'hold', 'held', { holdCode: decision.code || null }),
+      (db) => db.disbursementItem.update({
+        where: { id: existing.id },
+        data: { status: 'held', failureReason: decision.message },
+        include: { partner: true },
+      }),
+    );
   }
 
-  const locked = await prisma.disbursementItem.updateMany({
-    where: {
-      id: existing.id,
-      txHash: null,
-      status: { in: ['accepted', 'failed', 'held'] },
-    },
-    data: { status: 'processing', failureReason: null },
-  });
+  // The claim: with an audit, the claim and its row commit together before the transfer.
+  const locked = await auditedWrite(
+    audit,
+    payoutAuditEntry(
+      { ...existing, amount: decision.amount, walletAddress: decision.walletAddress },
+      'send',
+      'processing',
+    ),
+    (db) => db.disbursementItem.updateMany({
+      where: {
+        id: existing.id,
+        txHash: null,
+        status: { in: ['accepted', 'failed', 'held'] },
+      },
+      data: { status: 'processing', failureReason: null },
+    }),
+    (result) => result.count === 1,
+  );
   if (locked.count !== 1) {
     const current = await prisma.disbursementItem.findUnique({
       where: { id: existing.id },
@@ -437,10 +521,15 @@ async function loadRedemption(redemptionId, user) {
   return redemption;
 }
 
-async function disburseRedemption(user, redemptionId, { walletAddress } = {}) {
+/**
+ * Pay a USDT redemption out. With `audit` (the ops route): a redemption that already has a payout
+ * is processed as processItem does; a new payout is created in one transaction with the audit row
+ * (amount, wallet), and the transfer that follows belongs to that row.
+ */
+async function disburseRedemption(user, redemptionId, { walletAddress, audit } = {}) {
   const redemption = await loadRedemption(redemptionId, user);
   if (redemption.disbursementItem) {
-    const item = await processItem(redemption.disbursementItem.id);
+    const item = await processItem(redemption.disbursementItem.id, { audit });
     return { redemption, item };
   }
 
@@ -454,7 +543,19 @@ async function disburseRedemption(user, redemptionId, { walletAddress } = {}) {
   }
 
   const payoutId = `redemption:${redemption.id}`;
-  const batch = await prisma.disbursementBatch.create({
+  const createdEntry = (created) => ({
+    target: { type: 'points_redemption', id: redemption.id },
+    detail: {
+      step: 'create',
+      payoutId,
+      itemId: created.items[0]?.id || null,
+      amount,
+      asset: 'USDT',
+      chainId: chainId(),
+      walletAddress: wallet,
+    },
+  });
+  const batch = await auditedWrite(audit, createdEntry, (db) => db.disbursementBatch.create({
     data: {
       origin: ORIGIN_INTERNAL_REWARD,
       externalBatchId: payoutId,
@@ -483,7 +584,7 @@ async function disburseRedemption(user, redemptionId, { walletAddress } = {}) {
       },
     },
     include: { items: true },
-  });
+  }));
   const item = await processItem(batch.items[0].id);
   await refreshBatchStatus(batch.id);
   return { redemption, item };

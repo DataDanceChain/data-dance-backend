@@ -182,24 +182,43 @@ async function buildReceiptForOrder(order) {
   });
 }
 
+/**
+ * Store the attestation. With `audit` (an ops route), the order update and the audit row commit
+ * together.
+ */
 async function persistAttestation(orderId, {
   payload,
   attestationHash,
   attestationTxHash,
-}) {
-  const updated = await prisma.purchaseOrder.update({
-    where: { id: orderId },
-    data: {
-      attestationPayload: payload,
-      attestationHash,
-      attestationTxHash: attestationTxHash || null,
-      attestedAt: new Date(),
-    },
-  });
+}, { audit, order, submitted = false } = {}) {
+  const write = async (db) => {
+    const updated = await db.purchaseOrder.update({
+      where: { id: orderId },
+      data: {
+        attestationPayload: payload,
+        attestationHash,
+        attestationTxHash: attestationTxHash || null,
+        attestedAt: new Date(),
+      },
+    });
+    if (audit) {
+      await audit(db, {
+        target: { type: 'order', id: orderId, label: order?.orderNumber || null },
+        detail: {
+          attestationHash,
+          attestationTxHash: attestationTxHash || null,
+          attestationTxHashBefore: order?.attestationTxHash || null,
+          txHashSubmitted: submitted,
+        },
+      });
+    }
+    return updated;
+  };
+  const updated = audit ? await prisma.$transaction(write) : await write(prisma);
   return publicAttestation(updated);
 }
 
-async function attestPaidOrder(orderId, { txHash, submittedBy } = {}) {
+async function attestPaidOrder(orderId, { txHash, submittedBy, audit } = {}) {
   const order = await loadOrderForAttest(orderId);
   if (!order) {
     throw Object.assign(new Error('Order not found'), { statusCode: 404 });
@@ -227,7 +246,7 @@ async function attestPaidOrder(orderId, { txHash, submittedBy } = {}) {
     payload,
     attestationHash,
     attestationTxHash,
-  });
+  }, { audit, order, submitted: Boolean(proof) });
   return {
     ...saved,
     orderId: order.id,

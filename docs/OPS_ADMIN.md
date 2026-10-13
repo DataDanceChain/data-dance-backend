@@ -98,8 +98,22 @@ Campaigns are templates, not a CMS: `HOME_CARD`, `CONNECT_BOOST`, `REFERRAL_BOOS
 
 `OpsAuditLog` is append-only and has no foreign keys, so rows outlive the accounts they name. Sign-in,
 role, account, points and Data Planet changes write their own row in the same transaction as the
-change (a failed audit write changes nothing). Every other successful ops write gets one generic
-`ops.write` row with the method, route, params and status, never the request body.
+change (a failed audit write changes nothing). So do the routes that move money or balances, one row
+per change and none for a call that changes nothing:
+
+| Route | Action |
+|---|---|
+| `POST /payments/:id/confirm` | `payment.confirm` |
+| `POST /payments/:id/reject` | `payment.reject` |
+| `POST /merchants/:userId/credit` | `merchant.credit` |
+| `POST /orders/:id/attest` | `order.attest` |
+| `POST /disbursements/items/:id/process` | `disbursement.process` (written with the claim, before any transfer) |
+| `POST /disbursements/redemptions/:id/disburse` | `disbursement.disburse` (written with the new payout, before any transfer) |
+| `POST /demands/:id/fulfill` | `demand.fulfill` (purchase, request status and row in one transaction) |
+| `POST /campaigns/:id/raffle/draw` | `raffle.draw` |
+
+Every other successful ops write gets one generic `ops.write` row with the method, route, params
+and status, never the request body.
 
 ## Frontend
 

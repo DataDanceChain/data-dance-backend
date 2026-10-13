@@ -21,7 +21,7 @@ const { protectOps, restrictDemo, requireOps } = require('../middlewares/opsAuth
 const { protect } = require('../middlewares/authMiddleware');
 const { rateLimiters } = require('../middlewares/rateLimitMiddleware');
 const { uploadCampaignCover } = require('../middlewares/uploadMiddleware');
-const { auditOpsWrites } = require('../services/opsAudit');
+const { auditOpsWrites, auditInChange } = require('../services/opsAudit');
 const { listSsoClients } = require('../services/ssoDeveloperLive');
 const opsCampaigns = require('../controllers/opsCampaignController');
 const trackedLinks = require('../controllers/trackedLinkController');
@@ -35,7 +35,11 @@ try {
 
 const router = express.Router();
 
-/** Every mounted route as { method, path, permission } (tests walk it against router.stack). */
+/**
+ * Every mounted route as { method, path, permission, audit? } (tests walk it against router.stack).
+ * `audit` names the action of a route that moves money or balances and writes its row inside the
+ * transaction of the change (services/opsAudit.js auditInChange); the rest get the generic row.
+ */
 const opsRoutes = [];
 
 /** The matched route and its params, for the generic audit row (services/opsAudit.js). */
@@ -47,13 +51,17 @@ function noteRoute(req, res, next) {
 /**
  * Every ops route declares exactly one permission (src/constants/opsRoles.js); a missing or
  * unknown one throws at load. Handlers that are not all functions (an optional controller that is
- * absent from this build) leave the route unmounted, as before.
+ * absent from this build) leave the route unmounted, as before. A first argument `{ audit }`
+ * after the permission marks a money route (see opsRoutes).
  */
-function mount(method, path, permission, ...handlers) {
+function mount(method, path, permission, ...rest) {
   const guard = requireOps(permission);
+  const options = rest.length && rest[0] && typeof rest[0] === 'object' ? rest.shift() : {};
+  const handlers = rest;
+  const marks = options.audit ? [auditInChange(options.audit)] : [];
   if (handlers.length && handlers.every((handler) => typeof handler === 'function')) {
-    router[method](path, guard, noteRoute, ...handlers);
-    opsRoutes.push({ method, path, permission });
+    router[method](path, guard, noteRoute, ...marks, ...handlers);
+    opsRoutes.push({ method, path, permission, ...(options.audit ? { audit: options.audit } : {}) });
   }
 }
 
@@ -103,28 +111,28 @@ mount('post', '/campaigns/:id/transition', 'ops.write', opsCampaigns.transition)
 mount('get', '/campaigns/:id/applications', 'ops.read', opsCampaigns.listApplications);
 mount('post', '/campaigns/:id/applications/:appId', 'ops.write', opsCampaigns.resolveApplication);
 mount('get', '/campaigns/:id/raffle', 'ops.read', opsCampaigns.raffleState);
-mount('post', '/campaigns/:id/raffle/draw', 'ops.write', opsCampaigns.drawRaffle);
+mount('post', '/campaigns/:id/raffle/draw', 'ops.write', { audit: 'raffle.draw' }, opsCampaigns.drawRaffle);
 mount('post', '/campaigns/:id/raffle/wins/:winId/fulfill', 'ops.write', opsCampaigns.fulfillRaffleWin);
 mount('get', '/demands', 'ops.read', opsDemands.list);
 mount('get', '/demands/:id', 'ops.read', opsDemands.get);
 mount('post', '/demands/:id/quote', 'ops.write', opsDemands.quote);
 mount('post', '/demands/:id/decline', 'ops.write', opsDemands.decline);
 mount('post', '/demands/:id/assemble', 'ops.write', opsDemands.assemble);
-mount('post', '/demands/:id/fulfill', 'ops.write', opsDemands.fulfill);
+mount('post', '/demands/:id/fulfill', 'ops.write', { audit: 'demand.fulfill' }, opsDemands.fulfill);
 mount('get', '/overview', 'ops.read', opsCommerce.overview);
 mount('get', '/payments', 'ops.read', opsCommerce.listPayments);
-mount('post', '/payments/:id/confirm', 'ops.write', opsCommerce.confirmPayment);
-mount('post', '/payments/:id/reject', 'ops.write', opsCommerce.rejectPayment);
+mount('post', '/payments/:id/confirm', 'ops.write', { audit: 'payment.confirm' }, opsCommerce.confirmPayment);
+mount('post', '/payments/:id/reject', 'ops.write', { audit: 'payment.reject' }, opsCommerce.rejectPayment);
 mount('get', '/merchants', 'ops.read', opsCommerce.listMerchants);
 mount('get', '/merchants/:userId', 'ops.read', opsCommerce.getMerchant);
-mount('post', '/merchants/:userId/credit', 'ops.write', opsCommerce.creditMerchant);
+mount('post', '/merchants/:userId/credit', 'ops.write', { audit: 'merchant.credit' }, opsCommerce.creditMerchant);
 mount('post', '/merchants/:userId/kyc', 'ops.write', opsCommerce.reviewMerchantKyc);
 mount('get', '/orders', 'ops.read', opsCommerce.listOrders);
 mount('get', '/orders/:id', 'ops.read', opsCommerce.getOrder);
-mount('post', '/orders/:id/attest', 'ops.write', opsCommerce.attestOrder);
+mount('post', '/orders/:id/attest', 'ops.write', { audit: 'order.attest' }, opsCommerce.attestOrder);
 mount('get', '/disbursements', 'ops.read', disbursement.opsList);
-mount('post', '/disbursements/items/:id/process', 'ops.payouts', disbursement.opsRetry);
-mount('post', '/disbursements/redemptions/:id/disburse', 'ops.payouts', disbursement.opsDisburse);
+mount('post', '/disbursements/items/:id/process', 'ops.payouts', { audit: 'disbursement.process' }, disbursement.opsRetry);
+mount('post', '/disbursements/redemptions/:id/disburse', 'ops.payouts', { audit: 'disbursement.disburse' }, disbursement.opsDisburse);
 mount('get', '/privacy-requests', 'ops.read', listPrivacyRequests);
 mount('post', '/privacy-requests/:id', 'ops.write', resolvePrivacyRequest);
 mount('get', '/operations', 'ops.read', listOperations);
