@@ -472,7 +472,7 @@ async function uploadCrawlerData(data, userId) {
       }
       
       // Generate content hash and source ID
-      item.contentHash = generateContentHash(item.payload);
+      item.contentHash = generateContentHash(item.payload, { source: item.source, userId });
       item.sourceId = extractSourceId(item.source, item.payload, item.metadata);
       item.originalIndex = i;
       
@@ -656,8 +656,14 @@ async function uploadCrawlerData(data, userId) {
         itemTasks.push(task);
       }
 
-      // Prepare database insert data (each record tied to its CrawlerTask)
-      const insertData = validItems.map((item, i) => ({
+      // Prepare database insert data (each record tied to its CrawlerTask). Each row gets its id
+      // here so the rows createMany really wrote can be read back below: skipDuplicates drops a
+      // row without saying which, and only rows that were written may earn points.
+      const pending = validItems
+        .map((item, i) => ({ item, task: itemTasks[i], id: crypto.randomUUID() }))
+        .filter((row) => row.task);
+      const insertData = pending.map(({ item, task, id }) => ({
+        id,
         source: item.source,
         type: item.type,
         timestamp: new Date(item.timestamp || new Date()),
@@ -665,9 +671,9 @@ async function uploadCrawlerData(data, userId) {
         payload: item.payload,
         contentHash: item.contentHash,
         sourceId: item.sourceId,
-        taskId: itemTasks[i]?.id ?? null,
+        taskId: task.id,
         userId
-      })).filter(row => row.taskId != null);
+      }));
 
       if (insertData.length === 0) {
         return {
@@ -680,22 +686,35 @@ async function uploadCrawlerData(data, userId) {
       }
 
       // Insert data with skipDuplicates to handle race conditions
-      const insertResult = await tx.crawlerData.createMany({
+      await tx.crawlerData.createMany({
         data: insertData,
         skipDuplicates: true
       });
-      
-      const actualInserted = insertResult.count;
-      
-      // Attribute inserted count to tasks/sources (first actualInserted items with a task)
+
+      // The rows actually written, wherever they sat in the batch. A skipped row is reported as a
+      // duplicate instead of being dropped without a word.
+      const writtenIds = new Set(
+        (await tx.crawlerData.findMany({
+          where: { id: { in: insertData.map((row) => row.id) } },
+          select: { id: true }
+        })).map((row) => row.id)
+      );
+      const inserted = pending.filter((row) => writtenIds.has(row.id));
+      for (const { item } of pending.filter((row) => !writtenIds.has(row.id))) {
+        duplicates.push({
+          index: item.originalIndex,
+          reason: 'duplicate_data',
+          reasonText: 'This record already exists',
+          sourceId: item.sourceId,
+          contentHash: item.contentHash
+        });
+      }
+      const actualInserted = inserted.length;
+
+      // Attribute inserted rows to their tasks / sources
       const insertedBySource = {};
       const insertedByTaskDbId = {};
-      let attributed = 0;
-      for (let i = 0; i < validItems.length && attributed < actualInserted; i++) {
-        if (!itemTasks[i]) continue;
-        attributed += 1;
-        const item = validItems[i];
-        const task = itemTasks[i];
+      for (const { item, task } of inserted) {
         insertedByTaskDbId[task.id] = (insertedByTaskDbId[task.id] || 0) + 1;
         insertedBySource[item.source] = (insertedBySource[item.source] || 0) + 1;
       }
@@ -720,14 +739,7 @@ async function uploadCrawlerData(data, userId) {
       // Stay bonus: extra points per newly inserted eligible stay (base crawler points stay as-is)
       let summerBonusPoints = 0;
       if (stayRules && actualInserted > 0) {
-        const newlyInsertedItems = [];
-        let attributedForBonus = 0;
-        for (let i = 0; i < validItems.length && attributedForBonus < actualInserted; i++) {
-          if (!itemTasks[i]) continue;
-          newlyInsertedItems.push(validItems[i]);
-          attributedForBonus += 1;
-        }
-        const bonusItems = countStayBonusItems(newlyInsertedItems, stayRules);
+        const bonusItems = countStayBonusItems(inserted.map((row) => row.item), stayRules);
         summerBonusPoints = bonusItems * (stayRules.bonusPerItem || 0);
       }
 
@@ -943,12 +955,14 @@ async function getCrawlerStats(userId) {
 
 /**
  * Generate SHA256 hash of normalized payload data.
- * A social permalink hashes by that URL alone, so a new like count is the same post.
+ * A post on X / Instagram / Threads / TikTok hashes by its owner and canonical permalink instead,
+ * so a later like count is the same record for that user, while another user who saw the same
+ * post keeps a record of their own (contentHash is unique across the whole table).
  */
-function generateContentHash(payload) {
-  const postUrl = socialPostUrl(payload);
+function generateContentHash(payload, { source, userId } = {}) {
+  const postUrl = userId ? socialPostUrl(source, payload) : '';
   const content = postUrl
-    ? JSON.stringify({ postUrl })
+    ? JSON.stringify({ userId, postUrl })
     : JSON.stringify(normalizeObject(payload));
   return crypto.createHash('sha256').update(content).digest('hex');
 }
@@ -1042,7 +1056,7 @@ async function checkDuplicates(items, userId) {
   }
 
     // Generate content hash and extract source ID
-    currentItem.contentHash = generateContentHash(currentItem.payload);
+    currentItem.contentHash = generateContentHash(currentItem.payload, { source: currentItem.source, userId });
     currentItem.sourceId = extractSourceId(currentItem.source, currentItem.payload, currentItem.metadata);
     currentItem.originalIndex = i; // Save original index
 

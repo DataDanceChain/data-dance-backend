@@ -85,52 +85,59 @@ async function awardConnectBoosts(tx, userId, pointsBySource, now = new Date()) 
   };
 }
 
+/*
+ * A one-time grant (one Point row per user, source and sourceId) is decided and written inside one
+ * transaction that first takes a transaction-scoped advisory lock on that grant's key. Concurrent
+ * calls for the same grant queue on the lock, and each re-checks after the previous holder has
+ * committed, so exactly one of them writes. Point has no unique key to lean on, and adding one to
+ * that table is a separate, heavier change. Unrelated grants hash to other keys and do not wait on
+ * each other (a rare hashtext collision only makes two of them take turns).
+ */
+const GRANT_LOCK_NAMESPACE = 'ddc:point-grant-once';
+const GRANT_TX_OPTIONS = { maxWait: 10000, timeout: 15000 };
+
+async function lockGrant(tx, key) {
+  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${GRANT_LOCK_NAMESPACE}), hashtext(${key}))`;
+}
+
+function hasPoint(client, userId, source, sourceId) {
+  return client.point.findFirst({ where: { userId, source, sourceId }, select: { id: true } });
+}
+
+async function grantPoints(tx, userId, amount, source, sourceId) {
+  await tx.user.update({
+    where: { id: userId },
+    data: { totalPoints: { increment: amount } },
+  });
+  await tx.point.create({ data: { userId, amount, source, sourceId } });
+}
+
 async function awardReferralBoost(inviterId, inviteeId, now = new Date()) {
   const campaign = pickFirst(await listActiveRows(null, now, 'REFERRAL_BOOST'));
   if (!campaign) return { skipped: true, reason: 'inactive' };
   const extraInviter = Number(campaign.config?.extraInviterPoints) || 0;
   const extraInvitee = Number(campaign.config?.extraInviteePoints) || 0;
   if (extraInviter <= 0 && extraInvitee <= 0) return { skipped: true, reason: 'zero' };
-  const already = await prisma.point.findFirst({
-    where: {
-      userId: inviterId,
-      source: POINT_SOURCE_REFERRAL_BOOST,
-      sourceId: `${campaign.id}:${inviteeId}`,
-    },
-    select: { id: true },
-  });
-  if (already) return { skipped: true, reason: 'already_processed' };
-  await prisma.$transaction(async (tx) => {
+  const inviterSourceId = `${campaign.id}:${inviteeId}`;
+  const inviteeSourceId = `${campaign.id}:${inviterId}`;
+  // Either side's row means this pair was already rewarded under this campaign.
+  const paidAlready = async (client) =>
+    Boolean(
+      (await hasPoint(client, inviterId, POINT_SOURCE_REFERRAL_BOOST, inviterSourceId)) ||
+        (await hasPoint(client, inviteeId, POINT_SOURCE_REFERRAL_BOOST, inviteeSourceId)),
+    );
+  if (await paidAlready(prisma)) return { skipped: true, reason: 'already_processed' };
+  return prisma.$transaction(async (tx) => {
+    await lockGrant(tx, `${POINT_SOURCE_REFERRAL_BOOST}:${campaign.id}:${inviterId}:${inviteeId}`);
+    if (await paidAlready(tx)) return { skipped: true, reason: 'already_processed' };
     if (extraInviter > 0) {
-      await tx.user.update({
-        where: { id: inviterId },
-        data: { totalPoints: { increment: extraInviter } },
-      });
-      await tx.point.create({
-        data: {
-          userId: inviterId,
-          amount: extraInviter,
-          source: POINT_SOURCE_REFERRAL_BOOST,
-          sourceId: `${campaign.id}:${inviteeId}`,
-        },
-      });
+      await grantPoints(tx, inviterId, extraInviter, POINT_SOURCE_REFERRAL_BOOST, inviterSourceId);
     }
     if (extraInvitee > 0) {
-      await tx.user.update({
-        where: { id: inviteeId },
-        data: { totalPoints: { increment: extraInvitee } },
-      });
-      await tx.point.create({
-        data: {
-          userId: inviteeId,
-          amount: extraInvitee,
-          source: POINT_SOURCE_REFERRAL_BOOST,
-          sourceId: `${campaign.id}:${inviterId}`,
-        },
-      });
+      await grantPoints(tx, inviteeId, extraInvitee, POINT_SOURCE_REFERRAL_BOOST, inviteeSourceId);
     }
-  });
-  return { skipped: false, campaignId: campaign.id, extraInviter, extraInvitee };
+    return { skipped: false, campaignId: campaign.id, extraInviter, extraInvitee };
+  }, GRANT_TX_OPTIONS);
 }
 
 async function awardFirstActionBonus(userId, action, now = new Date()) {
@@ -139,30 +146,18 @@ async function awardFirstActionBonus(userId, action, now = new Date()) {
   if (!campaign) return { skipped: true, reason: 'inactive' };
   const points = Number(campaign.config?.points) || 0;
   if (points <= 0) return { skipped: true, reason: 'zero' };
-  const already = await prisma.point.findFirst({
-    where: {
-      userId,
-      source: POINT_SOURCE_FIRST_ACTION,
-      sourceId: `${action}:${campaign.id}`,
-    },
-    select: { id: true },
-  });
-  if (already) return { skipped: true, reason: 'already_processed' };
-  await prisma.$transaction(async (tx) => {
-    await tx.user.update({
-      where: { id: userId },
-      data: { totalPoints: { increment: points } },
-    });
-    await tx.point.create({
-      data: {
-        userId,
-        amount: points,
-        source: POINT_SOURCE_FIRST_ACTION,
-        sourceId: `${action}:${campaign.id}`,
-      },
-    });
-  });
-  return { skipped: false, campaignId: campaign.id, points };
+  const sourceId = `${action}:${campaign.id}`;
+  if (await hasPoint(prisma, userId, POINT_SOURCE_FIRST_ACTION, sourceId)) {
+    return { skipped: true, reason: 'already_processed' };
+  }
+  return prisma.$transaction(async (tx) => {
+    await lockGrant(tx, `${POINT_SOURCE_FIRST_ACTION}:${userId}:${sourceId}`);
+    if (await hasPoint(tx, userId, POINT_SOURCE_FIRST_ACTION, sourceId)) {
+      return { skipped: true, reason: 'already_processed' };
+    }
+    await grantPoints(tx, userId, points, POINT_SOURCE_FIRST_ACTION, sourceId);
+    return { skipped: false, campaignId: campaign.id, points };
+  }, GRANT_TX_OPTIONS);
 }
 
 function raffleRules(campaign) {

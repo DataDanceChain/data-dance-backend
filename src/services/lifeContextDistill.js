@@ -9,6 +9,20 @@ const STOP_WORDS = new Set([
   'size', 'new', 'black', 'white', 'of', 'in', 'to', 'on', 'a', 'an',
 ]);
 
+// Engagement and interface labels the App's Chinese UI shows next to a post. They are stripped only
+// where they stand on their own: not glued to the text before them, and followed by a space, a
+// number, another label or the end. A real title such as 旅行分享, 分享3个技巧 or 收藏夹 keeps them.
+const UI_LABEL = '(?:赞|讚|评论|評論|留言|转发|轉發|分享|收藏)';
+const CJK = '[\\u4e00-\\u9fff]';
+const NOT_GLUED_BEFORE = `(?<!${CJK})`;
+const NOT_GLUED_AFTER = `(?!(?!${UI_LABEL})${CJK})`;
+const LABEL_RUN = new RegExp(`${NOT_GLUED_BEFORE}${UI_LABEL}{2,}${NOT_GLUED_AFTER}`, 'g');
+const TEN_THOUSAND_LABEL = new RegExp(`(?:(?<![\\d,.])[\\d,.]+\\s*)?[万萬]\\s*${UI_LABEL}${NOT_GLUED_AFTER}`, 'g');
+const COUNT_LABEL = new RegExp(`(?<![\\d,.])\\d[\\d,.]*\\s*${UI_LABEL}${NOT_GLUED_AFTER}`, 'g');
+const LABEL_COUNT = new RegExp(`${NOT_GLUED_BEFORE}${UI_LABEL}\\s*[\\d,.]+[万萬]?(?![\\d,.])${NOT_GLUED_AFTER}`, 'g');
+// A theme token made only of labels and counts, with at least one label (2024 alone stays).
+const LABEL_TOKEN = new RegExp(`^(?=.*${UI_LABEL})(?:${UI_LABEL}|[\\d万萬])+$`);
+
 function asObject(value) {
   return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
 }
@@ -22,9 +36,10 @@ function cleanTitle(raw) {
     .replace(/\b[\d,.]+\s*(?:usd|eur|gbp|cny|hkd|sgd|jpy)\b/gi, ' ')
     .replace(/\b\d{5,}\b/g, ' ')
     .replace(/(?:内容)?更多选项|已静音|查看翻译|更多查看翻译/g, ' ')
-    .replace(/(?:赞|讚|评论|評論|留言|转发|轉發|分享|收藏)(?:赞|讚|评论|評論|留言|转发|轉發|分享|收藏)+/g, ' ')
-    .replace(/(?:[\d,.]+\s*)?[万萬]\s*(?:评论|評論|转发|轉發|赞|讚|分享|收藏)/g, ' ')
-    .replace(/(?:评论|評論|转发|轉發|赞|讚|分享|收藏)\s*[\d,.]+/g, ' ')
+    .replace(LABEL_RUN, ' ')
+    .replace(TEN_THOUSAND_LABEL, ' ')
+    .replace(COUNT_LABEL, ' ')
+    .replace(LABEL_COUNT, ' ')
     .replace(/\d+\s*(?:小时|小時|分钟|分鐘|天|周|週|星期)前/g, ' ')
     .replace(/更多\s*\d{1,2}\s*月\s*\d{1,2}\s*日/g, ' ')
     .replace(/\s+/g, ' ')
@@ -61,8 +76,7 @@ function themeTokens(title) {
     .split(/[^a-z0-9\u4e00-\u9fff]+/)
     .filter((w) => w.length > 2 && !STOP_WORDS.has(w))
     .filter((w) => !/(?:查看翻译|更多选项|已静音)/.test(w))
-    .filter((w) => !(/^(?:赞|讚|评论|評論|转发|轉發|分享|收藏|留言)+$/.test(w)))
-    .filter((w) => !((/(?:评论|評論|转发|轉發|赞|讚|分享|收藏)/.test(w) && /[\d万萬]/.test(w))))
+    .filter((w) => !LABEL_TOKEN.test(w))
     .filter((w) => !(/^更多\d+月\d+日$/.test(w) || /^\d+(?:小时|小時|分钟|分鐘|天|周|週)前$/.test(w)))
     .slice(0, 3);
 }
@@ -447,6 +461,8 @@ function searchLifeSignals(settings, portrait, query) {
 }
 
 module.exports = {
+  cleanTitle,
+  themeTokens,
   loadPortrait,
   loadPortraitRows,
   loadVault,

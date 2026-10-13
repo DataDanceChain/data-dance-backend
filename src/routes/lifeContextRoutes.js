@@ -1,5 +1,6 @@
 const express = require('express');
 const { protect } = require('../middlewares/authMiddleware');
+const { rateLimiters } = require('../middlewares/rateLimitMiddleware');
 const {
   getStatus,
   updateSettings,
@@ -18,7 +19,7 @@ router.get('/', getStatus);
 router.patch('/settings', updateSettings);
 router.post('/refine', postRefine);
 router.post('/clean', postClean);
-router.post('/refined', postSavedRefined);
+router.post('/refined', rateLimiters.lifeContextSave, postSavedRefined);
 router.get('/tokens', getTokens);
 router.post('/tokens', createToken);
 router.delete('/tokens/:id', deleteToken);
