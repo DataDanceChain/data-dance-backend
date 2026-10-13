@@ -441,7 +441,11 @@ function parseDraft(body = {}) {
       purpose: stripText(body.purpose, 500),
       legalText: stripText(body.legalText, 4000),
       coverImageUrl: parsed.coverImageUrl,
-      config: { ...parsed.config, i18n },
+      config: {
+        ...parsed.config,
+        ...(template === 'APPLY_COHORT' ? questionColumns(i18n) : {}),
+        i18n,
+      },
     },
   };
 }
@@ -497,20 +501,39 @@ function findScheduleConflict(existingRows, next, excludeId) {
   });
 }
 
+function chineseCopy(map) {
+  return map[SIMPLIFIED] || map['zh-TW'];
+}
+
 /**
  * The one-language columns of a campaign row from its i18n block. The Chinese columns hold the
  * Simplified copy when there is one (what the admin's Simplified field shows), else Traditional.
  */
 function copyColumns(i18n) {
-  const chinese = (map) => map[SIMPLIFIED] || map['zh-TW'];
   return {
     titleEn: i18n.title.en || firstFilled(i18n.title),
-    titleZh: chinese(i18n.title) || firstFilled(i18n.title),
+    titleZh: chineseCopy(i18n.title) || firstFilled(i18n.title),
     blurbEn: i18n.blurb.en || firstFilled(i18n.blurb),
-    blurbZh: chinese(i18n.blurb) || firstFilled(i18n.blurb),
+    blurbZh: chineseCopy(i18n.blurb) || firstFilled(i18n.blurb),
     pillEn: i18n.pill.en || null,
-    pillZh: chinese(i18n.pill) || null,
+    pillZh: chineseCopy(i18n.pill) || null,
   };
+}
+
+/**
+ * The question{n}En / question{n}Zh fields of an application config from its i18n block, by the
+ * copyColumns rule. They are recomputed on every save, so they always show the saved copy.
+ */
+function questionColumns(i18n) {
+  const out = {};
+  [1, 2, 3].forEach((index) => {
+    const map = i18n[`question${index}`] || {};
+    const any = firstFilled(map);
+    if (!any) return;
+    out[`question${index}En`] = map.en || any;
+    out[`question${index}Zh`] = chineseCopy(map) || any;
+  });
+  return out;
 }
 
 function mergeLocaleConfig(config, i18n) {
@@ -547,6 +570,7 @@ function applyCopyFields(existing, body = {}) {
     return { error: 'A title and blurb are required in at least one language' };
   }
   const config = mergeLocaleConfig(current, i18n);
+  if (existing.template === 'APPLY_COHORT') Object.assign(config, questionColumns(i18n));
   if (existing.template === 'RAFFLE' && Array.isArray(body.prizes) && Array.isArray(config.prizes)) {
     config.prizes = config.prizes.map((prize, index) => {
       const next = body.prizes[index] || {};

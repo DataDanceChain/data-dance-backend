@@ -49,7 +49,7 @@ require.cache[geminiPath] = {
 };
 
 const controller = require('../../src/controllers/opsCampaignController');
-const { pickFromMap } = require('../../src/utils/campaignI18n');
+const { pickFromMap, pickQuestion } = require('../../src/utils/campaignI18n');
 
 const SIMPLIFIED_TITLE = '点亮你的夏天';
 const TRADITIONAL_TITLE = '點亮你的夏天';
@@ -123,6 +123,21 @@ function formFromRow(row) {
     pillJa: pick('pill', 'ja'),
     pillZhTw: pick('pill', 'zh-TW'),
   };
+}
+
+/** The admin form for an application card after loading a saved row, question fields included. */
+function applyFormFromRow(row) {
+  const config = row.config || {};
+  const i18n = config.i18n || {};
+  const form = { ...formFromRow(row), slug: row.slug, template: row.template, seatCap: config.seatCap };
+  for (const index of [1, 2, 3]) {
+    const key = `question${index}`;
+    form[`${key}En`] = config[`${key}En`] || '';
+    form[`${key}Zh`] = config[`${key}Zh`] || '';
+    form[`${key}Ja`] = i18n[key]?.ja || config[`${key}Ja`] || '';
+    form[`${key}ZhTw`] = i18n[key]?.['zh-TW'] || config[`${key}ZhTw`] || '';
+  }
+  return form;
 }
 
 /** The admin's "translate the other languages" button: source field out, filled fields back in. */
@@ -232,4 +247,77 @@ describe('campaign copy written in Simplified Chinese, saved through the ops rou
     assert.equal(edited.config.i18n.title.en, 'New title');
     assert.equal(pickFromMap(edited.config.i18n.title, 'zh-TW'), 'New title');
   });
+});
+
+describe('application questions written in one language, edited, then saved again', () => {
+  beforeEach(() => {
+    rows.clear();
+  });
+
+  const cards = [
+    {
+      name: 'English-only',
+      body: { copySource: 'en', titleEn: 'Apply', blurbEn: 'Join the cohort' },
+      suffix: 'En',
+      slot: 'en',
+      before: 'Old question?',
+      after: 'New question?',
+    },
+    {
+      name: 'Japanese-only',
+      body: { copySource: 'ja', titleJa: '応募', blurbJa: '参加しよう' },
+      suffix: 'Ja',
+      slot: 'ja',
+      before: '古い質問？',
+      after: '新しい質問？',
+    },
+  ];
+
+  for (const status of ['DRAFT', 'LIVE']) {
+    for (const card of cards) {
+      it(`${status}: ${card.name} card keeps the edited question through later saves`, async () => {
+        const created = await call(controller.create, {
+          body: {
+            ...simplifiedDraft(),
+            slug: 'apply-copy',
+            template: 'APPLY_COHORT',
+            titleZh: '',
+            blurbZh: '',
+            ...card.body,
+            seatCap: 20,
+            [`question1${card.suffix}`]: card.before,
+            [`question2${card.suffix}`]: `${card.before} 2`,
+            [`question3${card.suffix}`]: `${card.before} 3`,
+          },
+        });
+        rows.get(created.id).status = status;
+
+        const assertQuestion = (row) => {
+          const question = row.config.i18n.question1;
+          assert.equal(question[card.slot], card.after);
+          assert.equal(question.zh, undefined);
+          assert.equal(Object.values(question).filter(Boolean).length, 1);
+          assert.equal(row.config.question1En, card.after);
+          assert.equal(row.config.question1Zh, card.after);
+          for (const language of ['en', 'zh-TW', 'ja', 'ko']) {
+            assert.equal(pickQuestion(row.config, 1, language), card.after, language);
+          }
+        };
+
+        const edited = await save(created.id, {
+          ...applyFormFromRow(rows.get(created.id)),
+          [`question1${card.suffix}`]: card.after,
+        });
+        assertQuestion(edited);
+
+        const again = await save(created.id, applyFormFromRow(rows.get(created.id)));
+        assertQuestion(again);
+        assert.deepEqual(again.config.i18n, edited.config.i18n);
+
+        const titled = await save(created.id, { ...applyFormFromRow(rows.get(created.id)), titleEn: 'Apply now' });
+        assertQuestion(titled);
+        assert.deepEqual(titled.config.i18n.question2, edited.config.i18n.question2);
+      });
+    }
+  }
 });
