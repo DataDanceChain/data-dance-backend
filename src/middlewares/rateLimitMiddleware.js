@@ -360,6 +360,16 @@ const rateLimiters = {
     keyGenerator: keyGenerators.ip
   }),
 
+  // POST /api/life-context/refined — saving a portrait extract, per signed-in user (after protect).
+  // The App saves after a distillation or when it reopens the page; ten a minute covers that.
+  lifeContextSave: createRateLimiter({
+    name: 'lifeContextSave',
+    windowMs: 60 * 1000,
+    max: 10,
+    message: 'Too many saves. Please wait a minute.',
+    keyGenerator: keyGenerators.userOrIp
+  }),
+
   // POST /api/sso/app-ticket — per user (Phase 3)
   ssoTicket: createRateLimiter({
     name: 'ssoTicket',
