@@ -12,6 +12,11 @@ the server checks on every request. Every change is written to an append-only au
   exchanges it with `POST /api/ops/auth/exchange { code, code_verifier }` for an ops session
   (`OPS_USER_TOKEN_TTL_SEC`, default 12 h, no refresh). The account must be enabled and hold
   `ddc_admin` or `operator` when the code is minted, when it is exchanged, and on every request.
+- **Which wallet sign-in may mint a code.** A verified session (`ver: 2`, from a Web3Auth ID token)
+  signed in within the last 10 minutes, issued after the account's last disable / re-enable.
+  Refusals: 403 `VERIFIED_SESSION_REQUIRED`, 403 `RECENT_SIGN_IN_REQUIRED`, 401
+  `SESSION_REVOKED`, 403 `ACCOUNT_DISABLED`, 403 `NOT_STAFF`. The console answers the first three
+  by signing the visitor out and asking for a new sign-in, then minting again.
 - **Demo.** `POST /api/ops/auth/login` with the demo credentials: read-only, unchanged.
 - **Shared emergency login.** `POST /api/ops/auth/login` with `OPS_ADMIN_USERNAME` /
   `OPS_ADMIN_PASSWORD`, accepted only while `OPS_SHARED_LOGIN=on` (default off). Audited as actor
@@ -38,6 +43,20 @@ node scripts/opsRoles.js revoke --email <e> --role <role> --reason "<why>" [--ap
 
 `developer` gives no ops access: it lets a partner register SSO clients in the developer console
 while self-serve registration is closed. A missing permission answers 403 `FORBIDDEN_ROLE`.
+
+### Sessions
+
+- **Disable and re-enable end staff sessions.** Both set `User.sessionsResetAt`. An ops session,
+  or a wallet JWT on `POST /auth/code` and on the console's staff endpoints, issued before it is
+  refused (ops: 401 `OPS_SESSION_INVALID`; wallet JWT: 401 `SESSION_REVOKED` /
+  `session_revoked`), and a sign-in code minted before it is not exchanged. The person signs in
+  again. In the wallet itself an unexpired wallet JWT works again after a re-enable, as before.
+- **The developer console's staff endpoints** (`GET /api/developer/sso/admin/clients`,
+  `GET /api/developer/sso/admin/staff-unlock`, and `POST /api/developer/sso/clients` while
+  self-serve registration is closed) apply the same rule as `POST /auth/code` without the
+  10-minute limit: 403 `verified_session_required` for `ver` < 2, 401 `session_revoked` for a
+  token from before the last disable / re-enable. `GET /api/developer/sso/me` reports
+  `verified_session` so the console can ask for a new sign-in before calling them.
 
 ## Environment
 
@@ -68,15 +87,15 @@ JWT_SECRET=<existing-jwt-secret>
 | GET | `/api/ops/roles?role=` | `ops.admin`. Active grants |
 | POST | `/api/ops/users/:userId/roles` | `ops.admin`. Body `{ role, reason }` |
 | POST | `/api/ops/users/:userId/roles/:role/revoke` | `ops.admin`. Body `{ reason }`. Never your own ddc_admin, never the last enabled one |
-| POST | `/api/ops/users/:userId/disable` | `ops.admin`. Body `{ reason }`. Ends MCP / partner tokens and SSO sessions |
-| POST | `/api/ops/users/:userId/enable` | `ops.admin`. Body `{ reason }` |
+| POST | `/api/ops/users/:userId/disable` | `ops.admin`. Body `{ reason }`. Ends MCP / partner tokens, SSO sessions and staff sessions |
+| POST | `/api/ops/users/:userId/enable` | `ops.admin`. Body `{ reason }`. Staff sessions from before stay ended |
 | GET | `/api/ops/audit` | `ops.admin`. Query `action` (exact or `role.`-style prefix), `actorUserId`, `targetType`, `targetId`, `from`, `to`, `limit`, `offset` |
 | GET | `/api/ops/identity-conflicts` | `ops.support`. Refused sign-ins, with counts by reason |
-| POST | `/api/ops/sso/planet-manager` | `ops.admin`. Body `{ email, reason }` |
+| POST | `/api/ops/sso/planet-manager` | `ops.admin`. Body `{ email, reason }`. An e-mail that matches two accounts ignoring case: 409 `email_ambiguous` |
 | GET | `/api/ops/points` | Ledger totals + paginated member balances. Query: `q`, `min`, `max`, `zeros=0`, `sort`, `order`, `page`, `limit` |
 | GET | `/api/ops/points/export` | Same filters, CSV download |
 | GET | `/api/ops/users/search?q=` | Ops Bearer token |
-| GET | `/api/ops/users/:userId` | The full user view: account, identity, roles, points, referrals, data licence, privacy requests, developer clients, merchant; sign-in issues and history with `ops.support` |
+| GET | `/api/ops/users/:userId` | The full user view: account, roles, points, referrals, data licence, privacy requests, developer clients, merchant. With `ops.support` also: identity (Web3Auth verifier ids, the network rebind's addresses and evidence), sign-in issues, history, and who acted (`account.disabledBy` / `disabledReason`, `roles[].grantedBy`, `privacyRequests[].resolvedBy`); without it these are `null` |
 | POST | `/api/ops/users/:userId/points` | `ops.write`, body: `{ amount, note }` (the note is the audit reason) |
 | GET | `/api/ops/campaigns` | List campaign drafts / scheduled / live / ended |
 | POST | `/api/ops/campaigns` | Create draft. Slot-filled fields only, no HTML |
@@ -103,17 +122,39 @@ per change and none for a call that changes nothing:
 
 | Route | Action |
 |---|---|
-| `POST /payments/:id/confirm` | `payment.confirm` |
-| `POST /payments/:id/reject` | `payment.reject` |
+| `POST /payments/:id/confirm` | `payment.confirm`; the call that confirms an order's payment also attests the order and writes its `order.attest` row (same actor). A repeat confirm changes nothing and attests nothing |
+| `POST /payments/:id/reject` | `payment.reject`. A confirmed payment is refused: 409 `PAYMENT_ALREADY_CONFIRMED` (a reversal will be its own action) |
 | `POST /merchants/:userId/credit` | `merchant.credit` |
-| `POST /orders/:id/attest` | `order.attest` |
-| `POST /disbursements/items/:id/process` | `disbursement.process` (written with the claim, before any transfer) |
+| `POST /orders/:id/attest` | `order.attest` (written with the stored hash, before the chain call; the tx hash it returns is stored on the order) |
+| `POST /disbursements/items/:id/process` | `disbursement.process` (written with the claim, before any transfer; one caller at a time claims a payout, also a submitted one being re-checked) |
 | `POST /disbursements/redemptions/:id/disburse` | `disbursement.disburse` (written with the new payout, before any transfer) |
 | `POST /demands/:id/fulfill` | `demand.fulfill` (purchase, request status and row in one transaction) |
-| `POST /campaigns/:id/raffle/draw` | `raffle.draw` |
+| `POST /campaigns/:id/raffle/draw` | `raffle.draw` (draws run one at a time per campaign) |
 
 Every other successful ops write gets one generic `ops.write` row with the method, route, params
-and status, never the request body.
+and status, never the request body. Its target is the record the route names, or for a create
+(`POST /links`, `POST /campaigns`, `POST /campaigns/cover`) the record it made.
+
+The developer console writes `console.staff_unlock` for each staff unlock it hands out and
+`console.client_register` for each client a developer or ddc_admin registers while self-serve
+registration is closed (in the same transaction as the client: no row, no client).
+
+## Migration
+
+`20261017100000_ops_roles_audit` adds three nullable columns to `"User"` and four tables with foreign
+keys to it. Both need short locks on `"User"`; behind a long-running reader they would queue, and
+every sign-in would queue behind them. The migration therefore sets `lock_timeout = '3s'`: on a
+busy table it fails within seconds and changes nothing (it runs as one transaction).
+
+- Run `prisma migrate deploy` as usual. If it fails with `55P03 canceling statement due to lock
+  timeout`, mark it rolled back and deploy again (a few seconds later, or in a quiet window):
+
+  ```bash
+  npx prisma migrate resolve --rolled-back 20261017100000_ops_roles_audit
+  npx prisma migrate deploy
+  ```
+
+- Any other failure: stop and read the error; do not retry blindly.
 
 ## Frontend
 

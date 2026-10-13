@@ -14,11 +14,18 @@
  * account's own answers 404, the same as one that does not exist.
  *
  * Roles (src/services/userRoles.js, admin issue #2):
- *   GET /api/developer/sso/me                   { user_id, email, roles, admin, can_register }
+ *   GET /api/developer/sso/me                   { user_id, email, roles, admin, can_register,
+ *                                                 verified_session }
  *   GET /api/developer/sso/admin/clients        ddc_admin: every client, read-only, never a secret
  *   GET /api/developer/sso/admin/staff-unlock   ddc_admin: the staff network unlock (audited)
  * While registration is closed, a signed-in account with the developer or ddc_admin role may
- * still register a client; anyone else, and every caller without a token, gets registration_closed.
+ * still register a client (audited: console.client_register); anyone else, and every caller
+ * without a token, gets registration_closed.
+ *
+ * These staff uses of a wallet JWT (the two admin routes, and registering while registration is
+ * closed) apply the rule of POST /api/ops/auth/code (src/services/staffSession.js): a verified
+ * session (ver 2), else 403 verified_session_required; not issued before the account's last
+ * disable / enable, else 401 session_revoked.
  */
 const express = require('express');
 const prisma = require('../utils/prisma');
@@ -38,7 +45,8 @@ const {
   rotateOwnedSecret,
 } = require('../services/ssoDeveloperClient');
 const { activeRoles } = require('../services/userRoles');
-const { writeAudit, actorFromUser } = require('../services/opsAudit');
+const { writeAudit, actorFromUser, OpsError } = require('../services/opsAudit');
+const { assertStaffWalletSession, verifiedSession } = require('../services/staffSession');
 
 const router = express.Router();
 const logger = createLogger('developerSso');
@@ -64,23 +72,61 @@ function registrationOpen(req, res, next) {
   return next();
 }
 
-// After `protect`, while registration is closed: the developer or ddc_admin role may register.
+/**
+ * A wallet JWT acting as staff on the console (see the header): verified, and not issued before
+ * the account's last disable / enable. Answers false after sending the refusal.
+ */
+function staffSessionOk(req, res) {
+  try {
+    assertStaffWalletSession(req.user, req.authClaims);
+    return true;
+  } catch (error) {
+    if (!(error instanceof OpsError)) throw error;
+    res.status(error.status).json({
+      error: error.code === 'SESSION_REVOKED' ? 'session_revoked' : 'verified_session_required',
+      error_description: error.message,
+    });
+    return false;
+  }
+}
+
+// After `protect`, while registration is closed: the developer or ddc_admin role may register,
+// from a staff session. The role the registration is made with is kept for its audit row.
 async function registrationRole(req, res, next) {
   if (!req.registrationNeedsRole) return next();
   try {
     const roles = await activeRoles(req.user.id);
-    if (roles.includes('developer') || roles.includes('ddc_admin')) return next();
-    return registrationClosed(res);
+    if (!roles.includes('developer') && !roles.includes('ddc_admin')) return registrationClosed(res);
+    if (!staffSessionOk(req, res)) return undefined;
+    req.registrationRole = roles.includes('ddc_admin') ? 'ddc_admin' : 'developer';
+    return next();
   } catch (error) {
     logger.error('Developer registration role check failed', { errorName: error && error.name });
     return res.status(500).json({ error: 'server_error', error_description: 'Could not create the client.' });
   }
 }
 
+/** The audit row of a registration made with a role while registration is closed. */
+function registrationAudit(req) {
+  if (!req.registrationRole) return undefined;
+  return (tx, row) => writeAudit(tx, {
+    actor: actorFromUser(req.user, req.registrationRole),
+    action: 'console.client_register',
+    target: { type: 'sso_client', id: row.clientId, label: row.clientName },
+    detail: { kind: 'developer', registration: 'closed', redirectUris: Array.isArray(row.redirectUris) ? row.redirectUris.length : 0 },
+    surface: 'console',
+    requestId: req.reqId || null,
+  });
+}
+
 router.post('/clients', registrationOpen, protect, registrationRole, rateLimiters.developerClientCreate, async (req, res) => {
   try {
-    // `protect` set req.user: the client belongs to the account that registered it.
-    const created = await createDeveloperClient(req.body || {}, { ownerUserId: req.user.id });
+    // `protect` set req.user: the client belongs to the account that registered it. A
+    // registration made with a role writes its audit row in the same transaction as the client.
+    const created = await createDeveloperClient(req.body || {}, {
+      ownerUserId: req.user.id,
+      audit: registrationAudit(req),
+    });
     const issuer = publicBaseUrl(req);
     return res.status(201).json({
       client_id: created.clientId,
@@ -234,19 +280,25 @@ router.get('/me', noStore, protect, rateLimiters.developerConsoleRead, async (re
       roles,
       admin,
       can_register: developerRegistrationOpen() || admin || roles.includes('developer'),
+      // The staff routes need a verified session: false tells the console to ask for a new sign-in.
+      verified_session: verifiedSession(req.authClaims),
     });
   } catch (error) {
     return sendConsoleError(req, res, error, 'me');
   }
 });
 
-/** ddc_admin only; anyone else gets 403 forbidden and no data. */
+/**
+ * ddc_admin only, from a staff session; anyone else gets 403 forbidden and no data, and an admin
+ * whose session is not a staff session gets 403 verified_session_required or 401 session_revoked.
+ */
 async function requireConsoleAdmin(req, res, next) {
   try {
     const roles = await activeRoles(req.user.id);
     if (!roles.includes('ddc_admin')) {
       return res.status(403).json({ error: 'forbidden', error_description: 'This view is for DataDance admins.' });
     }
+    if (!staffSessionOk(req, res)) return undefined;
     return next();
   } catch (error) {
     return sendConsoleError(req, res, error, 'admin check');

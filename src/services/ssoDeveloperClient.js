@@ -103,7 +103,7 @@ function newClientId() {
  * `ownerUserId` is the signed-in DataDance account that registers the client (the route runs
  * `protect`). Callers that pass none store null, as before.
  */
-async function createDeveloperClient(body = {}, { ownerUserId = null } = {}) {
+async function createDeveloperClient(body = {}, { ownerUserId = null, audit } = {}) {
   const clientName = cleanName(body.client_name);
   const contactEmail = cleanEmail(body.contact_email);
   const redirectUris = cleanRedirects(body.redirect_uris);
@@ -122,18 +122,24 @@ async function createDeveloperClient(body = {}, { ownerUserId = null } = {}) {
   if (!clientId) {
     throw new DeveloperClientError(500, 'server_error', 'Could not allocate a client id.');
   }
-  const row = await prisma.ssoDeveloperClient.create({
-    data: {
-      clientId,
-      clientName,
-      contactEmail,
-      secretHash,
-      redirectUris,
-      enabled: true,
-      kind: 'developer',
-      ownerUserId: ownerUserId || null,
-    },
-  });
+  const data = {
+    clientId,
+    clientName,
+    contactEmail,
+    secretHash,
+    redirectUris,
+    enabled: true,
+    kind: 'developer',
+    ownerUserId: ownerUserId || null,
+  };
+  // With `audit(tx, row)`, the client and its audit row commit together: no row, no client.
+  const row = audit
+    ? await prisma.$transaction(async (tx) => {
+      const created = await tx.ssoDeveloperClient.create({ data });
+      await audit(tx, created);
+      return created;
+    })
+    : await prisma.ssoDeveloperClient.create({ data });
   return {
     clientId: row.clientId,
     clientSecret,

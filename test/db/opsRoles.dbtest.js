@@ -7,8 +7,10 @@
  * indexes exist on a migrated database; the CHECK constraints refuse values outside the closed sets;
  * deleting a user cascades to its role grants and sign-in codes, while its audit rows survive (no
  * foreign keys); the role and account services run on it, including the advisory lock that keeps
- * at least one enabled ddc_admin when two admins act at once. Fixture rows use a per-run id prefix
- * and are deleted afterwards (audit rows by their per-run labels).
+ * at least one enabled ddc_admin when two admins act at once; a disable / re-enable ends the ops
+ * sessions issued before it (through the real ops router); a create's generic audit row names the
+ * record it made. Fixture rows use a per-run id prefix and are deleted afterwards (audit rows by
+ * their per-run labels).
  */
 const { describe, it, before, after } = require('node:test');
 const assert = require('node:assert/strict');
@@ -19,8 +21,21 @@ if (!url) throw new Error('TEST_DATABASE_URL is required for test:db (a throwawa
 if (!/\/[^/?]*test[^/?]*(\?|$)/.test(url)) throw new Error('TEST_DATABASE_URL must name a database containing "test" — refusing to write fixtures anywhere else');
 process.env.DATABASE_URL = url;
 process.env.LOG_LEVEL = 'error';
+process.env.JWT_SECRET = process.env.JWT_SECRET || 'ops-roles-db-test-key';
+
+const express = require('express');
+const jwt = require('jsonwebtoken');
+const request = require('supertest');
 
 const prisma = require('../../src/utils/prisma');
+// Modules that build their own client at load get the shared one, so after() closes it.
+const clientFile = require.resolve('@prisma/client');
+require.cache[clientFile].exports = {
+  ...require.cache[clientFile].exports,
+  PrismaClient: function PrismaClient() {
+    return prisma;
+  },
+};
 const { grantRole, revokeRole, activeRoles, loadUserWithRoles } = require('../../src/services/userRoles');
 const { disableAccount, enableAccount } = require('../../src/services/opsAccounts');
 const { writeAudit, listAudit } = require('../../src/services/opsAudit');
@@ -47,6 +62,8 @@ async function sqlState(promise) {
 }
 
 after(async () => {
+  await new Promise((resolve) => setTimeout(resolve, 150)); // generic rows land after the answer
+  await prisma.campaign.deleteMany({ where: { slug: { startsWith: RUN } } });
   await prisma.$executeRawUnsafe('DELETE FROM "OpsAuditLog" WHERE "actorLabel" LIKE $1 OR "targetId" LIKE $1', `${RUN}%`);
   await prisma.$executeRawUnsafe('DELETE FROM "IdentityConflict" WHERE "candidateUserId" LIKE $1', `${RUN}%`);
   await prisma.$executeRawUnsafe('DELETE FROM "User" WHERE id LIKE $1', `${RUN}%`);
@@ -63,10 +80,12 @@ describe('the migration on a migrated database', () => {
     assert.deepEqual(tables.map((row) => row.table_name), ['IdentityConflict', 'OpsAuditLog', 'OpsSignInCode', 'UserRoleGrant']);
     const columns = await prisma.$queryRawUnsafe(
       `SELECT column_name, is_nullable FROM information_schema.columns
-       WHERE table_schema = current_schema() AND table_name = 'User' AND column_name IN ('disabledAt','disabledBy','disabledReason')
+       WHERE table_schema = current_schema() AND table_name = 'User' AND column_name IN ('disabledAt','disabledBy','disabledReason','sessionsResetAt')
        ORDER BY column_name`,
     );
-    assert.deepEqual(columns.map((row) => [row.column_name, row.is_nullable]), [['disabledAt', 'YES'], ['disabledBy', 'YES'], ['disabledReason', 'YES']]);
+    assert.deepEqual(columns.map((row) => [row.column_name, row.is_nullable]), [
+      ['disabledAt', 'YES'], ['disabledBy', 'YES'], ['disabledReason', 'YES'], ['sessionsResetAt', 'YES'],
+    ]);
   });
 
   it('creates the indexes the lists read by', async () => {
@@ -217,5 +236,58 @@ describe('the services on Postgres', () => {
     const row = await prisma.opsAuditLog.findUnique({ where: { id: result.auditId } });
     assert.deepEqual(row.detail, { mcpTokens: 1, ssoTickets: 1 });
     await enableAccount({ userId: member.id, reason: 'db test enable', actor: actorOf(admin) });
+  });
+});
+
+describe('through the real ops router', () => {
+  const opsRouter = require('../../src/routes/opsAdminRoutes');
+  const app = express();
+  app.use(express.json());
+  app.use('/api/ops', opsRouter);
+  const opsToken = (row, ageSec = 0) => `Bearer ${jwt.sign(
+    { type: 'ops_admin', kind: 'user', sub: row.id, iat: Math.floor(Date.now() / 1000) - ageSec },
+    process.env.JWT_SECRET,
+    { expiresIn: '10m' },
+  )}`;
+  const me = (authorization) => request(app).get('/api/ops/auth/me').set('Authorization', authorization);
+
+  it('disable and re-enable each set sessionsResetAt; an ops session from before stays refused, a new one works', async () => {
+    const admin = await user('epoch-admin');
+    const operator = await user('epoch-operator');
+    await grantRole({ userId: operator.id, role: 'operator', reason: 'db test operator', actor: actorOf(admin) });
+    const before = opsToken(operator, 5);
+    assert.equal((await me(before)).status, 200);
+
+    await disableAccount({ userId: operator.id, reason: 'db test disable', actor: actorOf(admin) });
+    const disabled = await prisma.user.findUnique({ where: { id: operator.id } });
+    assert.equal(disabled.sessionsResetAt.getTime(), disabled.disabledAt.getTime());
+    assert.equal((await me(before)).status, 403);
+
+    await enableAccount({ userId: operator.id, reason: 'db test enable', actor: actorOf(admin) });
+    const enabled = await prisma.user.findUnique({ where: { id: operator.id } });
+    assert.ok(enabled.sessionsResetAt > disabled.sessionsResetAt);
+    const refused = await me(before);
+    assert.equal(refused.status, 401, 're-enabling does not bring the old session back');
+    assert.equal(refused.body.code, 'OPS_SESSION_INVALID');
+    assert.equal((await me(opsToken(operator))).status, 200);
+  });
+
+  it('a create\'s generic ops.write row names the record it made', async () => {
+    const admin = await user('create-admin');
+    await grantRole({ userId: admin.id, role: 'ddc_admin', reason: 'db test admin', actor: { kind: 'system', userId: null, label: `${RUN}-script`, role: 'system' }, surface: 'script' });
+    const res = await request(app).post('/api/ops/campaigns').set('Authorization', opsToken(admin)).send({
+      slug: id('campaign').toLowerCase(),
+      template: 'HOME_CARD',
+      startsAt: new Date(Date.now() + 86400000).toISOString(),
+      endsAt: new Date(Date.now() + 2 * 86400000).toISOString(),
+      titleEn: 'Draft',
+      blurbEn: 'A draft campaign',
+      ctaKind: 'ROUTE',
+      ctaValue: '/user/index',
+    });
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    const rows = await prisma.opsAuditLog.findMany({ where: { action: 'ops.write', actorUserId: admin.id } });
+    assert.deepEqual(rows.map((row) => [row.targetType, row.targetId, row.detail.route]), [['campaigns', res.body.data.id, '/api/ops/campaigns']]);
   });
 });

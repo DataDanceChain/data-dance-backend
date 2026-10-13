@@ -230,17 +230,25 @@ exports.listPayments = async (req, res) => {
   }
 };
 
+/**
+ * Only the call that confirmed the payment attests its order, and that attestation writes its own
+ * order.attest row (same actor) in the transaction that stores it. A repeat confirm changes
+ * nothing: no attestation, no row. A failed attestation is retried with POST /orders/:id/attest.
+ */
 exports.confirmPayment = async (req, res) => {
   try {
-    const payment = await commerceService.confirmPaymentByOps(
+    const { payment, changed } = await commerceService.confirmPaymentByOps(
       req.params.id,
       req.opsAdmin?.username || 'ops',
       { audit: req.auditChange },
     );
     const orderId = payment?.orderId || payment?.order?.id;
-    if (orderId) {
+    if (changed && orderId) {
       const commerceAttest = require('../services/commerceAttest');
-      await commerceAttest.attestPaidOrderSafe(orderId);
+      await commerceAttest.attestPaidOrderSafe(orderId, {
+        submittedBy: `ops:${req.opsAdmin?.username || 'unknown'}`,
+        audit: req.auditChangeAs ? req.auditChangeAs('order.attest') : undefined,
+      });
     }
     return res.json({ status: 'success', data: payment });
   } catch (error) {
@@ -260,7 +268,11 @@ exports.rejectPayment = async (req, res) => {
     return res.json({ status: 'success', data: payment });
   } catch (error) {
     const code = error.statusCode || 500;
-    return res.status(code).json({ status: code >= 500 ? 'error' : 'fail', message: error.message });
+    return res.status(code).json({
+      status: code >= 500 ? 'error' : 'fail',
+      ...(error.code && code < 500 ? { code: error.code } : {}),
+      message: error.message,
+    });
   }
 };
 

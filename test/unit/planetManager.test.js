@@ -118,6 +118,18 @@ describe('the assignment', () => {
     assert.equal(prisma.store.opsAuditLog.length, 0);
   });
 
+  it('refuses an e-mail that matches two accounts ignoring case (409 email_ambiguous), like scripts/opsRoles.js', async () => {
+    await seedUser(prisma, { email: 'Twin@example.test' });
+    await seedUser(prisma, { email: 'twin@example.test' });
+    for (const email of ['twin@example.test', 'TWIN@example.test']) {
+      const res = await assign({ email, reason: 'Data Planet lead' });
+      assert.equal(res.status, 409, email);
+      assert.equal(res.body.code, 'email_ambiguous', email);
+    }
+    assert.equal(planetRow(), null);
+    assert.equal(prisma.store.opsAuditLog.length, 0);
+  });
+
   it('a failed audit write leaves the owner as it was', async () => {
     await assign({ email: 'planet@example.test', reason: 'Data Planet lead' });
     const next = await seedUser(prisma, { email: 'next@example.test' });

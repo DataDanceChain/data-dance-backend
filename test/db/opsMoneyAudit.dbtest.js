@@ -48,13 +48,21 @@ replaceModule(path.join(__dirname, '../../src/utils/commerceAttestChain.js'), {
   }),
 });
 
-// The payout sender: records each transfer it is asked for and answers a confirmed hash.
+// The payout sender: records each transfer it is asked for and answers a confirmed hash. A test
+// can make it slow (`sender.delayMs`, so two calls overlap) or fail once (`sender.failNext`).
 const transfers = [];
+const sender = { delayMs: 0, failNext: null };
 const realPayout = require('../../src/services/disbursement/bscPayout');
 replaceModule(path.join(__dirname, '../../src/services/disbursement/bscPayout.js'), {
   ...realPayout,
   sendBscUsdt: async (args) => {
     transfers.push(args);
+    if (sender.delayMs) await new Promise((resolve) => setTimeout(resolve, sender.delayMs));
+    if (sender.failNext) {
+      const error = sender.failNext;
+      sender.failNext = null;
+      throw error;
+    }
     return { txHash: ethers.hexlify(ethers.randomBytes(32)), replayed: false };
   },
 });
@@ -270,6 +278,35 @@ describe('payments', () => {
     assert.equal((await rowsFor(payment.id)).length, 0);
   });
 
+  it('reject: a confirmed payment is refused (409) and its completed ledger row stays COMPLETED', async () => {
+    const payment = await topUp('pay-reject-confirmed');
+    assert.equal((await post(`/payments/${payment.id}/confirm`, auth.admin)).status, 200);
+    const res = await post(`/payments/${payment.id}/reject`, auth.admin, { notes: 'too late' });
+    assert.equal(res.status, 409, JSON.stringify(res.body));
+    assert.equal(res.body.code, 'PAYMENT_ALREADY_CONFIRMED');
+    assert.equal((await prisma.payment.findUnique({ where: { id: payment.id } })).status, 'confirmed');
+    assert.equal((await prisma.organizationTransaction.findUnique({ where: { id: payment.organizationTransactionId } })).status, 'COMPLETED');
+    await settle();
+    assert.deepEqual((await rowsFor(payment.id)).map((row) => row.action), ['payment.confirm']);
+    assert.equal(await genericRows(), 0);
+  });
+
+  it('confirm and reject at once: a confirmed payment never ends with a FAILED ledger row', async () => {
+    for (let round = 0; round < 4; round += 1) {
+      const payment = await topUp(`pay-confirm-reject-${round}`);
+      const [confirmed, rejected] = await Promise.all([
+        post(`/payments/${payment.id}/confirm`, auth.admin),
+        post(`/payments/${payment.id}/reject`, auth.admin, { notes: 'slip does not match' }),
+      ]);
+      assert.equal(confirmed.status, 200, JSON.stringify(confirmed.body));
+      assert.ok([200, 409].includes(rejected.status), JSON.stringify(rejected.body));
+      const row = await prisma.payment.findUnique({ where: { id: payment.id } });
+      const ledger = await prisma.organizationTransaction.findUnique({ where: { id: payment.organizationTransactionId } });
+      assert.equal(row.status, 'confirmed', `round ${round}`);
+      assert.equal(ledger.status, 'COMPLETED', `round ${round}`);
+    }
+  });
+
   it('reject: one payment.reject row with the note as its reason; a refused row leaves the payment pending', async () => {
     const payment = await topUp('pay-reject');
     const res = await post(`/payments/${payment.id}/reject`, auth.admin, { notes: 'slip does not match' });
@@ -309,6 +346,72 @@ describe('merchant credit', () => {
 });
 
 describe('order attestation', () => {
+  /** A paid order with one payment (`status`), and no attestation yet. */
+  async function orderWithPayment(name, status = 'pending') {
+    const buyer = await user(`${name}-buyer`, { organization: true });
+    const seller = await user(`${name}-seller`, { organization: true });
+    const order = await prisma.purchaseOrder.create({
+      data: { id: id(name), orderNumber: id(name).toUpperCase(), buyerId: buyer.id, sellerId: seller.id, subtotal: 30, total: 30 },
+    });
+    const payment = await prisma.payment.create({
+      data: {
+        id: id(`${name}-pay`),
+        paymentNumber: id(`${name}-pay`).toUpperCase(),
+        orderId: order.id,
+        payerId: buyer.id,
+        payeeId: seller.id,
+        amount: 30,
+        method: 'bank_transfer',
+        status,
+        paidAt: status === 'confirmed' ? new Date() : null,
+      },
+    });
+    return { order, payment };
+  }
+
+  it('repeat confirm on an order that is not attested: nothing is attested, sent or recorded', async () => {
+    const { order, payment } = await orderWithPayment('repeat-unattested', 'confirmed');
+    const sent = chain.sent.length;
+    const res = await post(`/payments/${payment.id}/confirm`, auth.admin);
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+    const after = await prisma.purchaseOrder.findUnique({ where: { id: order.id } });
+    assert.equal(after.attestationHash, null);
+    assert.equal(after.attestationTxHash, null);
+    assert.equal(after.attestedAt, null);
+    assert.equal(after.updatedAt.getTime(), order.updatedAt.getTime(), 'the order row was not written');
+    assert.equal(chain.sent.length, sent, 'no chain transaction');
+    await settle();
+    assert.equal((await rowsFor(payment.id)).length, 0);
+    assert.equal((await rowsFor(order.id)).length, 0);
+    assert.equal(await genericRows(), 0);
+  });
+
+  it('the confirm that changes the payment attests its order with its own order.attest row, same actor; a repeat adds nothing', async () => {
+    const { order, payment } = await orderWithPayment('confirm-attests');
+    const sent = chain.sent.length;
+    const res = await post(`/payments/${payment.id}/confirm`, auth.admin);
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+    const attested = await prisma.purchaseOrder.findUnique({ where: { id: order.id } });
+    assert.ok(attested.attestationHash);
+    assert.ok(attested.attestationTxHash);
+    assert.equal(chain.sent.length, sent + 1);
+    await settle();
+    const paymentRows = await rowsFor(payment.id);
+    const orderRows = await rowsFor(order.id);
+    assert.deepEqual(paymentRows.map((row) => row.action), ['payment.confirm']);
+    assert.deepEqual(orderRows.map((row) => [row.action, row.targetType, row.actorUserId, row.detail.chainSend]), [['order.attest', 'order', admin.id, true]]);
+    assert.equal(orderRows[0].detail.attestationHash, attested.attestationHash);
+    assert.equal(orderRows[0].requestId, paymentRows[0].requestId, 'one request, two rows');
+
+    const again = await post(`/payments/${payment.id}/confirm`, auth.admin);
+    assert.equal(again.status, 200);
+    assert.equal(chain.sent.length, sent + 1);
+    await settle();
+    assert.equal((await rowsFor(payment.id)).length, 1);
+    assert.equal((await rowsFor(order.id)).length, 1);
+    assert.equal(await genericRows(), 0);
+  });
+
   it('one attest: the stored attestation and one order.attest row; a refused row leaves the order as it was', async () => {
     const buyer = await user('attest-buyer', { organization: true });
     const seller = await user('attest-seller', { organization: true });
@@ -332,6 +435,27 @@ describe('order attestation', () => {
     const after = await prisma.purchaseOrder.findUnique({ where: { id: orderId } });
     assert.equal(after.attestedAt.getTime(), stored.attestedAt.getTime(), 'the refused attest stored nothing');
     assert.equal((await rowsFor(orderId)).length, 1);
+  });
+
+  it('the audit row is written before the chain call: a refused row sends no chain transaction', async () => {
+    const { order } = await orderWithPayment('attest-refused-first', 'confirmed');
+    const sent = chain.sent.length;
+    const refusedRes = await post(`/orders/${order.id}/attest`, auth.refused);
+    assert.equal(refusedRes.status, 500);
+    assert.equal(chain.sent.length, sent, 'nothing was sent on chain');
+    const after = await prisma.purchaseOrder.findUnique({ where: { id: order.id } });
+    assert.equal(after.attestationHash, null);
+    assert.equal(after.attestationTxHash, null);
+    assert.equal((await rowsFor(order.id)).length, 0);
+
+    const res = await post(`/orders/${order.id}/attest`, auth.admin);
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+    assert.equal(chain.sent.length, sent + 1);
+    const rows = await rowsFor(order.id);
+    assert.deepEqual(rows.map((row) => [row.action, row.detail.chainSend, row.detail.attestationTxHash]), [['order.attest', true, null]]);
+    const saved = await prisma.purchaseOrder.findUnique({ where: { id: order.id } });
+    assert.ok(saved.attestationTxHash, 'the hash the chain call returned is stored on the order');
+    assert.ok(rows[0].createdAt <= saved.updatedAt);
   });
 });
 
@@ -399,6 +523,67 @@ describe('payouts', () => {
     assert.equal((await prisma.disbursementItem.findUnique({ where: { id: item.id } })).status, 'held');
     const rows = await rowsFor(item.id);
     assert.deepEqual(rows.map((row) => [row.action, row.detail.step, row.detail.holdCode]), [['disbursement.process', 'hold', 'per_item_limit']]);
+  });
+
+  async function submittedPayout(name, amount = 4) {
+    return prisma.disbursementItem.create({
+      data: {
+        payoutId: id(name),
+        origin: 'internal_reward',
+        recordClass: recordClassForOrigin('internal_reward'),
+        walletAddress: wallet(),
+        amount,
+        asset: 'USDT',
+        chainId: chainId(),
+        tokenAddress: tokenAddress(),
+        reason: 'db test',
+        status: 'submitted',
+        txHash: ethers.hexlify(ethers.randomBytes(32)),
+        submittedAt: new Date(),
+      },
+    });
+  }
+
+  it('process: two calls at once on a submitted payout re-check it once (one send, one row)', async () => {
+    const item = await submittedPayout('recheck-race');
+    const before = transfers.length;
+    sender.delayMs = 300;
+    let results;
+    try {
+      results = await Promise.all([
+        post(`/disbursements/items/${item.id}/process`, auth.admin),
+        post(`/disbursements/items/${item.id}/process`, auth.admin),
+      ]);
+    } finally {
+      sender.delayMs = 0;
+    }
+    assert.equal(transfers.length, before + 1, 'only one caller reached the sender');
+    assert.equal(transfers[transfers.length - 1].existingTxHash, item.txHash);
+    const statuses = results.map((r) => r.status).sort();
+    assert.ok(statuses[0] === 200 && [200, 409].includes(statuses[1]), JSON.stringify(results.map((r) => r.body)));
+    const saved = await prisma.disbursementItem.findUnique({ where: { id: item.id } });
+    assert.equal(saved.status, 'confirmed');
+    await settle();
+    const rows = await rowsFor(item.id);
+    assert.deepEqual(rows.map((row) => [row.action, row.detail.step, row.detail.statusBefore, row.detail.statusAfter]), [
+      ['disbursement.process', 'recheck', 'submitted', 'processing'],
+    ]);
+  });
+
+  it('process: a re-check that fails releases the payout as submitted, and the next call re-checks it', async () => {
+    const item = await submittedPayout('recheck-fails');
+    const before = transfers.length;
+    sender.failNext = Object.assign(new Error('rpc unavailable'), { statusCode: 503, code: 'rpc_unavailable' });
+    const failed = await post(`/disbursements/items/${item.id}/process`, auth.admin);
+    assert.equal(failed.status, 503, JSON.stringify(failed.body));
+    const released = await prisma.disbursementItem.findUnique({ where: { id: item.id } });
+    assert.equal(released.status, 'submitted');
+    assert.equal(released.txHash, item.txHash);
+    const ok = await post(`/disbursements/items/${item.id}/process`, auth.admin);
+    assert.equal(ok.status, 200, JSON.stringify(ok.body));
+    assert.equal(transfers.length, before + 2);
+    assert.equal((await prisma.disbursementItem.findUnique({ where: { id: item.id } })).status, 'confirmed');
+    assert.deepEqual((await rowsFor(item.id)).map((row) => row.detail.step), ['recheck', 'recheck']);
   });
 
   async function redemption(name) {
@@ -513,6 +698,39 @@ describe('raffle draw', () => {
     await prisma.campaignRaffleTicket.create({ data: { campaignId: campaign.id, userId: holder.id, tickets: 1 } });
     return { campaign, holder };
   }
+
+  it('draw: three draws at once never hand out more seats than the prizes have', async () => {
+    const now = Date.now();
+    const campaign = await prisma.campaign.create({
+      data: {
+        slug: id('raffle-race'),
+        internalName: id('raffle-race'),
+        titleEn: 'Raffle', titleZh: 'Raffle', blurbEn: 'Raffle', blurbZh: 'Raffle',
+        template: 'RAFFLE',
+        status: 'ENDED',
+        startsAt: new Date(now - 86400000),
+        endsAt: new Date(now - 3600000),
+        ctaKind: 'none',
+        ctaValue: '',
+        createdBy: 'db-test',
+        updatedBy: 'db-test',
+        config: { prizes: [{ kind: 'POINTS', points: 10, count: 2, labelEn: 'Ten points', labelZh: 'Ten points' }] },
+      },
+    });
+    for (let n = 0; n < 6; n += 1) {
+      const holder = await user(`raffle-race-holder-${n}`);
+      await prisma.campaignRaffleTicket.create({ data: { campaignId: campaign.id, userId: holder.id, tickets: 1 } });
+    }
+    const results = await Promise.all([1, 2, 3].map(() => post(`/campaigns/${campaign.id}/raffle/draw`, auth.admin)));
+    assert.deepEqual(results.map((r) => r.status), [200, 200, 200], JSON.stringify(results.map((r) => r.body)));
+    const wins = await prisma.campaignRaffleWin.findMany({ where: { campaignId: campaign.id } });
+    assert.equal(wins.length, 2, 'two seats, two wins');
+    assert.equal(new Set(wins.map((w) => w.userId)).size, 2, 'no one wins the same prize twice');
+    assert.equal(await prisma.point.count({ where: { sourceId: { in: wins.map((w) => w.id) } } }), 2);
+    await settle();
+    const rows = await rowsFor(campaign.id);
+    assert.equal(rows.reduce((sum, row) => sum + row.detail.wins, 0), 2);
+  });
 
   it('draw: the win, its points and one raffle.draw row commit together; a refused row grants nothing', async () => {
     const { campaign, holder } = await raffle('raffle', 'raffle-holder');

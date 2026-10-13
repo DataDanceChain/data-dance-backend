@@ -1,5 +1,6 @@
 const service = require('../services/trackedLink');
 const { createLogger } = require('../utils/logger');
+const { noteCreated } = require('../services/opsAudit');
 
 const logger = createLogger('trackedLinkController');
 
@@ -30,6 +31,7 @@ async function list(req, res) {
 async function create(req, res) {
   try {
     const data = await service.createLink(req.body || {});
+    noteCreated(req, data && data.id);
     res.status(201).json({ status: 'success', data });
   } catch (error) {
     sendError(res, error);

@@ -9,7 +9,10 @@
  *     stored; a wrong verifier still burns it;
  *   - the redirect target is fixed by the server (OPS_ADMIN_URL), never taken from the request;
  *   - the account must be enabled and staff when the code is minted, when it is exchanged, and on
- *     every later request (protectOps).
+ *     every later request (protectOps);
+ *   - minting needs a verified wallet session (ver 2) signed in within the last 10 minutes and not
+ *     issued before the account's last disable / enable (src/services/staffSession.js); a code
+ *     minted before that reset is not exchanged either.
  *
  * Ops session tokens: `{ type: 'ops_admin', kind: 'user', sub: <User.id> }`, signed with
  * JWT_SECRET, OPS_USER_TOKEN_TTL_SEC (default 12 h, clamped to 5 min..12 h), no refresh. They never
@@ -21,6 +24,7 @@ const prisma = require('../utils/prisma');
 const { permissionsFor } = require('../constants/opsRoles');
 const { OpsError, writeAudit, actorFromUser } = require('./opsAudit');
 const { loadUserWithRoles } = require('./userRoles');
+const { assertStaffWalletSession } = require('./staffSession');
 
 const OPS_TOKEN_TYPE = 'ops_admin';
 const CODE_PREFIX = 'osc_';
@@ -105,13 +109,16 @@ function sameText(a, b) {
 /**
  * POST /api/ops/auth/code, after `protect`: the caller is req.user, req.authClaims its wallet JWT.
  * Answers the code, its lifetime, the fixed redirect target and the e-mail it signs in as.
+ * Refusals: 403 VERIFIED_SESSION_REQUIRED (ver < 2), 403 RECENT_SIGN_IN_REQUIRED (signed in more
+ * than 10 minutes ago), 403 ACCOUNT_DISABLED, 401 SESSION_REVOKED (issued before the last disable
+ * / enable), 403 NOT_STAFF.
  */
 async function mintSignInCode({ user, authClaims, body }, db = prisma) {
-  if (!(Number(authClaims && authClaims.ver) >= 2)) {
-    throw new OpsError(403, 'VERIFIED_SESSION_REQUIRED', 'Please sign in again to continue.');
-  }
+  // Verified and recent: the token alone settles both, before any database read.
+  assertStaffWalletSession(null, authClaims, { recent: true });
   const staff = await loadUserWithRoles(user.id, db);
   if (!staff || staff.user.disabledAt) throw new OpsError(403, 'ACCOUNT_DISABLED', 'This account has been disabled.');
+  assertStaffWalletSession(staff.user, authClaims, { recent: true });
   if (!staff.role) throw new OpsError(403, 'NOT_STAFF', 'This account has no operations access.');
   const challenge = body && typeof body.code_challenge === 'string' ? body.code_challenge : '';
   if (!CHALLENGE_PATTERN.test(challenge)) {
@@ -129,6 +136,7 @@ async function mintSignInCode({ user, authClaims, body }, db = prisma) {
       userId: staff.user.id,
       challenge,
       expiresAt: new Date(now + CODE_TTL_SEC * 1000),
+      createdAt: new Date(now),
     },
   });
   return {
@@ -166,6 +174,10 @@ async function exchangeSignInCode({ body, requestId = null }, db = prisma) {
 
   const staff = await loadUserWithRoles(row.userId, db);
   if (!staff || staff.user.disabledAt || !staff.role) throw invalidGrant();
+  // A code minted before the account's last disable / enable belongs to an ended session.
+  if (staff.user.sessionsResetAt && new Date(row.createdAt) < new Date(staff.user.sessionsResetAt)) {
+    throw invalidGrant();
+  }
 
   await writeAudit(db, {
     actor: actorFromUser(staff.user, staff.role),

@@ -1,8 +1,15 @@
 -- Operator accounts, roles and the ops audit log (admin issue #2).
 --
--- Additive: two nullable columns on "User" and four new tables. No existing row or column changes.
--- The legacy "Role" / "Permission" / "UserRole" tables are untouched and stay unused.
+-- Additive: three nullable columns on "User" and four new tables. No existing row or column
+-- changes. The legacy "Role" / "Permission" / "UserRole" tables are untouched and stay unused.
 -- Rollback = the previous image; the new columns and tables are then simply not read.
+--
+-- Live database: adding the columns and the foreign keys needs short table locks on "User". The
+-- lock_timeout below makes the migration fail at once (and change nothing: it is one transaction)
+-- instead of waiting behind a long reader while every sign-in queues behind it. If it fails with
+-- "canceling statement due to lock timeout", run `prisma migrate resolve --rolled-back
+-- 20261017100000_ops_roles_audit` and deploy again, or apply it in a quiet window
+-- (docs/OPS_ADMIN.md, "Migration").
 --
 --   UserRoleGrant     one row per active grant (ddc_admin | operator | developer); revoke deletes it
 --   OpsAuditLog       append-only: no route updates or deletes a row; no foreign keys, so rows
@@ -12,9 +19,12 @@
 --   IdentityConflict  sign-ins refused by web3authIdentity.resolveUser; no e-mail, verifierId or
 --                     wallet address is stored
 
+SET lock_timeout = '3s';
+
 -- AlterTable
 ALTER TABLE "User" ADD COLUMN "disabledBy" TEXT,
-ADD COLUMN "disabledReason" TEXT;
+ADD COLUMN "disabledReason" TEXT,
+ADD COLUMN "sessionsResetAt" TIMESTAMP(3);
 
 -- CreateTable
 CREATE TABLE "UserRoleGrant" (
@@ -118,3 +128,6 @@ ALTER TABLE "OpsAuditLog" ADD CONSTRAINT "OpsAuditLog_actorKind_check" CHECK ("a
 ALTER TABLE "OpsAuditLog" ADD CONSTRAINT "OpsAuditLog_surface_check" CHECK ("surface" IN ('ops', 'console', 'script'));
 
 ALTER TABLE "IdentityConflict" ADD CONSTRAINT "IdentityConflict_route_check" CHECK ("route" IN ('network_rebind', 'backfill', 'create'));
+
+-- Later migrations in the same deploy run keep the server default.
+RESET lock_timeout;

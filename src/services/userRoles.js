@@ -30,8 +30,9 @@ async function hasRole(userId, roles, db = prisma) {
 }
 
 /**
- * One query: the user ({ id, email, name, disabledAt }) with their roles and the staff role they
- * act as (ddc_admin over operator; null when neither). null when there is no such user.
+ * One query: the user ({ id, email, name, disabledAt, sessionsResetAt }) with their roles and the
+ * staff role they act as (ddc_admin over operator; null when neither). null when there is no such
+ * user.
  */
 async function loadUserWithRoles(userId, db = prisma) {
   if (typeof userId !== 'string' || !userId) return null;
@@ -42,13 +43,20 @@ async function loadUserWithRoles(userId, db = prisma) {
       email: true,
       name: true,
       disabledAt: true,
+      sessionsResetAt: true,
       roleGrants: { select: { role: true } },
     },
   });
   if (!row) return null;
   const roles = [...new Set((row.roleGrants || []).map((grant) => grant.role).filter(isRole))].sort(byRoleOrder);
   return {
-    user: { id: row.id, email: row.email, name: row.name || null, disabledAt: row.disabledAt || null },
+    user: {
+      id: row.id,
+      email: row.email,
+      name: row.name || null,
+      disabledAt: row.disabledAt || null,
+      sessionsResetAt: row.sessionsResetAt || null,
+    },
     roles,
     role: staffRole(roles),
   };

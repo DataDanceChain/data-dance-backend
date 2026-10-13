@@ -13,7 +13,7 @@ const { installOpsApp, listenLoopback, seedUser, grant, bearer, tokens, settle }
 
 const { prisma, app } = installOpsApp();
 const { clearRateLimitStore } = require('../../src/middlewares/rateLimitMiddleware');
-const { writeAudit, auditLog, auditOpsWrites, auditInChange, _internals } = require('../../src/services/opsAudit');
+const { writeAudit, auditLog, auditOpsWrites, auditInChange, noteCreated, _internals } = require('../../src/services/opsAudit');
 const { opsRoutes } = require('../../src/routes/opsAdminRoutes');
 
 let server;
@@ -157,7 +157,7 @@ describe('the generic ops.write row', () => {
     assert.equal(post.actorRole, 'operator');
     assert.equal(post.surface, 'ops');
     assert.equal(post.targetType, 'links');
-    assert.equal(post.targetId, null);
+    assert.equal(post.targetId, id, 'a create records the id it made');
     assert.deepEqual(post.detail, { method: 'POST', route: '/api/ops/links', params: {}, status: 201 });
     assert.ok(post.requestId, 'the request id is recorded');
 
@@ -342,6 +342,33 @@ describe('the generic ops.write row', () => {
       { statusCode: 200 },
     );
     assert.deepEqual(idRow.target, { type: 'campaigns', id: 'c-1' });
+  });
+
+  it('a create names what it made (noteCreated): its id, and a type when the path segment is not one', () => {
+    const actor = { kind: 'user', userId: 'a', username: 'a@example.test', role: 'operator' };
+    const created = { method: 'POST', opsAdmin: actor, opsRoute: { baseUrl: '/api/ops', path: '/campaigns', params: {} } };
+    noteCreated(created, 'camp-1');
+    assert.deepEqual(_internals.genericWriteRow(created, { statusCode: 200 }).target, { type: 'campaigns', id: 'camp-1' });
+    const cover = { method: 'POST', opsAdmin: actor, opsRoute: { baseUrl: '/api/ops', path: '/campaigns/cover', params: {} } };
+    noteCreated(cover, '/assets/campaigns/x.png', 'campaign_cover');
+    assert.deepEqual(_internals.genericWriteRow(cover, { statusCode: 200 }).target, { type: 'campaign_cover', id: '/assets/campaigns/x.png' });
+    const none = { method: 'POST', opsAdmin: actor, opsRoute: { baseUrl: '/api/ops', path: '/campaigns/translate', params: {} } };
+    noteCreated(none, null);
+    assert.deepEqual(_internals.genericWriteRow(none, { statusCode: 200 }).target, { type: 'campaigns', id: null });
+  });
+
+  it('every ops create route without an id in its path names what it made', () => {
+    // POST routes whose path has no parameter: each either creates and calls noteCreated, or
+    // creates nothing (translate) or writes its own row (planet manager).
+    const paramless = opsRoutes.filter((route) => route.method === 'post' && !route.path.includes(':')).map((route) => route.path).sort();
+    assert.deepEqual(paramless, ['/campaigns', '/campaigns/cover', '/campaigns/translate', '/links', '/sso/planet-manager']);
+    const fs = require('fs');
+    const path = require('path');
+    const read = (file) => fs.readFileSync(path.join(__dirname, '../../src/controllers', file), 'utf8');
+    const campaigns = read('opsCampaignController.js');
+    assert.match(campaigns, /exports\.create = [\s\S]*?noteCreated\(req, row\.id\)/);
+    assert.match(campaigns, /exports\.uploadCover = [\s\S]*?noteCreated\(req, pathName, 'campaign_cover'\)/);
+    assert.match(read('trackedLinkController.js'), /async function create[\s\S]*?noteCreated\(req, data && data\.id\)/);
   });
 });
 

@@ -66,6 +66,7 @@ async function seedUser(prisma, over = {}) {
       disabledAt: null,
       disabledBy: null,
       disabledReason: null,
+      sessionsResetAt: null,
       web3authVerifier: null,
       web3authVerifierId: null,
       web3authLinkedAt: null,
@@ -84,11 +85,15 @@ async function grant(prisma, userId, role, over = {}) {
 const bearer = (token) => `Bearer ${token}`;
 
 const tokens = {
-  /** The wallet's user JWT (`ver: 2` = a verified session). */
-  wallet: (user, { ver = 2 } = {}) => jwt.sign({ id: user.id, ver }, JWT_SECRET, { expiresIn: '5m' }),
-  /** A personal ops session. */
-  ops: (user, { expiresIn = '5m' } = {}) =>
-    jwt.sign({ type: 'ops_admin', kind: 'user', sub: user.id }, JWT_SECRET, { expiresIn }),
+  /**
+   * The wallet's user JWT (`ver: 2` = a verified session). `ageSec` backdates its `iat` (a sign-in
+   * that many seconds ago).
+   */
+  wallet: (user, { ver = 2, ageSec = 0 } = {}) =>
+    jwt.sign({ id: user.id, ver, iat: Math.floor(Date.now() / 1000) - ageSec }, JWT_SECRET, { expiresIn: '1h' }),
+  /** A personal ops session; `ageSec` backdates its `iat`. */
+  ops: (user, { expiresIn = '5m', ageSec = 0 } = {}) =>
+    jwt.sign({ type: 'ops_admin', kind: 'user', sub: user.id, iat: Math.floor(Date.now() / 1000) - ageSec }, JWT_SECRET, { expiresIn }),
   /** A legacy shared-login token (before personal sign-in): role 'admin'. */
   legacyShared: () => jwt.sign({ type: 'ops_admin', sub: 'ops-legacy', role: 'admin' }, JWT_SECRET, { expiresIn: '5m' }),
   /** A shared-login token as POST /auth/login issues it now. */

@@ -3,6 +3,7 @@ const { createLogger } = require('../utils/logger');
 const { permissionsFor, isPermission } = require('../constants/opsRoles');
 const { OPS_TOKEN_TYPE, sharedLoginOn } = require('../services/opsSignIn');
 const { loadUserWithRoles } = require('../services/userRoles');
+const { issuedBeforeReset } = require('../services/staffSession');
 const { classifyAuthError, sendDatabaseUnavailable } = require('./authErrors');
 
 const logger = createLogger('opsAuth');
@@ -22,8 +23,10 @@ function sessionInvalid(res, status = 401) {
  *     OPS_SESSION_INVALID; expired: 401 OPS_SESSION_EXPIRED; another kind of token (a wallet JWT):
  *     403 OPS_SESSION_INVALID.
  *   - kind 'user' (personal session): the account is loaded with its roles on every request. No
- *     such account: 401 OPS_SESSION_INVALID; disabled: 403 ACCOUNT_DISABLED; neither ddc_admin nor
- *     operator: 403 NOT_STAFF. So a role revoked mid-session stops the next call.
+ *     such account: 401 OPS_SESSION_INVALID; disabled: 403 ACCOUNT_DISABLED; issued before the
+ *     account's last disable / enable (User.sessionsResetAt): 401 OPS_SESSION_INVALID; neither
+ *     ddc_admin nor operator: 403 NOT_STAFF. So a role revoked mid-session stops the next call,
+ *     and a re-enabled account signs in again.
  *   - role 'demo': unchanged (read-only, see restrictDemo).
  *   - kind 'shared', or a legacy token with role 'admin': only while OPS_SHARED_LOGIN=on.
  *
@@ -67,6 +70,7 @@ async function protectOps(req, res, next) {
     }
     if (!staff) return sessionInvalid(res);
     if (staff.user.disabledAt) return refuse(res, 403, 'ACCOUNT_DISABLED', 'This account has been disabled.');
+    if (issuedBeforeReset(decoded, staff.user.sessionsResetAt)) return sessionInvalid(res);
     if (!staff.role) return refuse(res, 403, 'NOT_STAFF', 'This account has no operations access.');
     req.opsAdmin = {
       kind: 'user',

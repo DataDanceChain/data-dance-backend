@@ -8,7 +8,8 @@ const assert = require('node:assert/strict');
 const crypto = require('crypto');
 const request = require('supertest');
 
-const { installOpsApp, listenLoopback, seedUser, grant, bearer, tokens, ISSUER } = require('../helpers/opsApp');
+const jwt = require('jsonwebtoken');
+const { installOpsApp, listenLoopback, seedUser, grant, bearer, tokens, ISSUER, JWT_SECRET } = require('../helpers/opsApp');
 
 const PARTNER_SECRET = 'tge-secret-dev-for-console-admin';
 const { prisma, app } = installOpsApp({
@@ -85,7 +86,9 @@ describe('GET /api/developer/sso/me', () => {
     const plain = await get('/me', auth.plain);
     assert.equal(plain.status, 200, JSON.stringify(plain.body));
     assert.equal(plain.headers['cache-control'], 'no-store');
-    assert.deepEqual(plain.body, { user_id: people.plain.id, email: 'member@example.test', roles: [], admin: false, can_register: false });
+    assert.deepEqual(plain.body, {
+      user_id: people.plain.id, email: 'member@example.test', roles: [], admin: false, can_register: false, verified_session: true,
+    });
 
     const developer = (await get('/me', auth.developer)).body;
     assert.deepEqual([developer.roles, developer.admin, developer.can_register], [['developer'], false, true]);
@@ -95,6 +98,12 @@ describe('GET /api/developer/sso/me', () => {
 
     const operator = (await get('/me', auth.operator)).body;
     assert.deepEqual([operator.roles, operator.admin, operator.can_register], [['operator'], false, false]);
+  });
+
+  it('verified_session tells the console whether the staff routes will take this sign-in', async () => {
+    const older = (await get('/me', bearer(tokens.wallet(people.admin, { ver: 1 })))).body;
+    assert.equal(older.verified_session, false);
+    assert.equal(older.admin, true);
   });
 
   it('can_register is true for everyone while registration is open', async () => {
@@ -230,6 +239,68 @@ describe('GET /api/developer/sso/admin/staff-unlock', () => {
   });
 });
 
+/** A wallet JWT issued `secondsAgo` seconds ago. */
+const walletIssued = (user, secondsAgo, { ver = 2 } = {}) =>
+  bearer(jwt.sign({ id: user.id, ver, iat: Math.floor(Date.now() / 1000) - secondsAgo }, JWT_SECRET, { expiresIn: '1h' }));
+
+describe('the console staff routes need a staff session (the rule of POST /api/ops/auth/code)', () => {
+  const register = (authorization) => request(server)
+    .post('/api/developer/sso/clients')
+    .set('Authorization', authorization)
+    .send({ client_name: 'Partner app', contact_email: 'dev@example.test', redirect_uris: ['https://partner.example.test/cb'] });
+
+  it('a ddc_admin with an older sign-in (ver < 2) gets 403 verified_session_required and no data', async () => {
+    process.env.STAFF_UNLOCK_TOKEN = UNLOCK;
+    const older = bearer(tokens.wallet(people.admin, { ver: 1 }));
+    for (const path of ['/admin/clients', '/admin/staff-unlock']) {
+      const res = await get(path, older);
+      assert.equal(res.status, 403, path);
+      assert.equal(res.body.error, 'verified_session_required', path);
+      assert.equal(res.body.clients, undefined);
+      assert.equal(res.body.unlock_token, undefined);
+    }
+    assert.equal(prisma.store.opsAuditLog.length, 0, 'no unlock was handed out');
+  });
+
+  it('registering while registration is closed needs ver 2 too; no client is written', async () => {
+    for (const name of ['developer', 'admin']) {
+      clearRateLimitStore();
+      const res = await register(bearer(tokens.wallet(people[name], { ver: 1 })));
+      assert.equal(res.status, 403, name);
+      assert.equal(res.body.error, 'verified_session_required', name);
+    }
+    // An account without the role still gets the answer it got before.
+    const plain = await register(bearer(tokens.wallet(people.plain, { ver: 1 })));
+    assert.equal(plain.body.error, 'registration_closed');
+    assert.equal(prisma.store.ssoDeveloperClient.length, 0);
+  });
+
+  it('while registration is open, registering needs no role and no verified session (unchanged)', async () => {
+    initDeveloperRegistration({ env: { SSO_DEVELOPER_REGISTRATION: 'on' } });
+    const res = await register(bearer(tokens.wallet(people.plain, { ver: 1 })));
+    assert.equal(res.status, 201, JSON.stringify(res.body));
+    assert.equal(prisma.store.opsAuditLog.length, 0, 'open self-serve registration is not a staff action');
+  });
+
+  it('a wallet JWT issued before the account was last disabled / re-enabled gets 401 session_revoked', async () => {
+    const before = walletIssued(people.admin, 120);
+    prisma.store.user.find((u) => u.id === people.admin.id).sessionsResetAt = new Date(Date.now() - 60 * 1000);
+    process.env.STAFF_UNLOCK_TOKEN = UNLOCK;
+    for (const path of ['/admin/clients', '/admin/staff-unlock']) {
+      const res = await get(path, before);
+      assert.equal(res.status, 401, path);
+      assert.equal(res.body.error, 'session_revoked', path);
+    }
+    const reg = await register(before);
+    assert.equal(reg.status, 401);
+    assert.equal(reg.body.error, 'session_revoked');
+    // A sign-in after the reset works.
+    const after = await get('/admin/clients', walletIssued(people.admin, 0));
+    assert.equal(after.status, 200, JSON.stringify(after.body));
+    assert.equal(prisma.store.ssoDeveloperClient.length, 0);
+  });
+});
+
 describe('POST /api/developer/sso/clients while registration is closed', () => {
   const body = { client_name: 'Partner app', contact_email: 'dev@example.test', redirect_uris: ['https://partner.example.test/cb'] };
   const register = (authorization) => {
@@ -247,6 +318,41 @@ describe('POST /api/developer/sso/clients while registration is closed', () => {
       const row = prisma.store.ssoDeveloperClient.find((c) => c.clientId === res.body.client_id);
       assert.equal(row.ownerUserId, people[name].id);
     }
+  });
+
+  it('each registration writes one console.client_register row with the role it was made with; never the secret', async () => {
+    const made = {};
+    for (const name of ['developer', 'admin']) {
+      clearRateLimitStore();
+      const res = await register(auth[name]);
+      assert.equal(res.status, 201, JSON.stringify(res.body));
+      made[name] = res.body;
+    }
+    const rows = prisma.store.opsAuditLog;
+    assert.deepEqual(
+      rows.map((row) => [row.action, row.surface, row.actorUserId, row.actorRole, row.targetType, row.targetId, row.targetLabel]),
+      [
+        ['console.client_register', 'console', people.developer.id, 'developer', 'sso_client', made.developer.client_id, 'Partner app'],
+        ['console.client_register', 'console', people.admin.id, 'ddc_admin', 'sso_client', made.admin.client_id, 'Partner app'],
+      ],
+    );
+    assert.deepEqual(rows[0].detail, { kind: 'developer', registration: 'closed', redirectUris: 1 });
+    const text = JSON.stringify(rows);
+    assert.ok(!text.includes(made.developer.client_secret) && !text.includes(made.admin.client_secret), 'no secret in the log');
+  });
+
+  it('no audit row, no client: a failed audit write leaves nothing registered', async () => {
+    const original = prisma.opsAuditLog.create;
+    prisma.opsAuditLog.create = async () => { throw new Error('audit store down'); };
+    let res;
+    try {
+      res = await register(auth.developer);
+    } finally {
+      prisma.opsAuditLog.create = original;
+    }
+    assert.equal(res.status, 500);
+    assert.equal(res.body.client_secret, undefined);
+    assert.equal(prisma.store.ssoDeveloperClient.length, 0);
   });
 
   it('any other account gets 403 registration_closed and nothing is written', async () => {

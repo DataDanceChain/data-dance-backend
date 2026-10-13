@@ -104,6 +104,20 @@ describe('personal ops session (kind: user)', () => {
     assert.equal(after.body.code, 'NOT_STAFF');
   });
 
+  it('a session issued before the account was last disabled / re-enabled is 401 OPS_SESSION_INVALID', async () => {
+    const operator = await seedUser(prisma);
+    await grant(prisma, operator.id, 'operator');
+    const older = bearer(tokens.ops(operator, { ageSec: 120 }));
+    assert.equal((await me(older)).status, 200);
+    prisma.store.user.find((u) => u.id === operator.id).sessionsResetAt = new Date(Date.now() - 60 * 1000);
+    const refused = await me(older);
+    assert.equal(refused.status, 401);
+    assert.equal(refused.body.code, 'OPS_SESSION_INVALID');
+    // Issued after the reset (or in its second): accepted.
+    assert.equal((await me(bearer(tokens.ops(operator, { ageSec: 30 })))).status, 200);
+    assert.equal((await me(bearer(tokens.ops(operator)))).status, 200);
+  });
+
   it('an unknown account, a bad signature, no token and an expired token are 401', async () => {
     const ghost = { id: 'no-such-user' };
     const unknown = await me(bearer(tokens.ops(ghost)));

@@ -38,6 +38,9 @@ model User {
   /// Who disabled the account (the ops actor's label: an e-mail, 'shared' or 'script') and why.
   disabledBy               String?
   disabledReason           String?
+  /// Set by every disable and re-enable: ops sessions and wallet JWTs issued before it are refused
+  /// on the ops and console staff routes (src/services/staffSession.js).
+  sessionsResetAt          DateTime?
   createdActivities        Activity[]
   activityClaims           ActivityClaim[]
   transactions             AssetTransaction[]

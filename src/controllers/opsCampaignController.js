@@ -8,6 +8,7 @@ const {
   toPublicCard,
 } = require('../utils/campaignRules');
 const { drawRaffle } = require('../services/campaignEffects');
+const { noteCreated } = require('../services/opsAudit');
 const { translateCampaignCopy } = require('../services/campaignTranslate');
 
 function actorOf(req) {
@@ -93,6 +94,7 @@ exports.create = async (req, res) => {
       },
     });
     await writeEvent(row.id, actor, 'create', null, 'DRAFT');
+    noteCreated(req, row.id);
     return res.json({ status: 'success', data: serialize(row) });
   } catch (error) {
     if (error.code === 'P2002') return fail(res, 409, 'Slug already exists');
@@ -351,6 +353,7 @@ exports.uploadCover = async (req, res) => {
     }
     const origin = String(process.env.PUBLIC_BASE_URL || 'https://api.datadance.ai').replace(/\/$/, '');
     const pathName = `/assets/campaigns/${req.file.filename}`;
+    noteCreated(req, pathName, 'campaign_cover');
     return res.json({
       status: 'success',
       data: {

@@ -7,8 +7,10 @@
  *   3. delete the account's SsoTicket rows: App SSO consent sessions end;
  *   4. write the audit row.
  * Every sign-in path already refuses a disabled account (see the contract's §4 table). Wallet JWTs
- * cannot be revoked; they are refused while the account is disabled and work again after a
- * re-enable until they expire. Role grants are kept through disable and enable.
+ * cannot be revoked; they are refused while the account is disabled and work again in the wallet
+ * after a re-enable until they expire. Disable and enable both set `sessionsResetAt`, so no ops
+ * session and no wallet JWT issued before either is accepted on the ops and console staff routes
+ * again (src/services/staffSession.js). Role grants are kept through disable and enable.
  */
 const prisma = require('../utils/prisma');
 const { OpsError, writeAudit, isoOrNull } = require('./opsAudit');
@@ -40,7 +42,10 @@ async function disableAccount({ userId, reason, actor, surface = 'ops', requestI
     }
     const now = new Date();
     const state = { disabledAt: now, disabledBy: String(actor.label), disabledReason: why };
-    const changed = await tx.user.updateMany({ where: { id: target.id, disabledAt: null }, data: state });
+    const changed = await tx.user.updateMany({
+      where: { id: target.id, disabledAt: null },
+      data: { ...state, sessionsResetAt: now },
+    });
     if (changed.count !== 1) throw new OpsError(409, 'ALREADY_DISABLED', 'This account is already disabled.');
     const mcpTokens = await tx.mcpToken.deleteMany({ where: { userId: target.id } });
     const ssoTickets = await tx.ssoTicket.deleteMany({ where: { userId: target.id } });
@@ -72,7 +77,7 @@ async function enableAccount({ userId, reason, actor, surface = 'ops', requestId
     const previous = presentState(before || target);
     const changed = await tx.user.updateMany({
       where: { id: target.id, disabledAt: { not: null } },
-      data: { disabledAt: null, disabledBy: null, disabledReason: null },
+      data: { disabledAt: null, disabledBy: null, disabledReason: null, sessionsResetAt: new Date() },
     });
     if (changed.count !== 1) throw new OpsError(409, 'NOT_DISABLED', 'This account is not disabled.');
     const audit = await writeAudit(tx, {

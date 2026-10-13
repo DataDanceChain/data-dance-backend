@@ -37,6 +37,7 @@ const AUDIT_ACTIONS = Object.freeze([
   'points.adjust',
   'sso.planet_manager.assign',
   'console.staff_unlock',
+  'console.client_register',
   // Money and balance routes: the row is written in the transaction of the change.
   'payment.confirm',
   'payment.reject',

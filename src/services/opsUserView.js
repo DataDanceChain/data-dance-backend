@@ -1,7 +1,14 @@
 /**
  * The sections GET /api/ops/users/:userId adds to the existing member detail (admin issue #2):
- * account, identity, roles, data licence, privacy requests, developer clients, merchant, and —
- * for sessions with ops.support only — sign-in issues and the audit history (null otherwise).
+ * account, identity, roles, data licence, privacy requests, developer clients, merchant, sign-in
+ * issues and the audit history.
+ *
+ * Only a session with ops.support (ddc_admin, operator) sees who acted and the sign-in identity:
+ *   - identity (web3auth verifier ids, the network rebind's addresses and evidence), sign-in
+ *     issues and the audit history: null otherwise;
+ *   - account.disabledBy / disabledReason, roles[].grantedBy and privacyRequests[].resolvedBy:
+ *     null otherwise.
+ * The demo (read-only) and shared logins get the rest.
  */
 const prisma = require('../utils/prisma');
 const { conflictsForUser } = require('./identityConflicts');
@@ -38,7 +45,7 @@ async function userViewSections(user, { canSupport = false } = {}, db = prisma) 
       where: { userId },
       select: { companyName: true, kycStatus: true, kycReviewedAt: true },
     }),
-    db.web3AuthNetworkRebind.findUnique({ where: { userId } }),
+    canSupport ? db.web3AuthNetworkRebind.findUnique({ where: { userId } }) : null,
     canSupport ? conflictsForUser(userId, { take: 10 }, db) : null,
     canSupport ? auditForUser(userId, { take: 20 }, db) : null,
   ]);
@@ -50,10 +57,10 @@ async function userViewSections(user, { canSupport = false } = {}, db = prisma) 
       isOrganization: Boolean(user.isOrganization),
       createdAt: user.createdAt,
       disabledAt: user.disabledAt || null,
-      disabledBy: user.disabledBy || null,
-      disabledReason: user.disabledReason || null,
+      disabledBy: canSupport ? user.disabledBy || null : null,
+      disabledReason: canSupport ? user.disabledReason || null : null,
     },
-    identity: {
+    identity: !canSupport ? null : {
       web3auth: user.web3authVerifier
         ? {
             verifier: user.web3authVerifier,
@@ -80,7 +87,7 @@ async function userViewSections(user, { canSupport = false } = {}, db = prisma) 
       .map((grant) => ({
         role: grant.role,
         grantedAt: grant.grantedAt,
-        grantedBy: grant.grantedBy,
+        grantedBy: canSupport ? grant.grantedBy : null,
         reason: grant.reason,
       })),
     dataLicence: licence
@@ -97,7 +104,7 @@ async function userViewSections(user, { canSupport = false } = {}, db = prisma) 
       status: row.status,
       createdAt: row.createdAt,
       resolvedAt: row.resolvedAt || null,
-      resolvedBy: row.resolvedBy || null,
+      resolvedBy: canSupport ? row.resolvedBy || null : null,
     })),
     developerClients: clients.map((row) => ({
       client_id: row.clientId,

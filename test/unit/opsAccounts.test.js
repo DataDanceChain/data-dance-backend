@@ -88,6 +88,7 @@ describe('POST /api/ops/users/:userId/disable and /enable', () => {
     const row = userRow(member.id);
     assert.ok(row.disabledAt instanceof Date);
     assert.equal(row.disabledBy, 'sloan@example.test');
+    assert.equal(row.sessionsResetAt.getTime(), row.disabledAt.getTime(), 'a disable resets the staff sessions');
     assert.equal(prisma.store.mcpToken.filter((t) => t.userId === member.id).length, 0);
     assert.equal(prisma.store.ssoTicket.filter((t) => t.userId === member.id).length, 0);
     await settle();
@@ -102,10 +103,12 @@ describe('POST /api/ops/users/:userId/disable and /enable', () => {
   it('enables: clears the three fields and records what they were; role grants are kept', async () => {
     await grant(prisma, member.id, 'developer');
     await disable(member.id, { reason: 'fraud report #12' });
+    const disabledReset = userRow(member.id).sessionsResetAt;
     const res = await enable(member.id, { reason: 'cleared after review' });
     assert.equal(res.status, 200, JSON.stringify(res.body));
     assert.deepEqual(res.body.data.user, { id: member.id, disabledAt: null, disabledBy: null, disabledReason: null });
     const row = userRow(member.id);
+    assert.ok(row.sessionsResetAt instanceof Date && row.sessionsResetAt >= disabledReset, 'a re-enable resets them again');
     assert.equal(row.disabledAt, null);
     assert.equal(row.disabledBy, null);
     assert.equal(row.disabledReason, null);
@@ -194,8 +197,9 @@ describe('POST /api/ops/users/:userId/disable and /enable', () => {
 describe('while disabled, every path refuses the account; after enable the wallet JWT works again', () => {
   it('walks every path', async () => {
     await grant(prisma, member.id, 'operator');
-    const walletJwt = bearer(tokens.wallet(member));
-    const opsSession = bearer(tokens.ops(member));
+    // Issued a few seconds before the disable (JWT `iat` has whole seconds).
+    const walletJwt = bearer(tokens.wallet(member, { ageSec: 5 }));
+    const opsSession = bearer(tokens.ops(member, { ageSec: 5 }));
     assert.equal((await request(server).get('/api/developer/sso/clients').set('Authorization', walletJwt)).status, 200);
 
     const access = await seedAccessFor(member);
@@ -264,5 +268,19 @@ describe('while disabled, every path refuses the account; after enable the walle
     const consentBack = await request(server).get('/api/oauth/requests/missing-request').set('Authorization', `Bearer ${session}`);
     assert.notEqual(consentBack.status, 401);
     assert.ok(await readPartnerMe(again.partner));
+
+    // ...but not as staff: the ops session and the wallet JWT issued before the re-enable stay
+    // refused on the ops routes. A new sign-in works.
+    const oldOps = await request(server).get('/api/ops/auth/me').set('Authorization', opsSession);
+    assert.equal(oldOps.status, 401);
+    assert.equal(oldOps.body.code, 'OPS_SESSION_INVALID');
+    const oldCode = await request(server).post('/api/ops/auth/code').set('Authorization', walletJwt).send({ code_challenge: 'a'.repeat(43) });
+    assert.equal(oldCode.status, 401);
+    assert.equal(oldCode.body.code, 'SESSION_REVOKED');
+    assert.equal(prisma.store.opsSignInCode.length, 0);
+    const fresh = await request(server).get('/api/ops/auth/me').set('Authorization', bearer(tokens.ops(member)));
+    assert.equal(fresh.status, 200, JSON.stringify(fresh.body));
+    const freshCode = await request(server).post('/api/ops/auth/code').set('Authorization', bearer(tokens.wallet(member))).send({ code_challenge: 'a'.repeat(43) });
+    assert.equal(freshCode.status, 200, JSON.stringify(freshCode.body));
   });
 });

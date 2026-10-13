@@ -189,16 +189,19 @@ function firstSegment(routePath) {
 
 /**
  * The generic row for an ops write that wrote none of its own: action `ops.write`, the target
- * from the route params (userId: a user; id: the path's first segment), and a detail of method,
- * route, params and status. Never the body.
+ * from the route params (userId: a user; id: the path's first segment) or, for a create, the new
+ * record the handler named with `noteCreated`, and a detail of method, route, params and status.
+ * Never the body.
  */
 function genericWriteRow(req, res) {
   const route = req.opsRoute || {};
   const params = route.params || {};
   const routePath = route.path || req.path;
+  const created = req.auditCreated || null;
   let target;
   if (params.userId) target = { type: 'user', id: params.userId };
   else target = { type: firstSegment(routePath), id: params.id || null };
+  if (created) target = { type: created.type || target.type, id: created.id };
   return {
     actor: actorFromOps(req.opsAdmin),
     action: 'ops.write',
@@ -214,6 +217,15 @@ function genericWriteRow(req, res) {
   };
 }
 
+/**
+ * A create handler names the record it made, so the generic row's targetId is the new id (a
+ * create route has no id in its path). `type` defaults to the route's first path segment.
+ */
+function noteCreated(req, id, type = null) {
+  if (id === undefined || id === null || id === '') return;
+  req.auditCreated = { id: String(id), ...(type ? { type: String(type) } : {}) };
+}
+
 /** Where a failed generic write is reported. Replaceable for tests. */
 const auditLog = {
   error: (event, entry) => logger.error(event, entry),
@@ -222,7 +234,8 @@ const auditLog = {
 /**
  * Route middleware for an ops route that moves money or balances: the handler writes its own
  * `action` row with `req.auditChange(tx, { target, reason, detail })` inside the transaction of
- * the change, and the generic row is skipped (also when the call changed nothing).
+ * the change, and the generic row is skipped (also when the call changed nothing). A further
+ * change the call makes writes its own row with `req.auditChangeAs(otherAction)`.
  */
 function auditInChange(action) {
   if (!AUDIT_ACTIONS.includes(action)) throw new Error(`Unknown audit action: ${action}`);
@@ -233,11 +246,20 @@ function auditInChange(action) {
     } catch (error) {
       return res.status(error.status || 403).json({ status: 'fail', code: error.code, message: error.message });
     }
-    req.auditInChange = action;
-    req.auditChange = async (tx, { target, reason = null, detail }) => {
-      const row = await writeAudit(tx, { actor, action, target, reason, detail, surface: 'ops', requestId: req.reqId || null });
+    const writer = (rowAction) => async (tx, { target, reason = null, detail }) => {
+      const row = await writeAudit(tx, {
+        actor, action: rowAction, target, reason, detail, surface: 'ops', requestId: req.reqId || null,
+      });
       req.auditWritten = true;
       return row;
+    };
+    req.auditInChange = action;
+    req.auditChange = writer(action);
+    // A second change the same call makes (a payment confirm attests its order): its own action,
+    // the same actor, written inside that change's transaction.
+    req.auditChangeAs = (other) => {
+      if (!AUDIT_ACTIONS.includes(other)) throw new Error(`Unknown audit action: ${other}`);
+      return writer(other);
     };
     return next();
   };
@@ -300,6 +322,7 @@ module.exports = {
   auditForUser,
   auditOpsWrites,
   auditInChange,
+  noteCreated,
   auditLog,
   parsePaging,
   createdAtRange,

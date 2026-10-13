@@ -161,22 +161,40 @@ describe('GET /api/ops/users/:userId', () => {
     assert.deepEqual(data.audit, []);
   });
 
-  it('an operator (ops.support) sees sign-in issues and history; demo and shared get null', async () => {
+  it('an operator (ops.support) sees sign-in issues, history, identity and who acted; demo and shared do not', async () => {
+    const newest = prisma.store.privacyRequest.reduce((a, b) => (a.createdAt > b.createdAt ? a : b));
+    Object.assign(newest, { status: 'resolved', resolvedAt: new Date('2026-10-05T00:00:00Z'), resolvedBy: 'sloan@example.test' });
+
     const operatorView = (await view(member.id, auth.operator)).body.data;
     assert.equal(operatorView.identityConflicts.length, 1);
     assert.equal(operatorView.audit.length, 1);
-
-    const demo = await view(member.id, auth.demo);
-    assert.equal(demo.status, 200);
-    assert.equal(demo.body.data.identityConflicts, null);
-    assert.equal(demo.body.data.audit, null);
-    assert.equal(demo.body.data.roles.length, 1, 'the rest of the view is readable');
+    assert.equal(operatorView.identity.web3auth.verifierId, 'member@example.test');
+    assert.equal(operatorView.identity.rebind.oldAddress, '0x2222222222222222222222222222222222222222');
+    assert.equal(operatorView.account.disabledBy, 'sloan@example.test');
+    assert.equal(operatorView.account.disabledReason, 'fraud report #12');
+    assert.equal(operatorView.roles[0].grantedBy, 'sloan@example.test');
+    assert.equal(operatorView.privacyRequests[0].resolvedBy, 'sloan@example.test');
 
     process.env.OPS_SHARED_LOGIN = 'on';
-    const shared = await view(member.id, bearer(tokens.shared()));
-    assert.equal(shared.status, 200);
-    assert.equal(shared.body.data.identityConflicts, null);
-    assert.equal(shared.body.data.audit, null);
+    for (const [name, authorization] of [['demo', auth.demo], ['shared', bearer(tokens.shared())]]) {
+      const res = await view(member.id, authorization);
+      assert.equal(res.status, 200, name);
+      const data = res.body.data;
+      assert.equal(data.identityConflicts, null, name);
+      assert.equal(data.audit, null, name);
+      assert.equal(data.identity, null, `${name}: no verifier ids, rebind addresses or evidence`);
+      assert.equal(data.account.disabledAt, '2026-10-10T00:00:00.000Z', `${name}: the status itself stays`);
+      assert.equal(data.account.disabledBy, null, name);
+      assert.equal(data.account.disabledReason, null, name);
+      assert.equal(data.roles.length, 1, `${name}: the rest of the view is readable`);
+      assert.equal(data.roles[0].grantedBy, null, name);
+      assert.equal(data.privacyRequests[0].status, 'resolved', name);
+      assert.equal(data.privacyRequests[0].resolvedBy, null, name);
+      const text = JSON.stringify(data);
+      for (const hidden of ['fraud report #12', '0x2222222222222222222222222222222222222222', 'devnet_pair', 'web3auth-google-sapphire-mainnet']) {
+        assert.ok(!text.includes(hidden), `${name}: ${hidden} is not in the answer`);
+      }
+    }
   });
 
   it('an unknown account is 404 USER_NOT_FOUND', async () => {

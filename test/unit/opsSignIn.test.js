@@ -57,6 +57,25 @@ describe('POST /api/ops/auth/code', () => {
     assert.equal(prisma.store.opsSignInCode.length, 0);
   });
 
+  it('needs a wallet sign-in from the last 10 minutes: 403 RECENT_SIGN_IN_REQUIRED', async () => {
+    const old = await mint(bearer(tokens.wallet(admin, { ageSec: 601 })), { code_challenge: pkce().challenge });
+    assert.equal(old.status, 403);
+    assert.equal(old.body.code, 'RECENT_SIGN_IN_REQUIRED');
+    assert.equal(prisma.store.opsSignInCode.length, 0);
+    const recent = await mint(bearer(tokens.wallet(admin, { ageSec: 590 })), { code_challenge: pkce().challenge });
+    assert.equal(recent.status, 200, JSON.stringify(recent.body));
+  });
+
+  it('a wallet JWT issued before the last disable / re-enable: 401 SESSION_REVOKED', async () => {
+    const before = bearer(tokens.wallet(admin, { ageSec: 120 }));
+    prisma.store.user.find((u) => u.id === admin.id).sessionsResetAt = new Date(Date.now() - 60 * 1000);
+    const res = await mint(before, { code_challenge: pkce().challenge });
+    assert.equal(res.status, 401);
+    assert.equal(res.body.code, 'SESSION_REVOKED');
+    assert.equal(prisma.store.opsSignInCode.length, 0);
+    assert.equal((await mint(bearer(tokens.wallet(admin)), { code_challenge: pkce().challenge })).status, 200);
+  });
+
   it('needs a staff account: 403 NOT_STAFF (a developer is not staff)', async () => {
     const developer = await seedUser(prisma);
     await grant(prisma, developer.id, 'developer');
@@ -215,6 +234,16 @@ describe('POST /api/ops/auth/exchange', () => {
   it('an account disabled between mint and exchange is refused', async () => {
     const { code, verifier } = await minted();
     prisma.store.user.find((u) => u.id === admin.id).disabledAt = new Date();
+    const res = await exchange({ code, code_verifier: verifier });
+    assert.equal(res.status, 400);
+    assert.equal(res.body.code, 'INVALID_GRANT');
+    assert.equal(prisma.store.opsAuditLog.length, 0);
+  });
+
+  it('a code minted before the account was disabled and re-enabled is refused', async () => {
+    const { code, verifier } = await minted();
+    const row = prisma.store.user.find((u) => u.id === admin.id);
+    row.sessionsResetAt = new Date(Date.now() + 1000);
     const res = await exchange({ code, code_verifier: verifier });
     assert.equal(res.status, 400);
     assert.equal(res.body.code, 'INVALID_GRANT');

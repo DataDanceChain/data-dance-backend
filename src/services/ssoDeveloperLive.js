@@ -333,10 +333,17 @@ async function grantPlanetManager(email, audit) {
   if (normalized.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalized)) {
     throw planetManagerError(400, 'invalid_request', 'email is required.');
   }
-  const user = await prisma.user.findFirst({
+  // E-mail is unique only as typed: two accounts can differ in case alone. Like scripts/opsRoles.js,
+  // refuse to choose between them.
+  const matches = await prisma.user.findMany({
     where: { email: { equals: normalized, mode: 'insensitive' } },
     select: { id: true, email: true, disabledAt: true },
+    take: 2,
   });
+  if (matches.length > 1) {
+    throw planetManagerError(409, 'email_ambiguous', 'More than one account uses that email (ignoring case). Resolve it first.');
+  }
+  const user = matches[0];
   if (!user) {
     throw planetManagerError(404, 'not_found', 'No mainnet account uses that email. Ask them to sign in on Mainnet first.');
   }

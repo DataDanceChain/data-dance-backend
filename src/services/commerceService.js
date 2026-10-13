@@ -796,10 +796,12 @@ function paymentAuditEntry(payment, statusAfter, reason = null) {
  * Ops confirms a payment: the payment, its top-up ledger row, the invoice settlement and (when
  * `audit` is given) the audit row commit together. An already confirmed payment is left as it is
  * and writes no row; of two confirmations at once, only one changes it.
+ * Answers { payment, changed }: `changed` is true only for the call that confirmed it, so what
+ * follows a confirmation (the order's attestation) runs once, for that call.
  */
 async function confirmPaymentByOps(paymentId, operator = 'ops', { audit } = {}) {
   const confirmedAt = new Date();
-  await prisma.$transaction(async (tx) => {
+  const changed = await prisma.$transaction(async (tx) => {
     const payment = await tx.payment.findUnique({
       where: { id: paymentId },
       include: { invoice: true },
@@ -807,7 +809,7 @@ async function confirmPaymentByOps(paymentId, operator = 'ops', { audit } = {}) 
     if (!payment) {
       throw Object.assign(new Error('Payment not found'), { statusCode: 404 });
     }
-    if (payment.status === 'confirmed') return;
+    if (payment.status === 'confirmed') return false;
 
     let { matchStatus } = payment;
     if (payment.invoiceId) {
@@ -825,7 +827,7 @@ async function confirmPaymentByOps(paymentId, operator = 'ops', { audit } = {}) 
         paidAt: payment.paidAt || confirmedAt,
       },
     });
-    if (claimed.count !== 1) return;
+    if (claimed.count !== 1) return false;
 
     if (payment.organizationTransactionId) {
       const row = await tx.organizationTransaction.findUnique({
@@ -846,13 +848,23 @@ async function confirmPaymentByOps(paymentId, operator = 'ops', { audit } = {}) 
       await refreshInvoiceSettlement(tx, payment.invoiceId);
     }
     if (audit) await audit(tx, paymentAuditEntry(payment, 'confirmed'));
+    return true;
   });
-  return loadOpsPayment(paymentId);
+  return { payment: await loadOpsPayment(paymentId), changed };
+}
+
+function alreadyConfirmed() {
+  return Object.assign(
+    new Error('This payment is already confirmed and cannot be rejected.'),
+    { statusCode: 409, code: 'PAYMENT_ALREADY_CONFIRMED' },
+  );
 }
 
 /**
  * Ops rejects a payment: the payment, its ledger row (FAILED), the invoice settlement and (when
- * `audit` is given) the audit row commit together.
+ * `audit` is given) the audit row commit together. A confirmed payment is refused (409
+ * PAYMENT_ALREADY_CONFIRMED), also when a confirmation lands while this call runs: its completed
+ * ledger row is never turned to FAILED here (a reversal is a separate action).
  */
 async function rejectPaymentByOps(paymentId, notes, operator = 'ops', { audit } = {}) {
   await prisma.$transaction(async (tx) => {
@@ -860,14 +872,16 @@ async function rejectPaymentByOps(paymentId, notes, operator = 'ops', { audit } 
     if (!payment) {
       throw Object.assign(new Error('Payment not found'), { statusCode: 404 });
     }
-    await tx.payment.update({
-      where: { id: paymentId },
+    if (payment.status === 'confirmed') throw alreadyConfirmed();
+    const claimed = await tx.payment.updateMany({
+      where: { id: paymentId, status: { not: 'confirmed' } },
       data: {
         status: 'rejected',
         matchStatus: 'unmatched',
         notes: notes || payment.notes,
       },
     });
+    if (claimed.count !== 1) throw alreadyConfirmed();
     if (payment.organizationTransactionId) {
       const row = await tx.organizationTransaction.findUnique({
         where: { id: payment.organizationTransactionId },

@@ -182,40 +182,59 @@ async function buildReceiptForOrder(order) {
   });
 }
 
+function attestationData({ payload, attestationHash, attestationTxHash }) {
+  return {
+    attestationPayload: payload,
+    attestationHash,
+    attestationTxHash: attestationTxHash || null,
+    attestedAt: new Date(),
+  };
+}
+
+/** Store the attestation (no audit: the caller is not an ops route). */
+async function persistAttestation(orderId, attestation) {
+  const updated = await prisma.purchaseOrder.update({
+    where: { id: orderId },
+    data: attestationData(attestation),
+  });
+  return publicAttestation(updated);
+}
+
 /**
- * Store the attestation. With `audit` (an ops route), the order update and the audit row commit
- * together.
+ * An ops attestation: the receipt, its hash, any proven or stored tx hash and the audit row commit
+ * in one transaction BEFORE the chain call, as payouts do. A failed audit write therefore changes
+ * nothing and sends nothing; the row records whether a chain submission follows. The tx hash that
+ * submission returns is stored on the order afterwards (the row stays as written: append-only).
  */
-async function persistAttestation(orderId, {
-  payload,
-  attestationHash,
-  attestationTxHash,
-}, { audit, order, submitted = false } = {}) {
-  const write = async (db) => {
-    const updated = await db.purchaseOrder.update({
-      where: { id: orderId },
-      data: {
-        attestationPayload: payload,
-        attestationHash,
-        attestationTxHash: attestationTxHash || null,
-        attestedAt: new Date(),
+async function persistAuditedAttestation(order, attestation, { audit, submitted, chainSend }) {
+  return prisma.$transaction(async (tx) => {
+    const updated = await tx.purchaseOrder.update({
+      where: { id: order.id },
+      data: attestationData(attestation),
+    });
+    await audit(tx, {
+      target: { type: 'order', id: order.id, label: order.orderNumber || null },
+      detail: {
+        attestationHash: attestation.attestationHash,
+        attestationTxHash: attestation.attestationTxHash || null,
+        attestationTxHashBefore: order.attestationTxHash || null,
+        txHashSubmitted: submitted,
+        chainSend,
       },
     });
-    if (audit) {
-      await audit(db, {
-        target: { type: 'order', id: orderId, label: order?.orderNumber || null },
-        detail: {
-          attestationHash,
-          attestationTxHash: attestationTxHash || null,
-          attestationTxHashBefore: order?.attestationTxHash || null,
-          txHashSubmitted: submitted,
-        },
-      });
-    }
     return updated;
+  });
+}
+
+function attestResult(order, saved, { chain, proof }) {
+  return {
+    ...saved,
+    orderId: order.id,
+    orderNumber: order.orderNumber,
+    chainPending: !saved.attestationTxHash,
+    chainReason: chain && !chain.ok ? chain.reason : null,
+    ...(proof ? { attestationSender: proof.sender } : {}),
   };
-  const updated = audit ? await prisma.$transaction(write) : await write(prisma);
-  return publicAttestation(updated);
 }
 
 async function attestPaidOrder(orderId, { txHash, submittedBy, audit } = {}) {
@@ -235,6 +254,25 @@ async function attestPaidOrder(orderId, { txHash, submittedBy, audit } = {}) {
     : (looksLikeTxHash(order.attestationTxHash) ? order.attestationTxHash : null);
   let chain = null;
 
+  if (audit) {
+    const chainSend = !attestationTxHash;
+    let row = await persistAuditedAttestation(order, { payload, attestationHash, attestationTxHash }, {
+      audit,
+      submitted: Boolean(proof),
+      chainSend,
+    });
+    if (chainSend) {
+      chain = await attestHashOnChain(attestationHash);
+      if (chain.ok && looksLikeTxHash(chain.txHash)) {
+        row = await prisma.purchaseOrder.update({
+          where: { id: order.id },
+          data: { attestationTxHash: chain.txHash, attestedAt: new Date() },
+        });
+      }
+    }
+    return attestResult(order, publicAttestation(row), { chain, proof });
+  }
+
   if (!attestationTxHash) {
     chain = await attestHashOnChain(attestationHash);
     if (chain.ok && looksLikeTxHash(chain.txHash)) {
@@ -246,15 +284,8 @@ async function attestPaidOrder(orderId, { txHash, submittedBy, audit } = {}) {
     payload,
     attestationHash,
     attestationTxHash,
-  }, { audit, order, submitted: Boolean(proof) });
-  return {
-    ...saved,
-    orderId: order.id,
-    orderNumber: order.orderNumber,
-    chainPending: !saved.attestationTxHash,
-    chainReason: chain && !chain.ok ? chain.reason : null,
-    ...(proof ? { attestationSender: proof.sender } : {}),
-  };
+  });
+  return attestResult(order, saved, { chain, proof });
 }
 
 async function attestPaidOrderSafe(orderId, options) {

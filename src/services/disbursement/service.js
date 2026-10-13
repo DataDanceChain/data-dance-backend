@@ -124,7 +124,8 @@ async function monthToDateTotal(now = new Date()) {
   const sum = await prisma.disbursementItem.aggregate({
     _sum: { amount: true },
     where: {
-      status: { in: ['submitted', 'confirmed'] },
+      // 'processing' with a submission date: a submitted payout claimed for its re-check.
+      status: { in: ['submitted', 'processing', 'confirmed'] },
       OR: [
         { confirmedAt: { gte: start } },
         { submittedAt: { gte: start } },
@@ -282,12 +283,35 @@ async function processItem(itemId, { audit } = {}) {
   }
 
   if (existing.txHash && existing.status === 'submitted') {
-    if (!(await claimForAudit(audit, existing, 'recheck'))) return reloadItem(existing.id);
-    const sent = await sendBscUsdt({
-      to: existing.walletAddress,
-      amount: existing.amount,
-      existingTxHash: existing.txHash,
-    });
+    // The re-check can send a new transfer (when the stored hash never confirmed), so only one
+    // caller may run it: the claim moves the payout from 'submitted' to 'processing' (keeping its
+    // hash) and exactly one updateMany wins it. With an audit, the claim and its row commit
+    // together. The loser sees the payout as the winner left it.
+    const claimed = await auditedWrite(
+      audit,
+      payoutAuditEntry(existing, 'recheck', 'processing'),
+      (db) => db.disbursementItem.updateMany({
+        where: { id: existing.id, status: 'submitted', txHash: existing.txHash },
+        data: { status: 'processing' },
+      }),
+      (result) => result.count === 1,
+    );
+    if (claimed.count !== 1) return reloadItem(existing.id);
+    let sent;
+    try {
+      sent = await sendBscUsdt({
+        to: existing.walletAddress,
+        amount: existing.amount,
+        existingTxHash: existing.txHash,
+      });
+    } catch (error) {
+      // Released as it was claimed: still 'submitted' with its hash, for the next re-check.
+      await prisma.disbursementItem.updateMany({
+        where: { id: existing.id, status: 'processing', txHash: existing.txHash },
+        data: { status: 'submitted', failureReason: error.message || 'BSC payout re-check failed' },
+      });
+      throw error;
+    }
     const confirmed = await prisma.disbursementItem.update({
       where: { id: existing.id },
       data: {
@@ -303,11 +327,11 @@ async function processItem(itemId, { audit } = {}) {
     return attested;
   }
 
-  if (!existing.txHash && existing.failureReason === RECONCILE_REASON) {
+  if (existing.failureReason === RECONCILE_REASON) {
     return existing;
   }
 
-  if (existing.status === 'processing' && !existing.txHash) {
+  if (existing.status === 'processing') {
     const age = Date.now() - new Date(existing.updatedAt).getTime();
     if (age < IN_FLIGHT_MS) {
       throw httpError(409, 'disbursement_in_flight', 'This payout is already being submitted');
