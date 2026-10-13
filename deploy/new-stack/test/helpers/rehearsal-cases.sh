@@ -13,7 +13,7 @@
 set -u
 PKG="$1"; W="$2"
 REAL_DOCKER=$(command -v docker 2>/dev/null || true)
-unset API_HOST APP_HOST API_PORT WEB_PORT DB_PORT TAKE_OVER_VHOSTS REHEARSAL_CLIENT_ID DDC_RUN_LOG DDC_LOCK_HELD
+unset API_HOST APP_HOST API_PORT WEB_PORT DB_PORT TAKE_OVER_VHOSTS REHEARSAL_CLIENT_ID REHEARSAL_G8 DDC_RUN_LOG DDC_LOCK_HELD
 rm -rf "$W"; mkdir -p "$W/bin" "$W/backup/pg" "$W/ddcnew" "$W/switch" "$W/old/ddc-backend" "$W/avail" "$W/enabled" "$W/confd"
 fails=0; ok() { echo "PASS $*"; }; bad() { echo "FAIL $*"; fails=$((fails+1)); }
 COPY=ddc_rehearsal_copy
@@ -21,8 +21,8 @@ COPY=ddc_rehearsal_copy
 cat > "$W/bin/docker" <<'EOF'
 #!/bin/bash
 # stub docker for 60-rehearsal.sh (test/helpers/rehearsal-cases.sh). State in $STUB_DIR: copy (absent|marked|foreign),
-# ro (on|off), migrated, run, rolledback. Every call is logged to calls, every psql session to sql.log, every one-off
-# container to oneoffs.
+# ro (on|off), migrated, run, rolledback, snap (the users kept before --apply). Every call is logged to calls, every psql
+# session to sql.log, every one-off container to oneoffs.
 S="$STUB_DIR"
 printf '%s\n' "$*" >> "$S/calls"; printf '%s\n' "$*" >> "$S/allcalls"
 st() { cat "$S/$1" 2>/dev/null || echo "$2"; }
@@ -109,16 +109,22 @@ case "$1" in
     case "$sql" in
       *"SELECT 'db:'"*) case "$copy" in marked) echo "db:ddcnew-rehearsal-copy: restored by deploy/new-stack/60-rehearsal.sh, never production x.dump";; foreign) echo "db:";; esac;;
       *"CREATE DATABASE"*) [ "$copy" = absent ] || { echo 'ERROR:  database exists' >&2; exit 3; }; echo marked > "$S/copy";;
-      *"DROP DATABASE"*) echo absent > "$S/copy"; rm -f "$S/migrated" "$S/run" "$S/rolledback";;
+      *"DROP DATABASE"*) echo absent > "$S/copy"; rm -f "$S/migrated" "$S/run" "$S/rolledback" "$S/snap" "$S/scrubbed";;
       *"SET default_transaction_read_only = on"*) echo on > "$S/ro";;
       *"RESET default_transaction_read_only"*) echo off > "$S/ro";;
       *"SHOW default_transaction_read_only"*) st ro off;;
       *pg_terminate_backend*) echo 0; echo terminate >> "$S/terminated";;
       *"string_agg(datname"*) echo "ddc_rehearsal=9 MB ddcnew=8 MB";;
       *query_to_xml*) counts;;
-      *'"walletAddress"'*)   # STUB_DIGEST_BAD=1: the second digest of a run (after the rollback) differs from the first
-        if [ "${STUB_DIGEST_BAD:-0}" = 1 ] && [ -f "$S/digest-seen" ]; then rm -f "$S/digest-seen"; echo "1500 fedcba9876543210fedcba9876543210"
-        else [ "${STUB_DIGEST_BAD:-0}" = 1 ] && touch "$S/digest-seen"; echo "1500 0123456789abcdef0123456789abcdef"; fi;;
+      *rehearsal-scrubbed*)   # the G8 scrub: non-NULL values per column before and after, rows with an original value left
+        printf 'before 50 5 400 400\nafter 50 5 400 400\nleft %s\n' "$([ "${STUB_SCRUB_BAD:-0}" = 1 ] && echo 3 || echo 0)"; touch "$S/scrubbed";;
+      *"CREATE TABLE rehearsal_users_before"*) touch "$S/snap"; echo 1500;;
+      *"FULL JOIN rehearsal_users_before"*)   # "<changed> <updatedAt only>": after --apply, then after --rollback
+        [ -f "$S/snap" ] || { echo 'ERROR:  relation "rehearsal_users_before" does not exist' >&2; exit 3; }
+        if [ -f "$S/run" ]; then echo "${STUB_DIFF_APPLIED:-1200 0}"
+        elif [ "${STUB_DIGEST_BAD:-0}" = 1 ]; then echo "3 1197"   # STUB_DIGEST_BAD=1: 3 users not restored by the rollback
+        else echo "0 1200"; fi;;
+      *"DROP TABLE rehearsal_users_before"*) rm -f "$S/snap";;
       *Web3AuthNetworkRebindRun*) [ -f "$S/migrated" ] && echo 2 || echo 0;;
       *) echo "stub psql: unexpected SQL" >&2; exit 3;;
     esac; exit 0;;
@@ -201,7 +207,9 @@ case "$*" in *"/partner/tge/me"*) printf '%s' "${STUB_API_CODE:-401}";; *) print
 EOF
 cat > "$W/bin/df" <<'EOF'
 #!/bin/bash
-# df -Pk /: free space from STUB_DF_MB; after STUB_DF_LOW_AFTER calls, 1000 MB
+# df -Pk /: free space from STUB_DF_MB; after STUB_DF_LOW_AFTER calls, 1000 MB. df -Pk <another path> (the new cluster's
+# pgdata): STUB_DF_PG_MB (default 60000), not counted.
+if [ "${!#}" != / ]; then printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/stub2 104857600 1 %s 1%% /x\n' $(( ${STUB_DF_PG_MB:-60000} * 1024 )); exit 0; fi
 n=$(( $(cat "$STUB_DIR/dfcalls" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$STUB_DIR/dfcalls"
 mb="${STUB_DF_MB:-50000}"
 if [ -n "${STUB_DF_LOW_AFTER:-}" ] && [ "$n" -gt "$STUB_DF_LOW_AFTER" ]; then mb=1000; fi
@@ -231,6 +239,7 @@ fresh() { rm -rf "$W/s" "$W/ddcnew/rehearsal" "$W/ddcnew/logs"; mkdir -p "$W/s";
 reh() { # <60-rehearsal.sh args...>: one run; output in $W/out, status in RC; stub knobs come from the caller (VAR=value reh ...)
   RC=0
   env PATH="$W/bin:$PATH" STUB_DIR="$W/s" STUB_NEW_DIR="$W/ddcnew" DDC_LOCAL_TEST=1 NEW_DIR="$W/ddcnew" BACKUP_DIR="$W/backup" SWITCH_DIR="$W/switch" \
+    REHEARSAL_G8="${REHEARSAL_G8-scrub}" \
     OLD_BACKEND_DIR="$W/old/ddc-backend" OLD_APP_DIR="$W/old/ddc" OLD_ENV="$W/old/ddc-backend/backend.env" MAINNET_DIR="$W/old/ddc-mainnet" \
     NGINX_AVAIL="$W/avail" NGINX_ENABLED="$W/enabled" NGINX_CONFD="$W/confd" DDC_MEMINFO="$W/meminfo" BUILD_WATCH_INTERVAL=1 \
     bash "$PKG/60-rehearsal.sh" "$@" > "$W/out" 2>&1 < /dev/null || RC=$?
@@ -284,6 +293,26 @@ for c in restore migrate report apply-switch cleanup; do
     && ok "a $COPY without this script's mark: $c refuses and touches nothing" || { show; bad "foreign copy, $c (rc=$RC)"; }
 done
 fresh; mark marked; refused "restore over an existing marked copy" "already exists (an earlier restore): run ./60-rehearsal.sh cleanup first" restore
+fresh; STUB_LIVE_DB=ddc_prod refused "the running api uses ddc_prod (the new stack is production)" "the running api uses ddc_prod: the new stack is production now" restore
+for c in migrate report apply-switch; do
+  fresh; mark marked; STUB_LIVE_DB=ddc_prod reh "$c"
+  [ "$RC" = 1 ] && grep -q 'the new stack is production now' "$W/out" && [ ! -s "$W/s/oneoffs" ] && ! grep -qE 'ALTER DATABASE|DROP' "$W/s/sql.log" 2>/dev/null \
+    && ok "the running api uses ddc_prod: $c refuses before any one-off container or change" || { show; bad "$c next to production (rc=$RC)"; }
+done
+fresh; printf 'DATABASE_URL="postgresql://ddcuser:DUMMYSECRET-dbpw@db:5432/ddc_live2?schema=public"\n' > "$W/ddcnew/.env.cutover"
+STUB_LIVE_DB=ddc_live2 refused "the running api uses the database .env.cutover names" "the running api uses ddc_live2: the new stack is production now" restore; rm -f "$W/ddcnew/.env.cutover"
+fresh; mark marked; STUB_LIVE_DB=ddc_prod reh cleanup
+[ "$RC" = 0 ] && [ "$(cat "$W/s/copy")" = absent ] && grep -q '^WARN the running api uses ddc_prod: the new stack is production; cleanup only drops the copy' "$W/out" \
+  && ok "the running api uses ddc_prod: cleanup still drops a leftover copy (with a WARN)" || { show; bad "cleanup next to production (rc=$RC)"; }
+fresh; STUB_LIVE_DB=ddc_prod reh preflight
+[ "$RC" = 1 ] && grep -q '^FAIL the running api uses ddc_prod: the new stack is production now' "$W/out" && ok "preflight next to production: FAIL" || { show 20; bad "preflight next to production (rc=$RC)"; }
+for v in "" maybe; do
+  fresh; REHEARSAL_G8="$v" reh restore
+  [ "$RC" = 1 ] && grep -qE '^FAIL (gate G8 is not decided for this restore|REHEARSAL_G8 must be scrub or keep)' "$W/out" && [ "$(ncalls)" = 0 ] \
+    && ok "restore with REHEARSAL_G8='$v': refused before any docker call ($(grep -m1 '^FAIL' "$W/out" | cut -c1-80)...)" || { show; bad "restore with REHEARSAL_G8='$v' (rc=$RC)"; }
+done
+fresh; REHEARSAL_G8='' reh preflight
+[ "$RC" = 0 ] && grep -q '^WARN gate G8 not given: restore needs REHEARSAL_G8=scrub or REHEARSAL_G8=keep' "$W/out" && ok "preflight without REHEARSAL_G8: a WARN (restore will need it), still PASS" || { show 20; bad "preflight without G8 (rc=$RC)"; }
 for c in migrate report apply-switch; do
   fresh; reh "$c"
   [ "$RC" = 1 ] && grep -q "$COPY does not exist: run ./60-rehearsal.sh restore first" "$W/out" && [ ! -s "$W/s/oneoffs" ] && ok "$c without a copy: refused" || { show; bad "$c without a copy (rc=$RC)"; }
@@ -296,9 +325,22 @@ fresh; STUB_TOC=fail refused "pg_restore --list fails" "pg_restore --list failed
 fresh; STUB_TOC=nouser refused "a table of contents without the User table's data" "has no data for the User table" restore
 fresh; STUB_DF_MB=15000 refused "15 GB free for an old database of 6 GB (need 18 GB)" "need 18.0G = copy 1.5 x 6.0G (the old database's size) + the nightly P1 dump's own floor 9.0G" restore
 fresh; STUB_OLD_BYTES="" STUB_DF_MB=2000 refused "old database size unreadable: 3 x the dump instead" "3 x the dump (the old database's size could not be read)" restore
+mkdir -p "$W/ddcnew/pgdata"
+fresh; STUB_DF_PG_MB=10000 refused "50 GB free on / but 9.8 GB on the new cluster's pgdata (another file system)" "free disk 9.8G < need 18.0G" restore
+rmdir "$W/ddcnew/pgdata"
 printf 'MemTotal:       16000000 kB\nMemAvailable:    1500000 kB\n' > "$W/meminfo"
 fresh; refused "MemAvailable 1464 MB" "MemAvailable 1464MB < 2000MB" restore
+for c in migrate report apply-switch; do
+  fresh; mark marked; touch "$W/s/migrated"
+  if [ "$c" = report ]; then mkdir -p "$W/ddcnew/rehearsal"; echo 'User 1500' > "$W/ddcnew/rehearsal/counts-dump.txt"; fi
+  reh "$c"
+  [ "$RC" = 1 ] && grep -q 'MemAvailable 1464MB < 2000MB: no one-off container started' "$W/out" && [ ! -s "$W/s/oneoffs" ] \
+    && ok "MemAvailable 1464 MB: $c refuses before any one-off container (they inherit the api's memory limit)" || { show; bad "$c with low memory (rc=$RC)"; }
+done
 printf 'MemTotal:       16000000 kB\nMemAvailable:    8000000 kB\n' > "$W/meminfo"
+fresh; mark marked; STUB_DF_MB=8000 reh migrate
+[ "$RC" = 1 ] && grep -q "free disk 7.8G < the nightly P1 dump's own floor 9.0G (database size + 3G): no one-off container started" "$W/out" && [ ! -s "$W/s/oneoffs" ] \
+  && ok "8 GB free for an old database of 6 GB: migrate refuses before any one-off container (the nightly dump's own floor 9 GB)" || { show; bad "migrate with low disk (rc=$RC)"; }
 fresh; mark marked; STUB_IMAGES="ddcnew/backend:abcdef012345" reh migrate
 [ "$RC" = 1 ] && grep -q 'image ddcnew/backend:0123456789ab is not on this host' "$W/out" && [ ! -s "$W/s/oneoffs" ] && ok "migrate with the running api's image missing on the host: refused (nothing is pulled)" || { show; bad "missing image (rc=$RC)"; }
 
@@ -308,8 +350,15 @@ fresh; STUB_RESTORE=fail reh restore
   && ! grep -q 'someone@example.com' "$W/out" && ! grep -rq 'someone@example.com' "$W/ddcnew/logs" && grep -q 'someone@example.com' "$W/ddcnew/rehearsal/"*-restore.err \
   && ok "pg_restore fails -> FAIL, the partial copy is dropped; the e-mail address in its error is in neither the output nor the run log (only in the 600 record)" || { show 20; bad "failed restore (rc=$RC)"; }
 fresh; STUB_RESTORE=slow STUB_DF_LOW_AFTER=1 reh restore
-[ "$RC" = 1 ] && grep -q 'RESTORE STOPPED BY THE WATCHDOG: free disk on / 1000MB < 3072MB' "$W/out" && [ -s "$W/s/terminated" ] && [ "$(cat "$W/s/copy")" = absent ] \
+[ "$RC" = 1 ] && grep -q 'RESTORE STOPPED BY THE WATCHDOG: free disk (/ and pgdata) 1000MB < 3072MB' "$W/out" && [ -s "$W/s/terminated" ] && [ "$(cat "$W/s/copy")" = absent ] \
   && ok "free disk falls below 3 GB during the restore -> the watchdog ends its session inside Postgres and the partial copy is dropped" || { show 20; bad "restore watchdog (rc=$RC)"; }
+fresh; STUB_SCRUB_BAD=1 reh restore
+[ "$RC" = 1 ] && grep -q '^FAIL the G8 scrub did not leave every sensitive value replaced' "$W/out" && [ "$(cat "$W/s/copy")" = absent ] && grep -q 'the partial copy ddc_rehearsal_copy (created by this run) was dropped' "$W/out" \
+  && ok "a G8 scrub that leaves an original value -> FAIL, and the copy is dropped" || { show 20; bad "scrub failure (rc=$RC)"; }
+fresh; REHEARSAL_G8=keep reh restore
+[ "$RC" = 0 ] && grep -q '^WARN G8 keep: the copy holds User.password, privateKey, xAccessToken and xRefreshToken as the dump does' "$W/out" && [ ! -f "$W/s/scrubbed" ] \
+  && grep -q '^G8=keep$' "$W/ddcnew/rehearsal/state.env" && ! grep -q "$(printf '^scrub\t')" "$W/ddcnew/rehearsal/timings.tsv" \
+  && ok "restore with REHEARSAL_G8=keep: no scrub, a WARN, G8=keep recorded" || { show 20; bad "restore with G8 keep (rc=$RC)"; }
 
 echo "-- a whole rehearsal"
 fresh; reh preflight
@@ -323,10 +372,11 @@ fresh; STUB_LIVE_DB=$COPY STUB_DF_MB=15000 reh preflight
   && ok "preflight reports every failed check, then FAILs (2 here: the copy's name, the disk)" || { show 30; bad "preflight with failures (rc=$RC)"; }
 fresh; reh restore
 [ "$RC" = 0 ] && [ "$(cat "$W/s/copy")" = marked ] && grep -q '^PASS pg_restore --list ok: 3 entries, with the User table' "$W/out" && grep -q '^PASS tables=3 rows=6503 User=1500' "$W/out" \
-  && has_timings restore counts_restore \
+  && has_timings restore counts_restore sha256 scrub && grep -q '^G8=scrub$' "$W/ddcnew/rehearsal/state.env" \
+  && grep -q '^PASS G8 scrub: User.password 50, privateKey 5, xAccessToken 400, xRefreshToken 400 non-NULL values replaced by the placeholder (NULL kept); none left' "$W/out" \
   && grep -q "$(printf '^dump_est\t840\t')" "$W/ddcnew/rehearsal/timings.tsv" && grep -q '^DUMP=ddc-daily-20261013-0315.dump$' "$W/ddcnew/rehearsal/state.env" \
   && grep -q '^PASS old-stack containers unchanged' "$W/out" && grep -q '^PASS new-stack containers unchanged' "$W/out" && grep -q 'restore ddc_rehearsal_copy' "$W/s/restores" \
-  && ok "restore: creates and marks the copy, restores into it, counts the dump's rows, records restore, dump_est and counts_restore; both stacks unchanged" || { show 40; bad "restore (rc=$RC)"; }
+  && ok "restore: creates and marks the copy, restores into it, counts the dump's rows, scrubs (G8), records restore, dump_est, sha256, counts_restore and scrub; both stacks unchanged" || { show 40; bad "restore (rc=$RC)"; }
 log=$(ls "$W/ddcnew/logs/"*-60-rehearsal-restore-*.log 2>/dev/null | head -n 1)
 [ -n "$log" ] && grep -q '^PASS tables=3' "$log" && ok "restore wrote its server-side log ($(basename "$log"))" || bad "no server-side log for restore"
 fresh_keep() { rm -f "$W/s/calls" "$W/s/oneoffs"; }   # between the steps of one rehearsal: keep the copy's state
@@ -348,6 +398,7 @@ fresh_keep; reh report
   && grep -q '^ *conflicts (left unchanged, nothing deleted): 1$' "$W/out" && grep -q 'in all: 2 group(s), 5 rows, 350 points' "$W/out" \
   && grep -q 'keep.txt: 2 user id(s)' "$W/out" && grep -q 'vols= .*keep.txt:/tmp/keep.txt:ro' "$W/s/oneoffs" && grep -q '^cmd node scripts/mainnetSwitch.js --plan --json --keep-wallet-ids /tmp/keep.txt$' "$W/s/oneoffs" \
   && has_timings counts_report plan backfill duplicates && ! grep -q 'uid-secret' "$W/out" \
+  && grep -q "^GO/NO-GO here follows the rehearsal api's WEB3AUTH_\* settings (.env.api); in the window --plan runs with .env.cutover's" "$W/out" \
   && ok "report: read-only during the report and reset after it; counts against the dump's; --plan as counts by reason (keep.txt passed); backfill dry run; duplicates in all; each timed" || { show 50; bad "report (rc=$RC)"; }
 fresh_keep; STUB_LOST=1 reh report
 [ "$RC" = 1 ] && grep -q '^  LOST Point dump=5000 now=4990' "$W/out" && grep -q '^FAIL 1 table(s) of the dump are missing or have fewer rows' "$W/out" && [ "$(cat "$W/s/ro")" = off ] \
@@ -359,11 +410,17 @@ echo on > "$W/s/ro"
 fresh_keep; reh apply-switch
 [ "$RC" = 0 ] && grep -q '^PASS --apply recorded exactly the 1200 accounts --plan announced' "$W/out" && grep -q '^PASS after --apply: nothing left to record, 1200 pending re-binds' "$W/out" \
   && grep -q '^PASS --rollback restored 1200 accounts and deleted 1200 records' "$W/out" && grep -q '^PASS after --rollback: 1200 accounts to record again, no pending record, no open run' "$W/out" \
-  && grep -q '^PASS the four switch columns of every user are identical before --apply and after --rollback' "$W/out" \
+  && grep -q '^users kept before --apply: 1500 ' "$W/out" && grep -q '^PASS after --apply: 1200 users differ from before (the old-network pairs it reports cleared); every other user is unchanged' "$W/out" \
+  && grep -q '^PASS after --rollback every one of the 1500 users equals its state before --apply in every column but updatedAt' "$W/out" \
+  && grep -q '^updatedAt differs from before --apply on 1200 users: --apply sets it (Prisma @updatedAt) and --rollback does not restore it' "$W/out" && [ ! -f "$W/s/snap" ] \
   && grep -q "$(printf '^apply\t')" "$W/ddcnew/rehearsal/timings.tsv" && grep -q "$(printf '^rollback\t')" "$W/ddcnew/rehearsal/timings.tsv" \
-  && ok "apply-switch (after a report left the copy read-only): resets it, --apply timed, --rollback timed, the plan and the users' digest prove the rollback" || { show 40; bad "apply-switch (rc=$RC)"; }
+  && ok "apply-switch (after a report left the copy read-only): resets it, --apply timed, --rollback timed; the plan and every user against its state before --apply prove the apply and the rollback (updatedAt counted apart); the kept users dropped" || { show 40; bad "apply-switch (rc=$RC)"; }
 fresh_keep; STUB_DIGEST_BAD=1 reh apply-switch
-[ "$RC" = 1 ] && grep -q "the users' switch columns differ after --rollback" "$W/out" && ok "apply-switch: a rollback that leaves the users' switch columns different -> FAIL" || { show 20; bad "digest mismatch (rc=$RC)"; }
+[ "$RC" = 1 ] && grep -q "after --rollback 3 users differ from before --apply in a column other than updatedAt" "$W/out" && ok "apply-switch: a rollback that leaves 3 users different from before --apply -> FAIL" || { show 20; bad "rollback leaves users different (rc=$RC)"; }
+fresh_keep; STUB_DIFF_APPLIED="1199 0" reh apply-switch
+[ "$RC" = 1 ] && grep -q "after --apply 1199 users differ from before in a column other than updatedAt (added, removed or changed); --apply reports 1200 old-network pairs cleared" "$W/out" && ! grep -q -- '--rollback' "$W/s/oneoffs" \
+  && ok "apply-switch: --apply changing a number of users other than the pairs it reports cleared -> FAIL before the rollback" || { show 20; bad "apply diff mismatch (rc=$RC)"; }
+rm -f "$W/s/run"; touch "$W/s/rolledback"   # the run that FAIL left applied: as if rolled back, for the next cases
 fresh_keep; STUB_ROLLBACK_RESTORED=1199 reh apply-switch
 [ "$RC" = 1 ] && grep -q -- '--rollback restored 1199 accounts and deleted 1200 records, expected 1200 each' "$W/out" && ok "apply-switch: a rollback that restores one account too few -> FAIL" || { show 20; bad "rollback count (rc=$RC)"; }
 echo 20261013120000_ab12 > "$W/s/run"; rm -f "$W/s/rolledback"   # a run applied and never rolled back (an apply-switch stopped half way)
@@ -376,13 +433,40 @@ fresh_keep; STUB_RESTART=1 reh report
 [ "$RC" = 1 ] && grep -q "the new stack's containers changed during this run" "$W/out" && ok "a new-stack container restarted during a run -> FAIL (the run says so; it does not assume it did it)" || { show 20; bad "new-stack restart (rc=$RC)"; }
 rm -f "$W/s/snap-db"
 fresh_keep; reh summary
-[ "$RC" = 0 ] && grep -qE '^restore +[0-9]+ s' "$W/out" && grep -qE '^apply +[0-9]+ s' "$W/out" && grep -q 'cutover window estimate' "$W/out" && grep -qE '^PASS the estimate fits the 180-minute window' "$W/out" \
-  && grep -q 'smoke tests behind the gate' "$W/out" && [ "$(ncalls)" = 0 ] && ! grep -qE '^(run|lock):' "$W/out" \
-  && ok "summary: every timing and the window estimate (fits 180 min); read-only (no docker call, no lock)" || { show 40; bad "summary (rc=$RC)"; }
+TT="$W/ddcnew/rehearsal/timings.tsv"
+# window(): the estimate's rows (between its heading and the "in all" line); total(): the "in all" figure; want(): the
+# expected total from timings.tsv, part by part in the script's order (the latest time of each measured part;
+# counts_restore and plan count twice) with the runbook figures (F<min>: 5 + 10 + 15 + 20 + 40 + 10 = 100 min).
+window() { sed -n '/^cutover window estimate/,/ in all: /p' "$W/out" | sed '1d;$d'; }
+total() { sed -n 's/^ *\([0-9.]*\) min  in all: .*/\1/p' "$W/out"; }
+want() { awk -F'\t' '{ s[$1] = $2 } END { n = split("F5 dump_est counts_restore sha256 offsite_copy restore counts_restore F10 migrate F15 plan apply plan backfill points_repair F20 F40 F10", k, " ")
+  for (i = 1; i <= n; i++) { if (k[i] ~ /^F/) t += substr(k[i], 2); else if (k[i] in s) t += s[k[i]] / 60 }; printf "%.1f", t }' "$TT"; }
+[ "$RC" = 0 ] && grep -qE '^restore +[0-9]+ s' "$W/out" && grep -qE '^apply +[0-9]+ s' "$W/out" && grep -qE '^sha256 +[0-9]+ s' "$W/out" && grep -qE '^scrub +[0-9]+ s' "$W/out" \
+  && [ "$(window | grep -c .)" = 18 ] && [ "$(window | grep -c '(runbook figure)$')" = 6 ] && [ "$(grep -c 'NOT MEASURED' "$W/out")" = 2 ] \
+  && grep -q '^ *- *encrypted off-site copy of the final dump and its sha256 there (step 2): NOT MEASURED (offsite_copy)$' "$W/out" \
+  && grep -q '^ *- *points record repair after the restore (no script yet): NOT MEASURED (points_repair)$' "$W/out" \
+  && [ "$(grep -c 'social post backfill' "$W/out")" = 1 ] && grep -q 'social post backfill after the release (dry-run time, the --apply run writes and takes longer)$' "$W/out" \
+  && grep -q '^ *5.0 min  freeze the old stack (step 1) (runbook figure)$' "$W/out" && grep -q '^ *20.0 min  web image and domain switch (step 7) (runbook figure)$' "$W/out" \
+  && grep -q '^ *10.0 min  opening (step 9) (runbook figure)$' "$W/out" && [ "$(total)" = "$(want)" ] \
+  && grep -q '^WARN the estimate is incomplete: 2 part(s) neither measured nor given a runbook figure (offsite_copy points_repair): no PASS until each is measured$' "$W/out" \
+  && ! grep -q '^PASS the estimate' "$W/out" && [ "$(ncalls)" = 0 ] && ! grep -qE '^(run|lock):' "$W/out" \
+  && ok "summary: every timing; the window estimate has its 18 parts (steps 1-9: 6 at the runbook figure), the backfill row whole, total $(total) min = the measured parts + 100 min; the off-site copy and the points repair NOT MEASURED, so WARN incomplete and no PASS; read-only (no docker call, no lock)" || { show 50; bad "summary (rc=$RC, total $(total), want $(want))"; }
+# Every part measured: no NOT MEASURED, no WARN, PASS. Then one part too long: WARN, no PASS.
+printf 'offsite_copy\t600\t2026-10-13T20:00:00+0800\tmeasured outside the script\npoints_repair\t900\t2026-10-13T20:00:00+0800\tmeasured outside the script\n' >> "$TT"
+fresh_keep; reh summary
+[ "$RC" = 0 ] && ! grep -q 'NOT MEASURED' "$W/out" && ! grep -q '^WARN' "$W/out" && grep -q '^PASS the estimate fits the 180-minute window$' "$W/out" && [ "$(window | grep -c .)" = 18 ] && [ "$(total)" = "$(want)" ] \
+  && ok "summary with every part measured: no NOT MEASURED, no WARN, PASS (total $(total) min)" || { show 30; bad "summary fully measured (rc=$RC, total $(total), want $(want))"; }
+printf 'restore\t5400\t2026-10-13T20:00:00+0800\ta slower restore\n' >> "$TT"
+fresh_keep; reh summary
+[ "$RC" = 0 ] && grep -q '^WARN the estimate is longer than the 180-minute window: lengthen the window and the notice$' "$W/out" && ! grep -q '^PASS the estimate' "$W/out" && [ "$(total)" = "$(want)" ] \
+  && ok "summary with a 90-minute restore: total $(total) min > 180 -> WARN, no PASS" || { show 30; bad "summary too long (rc=$RC, total $(total), want $(want))"; }
+recs() { find "$W/ddcnew/rehearsal" -maxdepth 1 -type f \( -name '[0-9]*-[0-9]*-*.out' -o -name '[0-9]*-[0-9]*-*.err' \); }   # the records with ids
+outs=$(recs | grep -c . || true)
 fresh_keep; reh cleanup
 [ "$RC" = 0 ] && [ "$(cat "$W/s/copy")" = absent ] && grep -q '^PASS ddc_rehearsal_copy dropped' "$W/out" && [ ! -e "$W/ddcnew/rehearsal/compose.copy.yaml" ] && grep -q "$(printf '^cleanup\t')" "$W/ddcnew/rehearsal/timings.tsv" \
-  && grep -q 'does not carry the rehearsal mark' "$W/s/sql.log" \
-  && ok "cleanup: drops the copy (the session first checks its mark), removes the override, keeps the records" || { show 20; bad "cleanup (rc=$RC)"; }
+  && grep -q 'does not carry the rehearsal mark' "$W/s/sql.log" && [ "$outs" -gt 5 ] && grep -q "^PASS records with user or row ids removed: $outs file(s)" "$W/out" \
+  && [ -z "$(recs)" ] && [ -z "$(find "$W/ddcnew/rehearsal" -name '*.out' -o -name '*.err')" ] && [ -f "$W/ddcnew/rehearsal/state.env" ] && [ -f "$W/ddcnew/rehearsal/counts-dump.txt" ] \
+  && ok "cleanup: drops the copy (the session first checks its mark), removes the override and the $outs records with user or row ids, keeps the timings, state and counts" || { show 20; bad "cleanup (rc=$RC, records before $outs)"; }
 fresh_keep; reh cleanup
 [ "$RC" = 0 ] && grep -q '^PASS ddc_rehearsal_copy does not exist: nothing to drop' "$W/out" && ok "cleanup again: nothing to drop" || { show; bad "second cleanup (rc=$RC)"; }
 

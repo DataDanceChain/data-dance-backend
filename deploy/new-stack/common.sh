@@ -244,6 +244,7 @@ settings_env_lines() { local n; check_settings; for n in $SETTINGS_NAMES; do pri
 remote_overrides_check() {
   check_settings
   if [ -n "$OVR_REHEARSAL_CLIENT_ID" ]; then client_id_check "$OVR_REHEARSAL_CLIENT_ID"; fi
+  case "${REHEARSAL_G8:-}" in ""|scrub|keep) ;; *) die "REHEARSAL_G8 must be scrub or keep (60-rehearsal.sh restore, gate G8)";; esac
 }
 
 sha256() { if command -v sha256sum >/dev/null; then sha256sum | cut -c1-64; else shasum -a 256 | cut -c1-64; fi; }

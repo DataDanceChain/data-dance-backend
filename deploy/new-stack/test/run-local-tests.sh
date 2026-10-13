@@ -88,14 +88,21 @@
 #      one-off containers' gate through the real node, the compose override through the real docker compose) and on
 #      ubuntu:jammy (bash 5.1, GNU tools, the real run lock): the argument handling; the copy is never the running api's
 #      database, a database of an env file or a reserved one, never on another container, never a database without its
-#      mark; the dump, disk and memory checks; a failed or stopped restore leaves no partial copy; a whole rehearsal
-#      (preflight, restore, migrate, report, apply-switch, summary, cleanup) with its timings; the cases that stop it;
-#      psql only ever on postgres and the copy; no secret, user id or e-mail address in the output or the logs. Then
-#      the script's SQL on a REAL postgres:17 (test/helpers/rehearsal-pg.sh: its sessions forwarded to a throwaway
-#      container): the mark, the restore and counts, read-only for the report, the users' digest, the gate refusing a
-#      session that lands on the live database, the mark check refusing DROP DATABASE of an unmarked copy, and the
-#      synthetic live database exactly as before.
-#   10d. remote.sh: 60-rehearsal.sh preflight and summary need no approval, every other subcommand does.
+#      mark; no rehearsal once the new stack is production (cleanup still drops the copy); restore needs a G8 decision
+#      (REHEARSAL_G8=scrub|keep); the dump, disk (/ and pgdata) and memory checks, the memory and disk floor before every
+#      one-off container; a failed or stopped restore or scrub leaves no partial copy; a whole rehearsal (preflight,
+#      restore with the scrub, migrate, report, apply-switch, summary, cleanup) with its timings; the users after
+#      --apply and after --rollback against their state before; the window estimate (18 parts of runbook section 6,
+#      NOT MEASURED parts block the PASS, every part measured gives PASS, too long gives WARN); cleanup removing the
+#      records with ids; the cases that stop it; psql only ever on postgres and the copy; no secret, user id or e-mail
+#      address in the output or the logs. Then the script's SQL on a REAL postgres:17 (test/helpers/rehearsal-pg.sh:
+#      its sessions forwarded to a throwaway container): the mark, the restore and counts, the G8 scrub and keep,
+#      read-only for the report, --apply and --rollback emulated with the real script's SQL (updatedAt as Prisma sets
+#      it) against the users' check, which also catches a rollback that changes a column outside the four, the gate
+#      refusing a session that lands on the live database, the mark check refusing DROP DATABASE of an unmarked copy,
+#      and the synthetic live database exactly as before.
+#   10d. remote.sh: 60-rehearsal.sh preflight and summary need no approval, every other subcommand does; REHEARSAL_G8
+#      passes as scrub or keep and is refused otherwise, before connecting.
 # Every SSH test uses scratch COPIES of the scripts with a test local.env (loopback only): the package's own local.env,
 # if one exists, is never used to connect, and the real 1Password CLI is never called.
 # Containers and images: every docker run and docker build of this run carries the label ddcnew-localtest=<run id>
@@ -1383,6 +1390,13 @@ for c in "restore" "restore /root/backup/pg/ddc-daily-20261013-0315.dump" "migra
   printf '%s\n' "$out" | grep -q STUB || bad "60-rehearsal.sh $c with DDC_APPROVED=yes did not reach the (stubbed) connection: $out"
 done
 ok "60-rehearsal.sh restore, migrate, report, apply-switch and cleanup without DDC_APPROVED=yes: refused before connecting; with it they pass (a dump path and an image name are safe arguments)"
+for v in scrub keep; do
+  out=$(DDC_APPROVED=yes bash "$R/remote.sh" run 60-rehearsal.sh restore "REHEARSAL_G8=$v" 2>&1 < /dev/null || true)
+  printf '%s\n' "$out" | grep -q STUB || bad "60-rehearsal.sh restore REHEARSAL_G8=$v did not reach the (stubbed) connection: $out"
+done
+rc=0; out=$(DDC_APPROVED=yes bash "$R/remote.sh" run 60-rehearsal.sh restore REHEARSAL_G8=maybe 2>&1 < /dev/null) || rc=$?
+[ "$rc" = 2 ] && printf '%s\n' "$out" | grep -q '^refusing before connecting: FAIL REHEARSAL_G8 must be scrub or keep' && ! printf '%s\n' "$out" | grep -q STUB \
+  && ok "60-rehearsal.sh restore REHEARSAL_G8=scrub or keep: allowlisted and passed through; REHEARSAL_G8=maybe refused before connecting" || bad "REHEARSAL_G8=maybe: rc=$rc $out"
 for a in PARTNER_CRYPT_IMAGE=node:22-alpine SRV_DIR=/tmp/x DDC_TEST_RUN_ID=lt1 NGINX_LOCAL_URL=http://x MAINNET_DIR=/tmp/x NGINX_CONFD=/tmp/x; do
   rc=0; out=$(DDC_APPROVED=yes bash "$R/remote.sh" run 50-partner-page.sh apply "$a" 2>&1 < /dev/null) || rc=$?
   [ "$rc" = 2 ] && printf '%s\n' "$out" | grep -q "override ${a%%=*} is not allowed" && ! printf '%s\n' "$out" | grep -q STUB || bad "override ${a%%=*} (50-partner-page.sh): rc=$rc $out"
@@ -2081,15 +2095,15 @@ rh_results() { # <label> <helper output file> <helper exit status> <minimum numb
   else grep -vE '^(PASS|FAIL) ' "$2" | tail -n 20 | sed 's/^/    /'; bad "$1: rehearsal-cases.sh exit $3, $n results (at least $4 expected)"; fi
 }
 rc=0; timeout 600 bash "$PKG/test/helpers/rehearsal-cases.sh" "$PKG" "$T/rehearsal-mac" > "$T/rehearsal-mac.out" 2>&1 || rc=$?
-rh_results "60-rehearsal.sh on macOS (bash 3.2, the real node and docker compose)" "$T/rehearsal-mac.out" "$rc" 66
+rh_results "60-rehearsal.sh on macOS (bash 3.2, the real node and docker compose)" "$T/rehearsal-mac.out" "$rc" 86
 if docker info >/dev/null 2>&1 && [ -n "${SIG_IMG:-}" ] && docker image inspect "$SIG_IMG" >/dev/null 2>&1; then
   rc=0; timeout 600 docker run --rm "${LT[@]}" --name "rehearsal-$RANDOM-$RUN_ID" --user 1000:1000 -v "$PKG:/pkg:ro" "$SIG_IMG" \
     bash /pkg/test/helpers/rehearsal-cases.sh /pkg /tmp/rehearsal > "$T/rehearsal-jammy.out" 2>&1 || rc=$?
-  rh_results "60-rehearsal.sh on ubuntu:jammy (bash 5.1, GNU tools, flock)" "$T/rehearsal-jammy.out" "$rc" 60
+  rh_results "60-rehearsal.sh on ubuntu:jammy (bash 5.1, GNU tools, flock)" "$T/rehearsal-jammy.out" "$rc" 82
 else bad "section 12d (ubuntu:jammy) needs Docker Desktop and the image of section 12c (${SIG_IMG:-not built})"; fi
 if docker info >/dev/null 2>&1; then
   rc=0; timeout 600 bash "$PKG/test/helpers/rehearsal-pg.sh" "$PKG" "$T/rehearsal-pg" "$RUN_ID" > "$T/rehearsal-pg.out" 2>&1 || rc=$?
-  rh_results "60-rehearsal.sh's SQL on a real postgres:17" "$T/rehearsal-pg.out" "$rc" 13
+  rh_results "60-rehearsal.sh's SQL on a real postgres:17" "$T/rehearsal-pg.out" "$rc" 16
 else bad "section 12d (real Postgres) needs Docker Desktop"; fi
 
 # ---------------------------------------------------------------------------

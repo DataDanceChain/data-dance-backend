@@ -35,7 +35,7 @@ new stack**.
 | N | Partner info page (section 8): the page password, created once in 1Password; the partner server's address (`PARTNER_ALLOWED_IP`, also in the WAF rule of item F); the partner's callback and start-login addresses in `20-env.sh`. Sloan shares the page password with the partner. | Sloan | `50-partner-page.sh` |
 | O | Which stack serves the rehearsal hosts (section 9): **A**, this stack takes over Race's names (`TAKE_OVER_VHOSTS=yes`, his vhost entries backed up first), or **B**, both stacks run side by side, this one under other names (their DNS, WAF rule, Web3Auth allow-list entry and a frontend commit built for them). | Sloan + Race | `30-nginx.sh apply` (A), or everything from `10-build.sh` on (B) |
 | P | `REHEARSAL_CLIENT_ID`: the partner's client id for the rehearsal (`SSO_TGE_CLIENT_ID`). **Required, no default:** since backend fd2d4e9 the api refuses to boot with `tge` or `tge-rehearsal`, and any id that is not `[A-Za-z0-9._-]{1,64}`. Given on the first `20-env.sh` run, recorded, reused afterwards. | Sloan (with the partner) | `20-env.sh` |
-| Q | The rehearsal on a copy of production data (`60-rehearsal.sh`, section 10): approve `restore`, `migrate`, `report`, `apply-switch` and `cleanup`, each on its own; name the release image for `migrate`. Section 7's gate applies (the script itself checks G1, the disk, and G2, `INFRA_ONLY=0`). | Sloan | the rehearsal |
+| Q | The rehearsal on a copy of production data (`60-rehearsal.sh`, section 10): approve `restore`, `migrate`, `report`, `apply-switch` and `cleanup`, each on its own; name the release image for `migrate`; decide G8 (`REHEARSAL_G8=scrub` or `keep` on `restore`). Section 7's gate applies. The script checks only part of it: the free disk it needs (not `expand-check`, so not G1 itself), G2 (`INFRA_ONLY=0`), and that a G8 decision is given (`restore` refuses without one). | Sloan | the rehearsal |
 
 ## 2. Decisions taken in this package
 
@@ -373,11 +373,11 @@ Consequences the data step (separate approval) must honour:
 - **remote.sh overrides (allowlist):** `run` passes only `REHEARSAL_DB`, `REHEARSAL_REDIRECT_URIS`,
   `REHEARSAL_INITIATE_LOGIN_URI`, `OAUTH_PUBLIC_REGISTRATION`, `W3A_GOOGLE/EMAIL/APPLE/X`, `JWKS_NEW_PINS_VERIFIED`,
   `BUILD_MEM_FLOOR_MB`, `P1_USERS_MIN`, `PARTNER_ALLOWED_IP`, the settings `API_HOST`, `APP_HOST`, `API_PORT`,
-  `WEB_PORT`, `DB_PORT`, `REHEARSAL_CLIENT_ID` and `TAKE_OVER_VHOSTS` to the server; every other `NAME=value` (`PATH`,
+  `WEB_PORT`, `DB_PORT`, `REHEARSAL_CLIENT_ID`, `TAKE_OVER_VHOSTS` and `REHEARSAL_G8` (`scrub` or `keep`) to the server; every other `NAME=value` (`PATH`,
   `BASH_ENV`, `LD_PRELOAD`, `DDC_LOCAL_TEST`, `NEW_DIR`, `SRV_DIR`, `BACKUP_DIR`, `MAINNET_DIR`, `NGINX_*`, ...) is
   refused before connecting. Every argument must consist of `[A-Za-z0-9._/=:,-]` only (no `;`, `$()`, backticks, blank,
-  newline or carriage return can reach the server's root shell), and the settings, `REHEARSAL_CLIENT_ID` and
-  `TAKE_OVER_VHOSTS` among the overrides are checked with the server's own rules (`common.sh
+  newline or carriage return can reach the server's root shell), and the settings, `REHEARSAL_CLIENT_ID`,
+  `TAKE_OVER_VHOSTS` and `REHEARSAL_G8` among the overrides are checked with the server's own rules (`common.sh
   remote_overrides_check`) before anything connects (a setting not given counts with its default there, as in
   `preflight`; the server checks again against its record). `preflight` takes the five settings only, and `run
   00-preflight.sh` is refused (the preflight needs the lines `preflight` prepends). `run` forwards its stdin to the
@@ -486,22 +486,33 @@ by side. It must end with `summary: fails=0`. It covers:
   `ddcnew/backend:<12 hex>`, an `-infra` image, a dump outside `/root/backup/pg`, a symlink or a badly named file) before
   any docker call; `ddc_rehearsal_copy` is refused when the running api uses it, when an env file names it, when the
   api's database cannot be read or is on another host; nothing runs on a db container of another project, an unhealthy
-  one, with `INFRA_ONLY=1`, or on a copy without the mark (no step drops, alters or writes it); `restore` refuses a
-  sha256 mismatch, a failing or User-less table of contents, too little disk (the need printed) and too little memory
-  before it creates anything; a failed `pg_restore` and the disk watchdog each drop the partial copy, and no e-mail
-  address of an error reaches the output or the log; a one-off container whose `DATABASE_URL` is the live database
-  (override not applied) is stopped by its gate before its command; a whole rehearsal passes with every timing; a lost
-  row, a NO-GO plan, an open run, an `--apply` with nothing to do, a rollback one account short or with different user
-  columns, and a restarted new-stack container each stop it; psql only ever connects to `postgres` and the copy; no
+  one, with `INFRA_ONLY=1`, or on a copy without the mark (no step drops, alters or writes it); once the running api
+  uses `ddc_prod` (or the database `.env.cutover` names) `restore`, `migrate`, `report` and `apply-switch` refuse and
+  `cleanup` still drops the copy; `restore` refuses without `REHEARSAL_G8=scrub|keep` before any docker call, and
+  refuses a sha256 mismatch, a failing or User-less table of contents, too little disk on `/` or on `pgdata` (the need
+  printed) and too little memory before it creates anything; `migrate`, `report` and `apply-switch` refuse too little
+  memory or disk before any one-off container; a failed `pg_restore`, the disk watchdog and a scrub that leaves an
+  original value each drop the partial copy, and no e-mail address of an error reaches the output or the log; `keep`
+  skips the scrub with a WARN; a one-off container whose `DATABASE_URL` is the live database (override not applied) is
+  stopped by its gate before its command; a whole rehearsal passes with every timing; after `--apply` exactly the
+  users it reports cleared differ from their state before, after `--rollback` none (updatedAt counted apart); a lost
+  row, a NO-GO plan, an open run, an `--apply` with nothing to do or changing another number of users, a rollback one
+  account short or leaving users different, and a restarted new-stack container each stop it; the window estimate
+  lists its 18 parts with the backfill row whole and the right total, prints no PASS while the off-site copy and the
+  points repair are NOT MEASURED, PASS once every part is measured, and WARN when the total exceeds 180 min; `cleanup`
+  removes the records with ids and keeps the timings; psql only ever connects to `postgres` and the copy; no
   secret, user id or e-mail address in the output or the server-side logs; records 700/600; the old database container
   is only inspected and asked for its size. On macOS also: the gate through the real node (9 URLs), and the override
   through the real docker compose (the api service gets the release image and the copy's `DATABASE_URL` over `.env.api`'s,
   keeps everything else, and compose refuses to run without the URL). Then the script's SQL on a real postgres:17
   (`test/helpers/rehearsal-pg.sh`, its sessions forwarded to a throwaway container with a small synthetic live database):
-  the mark set by `restore`, the real dump restored with counts equal to the live database's, `report` making new
-  sessions read-only (a write is refused) and resetting it, the users' digest, the gate inside Postgres refusing a copy
-  session that lands on the live database, the mark check inside Postgres refusing `DROP DATABASE` of an unmarked copy
-  even when the script is told it is marked, and the live database exactly as before.
+  the mark set by `restore`, the real dump restored with counts equal to the live database's, the G8 scrub (every
+  non-NULL value replaced, NULL kept) and `keep` (values as in the dump), `report` making new sessions read-only (a
+  write is refused) and resetting it, `--apply` and `--rollback` emulated with the real script's SQL (updatedAt set as
+  Prisma sets it) against the users' check: it passes the real rollback, counts updatedAt apart, and catches a
+  rollback that changes a column outside the four; the gate inside Postgres refusing a copy session that lands on the
+  live database, the mark check inside Postgres refusing `DROP DATABASE` of an unmarked copy even when the script is
+  told it is marked, and the live database exactly as before.
 - Section 13: `test/helpers/public-repo-scan.sh` on every committable file of the package, with a negative control.
 - Section 14, the partner info page: `50-partner-page.sh` on a `20-env.sh` output (its generated secret) with dummy
   32-character page passwords: `apply` writes the two files (modes, `secret.json` fields, a new salt and IV per run),
@@ -534,7 +545,7 @@ evidence before the data step is approved. The commands and pass criteria of G3 
 | G5 | The remaining host hardening items of the private runbook | each item's pass criteria in the runbook; the old api still up |
 | G6 | Encrypted off-site backups running (design in the private runbook) | one encrypted daily dump off the host and a restore drill from it passed |
 | G7 | The data-step script follows section 4.1 | dropdb/createdb, `./public` mount and seeding, `refuse_if_infra_only` first |
-| G8 | Decide how the rehearsal treats sensitive columns in the restored data (private runbook) | an audit note on the reconciled commit |
+| G8 | Decide how the rehearsal treats sensitive columns in the restored data (private runbook) | an audit note on the reconciled commit; `60-rehearsal.sh restore` takes the decision as `REHEARSAL_G8=scrub` (every non-NULL `User.password`, `privateKey`, `xAccessToken`, `xRefreshToken` replaced by a placeholder after the restore, NULL kept) or `REHEARSAL_G8=keep` (as in the dump), and refuses without it |
 
 ## 8. Partner info page (`50-partner-page.sh`)
 
@@ -704,18 +715,28 @@ it (`COMMENT ON DATABASE`); every later step works on it only while it carries t
   command unless that is `db:5432/ddc_rehearsal_copy schema=public`;
 - nothing is written to the old stack (its database is only asked for its size) or to the new stack's live database
   (never connected to). Each write run takes the run lock and logs on the server, fingerprints the old stack, and checks
-  that the new stack's api, db and web containers were not restarted (same ids, state, start time and restart count).
+  that the new stack's api, db and web containers were not restarted (same ids, state, start time and restart count);
+- once the running api uses `ddc_prod` (or the database `.env.cutover` names), the new stack is production: `restore`,
+  `migrate`, `report` and `apply-switch` refuse, and `cleanup` still drops a leftover copy;
+- every one-off container needs MemAvailable >= 2000 MB and free disk >= the nightly P1 dump's own floor first (it
+  inherits the api's memory limit and OOM score; `--plan` and `--apply` load every user).
+
+**When:** run R1 and R2 at low traffic and not within an hour of the nightly P1 dump (03:15 CST): the restore and the
+index builds of the migration share the disk with the live old database. **R6 cleanup before the cutover window:** the
+copy takes about 1-1.5 x the database, on the disk the window needs (`window_need_gb`).
 
 | # | Command | Changes on the server | Pass criteria | Time | Undo |
 |---|---|---|---|---|---|
-| R0 | `./remote.sh run 60-rehearsal.sh preflight` (read-only; add a dump path to check that one) | nothing | `REHEARSAL PREFLIGHT PASS`: the db container healthy, the api answers 401, `INFRA_ONLY=0`, the copy is none of the protected databases (listed) and does not exist yet; the newest `ddc-daily-*.dump` with its `.sha256` (or the one given) matches its sidecar; free disk >= the need it prints (1.5 x the old database's size for the copy + the nightly P1 dump's own floor, database size + 3G); MemAvailable >= 2000 MB. A dump older than 26 h is a WARN | 1 min | - |
-| R1 | `DDC_APPROVED=yes ./remote.sh run 60-rehearsal.sh restore` (or `restore /root/backup/pg/<dump>`) | database `ddc_rehearsal_copy` (created, marked, restored); `/root/ddcnew/rehearsal/` (700) with `timings.tsv`, `state.env`, `counts-dump.txt` (600); one `pg_restore --list` container (`--rm --network none`) | the same checks as R0 (each stops it before anything is created), `pg_restore --list` ok with the User table's data; `pg_restore exit=0`; `tables=<n> rows=<n> User=<n>`; `time: restore`, `dump_est` (from the dump's name and modification time), `counts_restore`; both stacks unchanged. A failed restore, or free disk below 3 GB during it (the watchdog ends its session inside Postgres), drops the partial copy | measured | `cleanup` |
-| R2 | `DDC_APPROVED=yes ./remote.sh run 60-rehearsal.sh migrate ddcnew/backend:<12 hex>` (default: the running api's image; the image must be on the host) | the copy's schema (`prisma migrate deploy`) | `PASS db_target=db:5432/ddc_rehearsal_copy schema=public`; `time: migrate`; `migrate status: Database schema is up to date`; the rebind tables present; the image recorded | measured | `cleanup`, then R1 |
-| R3 | `DDC_APPROVED=yes ./remote.sh run 60-rehearsal.sh report` (default image: R2's) | nothing in the copy (read-only while it runs, reset at the end); records `<ts>-report-*.out/.err` (600, with user and row ids) | the row count of every table against the dump's (`missing or fewer rows 0`; more rows or new tables come from the migrations); `mainnetSwitch --plan`: GO or NO-GO, the counts per authType, login key and pair state, what `--apply` would record, and the accounts that will not re-bind automatically, by reason (counts only); `backfillSocialPostIdentity.js` dry run (counts); `reportDuplicateCampaignGrants.js` (groups, rows and points in all); each timed | measured | - |
-| R4 | `DDC_APPROVED=yes ./remote.sh run 60-rehearsal.sh apply-switch` (with `/root/mainnet-switch/keep.txt` when it exists, mounted read-only) | the copy: one `--apply` run (its backup table stays), rolled back | `--plan` GO with no open run; `--apply` records exactly what `--plan` announced (`time: apply`); `--plan` then 0 to record and that many pending; `--rollback` restores and deletes that many (`time: rollback`); `--plan` back to the start; the digest of the four User columns the switch changes identical before `--apply` and after `--rollback` | measured | `cleanup`, then R1 |
-| R5 | `./remote.sh run 60-rehearsal.sh summary` (read-only) | nothing | the timings of every step, and the window estimate of runbook section 6 (dump + counts + restore + counts + migrate + plan, apply, plan + the social post backfill + smoke tests 40 min + domain switch 15 min) against 180 min | 1 min | - |
-| R6 | `DDC_APPROVED=yes ./remote.sh run 60-rehearsal.sh cleanup` | `DROP DATABASE ddc_rehearsal_copy WITH (FORCE)` (only with the mark); the override removed; the records kept | `PASS ddc_rehearsal_copy dropped`; `time: cleanup`; both stacks unchanged | 1 min | R1 again |
+| R0 | `./remote.sh run 60-rehearsal.sh preflight REHEARSAL_G8=scrub` (read-only; add a dump path to check that one) | nothing | `REHEARSAL PREFLIGHT PASS`: the db container healthy, the api answers 401, `INFRA_ONLY=0`, the copy is none of the protected databases (listed) and does not exist yet, the new stack is not production yet; the newest `ddc-daily-*.dump` with its `.sha256` (or the one given) matches its sidecar; free disk (the lower of `/` and `pgdata`) >= the need it prints (1.5 x the old database's size for the copy + the nightly P1 dump's own floor, database size + 3G); MemAvailable >= 2000 MB. A dump older than 26 h, `REHEARSAL_G8=keep` and no `REHEARSAL_G8` are WARNs | 1 min | - |
+| R1 | `DDC_APPROVED=yes ./remote.sh run 60-rehearsal.sh restore REHEARSAL_G8=scrub` (or `keep`, per the G8 decision; or `restore /root/backup/pg/<dump> REHEARSAL_G8=...`) | database `ddc_rehearsal_copy` (created, marked, restored; with `scrub` the four sensitive User columns' values replaced); `/root/ddcnew/rehearsal/` (700) with `timings.tsv`, `state.env`, `counts-dump.txt` (600); one `pg_restore --list` container (`--rm --network none`) | refused without `REHEARSAL_G8`; the same checks as R0 (each stops it before anything is created), `pg_restore --list` ok with the User table's data; `pg_restore exit=0`; `tables=<n> rows=<n> User=<n>`; `time: restore`, `dump_est` (from the dump's name and modification time), `sha256`, `counts_restore`; with `scrub`: `PASS G8 scrub: ... none left` and `time: scrub` (not part of the window), with `keep` a WARN; both stacks unchanged. A failed restore or scrub, or free disk below 3 GB during the restore (the watchdog ends its session inside Postgres), drops the partial copy. Run it at low traffic, not near 03:15 | measured | `cleanup` |
+| R2 | `DDC_APPROVED=yes ./remote.sh run 60-rehearsal.sh migrate ddcnew/backend:<12 hex>` (default: the running api's image; the image must be on the host) | the copy's schema (`prisma migrate deploy`) | MemAvailable and free disk before the one-off containers; `PASS db_target=db:5432/ddc_rehearsal_copy schema=public`; `time: migrate`; `migrate status: Database schema is up to date`; the rebind tables present; the image recorded. Run it at low traffic, not near 03:15 | measured | `cleanup`, then R1 |
+| R3 | `DDC_APPROVED=yes ./remote.sh run 60-rehearsal.sh report` (default image: R2's) | nothing in the copy (read-only while it runs, reset at the end); records `<ts>-report-*.out/.err` (600, with user and row ids; removed by R6) | the row count of every table against the dump's (`missing or fewer rows 0`; more rows or new tables come from the migrations); `mainnetSwitch --plan`: GO or NO-GO, the counts per authType, login key and pair state, what `--apply` would record, and the accounts that will not re-bind automatically, by reason (counts only). GO here follows the `WEB3AUTH_*` values of `.env.api` (the rehearsal api's), not those of `.env.cutover` that the window's `--plan` uses; `backfillSocialPostIdentity.js` dry run (counts); `reportDuplicateCampaignGrants.js` (groups, rows and points in all); each timed | measured | - |
+| R4 | `DDC_APPROVED=yes ./remote.sh run 60-rehearsal.sh apply-switch` (with `/root/mainnet-switch/keep.txt` when it exists, mounted read-only) | the copy: one `--apply` run (its backup table stays), rolled back; the table `rehearsal_users_before` while it runs | `--plan` GO with no open run; every user kept before `--apply` (a digest of every column but updatedAt); `--apply` records exactly what `--plan` announced (`time: apply`), and exactly the users whose old-network pairs it reports cleared differ from before (a WARN when it cleared none: the rollback check then proves the records only); `--plan` then 0 to record and that many pending; `--rollback` restores and deletes that many (`time: rollback`); `--plan` back to the start; every user equal to its state before `--apply` in every column but updatedAt. **updatedAt stays changed** on the cleared users (Prisma's `@updatedAt` on `--apply`; `--rollback` restores the four switch columns only): a production rollback leaves it changed too | measured | `cleanup`, then R1 |
+| R5 | `./remote.sh run 60-rehearsal.sh summary` (read-only) | nothing | the timings of every step, and the window estimate of runbook section 6, steps 1-9, against 180 min: measured here are the final dump (from the nightly dump), the row counts (old database: timed on the copy right after its restore, so likely faster than the old database's cold count), the dump's sha256, the restore, migrate deploy, `--plan`, `--apply`, `--plan` and the social post backfill (dry-run time); at the runbook's figure are the freeze 5 min, the `public/` files 10 min, the rest of step 5 15 min, the web image and domain switch 20 min, the smoke tests 40 min and the opening 10 min. The encrypted off-site copy of the final dump (`offsite_copy`) and the points record repair (`points_repair`, no script yet) have neither: they show NOT MEASURED and the summary prints no PASS until each is measured and added to `timings.tsv` | 1 min | - |
+| R6 | `DDC_APPROVED=yes ./remote.sh run 60-rehearsal.sh cleanup` (before the cutover window) | `DROP DATABASE ddc_rehearsal_copy WITH (FORCE)` (only with the mark); the override and the records with user or row ids (`<ts>-*.out/.err`) removed; `timings.tsv`, `state.env` and the row counts kept | `PASS ddc_rehearsal_copy dropped`; `time: cleanup`; `records with user or row ids removed`; both stacks unchanged | 1 min | R1 again |
 
-Not covered here (the cutover's own steps): the old stack's freeze and final dump (the estimate takes the daily dump's
-time), the `public/` files, the web image and the domain switch. `99-teardown.sh` does not drop the copy (it lives in
-`pgdata`): run R6 first. `rm -rf /root/ddcnew/rehearsal` removes the records.
+Not covered here (the cutover's own steps): the old stack's freeze, the final dump and its off-site copy (the estimate
+takes the daily dump's time), the `public/` files, the switch to `.env.cutover`, the web image, the domain switch and
+the repair of the points records. The summary counts each at the runbook's figure, or lists it as NOT MEASURED.
+`99-teardown.sh` does not drop the copy (it lives in `pgdata`): run R6 first. `rm -rf /root/ddcnew/rehearsal` removes
+the rest of the records.

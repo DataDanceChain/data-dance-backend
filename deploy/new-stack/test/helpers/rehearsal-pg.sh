@@ -6,12 +6,14 @@
 # the scripts' outputs are emulated as in rehearsal-cases.sh. In the cluster: ddc_rehearsal, a small SYNTHETIC "live"
 # database (the one the stub api reports), dumped as the P1 daily dump. Checks: the real mark, row counts and digests;
 # the live database unchanged by the whole rehearsal; the in-Postgres gate refuses a session on another database; the
-# in-Postgres mark check refuses DROP DATABASE on an unmarked copy. Prints PASS/FAIL lines; exit 1 on FAIL.
+# in-Postgres mark check refuses DROP DATABASE on an unmarked copy; the G8 scrub (and keep); --apply and --rollback
+# emulated with the real script's SQL on the copy (the four columns, and updatedAt as Prisma sets it), so that the
+# rollback check runs against real rows. Prints PASS/FAIL lines; exit 1 on FAIL.
 set -u
 PKG="$1"; W="$2"; RID="$3"
 D=$(command -v docker) || { echo "FAIL rehearsal-pg.sh needs docker"; exit 1; }
 command -v node >/dev/null || { echo "FAIL rehearsal-pg.sh needs node"; exit 1; }
-unset API_HOST APP_HOST API_PORT WEB_PORT DB_PORT TAKE_OVER_VHOSTS REHEARSAL_CLIENT_ID DDC_RUN_LOG DDC_LOCK_HELD
+unset API_HOST APP_HOST API_PORT WEB_PORT DB_PORT TAKE_OVER_VHOSTS REHEARSAL_CLIENT_ID REHEARSAL_G8 DDC_RUN_LOG DDC_LOCK_HELD
 rm -rf "$W"; mkdir -p "$W/bin" "$W/backup/pg" "$W/ddcnew" "$W/switch" "$W/old" "$W/avail" "$W/enabled" "$W/confd" "$W/s"
 fails=0; ok() { echo "PASS $*"; }; bad() { echo "FAIL $*"; fails=$((fails+1)); }
 COPY=ddc_rehearsal_copy
@@ -22,10 +24,15 @@ trap '"$D" rm -fv "$PG" >/dev/null 2>&1 || true' EXIT
 for _ in $(seq 1 60); do "$D" exec "$PG" pg_isready -h 127.0.0.1 -U ddcuser >/dev/null 2>&1 && break; sleep 1; done
 sleep 2; "$D" exec "$PG" pg_isready -h 127.0.0.1 -U ddcuser >/dev/null 2>&1 || { echo "FAIL postgres:17 did not become ready"; exit 1; }
 pq() { "$D" exec -i "$PG" psql -X -q -v ON_ERROR_STOP=1 -U ddcuser -d "$1" -tA; }   # <database>, SQL on stdin
-# The synthetic live database: the tables the script reads (User with the four switch columns, the rebind tables).
+# The synthetic live database: the tables the script reads (User with the four switch columns, the four sensitive
+# columns of gate G8, partly NULL, and updatedAt; the rebind tables). Users 1-250 hold an old-network pair.
 pq postgres <<< 'CREATE DATABASE ddc_rehearsal;' && pq ddc_rehearsal <<'SQL' || bad "cannot create the synthetic live database"
-CREATE TABLE "User" (id text PRIMARY KEY, email text, "walletAddress" text, "web3authVerifier" text, "web3authVerifierId" text, "web3authLinkedAt" timestamptz);
-INSERT INTO "User" SELECT 'uid-secret-' || g, 'someone' || g || '@example.com', '0x' || md5(g::text), 'web3auth-google-sapphire-devnet', 'vid-' || g, now() FROM generate_series(1, 300) g;
+CREATE TABLE "User" (id text PRIMARY KEY, email text, password text, "privateKey" text, "xAccessToken" text, "xRefreshToken" text, "walletAddress" text,
+  "web3authVerifier" text, "web3authVerifierId" text, "web3authLinkedAt" timestamp(3), "updatedAt" timestamp(3) NOT NULL);
+INSERT INTO "User" SELECT 'uid-secret-' || g, 'someone' || g || '@example.com', CASE WHEN g % 3 = 0 THEN 'DUMMYSECRET-pwhash-' || g END,
+  CASE WHEN g % 10 = 0 THEN 'DUMMYSECRET-key-' || g END, CASE WHEN g % 4 = 0 THEN 'DUMMYSECRET-xat-' || g END, CASE WHEN g % 4 = 0 THEN 'DUMMYSECRET-xrt-' || g END,
+  '0x' || md5(g::text), CASE WHEN g <= 250 THEN 'web3auth-google-sapphire-devnet' END, CASE WHEN g <= 250 THEN 'vid-' || g END,
+  CASE WHEN g <= 250 THEN now() - interval '2 days' END, now() - interval '1 day' FROM generate_series(1, 300) g;
 CREATE TABLE "Point" (id serial PRIMARY KEY, "userId" text REFERENCES "User"(id), amount int);
 INSERT INTO "Point" ("userId", amount) SELECT 'uid-secret-' || (g % 300 + 1), g FROM generate_series(1, 1000) g;
 CREATE TABLE "Web3AuthNetworkRebind" (id text PRIMARY KEY);
@@ -93,9 +100,21 @@ case "$1" in
         if [ -f "$S/run" ]; then to=0; pend=300; runs='[{"id": "20261013120000_ab12", "rolled_back_at": null}]'
         elif [ -f "$S/rolledback" ]; then runs='[{"id": "20261013120000_ab12", "rolled_back_at": "2026-10-13T12:05:00Z"}]'; fi
         printf '{"mode": "plan", "go": true, "blockers": [], "warnings": [], "from_network": "sapphire_devnet", "to_network": "sapphire_mainnet", "report": {"users_total": 300, "records": {"pending": %s, "rebound": 0}, "to_record": {"total": %s}, "not_automatic": {}}, "runs": %s}\n' "$pend" "$to" "$runs";;
-      "node scripts/mainnetSwitch.js --apply --yes --json"*) touch "$S/run"; rm -f "$S/rolledback"
-        echo '{"mode": "apply", "go": true, "applied": true, "run_id": "20261013120000_ab12", "backup_table": "mainnet_switch_backup_20261013120000_ab12", "accounts": 300}';;
-      "node scripts/mainnetSwitch.js --rollback --run 20261013120000_ab12 --yes --json") rm -f "$S/run"; touch "$S/rolledback"
+      "node scripts/mainnetSwitch.js --apply --yes --json"*)   # scripts/mainnetSwitch.js apply(): backup, then clear the stale pairs (updateMany: updatedAt too)
+        "$D" exec -i "$STUB_PG" psql -X -q -v ON_ERROR_STOP=1 -U ddcuser -d ddc_rehearsal_copy -tA > /dev/null <<'SQL' || exit 3
+BEGIN;
+CREATE TABLE mainnet_switch_backup_20261013120000_ab12 AS SELECT id, "walletAddress", "web3authVerifier", "web3authVerifierId", "web3authLinkedAt", now() AS "backedUpAt" FROM "User";
+UPDATE "User" SET "web3authVerifier" = NULL, "web3authVerifierId" = NULL, "web3authLinkedAt" = NULL, "updatedAt" = now() WHERE "web3authVerifier" IS NOT NULL;
+COMMIT;
+SQL
+        touch "${S:?}/run"; rm -f "${S:?}/rolledback"
+        echo '{"mode": "apply", "go": true, "applied": true, "run_id": "20261013120000_ab12", "backup_table": "mainnet_switch_backup_20261013120000_ab12", "accounts": 300, "old_network_pairs_cleared": 250}';;
+      "node scripts/mainnetSwitch.js --rollback --run 20261013120000_ab12 --yes --json")   # rollback(): the four columns from the backup, updatedAt untouched
+        { printf '%s\n' 'UPDATE "User" u SET "walletAddress" = b."walletAddress", "web3authVerifier" = b."web3authVerifier", "web3authVerifierId" = b."web3authVerifierId", "web3authLinkedAt" = b."web3authLinkedAt" FROM mainnet_switch_backup_20261013120000_ab12 b WHERE u.id = b.id;'
+          # STUB_ROLLBACK_EXTRA=1: one user ends with another e-mail address (a column outside the four)
+          if [ "${STUB_ROLLBACK_EXTRA:-0}" = 1 ]; then printf '%s\n' "UPDATE \"User\" SET email = 'changed@example.com' WHERE id = 'uid-secret-7';"; fi
+        } | "$D" exec -i "$STUB_PG" psql -X -q -v ON_ERROR_STOP=1 -U ddcuser -d ddc_rehearsal_copy -tA > /dev/null || exit 3
+        rm -f "${S:?}/run"; touch "${S:?}/rolledback"
         echo '{"mode": "rollback", "go": true, "rolled_back": true, "run_id": "20261013120000_ab12", "accounts_restored": 300, "records_deleted": 300}';;
       "node scripts/backfillSocialPostIdentity.js") printf 'mode dry-run: scanned 0 social rows\n  would update: 0\n';;
       "node scripts/reportDuplicateCampaignGrants.js") printf 'one-time campaign grants written more than once: 0 group(s)\n';;
@@ -117,11 +136,13 @@ reh() {
   env PATH="$W/bin:$PATH" STUB_DIR="$W/s" STUB_REAL_DOCKER="$D" STUB_PG="$PG" STUB_RID="$RID" DDC_LOCAL_TEST=1 NEW_DIR="$W/ddcnew" BACKUP_DIR="$W/backup" \
     SWITCH_DIR="$W/switch" OLD_BACKEND_DIR="$W/old/ddc-backend" OLD_APP_DIR="$W/old/ddc" OLD_ENV="$W/old/ddc-backend/backend.env" MAINNET_DIR="$W/old/ddc-mainnet" \
     NGINX_AVAIL="$W/avail" NGINX_ENABLED="$W/enabled" NGINX_CONFD="$W/confd" DDC_MEMINFO="$W/meminfo" BUILD_WATCH_INTERVAL=1 \
-    bash "$PKG/60-rehearsal.sh" "$@" > "$W/out" 2>&1 < /dev/null || RC=$?
+    REHEARSAL_G8="${REHEARSAL_G8-scrub}" bash "$PKG/60-rehearsal.sh" "$@" > "$W/out" 2>&1 < /dev/null || RC=$?
 }
 show() { sed 's/^/    /' "$W/out" | tail -n "${1:-15}"; }
 copy_comment() { pq postgres <<< "SELECT coalesce(shobj_description(oid, 'pg_database'), '<none>') FROM pg_database WHERE datname = '$COPY';"; }
 counts() { pq "$1" <<< "SELECT (SELECT count(*) FROM \"User\") || ' ' || (SELECT count(*) FROM \"Point\") || ' ' || (SELECT count(*) FROM \"_prisma_migrations\");"; }
+# <database>: non-NULL values of the four G8 columns, then the users holding a value other than the placeholder
+sens() { pq "$1" <<< "SELECT count(password) || ' ' || count(\"privateKey\") || ' ' || count(\"xAccessToken\") || ' ' || count(\"xRefreshToken\") || ' ' || count(*) FILTER (WHERE password <> 'rehearsal-scrubbed' OR \"privateKey\" <> 'rehearsal-scrubbed' OR \"xAccessToken\" <> 'rehearsal-scrubbed' OR \"xRefreshToken\" <> 'rehearsal-scrubbed') FROM \"User\";"; }
 
 reh preflight
 [ "$RC" = 0 ] && grep -q '^PASS REHEARSAL PREFLIGHT PASS' "$W/out" && grep -q '^PASS ddc_rehearsal_copy does not exist yet' "$W/out" && grep -q 'databases in the new cluster: ddc_rehearsal=' "$W/out" \
@@ -130,6 +151,9 @@ reh restore
 [ "$RC" = 0 ] && grep -q '^PASS tables=5 rows=1302 User=300' "$W/out" && [[ "$(copy_comment)" == "ddcnew-rehearsal-copy: restored by deploy/new-stack/60-rehearsal.sh, never production ddc-daily-20261013-0315.dump" ]] \
   && [ "$(counts $COPY)" = "$(counts ddc_rehearsal)" ] && grep -q 'pg_restore --list ok: .* entries, with the User table' "$W/out" \
   && ok "restore on a real Postgres 17: the copy created with its mark (COMMENT ON DATABASE), the real dump restored, the exact counts equal the live database's" || { show 30; bad "restore (rc=$RC, comment: $(copy_comment))"; }
+sl=$(sens ddc_rehearsal); sc=$(sens $COPY)
+[ "${sc% *}" = "${sl% *}" ] && [ "${sc##* }" = 0 ] && [ "${sl##* }" -gt 0 ] && grep -q "^PASS G8 scrub: User.password ${sl%% *}, " "$W/out" \
+  && ok "the G8 scrub on a real Postgres 17: every non-NULL value of password, privateKey, xAccessToken and xRefreshToken replaced, NULL kept (non-NULL per column ${sc% *} on the copy and live); the live database keeps its ${sl##* } users' values" || { show 30; bad "scrub (live $sl, copy $sc)"; }
 reh migrate
 [ "$RC" = 0 ] && grep -q '^PASS the copy has Web3AuthNetworkRebind and Web3AuthNetworkRebindRun' "$W/out" && ok "migrate: the real rebind-table query finds both tables on the copy" || { show; bad "migrate (rc=$RC)"; }
 reh report
@@ -141,10 +165,20 @@ w=$(pq $COPY <<< 'INSERT INTO "_prisma_migrations" VALUES ($$x$$);' 2>&1 || true
 pq postgres <<< "ALTER DATABASE $COPY RESET default_transaction_read_only;"
 [[ "$w" == *"read-only transaction"* ]] && ok "  ... and while it is set, a write on the copy is refused by Postgres (cannot execute INSERT in a read-only transaction)" || bad "a write under default_transaction_read_only: $w"
 reh apply-switch
-[ "$RC" = 0 ] && grep -q '^PASS the four switch columns of every user are identical before --apply and after --rollback' "$W/out" \
-  && ok "apply-switch: the real digest of the four switch columns over every user runs on the copy (equal before and after)" || { show 30; bad "apply-switch (rc=$RC)"; }
-# The in-Postgres gate: a session meant for the copy that lands on another database refuses before its statements.
-reh cleanup; reh restore
+left=$(pq $COPY <<< "SELECT count(*) FROM information_schema.tables WHERE table_name = 'rehearsal_users_before';")
+[ "$RC" = 0 ] && grep -q '^users kept before --apply: 300 ' "$W/out" && grep -q '^PASS after --apply: 250 users differ from before (the old-network pairs it reports cleared)' "$W/out" \
+  && grep -q '^PASS after --rollback every one of the 300 users equals its state before --apply in every column but updatedAt' "$W/out" \
+  && grep -q '^updatedAt differs from before --apply on 250 users' "$W/out" && [ "$left" = 0 ] \
+  && ok "apply-switch on real rows: --apply (the script's SQL: backup, clear 250 pairs, updatedAt set) changes exactly those 250 users; after --rollback all 300 equal their state before in every column but updatedAt, which stays changed on 250 (counted apart); the kept users dropped" || { show 30; bad "apply-switch (rc=$RC, kept table left: $left)"; }
+# A rollback that leaves one user different in a column outside the four switch columns: FAIL (a digest of the four
+# columns alone would have passed it).
+reh cleanup; reh restore; STUB_ROLLBACK_EXTRA=1 reh apply-switch
+[ "$RC" = 1 ] && grep -q 'after --rollback 1 users differ from before --apply in a column other than updatedAt' "$W/out" \
+  && ok "apply-switch on real rows: a rollback that leaves one user with another e-mail address -> FAIL" || { show 20; bad "rollback with an extra change (rc=$RC)"; }
+# REHEARSAL_G8=keep: the copy holds the sensitive values as the dump does. Then the in-Postgres gate: a session meant for
+# the copy that lands on another database refuses before its statements.
+reh cleanup; REHEARSAL_G8=keep reh restore
+[ "$RC" = 0 ] && [ "$(sens $COPY)" = "$(sens ddc_rehearsal)" ] && grep -q '^WARN G8 keep' "$W/out" && ok "restore with REHEARSAL_G8=keep on a real Postgres 17: the sensitive values as the dump has them ($(sens $COPY))" || { show 20; bad "keep (rc=$RC)"; }
 STUB_REDIRECT_COPY=ddc_rehearsal reh report
 [ "$RC" = 1 ] && grep -q 'refusing: this session is not on the marked rehearsal copy' "$W/out" && [ "$(live_state)" = "$LIVE0" ] \
   && ok "the gate inside Postgres: a copy session that lands on the live database raises before any statement (the live database: same rows, digest, no comment, not read-only)" || { show 20; bad "gate redirect (rc=$RC)"; }

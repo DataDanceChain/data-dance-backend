@@ -23,8 +23,13 @@
 #                         the copy exists; the dump restore will use (the newest ddc-daily-*.dump with a .sha256 sidecar
 #                         in /root/backup/pg, or <dump>): size, age, sha256; free disk against the need (below);
 #                         MemAvailable; the images and the user list. No container is started and nothing is written.
-#   restore [dump]        CREATE DATABASE ddc_rehearsal_copy + its mark, then pg_restore of the dump into it (timed),
-#                         then the exact row count of every table (counts-dump.txt: the dump's counts).
+#   restore [dump]        needs REHEARSAL_G8=scrub|keep (gate G8, APPROVAL.md section 7: how the copy treats the
+#                         sensitive User columns; refused without it). CREATE DATABASE ddc_rehearsal_copy + its mark,
+#                         then pg_restore of the dump into it (timed), then the exact row count of every table
+#                         (counts-dump.txt: the dump's counts). With scrub, every non-NULL value of User.password,
+#                         privateKey, xAccessToken and xRefreshToken is then replaced by a placeholder (NULL stays NULL,
+#                         so mainnetSwitch's counts do not change; timed apart, not part of the window); with keep the
+#                         copy holds them as the dump does.
 #   migrate [image]       prisma migrate deploy on the copy (timed) in a one-off container of <image> (default: the
 #                         running api's image); migrate status before and after.
 #   report [image]        the copy is made read-only for the report (ALTER DATABASE ... SET default_transaction_read_only),
@@ -33,12 +38,19 @@
 #                         scripts/backfillSocialPostIdentity.js dry run; scripts/reportDuplicateCampaignGrants.js. Each
 #                         timed. Then the read-only setting is reset. <image>: default the one migrate used.
 #   apply-switch [image]  mainnetSwitch --plan, --apply --yes (timed), --plan, --rollback --run <id> --yes (timed),
-#                         --plan, on the copy only; the four User columns the switch changes must be identical before
-#                         the apply and after the rollback (a digest over every user).
-#   summary               read-only: the timings of every step and the estimate of the cutover window (runbook section 6:
-#                         dump + counts + restore + counts + migrate + plan, apply, plan + backfill + smoke tests 40 min +
-#                         domain switch 15 min; limit 180 min).
-#   cleanup               DROP DATABASE ddc_rehearsal_copy WITH (FORCE) (only while it carries the mark; timed).
+#                         --plan, on the copy only. Before --apply a digest of every User row without updatedAt is kept
+#                         in the copy (table rehearsal_users_before); after --apply exactly the users whose old-network
+#                         pair it reports cleared differ from it, after --rollback none does (updatedAt, set by Prisma's
+#                         @updatedAt and not restored by --rollback, is counted apart).
+#   summary               read-only: the timings of every step and the estimate of the cutover window, runbook section
+#                         6 steps 1-9 (limit 180 min): each part measured here or, where the runbook gives one, at the
+#                         runbook's figure. A part with neither (the off-site copy of the final dump, the points record
+#                         repair) is listed as NOT MEASURED, and then no PASS is printed.
+#   cleanup               DROP DATABASE ddc_rehearsal_copy WITH (FORCE) (only while it carries the mark; timed), then
+#                         the records that hold user or row ids (<ts>-*.out/.err) are removed.
+#   The new stack as production: once the running api uses ddc_prod (or the database .env.cutover names), restore,
+#   migrate, report and apply-switch refuse; cleanup still drops a leftover copy. Run cleanup before the cutover window:
+#   the copy takes about 1-1.5 x the database on the disk the window needs.
 #   The one-off containers are `docker compose run --rm --no-deps -T api` of project ddcnew with the override
 #   /root/ddcnew/rehearsal/compose.copy.yaml (written by this script; no secret in it), which sets only the image and
 #   DATABASE_URL (= the api's DATABASE_URL from .env.api with the database name replaced by the copy's; never printed).
@@ -48,7 +60,8 @@
 # CHANGES ON THE SERVER
 #   restore, migrate, report, apply-switch, cleanup: the database ddc_rehearsal_copy only (created, written, dropped), the
 #   records in /root/ddcnew/rehearsal/ (700; files 600): timings.tsv, state.env, counts-dump.txt, compose.copy.yaml and
-#   per run <ts>-<step>.out/.err (the full script outputs, which hold user and row ids, never printed), short-lived
+#   per run <ts>-<step>.out/.err (the full script outputs, which hold user and row ids, never printed; removed by
+#   cleanup), short-lived
 #   one-off containers (removed by --rm) and one `pg_restore --list` container (restore; --network none, --rm). Each takes
 #   the run lock /root/ddcnew/.lock and logs to /root/ddcnew/logs/<ts>-60-rehearsal-<step>-<pid>.log (common.sh
 #   run_begin), and fingerprints the old stack (common.sh old_snapshot_begin/assert) and the new stack's api, db and web
@@ -56,16 +69,21 @@
 #   preflight and summary: nothing.
 # DISK: restore needs, before it starts, free space for 1.5 x the restore size (the old database's size, or 3 x the dump
 #   when that cannot be read) plus what the nightly P1 dump itself requires (database size + 3G, ddc-pgdump.sh), and stops
-#   the restore when the free space on / falls below BUILD_DISK_FLOOR_MB (3G; the live Postgres instances share the
-#   disk): its session is ended inside Postgres and the partial copy dropped. MemAvailable >= 2000 MB before it starts.
+#   the restore when the free space falls below BUILD_DISK_FLOOR_MB (3G; the live Postgres instances share the disk):
+#   its session is ended inside Postgres and the partial copy dropped. Free space is the lower of / and the new
+#   cluster's pgdata (when that is another file system). MemAvailable >= 2000 MB before the restore and before every
+#   one-off container (they inherit the api's memory limit, and --plan/--apply load every user); free space >= the
+#   nightly dump's own floor before every one-off container.
 # OUTPUT: names, counts, sizes, timings, hashes and PASS/WARN/FAIL only. No e-mail, wallet, user id or secret is printed;
 #   errors of pg_restore and of the scripts are shown filtered (common.sh log_safe, e-mail addresses and DETAIL lines
 #   removed), and kept whole in /root/ddcnew/rehearsal/ (600).
 # UNDO
-#   ./60-rehearsal.sh cleanup (drops the copy; the records stay for the window plan); rm -rf /root/ddcnew/rehearsal
-#   removes the records. 99-teardown.sh does not drop the copy (it lives in pgdata): run cleanup before it.
+#   ./60-rehearsal.sh cleanup (drops the copy and the records with ids; the timings, state and row counts stay for the
+#   window plan); rm -rf /root/ddcnew/rehearsal removes the rest. 99-teardown.sh does not drop the copy (it lives in
+#   pgdata): run cleanup before it.
 # Usage: ./60-rehearsal.sh preflight [dump] | restore [dump] | migrate [image] | report [image] | apply-switch [image]
 #        | summary | cleanup        (dump: a ddc-*.dump in /root/backup/pg; image: ddcnew/backend:<12 hex>)
+#        restore also needs REHEARSAL_G8=scrub|keep in its environment (remote.sh passes it as an override).
 set -euo pipefail
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=common.sh
@@ -86,8 +104,14 @@ TIMINGS="$RH_DIR/timings.tsv"; STATE="$RH_DIR/state.env"; OVERRIDE="$RH_DIR/comp
 KEEP_FILE="$SWITCH_DIR/keep.txt"
 IMAGE_RE='^ddcnew/backend:[0-9a-f]{12}$'
 REHEARSAL_MEM_FLOOR_MB=2000
-# Runbook section 6: the parts of the window this script cannot measure, and the window's limit (runbook 4.3 step 4).
-SMOKE_MIN=40; SWITCH_MIN=15; WINDOW_LIMIT_MIN=180
+# Runbook section 6: the parts of the window this script cannot measure, at the runbook's figure in minutes (step 4:
+# the upper end of 5-10; step 5: the whole step's figure, on top of the measured migrate), and the window's limit.
+FREEZE_MIN=5; PUBLIC_MIN=10; CONFIG_MIN=15; SWITCH_MIN=20; SMOKE_MIN=40; OPEN_MIN=10; WINDOW_LIMIT_MIN=180
+# Gate G8 (APPROVAL.md section 7): scrub = the sensitive User columns below get a placeholder after the restore (NULL
+# stays NULL); keep = the copy holds them as the dump does. restore refuses without a decision.
+REHEARSAL_G8="${REHEARSAL_G8:-}"
+SCRUB_PLACEHOLDER=rehearsal-scrubbed
+USERS_BEFORE=rehearsal_users_before
 G=1073741824
 RUN_TS=$(date +%Y%m%d-%H%M%S)
 USAGE="usage: $0 preflight [dump] | restore [dump] | migrate [image] | report [image] | apply-switch [image] | summary | cleanup"
@@ -102,6 +126,25 @@ gb() { awk -v b="$1" 'BEGIN { printf "%.1f", b / 1073741824 }'; }
 # Error output of pg_restore, prisma and the scripts, on its way to the terminal and the run log: common.sh log_safe, then
 # DETAIL/STATEMENT lines (they can quote row values) and anything shaped like an e-mail address removed.
 err_safe() { grep -vE '^[[:space:]]*(pg_restore: )?(DETAIL|STATEMENT|HINT|CONTEXT|Command was):' | log_safe | sed -E 's/[^[:space:]<>"(),;]+@[^[:space:]<>"(),;]+/<e-mail removed>/g'; }
+# Free space in MB where the copy grows: the lower of / (the live Postgres instances and the dumps) and the new cluster's
+# pgdata when it exists (another file system there would fill first). Empty when / cannot be read.
+rh_disk_avail_mb() {
+  local a p
+  a=$(disk_avail_mb)
+  case "$a" in ''|*[!0-9]*) printf '%s' "$a"; return 0;; esac
+  if [ -d "$NEW_DIR/pgdata" ]; then
+    p=$(df -Pk "$NEW_DIR/pgdata" 2>/dev/null | awk 'NR == 2 {print int($4 / 1024)}' || true)
+    case "$p" in ''|*[!0-9]*) ;; *) if [ "$p" -lt "$a" ]; then a=$p; fi;; esac
+  fi
+  printf '%s' "$a"
+}
+g8_check() { # restore only: the G8 decision is given and is one of the two this script implements
+  case "$REHEARSAL_G8" in
+    scrub|keep) ;;
+    "") die "gate G8 is not decided for this restore (APPROVAL.md section 7): pass REHEARSAL_G8=scrub (the sensitive User columns get a placeholder after the restore) or REHEARSAL_G8=keep (the copy holds them as the dump does)";;
+    *) die "REHEARSAL_G8 must be scrub or keep, not '$REHEARSAL_G8'";;
+  esac
+}
 
 rh_dir_init() {
   guard_write_path "$RH_DIR"
@@ -135,7 +178,7 @@ env_db_name() { # <env file>: the database name in its DATABASE_URL (nothing whe
   [ -n "$u" ] || return 0
   printf '%s' "${u##*/}"
 }
-LIVE_HOST=""; LIVE_DB=""; PROTECTED=""; PROT_WHY=""
+LIVE_HOST=""; LIVE_DB=""; PROTECTED=""; PROT_WHY=""; CUTOVER_DB=""
 # Sets LIVE_HOST, LIVE_DB and PROTECTED (every name the copy must never have). Returns 1 with PROT_WHY when the running
 # api's database cannot be read or is not on this stack's Postgres: fail closed.
 protected_read() {
@@ -145,6 +188,7 @@ protected_read() {
   LIVE_HOST="${live%% *}"; LIVE_DB="${live#* }"
   [ "$LIVE_HOST" = db ] || { PROT_WHY="the running api ($NEW_API_CTR) uses a database on host $LIVE_HOST, not this stack's db: stop and check its env before any rehearsal"; return 1; }
   PROTECTED="$RESERVED_DBS $LIVE_DB"
+  CUTOVER_DB=$(env_db_name "$NEW_DIR/.env.cutover")
   for f in .env.api .env.rehearsal .env.cutover; do n=$(env_db_name "$NEW_DIR/$f"); PROTECTED="$PROTECTED $n"; done
   [ ! -f "$NEW_DIR/.env.db" ] || PROTECTED="$PROTECTED $(env_get_simple POSTGRES_DB "$NEW_DIR/.env.db")"
   # shellcheck disable=SC2086  # word splitting of the name list is intended
@@ -161,6 +205,10 @@ copy_guard() {
   copy_name_ok || die "$COPY_WHY"
   pass "the copy $COPY_DB is none of the protected databases ($PROTECTED); the running api uses $LIVE_DB"
 }
+# After protected_read: the new stack serves production once its api uses ddc_prod or the database .env.cutover names.
+live_is_production() { [ "$LIVE_DB" = ddc_prod ] || { [ -n "$CUTOVER_DB" ] && [ "$LIVE_DB" = "$CUTOVER_DB" ]; }; }
+prod_why() { printf 'the running api uses %s: the new stack is production now. No rehearsal runs next to it (the disk, memory and IO belong to production); ./60-rehearsal.sh cleanup drops a leftover copy' "$LIVE_DB"; }
+refuse_if_production() { if live_is_production; then die "$(prod_why)"; fi; }   # restore, migrate, report, apply-switch
 # The new stack's Postgres container: this project's db service, running and healthy. Sets NEW_WHY.
 NEW_WHY=""
 new_db_ok() {
@@ -215,12 +263,32 @@ copy_drop() { { mark_check_sql; printf 'DROP DATABASE "%s" WITH (FORCE);\n' "$CO
 # Exact row count of every table of the copy: "<table> <rows>" per line, sorted (runbook section 6 step 2).
 COUNTS_SQL="SELECT table_name || ' ' || (xpath('/row/c/text()', query_to_xml(format('SELECT count(*) AS c FROM %I.%I', table_schema, table_name), false, true, '')))[1]::text FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE' ORDER BY table_name;"
 copy_counts() { printf '%s\n' "$COUNTS_SQL" | copy_sql; }
-# The four User columns mainnetSwitch --apply/--rollback change, as "<users> <md5 over every row>".
-copy_users_digest() {
-  copy_sql <<'SQL'
-SELECT count(*) || ' ' || md5(coalesce(string_agg(md5(ROW(id, "walletAddress", "web3authVerifier", "web3authVerifierId", "web3authLinkedAt")::text), '' ORDER BY id), '')) FROM "User";
+# Every User row before mainnetSwitch --apply, kept in the copy as id + md5 of the row without updatedAt + updatedAt
+# (DROP + CREATE TABLE rehearsal_users_before). Prints the number of users kept.
+users_snapshot() {
+  copy_sql <<SQL
+DROP TABLE IF EXISTS $USERS_BEFORE;
+CREATE TABLE $USERS_BEFORE AS SELECT id, md5((to_jsonb(u) - 'updatedAt')::text) AS h, to_jsonb(u) ->> 'updatedAt' AS t FROM "User" u;
+SELECT count(*) FROM $USERS_BEFORE;
 SQL
 }
+# The users now against that snapshot: "<changed> <updatedAt only>". changed = users added, removed, or different in any
+# column but updatedAt; updatedAt only = users equal in every other column whose updatedAt differs.
+users_diff() {
+  copy_sql <<SQL
+SELECT count(*) FILTER (WHERE u.id IS NULL OR b.id IS NULL OR md5((to_jsonb(u) - 'updatedAt')::text) <> b.h) || ' ' || count(*) FILTER (WHERE u.id IS NOT NULL AND b.id IS NOT NULL AND md5((to_jsonb(u) - 'updatedAt')::text) = b.h AND (to_jsonb(u) ->> 'updatedAt') IS DISTINCT FROM b.t) FROM "User" u FULL JOIN $USERS_BEFORE b ON b.id = u.id;
+SQL
+}
+users_snapshot_drop() { copy_sql <<< "DROP TABLE $USERS_BEFORE;"; }
+# Gate G8 = scrub: every non-NULL value of the sensitive User columns becomes the placeholder, in one transaction.
+# Prints "before <n n n n>", "after <n n n n>" (non-NULL values per column) and "left <rows with an original value>".
+SCRUB_SQL="BEGIN;
+SELECT 'before ' || count(\"password\") || ' ' || count(\"privateKey\") || ' ' || count(\"xAccessToken\") || ' ' || count(\"xRefreshToken\") FROM \"User\";
+UPDATE \"User\" SET \"password\" = CASE WHEN \"password\" IS NULL THEN NULL ELSE '$SCRUB_PLACEHOLDER' END, \"privateKey\" = CASE WHEN \"privateKey\" IS NULL THEN NULL ELSE '$SCRUB_PLACEHOLDER' END, \"xAccessToken\" = CASE WHEN \"xAccessToken\" IS NULL THEN NULL ELSE '$SCRUB_PLACEHOLDER' END, \"xRefreshToken\" = CASE WHEN \"xRefreshToken\" IS NULL THEN NULL ELSE '$SCRUB_PLACEHOLDER' END WHERE \"password\" IS NOT NULL OR \"privateKey\" IS NOT NULL OR \"xAccessToken\" IS NOT NULL OR \"xRefreshToken\" IS NOT NULL;
+SELECT 'after ' || count(\"password\") || ' ' || count(\"privateKey\") || ' ' || count(\"xAccessToken\") || ' ' || count(\"xRefreshToken\") FROM \"User\";
+SELECT 'left ' || count(*) FROM \"User\" WHERE \"password\" <> '$SCRUB_PLACEHOLDER' OR \"privateKey\" <> '$SCRUB_PLACEHOLDER' OR \"xAccessToken\" <> '$SCRUB_PLACEHOLDER' OR \"xRefreshToken\" <> '$SCRUB_PLACEHOLDER';
+COMMIT;"
+copy_scrub() { printf '%s\n' "$SCRUB_SQL" | copy_sql; }
 rebind_tables() { copy_sql <<< "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name IN ('Web3AuthNetworkRebind', 'Web3AuthNetworkRebindRun');"; }
 
 # ---------------------------------------------------------------------------
@@ -333,8 +401,19 @@ console.log("db_target=" + u.hostname + ":" + (u.port || "5432") + u.pathname + 
 if (u.hostname !== "db" || (u.port || "5432") !== "5432" || decodeURIComponent(u.pathname) !== "/" + process.env.REHEARSAL_EXPECT_DB || s !== "public") process.exit(97);'
 GATE_LINE="db_target=db:5432/$COPY_DB schema=public"
 COPY_URL=""; CX_VOLS=(); CX_KEEP=()
-cx_prepare() { # the copy's URL, the override, keep.txt
-  local n
+cx_prepare() { # memory and disk, the copy's URL, the override, keep.txt
+  local n mem d dbb floor
+  # A one-off container inherits the api's mem_limit and oom_score_adj (the same as the live new-stack containers), and
+  # mainnetSwitch --plan/--apply load every user: the same memory floor as the restore. Free space at least the nightly
+  # P1 dump's own floor (migrate's index builds and --apply's backup table grow the copy; nothing watches them).
+  mem=$(mem_avail_mb); case "$mem" in ''|*[!0-9]*) die "cannot read MemAvailable: no one-off container started";; esac
+  [ "$mem" -ge "$REHEARSAL_MEM_FLOOR_MB" ] || die "MemAvailable ${mem}MB < ${REHEARSAL_MEM_FLOOR_MB}MB: no one-off container started (it inherits the api's memory limit, and the host has no swap)"
+  d=$(rh_disk_avail_mb); case "$d" in ''|*[!0-9]*) die "cannot read the free disk space on /: no one-off container started";; esac
+  dbb=$(old_db_bytes)
+  if [ -z "$dbb" ] || [ "$dbb" = 0 ]; then dbb=$(state_get DUMP_BYTES | tr -dc '0-9'); dbb=$(( ${dbb:-0} * 3 )); fi   # as disk_need
+  floor=$(( dbb + 3 * G ))
+  [ $(( d * 1048576 )) -ge "$floor" ] || die "free disk $(gb $(( d * 1048576 )))G < the nightly P1 dump's own floor $(gb "$floor")G (database size + 3G): no one-off container started (free space, or ./60-rehearsal.sh cleanup)"
+  pass "MemAvailable ${mem}MB >= ${REHEARSAL_MEM_FLOOR_MB}MB; free disk $(gb $(( d * 1048576 )))G >= the nightly P1 dump's own floor $(gb "$floor")G"
   COPY_URL=$(copy_url)
   override_write
   if [ -f "$KEEP_FILE" ] && [ ! -L "$KEEP_FILE" ]; then
@@ -418,12 +497,19 @@ do_preflight() {
   if protected_read; then
     say "the running api uses $LIVE_HOST:5432/$LIVE_DB; protected databases: $PROTECTED"
     if copy_name_ok; then pass "the copy $COPY_DB is none of the protected databases"; else pf_fail "$COPY_WHY"; fi
+    if live_is_production; then pf_fail "$(prod_why)"; fi
   else pf_fail "$PROT_WHY"; fi
+  case "$REHEARSAL_G8" in
+    scrub) pass "gate G8: REHEARSAL_G8=scrub (restore replaces the sensitive User columns' values by a placeholder)";;
+    keep) pf_warn "gate G8: REHEARSAL_G8=keep: the copy will hold the sensitive User columns as the dump does";;
+    "") pf_warn "gate G8 not given: restore needs REHEARSAL_G8=scrub or REHEARSAL_G8=keep (APPROVAL.md section 7)";;
+    *) pf_fail "REHEARSAL_G8 must be scrub or keep, not '$REHEARSAL_G8'";;
+  esac
   if new_db_ok; then
     if st=$( ( copy_state ) 2>&1 ); then
       case "$st" in
         absent) pass "$COPY_DB does not exist yet: restore can create it";;
-        marked) pf_warn "$COPY_DB exists (restored earlier): restore refuses until cleanup; migrate, report and apply-switch use it";;
+        marked) pf_warn "$COPY_DB exists (restored earlier): restore refuses until cleanup; migrate, report and apply-switch use it. Drop it with cleanup before the cutover window (it takes the disk the window needs)";;
         *) pf_fail "$COPY_DB exists WITHOUT this script's mark: nothing here touches it (ask the team whose it is)";;
       esac
     else pf_fail "${st#FAIL }"; fi
@@ -443,7 +529,7 @@ do_preflight() {
   dbb=$(old_db_bytes)
   say "old database size: $([ -n "$dbb" ] && echo "$(gb "$dbb")G" || echo 'unreadable')"
   disk_need "$dbb" "$b"
-  avail=$(disk_avail_mb)
+  avail=$(rh_disk_avail_mb)
   case "$avail" in ''|*[!0-9]*) pf_fail "cannot read the free disk space on /";;
     *) if [ $(( avail * 1048576 )) -ge "$NEED_BYTES" ]; then pass "free disk $(gb $(( avail * 1048576 )))G >= $NEED_TEXT"
        else pf_fail "free disk $(gb $(( avail * 1048576 )))G < $NEED_TEXT: expand the disk first (APPROVAL.md section 3)"; fi;;
@@ -469,18 +555,19 @@ restore_abort() { # EXIT trap of restore: a restore that did not complete leaves
     else warn "could not drop the partial copy $COPY_DB: run ./60-rehearsal.sh cleanup"; fi
   fi
 }
-# pg_restore of <dump> into the copy, while the free space on / stays above BUILD_DISK_FLOOR_MB. A stop ends the
-# restore's session inside Postgres (the docker exec client alone would leave it running) and sets RESTORE_STOP.
+# pg_restore of <dump> into the copy, while the free space (rh_disk_avail_mb: / and pgdata) stays above
+# BUILD_DISK_FLOOR_MB. A stop ends the restore's session inside Postgres (the docker exec client alone would leave it
+# running) and sets RESTORE_STOP.
 restore_watched() {
   local pid d rc=0
   docker exec -i "$NEW_DB_CTR" sh -c 'exec pg_restore -U "$POSTGRES_USER" -d "$0" --no-owner --no-acl --exit-on-error' "$COPY_DB" \
     < "$1" > "$RH_DIR/$RUN_TS-restore.err" 2>&1 &
   pid=$!
   while kill -0 "$pid" 2>/dev/null; do
-    d=$(disk_avail_mb)
+    d=$(rh_disk_avail_mb)
     case "$d" in ''|*[!0-9]*) RESTORE_STOP="free disk on / unreadable"; break;; esac
     if [ -z "$RESTORE_DMIN" ] || [ "$d" -lt "$RESTORE_DMIN" ]; then RESTORE_DMIN=$d; fi
-    if [ "$d" -lt "$BUILD_DISK_FLOOR_MB" ]; then RESTORE_STOP="free disk on / ${d}MB < ${BUILD_DISK_FLOOR_MB}MB"; break; fi
+    if [ "$d" -lt "$BUILD_DISK_FLOOR_MB" ]; then RESTORE_STOP="free disk (/ and pgdata) ${d}MB < ${BUILD_DISK_FLOOR_MB}MB"; break; fi
     sleep "$BUILD_WATCH_INTERVAL"
   done
   if [ -n "$RESTORE_STOP" ]; then
@@ -493,10 +580,13 @@ restore_watched() {
   return "$rc"
 }
 do_restore() {
-  local f b dbb avail mem toc rc t0 t1 est n rows users
+  local f b dbb avail mem toc rc t0 t1 est n rows users sha_s sc
+  local -a a_before=() a_after=()
+  g8_check
   refuse_if_infra_only
   new_db_ok || die "$NEW_WHY"
   copy_guard
+  refuse_if_production
   local st; st=$(copy_state) || exit 1   # copy_state printed why it could not ask Postgres
   case "$st" in
     absent) ;;
@@ -508,17 +598,19 @@ do_restore() {
   [ -n "$f" ] || die "no ddc-daily-*.dump with its .sha256 in $BACKUP_DIR/pg: pass a dump (./60-rehearsal.sh restore $BACKUP_DIR/pg/<file>)"
   b=$(file_bytes "$f")
   say "dump: $(basename "$f") size_mb=$(( b / 1048576 )) age_h=$(( ($(date +%s) - $(file_mtime "$f")) / 3600 ))"
+  t0=$(date +%s)
   dump_sha_ok "$f" || die "sha256 of $(basename "$f") does not match its .sha256 sidecar (or the sidecar is missing or malformed): not restoring it"
-  pass "sha256 matches"
+  t1=$(date +%s); sha_s=$((t1 - t0))
+  pass "sha256 matches (the sidecar is what proves the dump complete)"
   rc=0; toc=$(docker run --rm -i --pull never --network none --name "$PROJECT-rehearsal-toc-$$" postgres:17 pg_restore --list < "$f") || rc=$?
-  [ "$rc" = 0 ] || die "pg_restore --list failed (exit $rc): the dump is unreadable or truncated"
+  [ "$rc" = 0 ] || die "pg_restore --list failed (exit $rc): the dump's table of contents cannot be read (not a custom-format dump, or damaged)"
   n=$(printf '%s\n' "$toc" | grep -cv '^;' || true)
   grep -qE ' TABLE DATA public "?User"? ' <<< "$toc" || die "the dump's table of contents has no data for the User table: not a complete P1 dump"
   toc=""
   pass "pg_restore --list ok: $n entries, with the User table's data"
   step "2. disk and memory"
   dbb=$(old_db_bytes); disk_need "$dbb" "$b"
-  avail=$(disk_avail_mb); case "$avail" in ''|*[!0-9]*) die "cannot read the free disk space on /";; esac
+  avail=$(rh_disk_avail_mb); case "$avail" in ''|*[!0-9]*) die "cannot read the free disk space on /";; esac
   [ $(( avail * 1048576 )) -ge "$NEED_BYTES" ] || die "free disk $(gb $(( avail * 1048576 )))G < $NEED_TEXT: expand the disk first"
   pass "free disk $(gb $(( avail * 1048576 )))G >= $NEED_TEXT"
   mem=$(mem_avail_mb); case "$mem" in ''|*[!0-9]*) die "cannot read MemAvailable";; esac
@@ -526,7 +618,7 @@ do_restore() {
   pass "MemAvailable ${mem}MB >= ${REHEARSAL_MEM_FLOOR_MB}MB"
   rh_dir_init
   integrity_begin
-  step "3. create the copy and restore into it (timed; the restore stops below ${BUILD_DISK_FLOOR_MB}MB free on /)"
+  step "3. create the copy and restore into it (timed; the restore stops below ${BUILD_DISK_FLOOR_MB}MB free on / or pgdata)"
   trap restore_abort EXIT
   trap 'exit 1' HUP INT TERM
   { printf 'CREATE DATABASE "%s";\n' "$COPY_DB"
@@ -543,6 +635,7 @@ do_restore() {
   pass "pg_restore exit=0; lowest free disk during the restore ${RESTORE_DMIN:-?}MB"
   timing_add restore $((t1 - t0)) "$(basename "$f"), $(( b / 1048576 )) MB"
   est=$(dump_est_seconds "$f"); if [ -n "$est" ]; then timing_add dump_est "$est" "from the dump's name and modification time, to the minute"; fi
+  timing_add sha256 "$sha_s" "sha256 of $(basename "$f"), $(( b / 1048576 )) MB"
   step "4. exact row counts of the copy = the dump's (runbook section 6 steps 2-3)"
   guard_write_path "$COUNTS_DUMP"
   t0=$(date +%s); ( umask 077; copy_counts > "$COUNTS_DUMP.tmp" ) || die "the row count of the copy failed"; t1=$(date +%s)
@@ -552,6 +645,18 @@ do_restore() {
   [ "$n" -gt 0 ] && [ -n "$users" ] || die "the copy has no tables or no User table after the restore"
   pass "tables=$n rows=$rows User=$users (kept in $COUNTS_DUMP)"
   timing_add counts_restore $((t1 - t0)) "$n tables, $rows rows"
+  step "5. gate G8: REHEARSAL_G8=$REHEARSAL_G8"
+  if [ "$REHEARSAL_G8" = scrub ]; then
+    t0=$(date +%s); sc=$(copy_scrub) || die "the G8 scrub of the copy failed (the psql error above): the copy is dropped"; t1=$(date +%s)
+    read -r -a a_before <<< "$(sed -n 's/^before //p' <<< "$sc")"; read -r -a a_after <<< "$(sed -n 's/^after //p' <<< "$sc")"
+    [ "${#a_before[@]}" = 4 ] && [ "${a_before[*]}" = "${a_after[*]:-}" ] && [ "$(sed -n 's/^left //p' <<< "$sc")" = 0 ] \
+      || die "the G8 scrub did not leave every sensitive value replaced with NULL kept (non-NULL per column before: ${a_before[*]:-?}, after: ${a_after[*]:-?}, rows with an original value left: $(sed -n 's/^left //p' <<< "$sc")): the copy is dropped"
+    pass "G8 scrub: User.password ${a_before[0]}, privateKey ${a_before[1]}, xAccessToken ${a_before[2]}, xRefreshToken ${a_before[3]} non-NULL values replaced by the placeholder (NULL kept); none left"
+    timing_add scrub $((t1 - t0)) "G8 scrub, not part of the window"
+  else
+    warn "G8 keep: the copy holds User.password, privateKey, xAccessToken and xRefreshToken as the dump does (the recorded G8 decision)"
+  fi
+  state_set G8 "$REHEARSAL_G8"
   state_set DUMP "$(basename "$f")"; state_set DUMP_BYTES "$b"; state_set RESTORED_AT "$(date +%Y-%m-%dT%H:%M:%S%z)"
   state_set IMAGE ""; state_set MIGRATED_AT ""; state_set DROPPED_AT ""
   RESTORE_DONE=1; trap - EXIT HUP INT TERM
@@ -563,6 +668,7 @@ do_migrate() {
   local t0 t1 st
   new_db_ok || die "$NEW_WHY"
   copy_guard
+  refuse_if_production
   copy_require_marked
   resolve_image "${1:-}" migrate
   rh_dir_init
@@ -651,6 +757,7 @@ do_report() {
   local t0 t1 present now bad=0 v line
   new_db_ok || die "$NEW_WHY"
   copy_guard
+  refuse_if_production
   copy_require_marked
   [ -f "$COUNTS_DUMP" ] || die "$COUNTS_DUMP missing: the copy's counts after the restore are the reference (run cleanup, then restore again)"
   resolve_image "${1:-}" other
@@ -690,6 +797,7 @@ do_report() {
     t0=$(date +%s); run_plan report-plan; t1=$(date +%s)
     timing_add plan $((t1 - t0)) "exit $CX_RC"
     [ "$(fact 1)" = 1 ] && pass "mainnetSwitch --plan: GO" || warn "mainnetSwitch --plan: NO-GO on the copy (BLOCKER lines above)"
+    say "GO/NO-GO here follows the rehearsal api's WEB3AUTH_* settings (.env.api); in the window --plan runs with .env.cutover's"
   else printf 'FAIL scripts/mainnetSwitch.js is not in %s\n' "$IMAGE"; bad=1; fi
   step "5. backfillSocialPostIdentity.js dry run (timed; writes nothing)"
   if [[ " $present " == *" scripts/backfillSocialPostIdentity.js "* ]]; then
@@ -711,15 +819,17 @@ do_report() {
   step "7. the copy writable again"
   copy_readonly off >/dev/null || die "could not reset default_transaction_read_only on $COPY_DB (the psql error above)"; trap - EXIT
   pass "default_transaction_read_only reset on $COPY_DB"
-  say "the whole outputs (with user and row ids) stay on the server: $RH_DIR/$RUN_TS-report-*.out (600)"
+  say "the whole outputs (with user and row ids) stay on the server until cleanup: $RH_DIR/$RUN_TS-report-*.out (600)"
   integrity_end
   [ "$bad" = 0 ] || die "the report found the problems above"
 }
 
 do_apply_switch() {
-  local t0 t1 before after acc run runid restored deleted
+  local t0 t1 kept acc run runid restored deleted cleared
+  local -a dd=()
   new_db_ok || die "$NEW_WHY"
   copy_guard
+  refuse_if_production
   copy_require_marked
   [ "$(rebind_tables)" = 2 ] || die "the copy has no Web3AuthNetworkRebind tables: run ./60-rehearsal.sh migrate first"
   resolve_image "${1:-}" other
@@ -732,9 +842,9 @@ do_apply_switch() {
   [ "$(fact 1)" = 1 ] || die "mainnetSwitch --plan says NO-GO on the copy (BLOCKER lines above): --apply would refuse"
   [ "$(fact 5)" = 0 ] || die "the copy holds a run that was never rolled back ($(fact 6)): for clean timings run cleanup, restore and migrate again"
   acc=$(fact 2)
-  before=$(copy_users_digest)
-  say "users and the digest of their four switch columns before: ${before%% *} ${before#* }"
-  before="${before#* }"
+  kept=$(users_snapshot) || die "could not keep the users before --apply (the psql error above)"
+  [[ "$kept" =~ ^[0-9]+$ ]] || die "could not keep the users before --apply (no count)"
+  say "users kept before --apply: $kept (a digest of every column but updatedAt per user, in $USERS_BEFORE on the copy)"
   step "2. --apply --yes (timed)"
   t0=$(date +%s); copy_exec switch-apply node scripts/mainnetSwitch.js --apply --yes --json ${CX_KEEP[@]+"${CX_KEEP[@]}"}; t1=$(date +%s)
   [ "$CX_RC" = 0 ] || cx_fail "mainnetSwitch --apply failed on the copy"
@@ -742,8 +852,14 @@ do_apply_switch() {
   runid=$(json_field "$CX_OUT" run_id); run=$(json_field "$CX_OUT" accounts)
   [[ "$runid" =~ ^[0-9]{14}_[0-9a-f]{4}$ ]] || die "mainnetSwitch --apply returned no run id"
   timing_add apply $((t1 - t0)) "$run accounts recorded"
-  say "run_id $runid, backup table $(json_field "$CX_OUT" backup_table), accounts $run, old-network pairs cleared $(json_field "$CX_OUT" old_network_pairs_cleared)"
+  cleared=$(json_field "$CX_OUT" old_network_pairs_cleared)
+  say "run_id $runid, backup table $(json_field "$CX_OUT" backup_table), accounts $run, old-network pairs cleared $cleared"
   [ "$run" = "$acc" ] && pass "--apply recorded exactly the $acc accounts --plan announced" || die "--apply recorded $run accounts, --plan announced $acc"
+  [[ "$cleared" =~ ^[0-9]+$ ]] || die "mainnetSwitch --apply reported no old_network_pairs_cleared"
+  read -r -a dd <<< "$(users_diff)"
+  [ "${dd[0]:-}" = "$cleared" ] && pass "after --apply: $cleared users differ from before (the old-network pairs it reports cleared); every other user is unchanged" \
+    || die "after --apply ${dd[0]:-?} users differ from before in a column other than updatedAt (added, removed or changed); --apply reports $cleared old-network pairs cleared"
+  [ "$cleared" != 0 ] || warn "--apply cleared no old-network pair: the check after --rollback then proves the records only, not a restore of the users' columns"
   step "3. --plan after the apply"
   run_plan switch-plan-applied
   [ "$(fact 2)" = 0 ] && [ "$(fact 3)" = "$acc" ] && pass "after --apply: nothing left to record, $acc pending re-binds" \
@@ -756,56 +872,89 @@ do_apply_switch() {
   timing_add rollback $((t1 - t0)) "$restored accounts restored"
   [ "$restored" = "$acc" ] && [ "$deleted" = "$acc" ] && pass "--rollback restored $restored accounts and deleted $deleted records" \
     || die "--rollback restored $restored accounts and deleted $deleted records, expected $acc each"
-  step "5. --plan after the rollback, and the users' switch columns"
+  step "5. --plan after the rollback, and every user against its state before --apply"
   run_plan switch-plan-rolled-back
   [ "$(fact 2)" = "$acc" ] && [ "$(fact 3)" = 0 ] && [ "$(fact 5)" = 0 ] && pass "after --rollback: $acc accounts to record again, no pending record, no open run" \
     || die "after --rollback --plan shows to_record $(fact 2), pending $(fact 3), open runs $(fact 5); expected $acc, 0, 0"
-  after=$(copy_users_digest); after="${after#* }"
-  [ "$after" = "$before" ] && pass "the four switch columns of every user are identical before --apply and after --rollback (digest ${after:0:12})" \
-    || die "the users' switch columns differ after --rollback (digest ${before:0:12} before, ${after:0:12} after)"
+  read -r -a dd <<< "$(users_diff)"
+  [ "${dd[0]:-}" = 0 ] && pass "after --rollback every one of the $kept users equals its state before --apply in every column but updatedAt" \
+    || die "after --rollback ${dd[0]:-?} users differ from before --apply in a column other than updatedAt (added, removed or changed)"
+  say "updatedAt differs from before --apply on ${dd[1]:-?} users: --apply sets it (Prisma @updatedAt) and --rollback does not restore it; a production rollback leaves it changed too"
+  users_snapshot_drop >/dev/null || warn "could not drop $USERS_BEFORE on the copy (cleanup drops the whole copy)"
   integrity_end
   say "next: ./60-rehearsal.sh summary; when done: ./60-rehearsal.sh cleanup"
 }
 
+# The cutover window estimate, runbook section 6 steps 1-9, one row per part (window_parts below, in the order of the
+# steps): meas <key> <label> takes the latest measured time of <key> from timings.tsv, fig <minutes> <label> the runbook's
+# figure. A part with neither (offsite_copy: the encrypted off-site copy of the final dump, measured with gate G6's
+# tooling; points_repair: the repair of the points records after the restore, no script yet) shows NOT MEASURED, and
+# then no PASS is printed. Such a part counts once its time is in timings.tsv (<key> TAB <seconds> TAB <time> TAB <note>).
 do_summary() {
   local f
   settings_say
   [ -f "$TIMINGS" ] || { say "no timings yet ($TIMINGS): run restore, migrate, report and apply-switch first"; return 0; }
-  for f in DUMP DUMP_BYTES RESTORED_AT IMAGE MIGRATED_AT DROPPED_AT; do say "$f=$(state_get "$f")"; done
+  for f in DUMP DUMP_BYTES RESTORED_AT G8 IMAGE MIGRATED_AT DROPPED_AT; do say "$f=$(state_get "$f")"; done
   step "timings (the latest run of each step; runs = how often it was measured)"
-  awk -F'\t' -v smoke="$SMOKE_MIN" -v sw="$SWITCH_MIN" -v lim="$WINDOW_LIMIT_MIN" '
+  awk -F'\t' -v freeze="$FREEZE_MIN" -v public="$PUBLIC_MIN" -v config="$CONFIG_MIN" -v sw="$SWITCH_MIN" -v smoke="$SMOKE_MIN" \
+      -v open="$OPEN_MIN" -v lim="$WINDOW_LIMIT_MIN" '
     { s[$1] = $2; w[$1] = $3; nt[$1] = $4; c[$1]++ }
-    function row(k, label) { if (k in s) printf "%-16s %8d s %7.1f min  runs %-3d %s  %s\n", label, s[k], s[k] / 60, c[k], w[k], nt[k]; else printf "%-16s %10s %11s\n", label, "-", "-" }
+    function row(k) { if (k in s) printf "%-16s %8d s %7.1f min  runs %-3d %s  %s\n", k, s[k], s[k] / 60, c[k], w[k], nt[k]; else printf "%-16s %10s %11s\n", k, "-", "-" }
+    function meas(k, label) {
+      if (k in s) { printf "  %7.1f min  %s\n", s[k] / 60, label; total += s[k] / 60 }
+      else { printf "  %11s  %s: NOT MEASURED (%s)\n", "-", label, k; miss++; missing = missing " " k }
+    }
+    function fig(m, label) { printf "  %7.1f min  %s (runbook figure)\n", m, label; total += m }
     END {
       printf "%-16s %10s %11s  %s\n", "step", "seconds", "minutes", "runs, when, note"
-      split("dump_est restore counts_restore migrate counts_report plan backfill duplicates apply rollback cleanup", k, " ")
-      for (i = 1; i <= 11; i++) row(k[i], k[i])
-      printf "\ncutover window estimate (runbook section 6, steps 2-8):\n"
-      line ="dump_est|final dump (step 2);counts_restore|row counts, old database (step 2);restore|restore (step 3);counts_restore|row counts, new database (step 3);migrate|migrate (step 5);plan|--plan (step 6);apply|--apply (step 6);plan|--plan again (step 6);backfill|social post backfill after the release (dry-run time; the --apply run writes, so longer)"
-      m = split(line, parts, ";"); total = 0; miss = 0
-      for (i = 1; i <= m; i++) {
-        split(parts[i], kv, "|")
-        if (kv[1] in s) { printf "  %7.1f min  %s\n", s[kv[1]] / 60, kv[2]; total += s[kv[1]] }
-        else { printf "  %11s  %s: NOT MEASURED\n", "-", kv[2]; miss++ }
-      }
-      printf "  %7.1f min  smoke tests behind the gate (step 8, runbook figure)\n", smoke
-      printf "  %7.1f min  domain switch (step 7, runbook figure)\n", sw
-      total = total / 60 + smoke + sw
-      printf "  %7.1f min  in all (limit %d min)\n", total, lim
-      if (miss) printf "WARN the estimate is incomplete: %d part(s) not measured yet\n", miss
-      if (total <= lim) printf "PASS the estimate fits the %d-minute window\n", lim
-      else printf "WARN the estimate is longer than the %d-minute window: lengthen the window and the notice\n", lim
+      n = split("dump_est sha256 restore counts_restore scrub migrate counts_report plan backfill duplicates apply rollback cleanup offsite_copy points_repair", k, " ")
+      for (i = 1; i <= n; i++) row(k[i])
+      printf "\ncutover window estimate (runbook section 6, steps 1-9):\n"
+      total = 0; miss = 0; missing = ""
+      fig(freeze, "freeze the old stack (step 1)")
+      meas("dump_est", "final dump (step 2, timed from the nightly dump)")
+      meas("counts_restore", "row counts of the old database (step 2, timed on the copy right after its restore, cached: the old database counts cold, likely slower)")
+      meas("sha256", "sha256 of the final dump (step 2)")
+      meas("offsite_copy", "encrypted off-site copy of the final dump and its sha256 there (step 2)")
+      meas("restore", "restore (step 3)")
+      meas("counts_restore", "row counts of the new database (step 3)")
+      fig(public, "uploaded files, public/ (step 4, the upper end of 5-10 min)")
+      meas("migrate", "migrate deploy (step 5)")
+      fig(config, "the rest of step 5: configuration, database check, migrate status, api recreate, boot log (the whole step)")
+      meas("plan", "--plan (step 6)")
+      meas("apply", "--apply (step 6)")
+      meas("plan", "--plan again (step 6)")
+      meas("backfill", "social post backfill after the release (dry-run time, the --apply run writes and takes longer)")
+      meas("points_repair", "points record repair after the restore (no script yet)")
+      fig(sw, "web image and domain switch (step 7)")
+      fig(smoke, "smoke tests behind the gate (step 8)")
+      fig(open, "opening (step 9)")
+      printf "  %7.1f min  in all: the measured parts and the runbook figures (limit %d min)\n", total, lim
+      if (miss) printf "WARN the estimate is incomplete: %d part(s) neither measured nor given a runbook figure (%s): no PASS until each is measured\n", miss, substr(missing, 2)
+      else if (total <= lim) printf "PASS the estimate fits the %d-minute window\n", lim
+      if (total > lim) printf "WARN the estimate is longer than the %d-minute window: lengthen the window and the notice\n", lim
     }' "$TIMINGS"
+}
+
+# The per-run outputs that hold user and row ids (<ts>-<step>.out/.err, <ts>-restore.err): removed by cleanup.
+records_prune() {
+  local f n=0
+  for f in "$RH_DIR"/[0-9]*-[0-9]*-*.out "$RH_DIR"/[0-9]*-[0-9]*-*.out.tmp "$RH_DIR"/[0-9]*-[0-9]*-*.err; do
+    [ -f "$f" ] || continue
+    guard_write_path "$f"; rm -f -- "$f"; n=$((n + 1))
+  done
+  pass "records with user or row ids removed: $n file(s) (<ts>-*.out/.err); kept: timings.tsv, state.env and the row counts"
 }
 
 do_cleanup() {
   local t0 t1
   new_db_ok || die "$NEW_WHY"
   copy_guard
+  if live_is_production; then warn "the running api uses $LIVE_DB: the new stack is production; cleanup only drops the copy"; fi
   rh_dir_init
   local st; st=$(copy_state) || exit 1   # copy_state printed why it could not ask Postgres
   case "$st" in
-    absent) pass "$COPY_DB does not exist: nothing to drop"; return 0;;
+    absent) pass "$COPY_DB does not exist: nothing to drop"; records_prune; return 0;;
     marked) ;;
     *) die "$COPY_DB exists WITHOUT this script's mark: 60-rehearsal.sh did not create it and does not drop it (ask the team whose it is)";;
   esac
@@ -818,7 +967,8 @@ do_cleanup() {
   timing_add cleanup $((t1 - t0)) ""
   if [ -e "$OVERRIDE" ]; then guard_write_path "$OVERRIDE"; rm -f -- "$OVERRIDE"; fi
   state_set DROPPED_AT "$(date +%Y-%m-%dT%H:%M:%S%z)"
-  say "free disk on / now: $(disk_avail_mb)MB; the records stay in $RH_DIR (./60-rehearsal.sh summary)"
+  records_prune
+  say "free disk on / now: $(disk_avail_mb)MB; the timings stay in $RH_DIR (./60-rehearsal.sh summary)"
   integrity_end
 }
 

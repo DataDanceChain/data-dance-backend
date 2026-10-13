@@ -14,6 +14,7 @@
 #   ./remote.sh run p2-disk.sh preview | run p2-disk.sh expand-check | run p1-backup.sh status | run 30-nginx.sh status
 #               | run 50-partner-page.sh status | run 60-rehearsal.sh preflight [dump] | run 60-rehearsal.sh summary
 #                                             (read-only, no flag needed)
+#   DDC_APPROVED=yes ./remote.sh run 60-rehearsal.sh restore REHEARSAL_G8=scrub|keep   the rehearsal's restore (gate G8)
 #   op read "op://<vault>/<item>/password" | DDC_APPROVED=yes ./remote.sh run 50-partner-page.sh apply PARTNER_ALLOWED_IP=<ip>
 #                                             the page password: piped, forwarded on ssh's stdin, never typed or printed
 # The server login (DDC_SSH_TARGET) and the 1Password reference (DDC_OP_SECRET_REF) come from local.env (untracked;
@@ -60,7 +61,7 @@ rssh() { # rssh <remote command> ; stdin is forwarded
   rm -f "$a"; return $rc
 }
 # Environment overrides that may reach the server (everything else is refused, including PATH, BASH_ENV, LD_*).
-SERVER_ENV_ALLOWED="REHEARSAL_DB REHEARSAL_REDIRECT_URIS REHEARSAL_INITIATE_LOGIN_URI OAUTH_PUBLIC_REGISTRATION W3A_GOOGLE W3A_EMAIL W3A_APPLE W3A_X JWKS_NEW_PINS_VERIFIED BUILD_MEM_FLOOR_MB P1_USERS_MIN PARTNER_ALLOWED_IP API_HOST APP_HOST API_PORT WEB_PORT DB_PORT TAKE_OVER_VHOSTS REHEARSAL_CLIENT_ID"
+SERVER_ENV_ALLOWED="REHEARSAL_DB REHEARSAL_REDIRECT_URIS REHEARSAL_INITIATE_LOGIN_URI OAUTH_PUBLIC_REGISTRATION W3A_GOOGLE W3A_EMAIL W3A_APPLE W3A_X JWKS_NEW_PINS_VERIFIED BUILD_MEM_FLOOR_MB P1_USERS_MIN PARTNER_ALLOWED_IP API_HOST APP_HOST API_PORT WEB_PORT DB_PORT TAKE_OVER_VHOSTS REHEARSAL_CLIENT_ID REHEARSAL_G8"
 valid_sha() { [[ "$1" =~ ^[0-9a-f]{40}$ ]] || { echo "need a full 40-hex commit id"; exit 2; }; }
 # commit_signature <repo> <sha>: the kind of the commit's signature (e.g. "SSH SIGNATURE") from its gpgsig header (a
 # header line, before the first blank line: a "gpgsig" in the message does not count); fails when there is none.
@@ -176,5 +177,5 @@ case "$cmd" in
     chk=$(env -i PATH="$PATH" ${ovr[@]+"${ovr[@]}"} bash -c '. "$1/common.sh" && remote_overrides_check' _ "$PKG" 2>&1) \
       || { echo "refusing before connecting: $(printf '%s' "$chk" | tail -n 1)"; exit 2; }
     rssh "cd /root/ddcnew/deploy && env$envs ./$s$args" 2>&1 | tee "$PKG/logs/$TS-${s%.sh}.txt";;
-  *) sed -n '2,18p' "$0"; exit 2;;
+  *) sed -n '2,19p' "$0"; exit 2;;
 esac

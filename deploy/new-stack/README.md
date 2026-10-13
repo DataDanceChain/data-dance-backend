@@ -60,19 +60,24 @@ verified P1 daily dump into the database `ddc_rehearsal_copy` of the new stack's
 image, reports on it, runs the user migration's `--apply` and then its `--rollback` on it, times every step and drops it.
 The subcommands, in order:
 
-    ./remote.sh run 60-rehearsal.sh preflight                       # read-only
-    DDC_APPROVED=yes ./remote.sh run 60-rehearsal.sh restore        # newest ddc-daily-*.dump, or a dump path
+    ./remote.sh run 60-rehearsal.sh preflight REHEARSAL_G8=scrub    # read-only
+    DDC_APPROVED=yes ./remote.sh run 60-rehearsal.sh restore REHEARSAL_G8=scrub   # or keep (gate G8); newest daily dump, or a dump path
     DDC_APPROVED=yes ./remote.sh run 60-rehearsal.sh migrate ddcnew/backend:<12 hex>   # default: the running api's image
     DDC_APPROVED=yes ./remote.sh run 60-rehearsal.sh report
     DDC_APPROVED=yes ./remote.sh run 60-rehearsal.sh apply-switch
     ./remote.sh run 60-rehearsal.sh summary                         # read-only: timings and the window estimate
-    DDC_APPROVED=yes ./remote.sh run 60-rehearsal.sh cleanup        # drops the copy
+    DDC_APPROVED=yes ./remote.sh run 60-rehearsal.sh cleanup        # drops the copy and the records with ids
 
 The copy is never the database the running api uses, a database named in the new stack's env files, or `ddc`,
 `ddc_prod`, `ddc_rehearsal`, `ddc_rehearsal2`, `postgres` and the templates; `restore` marks it, and every later step
 works on it only while it carries that mark. psql connects only to the copy and to the maintenance database; each
 one-off container checks, before its command starts, that its `DATABASE_URL` names the copy. The old stack is only read
-(the size of its database). `report` makes the copy read-only while it runs and prints counts only. What each step
+(the size of its database). `report` makes the copy read-only while it runs and prints counts only. `restore` needs the
+G8 decision: `scrub` replaces the sensitive User columns' values after the restore, `keep` leaves them as in the dump.
+Once the new stack is production (its api on `ddc_prod`), `restore`, `migrate`, `report` and `apply-switch` refuse and
+`cleanup` still drops the copy. Run `restore` and `migrate` at low traffic, away from the 03:15 nightly dump, and
+**`cleanup` before the cutover window** (the copy takes about 1-1.5 x the database on the disk the window needs).
+`summary` prints no PASS while a part of the window is neither measured nor given a runbook figure. What each step
 changes, its pass criteria and its undo: [APPROVAL.md](APPROVAL.md) section 10.
 
 ## Files
