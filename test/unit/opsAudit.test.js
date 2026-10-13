@@ -13,7 +13,10 @@ const { installOpsApp, listenLoopback, seedUser, grant, bearer, tokens, settle }
 
 const { prisma, app } = installOpsApp();
 const { clearRateLimitStore } = require('../../src/middlewares/rateLimitMiddleware');
-const { writeAudit, auditLog, auditOpsWrites, auditInChange, noteCreated, _internals } = require('../../src/services/opsAudit');
+const {
+  writeAudit, auditLog, auditOpsWrites, auditInChange, noteCreated, _internals,
+  actorFromOps, actorFromUser, recordLabelOf, staffRecordLabel, SCRIPT_ACTOR,
+} = require('../../src/services/opsAudit');
 const { opsRoutes } = require('../../src/routes/opsAdminRoutes');
 
 let server;
@@ -292,6 +295,39 @@ describe('the generic ops.write row', () => {
     });
   });
 
+  it('a personal session writes its record label into the point, never its e-mail; the audit row keeps who acted', async () => {
+    const member = await seedUser(prisma, { totalPoints: 10 });
+    const res = await request(server)
+      .post(`/api/ops/users/${member.id}/points`)
+      .set('Authorization', auth.operator)
+      .send({ amount: -4, note: 'duplicate grant' });
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+    const label = `ops:${operator.id.slice(0, 8)}`;
+    const [point] = prisma.store.point;
+    assert.ok(point.sourceId.endsWith(`__${label}`), point.sourceId);
+    assert.equal(res.body.data.adjustedBy, label);
+    assert.ok(!JSON.stringify(point).includes('op@example.test'));
+    assert.ok(!JSON.stringify(res.body.data.sourceId).includes('@'));
+    await settle();
+    const [row] = prisma.store.opsAuditLog;
+    assert.equal(row.actorLabel, 'op@example.test');
+    assert.equal(row.actorUserId, operator.id);
+  });
+
+  it('a deduction larger than the balance is refused (400) and moves nothing', async () => {
+    const member = await seedUser(prisma, { totalPoints: 3 });
+    const res = await request(server)
+      .post(`/api/ops/users/${member.id}/points`)
+      .set('Authorization', auth.operator)
+      .send({ amount: -4, note: 'too much' });
+    assert.equal(res.status, 400, JSON.stringify(res.body));
+    assert.match(res.body.message, /Insufficient balance: 3/);
+    assert.equal(prisma.store.user.find((u) => u.id === member.id).totalPoints, 3);
+    assert.equal(prisma.store.point.length, 0);
+    await settle();
+    assert.equal(prisma.store.opsAuditLog.length, 0);
+  });
+
   it('a points adjust whose audit row cannot be written moves no points', async () => {
     const member = await seedUser(prisma, { totalPoints: 10 });
     const original = prisma.opsAuditLog.create;
@@ -408,5 +444,25 @@ describe('money routes write their row inside the change', () => {
     assert.equal(row.actorUserId, admin.id);
     assert.equal(row.requestId, 'r-money');
     assert.equal(row.surface, 'ops');
+  });
+});
+
+describe('who acted, inside and outside the audit log', () => {
+  it('a personal session: the audit label is its e-mail, the record label is ops:<first 8 of its id>', () => {
+    const ops = { kind: 'user', userId: '0f1e2d3c-aaaa-bbbb-cccc-000000000000', username: 'ops:0f1e2d3c', email: 'person@example.test', role: 'operator' };
+    const actor = actorFromOps(ops);
+    assert.equal(actor.label, 'person@example.test');
+    assert.equal(actor.recordLabel, 'ops:0f1e2d3c');
+    assert.equal(recordLabelOf(actor), 'ops:0f1e2d3c');
+    // Even an actor built with only an e-mail label writes no e-mail into a record.
+    assert.equal(recordLabelOf({ kind: 'user', userId: '0f1e2d3c-1', label: 'person@example.test' }), 'ops:0f1e2d3c');
+    assert.equal(recordLabelOf(actorFromUser({ id: 'abcdef012345', email: 'dev@example.test' }, 'developer')), 'ops:abcdef01');
+  });
+
+  it('the shared login and the script keep their names; an empty id gives "ops"', () => {
+    assert.equal(recordLabelOf(actorFromOps({ kind: 'shared', username: 'shared', role: 'shared' })), 'shared');
+    assert.equal(recordLabelOf(SCRIPT_ACTOR), 'script');
+    assert.equal(staffRecordLabel(''), 'ops');
+    assert.throws(() => actorFromOps({ kind: 'demo', role: 'demo' }), /cannot change/);
   });
 });

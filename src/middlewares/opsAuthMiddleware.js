@@ -4,6 +4,7 @@ const { permissionsFor, isPermission } = require('../constants/opsRoles');
 const { OPS_TOKEN_TYPE, sharedLoginOn } = require('../services/opsSignIn');
 const { loadUserWithRoles } = require('../services/userRoles');
 const { issuedBeforeReset } = require('../services/staffSession');
+const { staffRecordLabel } = require('../services/opsAudit');
 const { classifyAuthError, sendDatabaseUnavailable } = require('./authErrors');
 
 const logger = createLogger('opsAuth');
@@ -30,8 +31,11 @@ function sessionInvalid(res, status = 401) {
  *   - role 'demo': unchanged (read-only, see restrictDemo).
  *   - kind 'shared', or a legacy token with role 'admin': only while OPS_SHARED_LOGIN=on.
  *
- * req.opsAdmin = { kind, userId, username, role, roles }. `username` keeps filling the existing
- * "by" fields; a personal session writes its e-mail there.
+ * req.opsAdmin = { kind, userId, username, role, roles }. `username` fills the existing "by"
+ * fields (a point's source id, resolvedBy, kycReviewedBy, ledger metadata, campaign createdBy /
+ * updatedBy / publishedBy and events, data request events), which users, merchants and the demo
+ * login can read. A personal session's is therefore `ops:<first 8 of the user id>`, never its
+ * e-mail; the e-mail is kept only in OpsAuditLog (actorUserId, actorLabel).
  */
 async function protectOps(req, res, next) {
   const header = req.headers.authorization;
@@ -75,7 +79,7 @@ async function protectOps(req, res, next) {
     req.opsAdmin = {
       kind: 'user',
       userId: staff.user.id,
-      username: staff.user.email,
+      username: staffRecordLabel(staff.user.id),
       email: staff.user.email,
       name: staff.user.name,
       role: staff.role,

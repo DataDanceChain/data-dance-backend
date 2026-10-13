@@ -67,6 +67,39 @@ function isDemo(req) {
   return req.opsAdmin?.role === 'demo';
 }
 
+/**
+ * Who acted, as written into records merchants can read (ledger metadata, kycReviewedBy): the
+ * session's record label, never an e-mail (see opsAuthMiddleware and opsAudit.staffRecordLabel).
+ */
+function opsBy(req) {
+  return req.opsAdmin?.username || 'ops';
+}
+
+/** The attestation's submittedBy: `ops:` and the record label (which may already start with it). */
+function opsSubmitter(req) {
+  const by = opsBy(req);
+  return by.startsWith('ops:') ? by : `ops:${by}`;
+}
+
+const IDEMPOTENCY_KEY = /^[A-Za-z0-9._:-]{8,128}$/;
+
+/**
+ * The optional Idempotency-Key header of a merchant credit: null when absent; a 400 when it is not
+ * 8..128 characters of letters, digits and . _ : -.
+ */
+function idempotencyKeyOf(req) {
+  const raw = req.get('Idempotency-Key');
+  if (raw === undefined || raw === '') return null;
+  const key = String(raw).trim();
+  if (!IDEMPOTENCY_KEY.test(key)) {
+    throw Object.assign(new Error('Idempotency-Key must be 8 to 128 letters, digits, dots, colons, dashes or underscores.'), {
+      statusCode: 400,
+      code: 'INVALID_IDEMPOTENCY_KEY',
+    });
+  }
+  return key;
+}
+
 function maskEmail(value) {
   const email = String(value || '').trim();
   const at = email.indexOf('@');
@@ -239,14 +272,14 @@ exports.confirmPayment = async (req, res) => {
   try {
     const { payment, changed } = await commerceService.confirmPaymentByOps(
       req.params.id,
-      req.opsAdmin?.username || 'ops',
+      opsBy(req),
       { audit: req.auditChange },
     );
     const orderId = payment?.orderId || payment?.order?.id;
     if (changed && orderId) {
       const commerceAttest = require('../services/commerceAttest');
       await commerceAttest.attestPaidOrderSafe(orderId, {
-        submittedBy: `ops:${req.opsAdmin?.username || 'unknown'}`,
+        submittedBy: opsSubmitter(req),
         audit: req.auditChangeAs ? req.auditChangeAs('order.attest') : undefined,
       });
     }
@@ -262,7 +295,7 @@ exports.rejectPayment = async (req, res) => {
     const payment = await commerceService.rejectPaymentByOps(
       req.params.id,
       req.body?.notes,
-      req.opsAdmin?.username || 'ops',
+      opsBy(req),
       { audit: req.auditChange },
     );
     return res.json({ status: 'success', data: payment });
@@ -390,6 +423,13 @@ exports.getMerchant = async (req, res) => {
   }
 };
 
+/**
+ * Credit a merchant's USD balance. An optional Idempotency-Key header makes a repeat of the same
+ * credit (a double submit, a retry after a lost answer) return the first one instead of crediting
+ * again: under a per-merchant-and-key lock, a DEPOSIT already made with that key is answered as it
+ * is (200, `replayed: true`, no new row, no audit row). The same key with another amount or note
+ * is refused: 409 IDEMPOTENCY_KEY_REUSED.
+ */
 exports.creditMerchant = async (req, res) => {
   try {
     const amount = Number(req.body?.amount);
@@ -400,6 +440,7 @@ exports.creditMerchant = async (req, res) => {
     if (note.length < 2) {
       return res.status(400).json({ status: 'fail', message: 'Note is required' });
     }
+    const idempotencyKey = idempotencyKeyOf(req);
     const user = await prisma.user.findUnique({
       where: { id: req.params.userId },
       select: { id: true, isOrganization: true },
@@ -408,7 +449,26 @@ exports.creditMerchant = async (req, res) => {
       return res.status(404).json({ status: 'fail', message: 'Merchant not found' });
     }
     // Same transaction: if the audit row cannot be written, the merchant is not credited.
-    const transaction = await prisma.$transaction(async (tx) => {
+    const { transaction, replayed } = await prisma.$transaction(async (tx) => {
+      if (idempotencyKey) {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('ddc:ops-credit'), hashtext(${`${user.id}:${idempotencyKey}`}))`;
+        const earlier = await tx.organizationTransaction.findFirst({
+          where: {
+            userId: user.id,
+            type: 'DEPOSIT',
+            metadata: { path: ['idempotencyKey'], equals: idempotencyKey },
+          },
+        });
+        if (earlier) {
+          if (Number(earlier.amount) !== amount || String(earlier.description || '') !== note) {
+            throw Object.assign(new Error('This Idempotency-Key was already used for a different credit.'), {
+              statusCode: 409,
+              code: 'IDEMPOTENCY_KEY_REUSED',
+            });
+          }
+          return { transaction: earlier, replayed: true };
+        }
+      }
       const row = await tx.organizationTransaction.create({
         data: {
           userId: user.id,
@@ -418,7 +478,8 @@ exports.creditMerchant = async (req, res) => {
           description: note,
           metadata: {
             source: 'ops_credit',
-            operator: req.opsAdmin?.username || 'ops',
+            operator: opsBy(req),
+            ...(idempotencyKey ? { idempotencyKey } : {}),
           },
         },
       });
@@ -427,18 +488,18 @@ exports.creditMerchant = async (req, res) => {
         reason: note,
         detail: { organizationTransactionId: row.id, type: 'DEPOSIT', amount, currency: 'USD' },
       });
-      return row;
+      return { transaction: row, replayed: false };
     });
     return res.json({
       status: 'success',
-      data: { transaction, balance: await orgBalance(user.id) },
+      data: { transaction, balance: await orgBalance(user.id), ...(replayed ? { replayed: true } : {}) },
     });
   } catch (error) {
     const status = error.statusCode || 500;
     if (status < 500) {
       return res.status(status).json({ status: 'fail', code: error.code, message: error.message });
     }
-    console.error('Ops credit error:', error);
+    console.error('Ops credit error:', error && error.name);
     return res.status(500).json({ status: 'error', message: 'Server error' });
   }
 };
@@ -575,7 +636,7 @@ exports.attestOrder = async (req, res) => {
     const commerceAttest = require('../services/commerceAttest');
     const data = await commerceAttest.attestPaidOrder(req.params.id, {
       txHash: req.body?.txHash,
-      submittedBy: `ops:${req.opsAdmin?.username || 'unknown'}`,
+      submittedBy: opsSubmitter(req),
       audit: req.auditChange,
     });
     return res.json({ status: 'success', data });
@@ -617,7 +678,7 @@ exports.reviewMerchantKyc = async (req, res) => {
       data: {
         kycStatus: nextStatus,
         kycReviewedAt: new Date(),
-        kycReviewedBy: req.opsAdmin?.username || 'ops',
+        kycReviewedBy: opsBy(req),
         kycNote: note || null,
       },
     });

@@ -41,7 +41,7 @@ describe('grant', () => {
     assert.equal(res.status, 201, JSON.stringify(res.body));
     assert.equal(res.body.data.grant.userId, user.id);
     assert.equal(res.body.data.grant.role, 'developer');
-    assert.equal(res.body.data.grant.grantedBy, 'sloan@example.test');
+    assert.equal(res.body.data.grant.grantedBy, `ops:${admin.id.slice(0, 8)}`, 'the record label, never the e-mail');
     assert.equal(res.body.data.grant.reason, 'TGE partner integration');
     assert.deepEqual(grantsOf(user.id), ['developer']);
     const row = prisma.store.userRoleGrant.find((r) => r.userId === user.id);

@@ -90,7 +90,7 @@ async function listClients(req, res) {
 router.post('/auth/login', rateLimiters.opsLogin, login);
 // A DataDance account's wallet JWT mints a one-time code for the ops site (the developer console calls it).
 router.post('/auth/code', protect, rateLimiters.opsSignInCode, opsAccess.createSignInCode);
-router.post('/auth/exchange', rateLimiters.opsLogin, opsAccess.exchangeSignInCode);
+router.post('/auth/exchange', rateLimiters.opsSignInExchange, opsAccess.exchangeSignInCode);
 
 router.use(protectOps);
 router.use(restrictDemo);

@@ -16,7 +16,7 @@ const {
 const EXPECTED_LIMITERS = [
   'upload', 'general', 'auth', 'public', 'verify',
   'web3authLogin', 'oauthRegister', 'oauthAuthorize', 'oauthToken', 'oauthTokenClient', 'oauthRevoke', 'oauthRevokeClient',
-  'consent', 'partner', 'opsLogin', 'opsSignInCode', 'ssoTicket', 'ssoExchange', 'registerIp', 'registerEmail',
+  'consent', 'partner', 'opsLogin', 'opsSignInExchange', 'opsSignInCode', 'ssoTicket', 'ssoExchange', 'registerIp', 'registerEmail',
 ];
 
 function ok(req, res) {
@@ -293,6 +293,29 @@ describe('pre-configured limiters', () => {
     const blocked = await request(app).post('/api/ops/auth/login').set('X-Forwarded-For', '203.0.113.50');
     assert.equal(blocked.status, 429);
     assert.equal((await request(app).post('/api/ops/auth/login').set('X-Forwarded-For', '203.0.113.51')).status, 401);
+  });
+
+  it('opsSignInExchange is its own bucket: failed exchanges never lock out the password login, nor the reverse', async () => {
+    const app = buildApp();
+    app.post('/api/ops/auth/login', rateLimiters.opsLogin, (req, res) => res.status(401).json({ status: 'fail' }));
+    app.post('/api/ops/auth/exchange', rateLimiters.opsSignInExchange, (req, res) => res.status(400).json({ status: 'fail' }));
+    const ip = '203.0.113.52';
+    for (let i = 0; i < 10; i += 1) {
+      assert.equal((await request(app).post('/api/ops/auth/exchange').set('X-Forwarded-For', ip)).status, 400);
+    }
+    assert.equal((await request(app).post('/api/ops/auth/exchange').set('X-Forwarded-For', ip)).status, 429);
+    for (let i = 0; i < 5; i += 1) {
+      assert.equal((await request(app).post('/api/ops/auth/login').set('X-Forwarded-For', ip)).status, 401, 'login has its own five');
+    }
+    assert.equal((await request(app).post('/api/ops/auth/login').set('X-Forwarded-For', ip)).status, 429);
+  });
+
+  it('the ops router puts /auth/exchange on opsSignInExchange and /auth/login on opsLogin', () => {
+    const router = require('../../src/routes/opsAdminRoutes');
+    const handlersOf = (path) => router.stack.find((layer) => layer.route && layer.route.path === path).route.stack.map((l) => l.handle);
+    assert.ok(handlersOf('/auth/exchange').includes(rateLimiters.opsSignInExchange));
+    assert.ok(!handlersOf('/auth/exchange').includes(rateLimiters.opsLogin));
+    assert.ok(handlersOf('/auth/login').includes(rateLimiters.opsLogin));
   });
 
   it('web3authLogin allows 10 per minute per IP', async () => {

@@ -9,7 +9,7 @@
  */
 const prisma = require('../utils/prisma');
 const { ROLES, isRole, staffRole, cleanReason } = require('../constants/opsRoles');
-const { OpsError, writeAudit, isoOrNull } = require('./opsAudit');
+const { OpsError, writeAudit, isoOrNull, recordLabelOf } = require('./opsAudit');
 
 function byRoleOrder(a, b) {
   return ROLES.indexOf(a) - ROLES.indexOf(b);
@@ -152,7 +152,7 @@ async function grantRole({ userId, role, reason, actor, surface = 'ops', request
           userId: target.id,
           role: wanted,
           grantedByUserId: actor.userId || null,
-          grantedBy: String(actor.label),
+          grantedBy: recordLabelOf(actor),
           reason: why,
         },
       });

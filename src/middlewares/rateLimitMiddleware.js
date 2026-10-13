@@ -360,6 +360,18 @@ const rateLimiters = {
     keyGenerator: keyGenerators.ip
   }),
 
+  // POST /api/ops/auth/exchange — 10 failures per 15 minutes per IP; successes are free. Its own
+  // bucket: a stale or double-submitted sign-in code never locks the password login out, nor the
+  // other way round. Codes are single-use, short-lived and bound to a PKCE verifier.
+  opsSignInExchange: createRateLimiter({
+    name: 'opsSignInExchange',
+    windowMs: 15 * 60 * 1000,
+    max: 10,
+    message: 'Too many failed sign-in attempts, please try again later.',
+    skipSuccessfulRequests: true,
+    keyGenerator: keyGenerators.ip
+  }),
+
   // POST /api/ops/auth/code — ops sign-in codes, per signed-in account (after protect)
   opsSignInCode: createRateLimiter({
     name: 'opsSignInCode',

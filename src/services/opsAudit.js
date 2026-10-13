@@ -29,23 +29,51 @@ class OpsError extends Error {
   }
 }
 
-/** The actor of scripts/opsRoles.js. */
-const SCRIPT_ACTOR = Object.freeze({ kind: 'system', userId: null, label: 'script', role: 'system' });
+/**
+ * Who acted, as written into records that people outside staff can read (a point's source id, a
+ * privacy request's resolvedBy, a ledger row's metadata, a campaign's createdBy, a role grant's
+ * grantedBy, ...): `ops:` and the first 8 characters of the staff account's id, never its e-mail.
+ * The person behind it is kept only in OpsAuditLog (actorUserId, actorLabel).
+ */
+function staffRecordLabel(userId) {
+  const short = String(userId || '').slice(0, 8);
+  return short ? `ops:${short}` : 'ops';
+}
 
-/** The audit actor of an ops session (req.opsAdmin). A demo session never writes. */
+/** The actor of scripts/opsRoles.js. */
+const SCRIPT_ACTOR = Object.freeze({ kind: 'system', userId: null, label: 'script', recordLabel: 'script', role: 'system' });
+
+/**
+ * The audit actor of an ops session (req.opsAdmin). A demo session never writes. `label` is the
+ * audit row's actorLabel (a personal session's e-mail); `recordLabel` is what any other record
+ * gets (see staffRecordLabel).
+ */
 function actorFromOps(opsAdmin) {
   if (opsAdmin && opsAdmin.kind === 'user') {
-    return { kind: 'user', userId: opsAdmin.userId, label: opsAdmin.username, role: opsAdmin.role };
+    return {
+      kind: 'user',
+      userId: opsAdmin.userId,
+      label: opsAdmin.email || opsAdmin.username,
+      recordLabel: staffRecordLabel(opsAdmin.userId),
+      role: opsAdmin.role,
+    };
   }
   if (opsAdmin && opsAdmin.kind === 'shared') {
-    return { kind: 'shared', userId: null, label: 'shared', role: 'shared' };
+    return { kind: 'shared', userId: null, label: 'shared', recordLabel: 'shared', role: 'shared' };
   }
   throw new OpsError(403, 'FORBIDDEN_ROLE', 'This session cannot change anything.');
 }
 
 /** The audit actor for a signed-in DataDance account acting with `role`. */
 function actorFromUser(user, role) {
-  return { kind: 'user', userId: user.id, label: user.email || user.id, role };
+  return { kind: 'user', userId: user.id, label: user.email || user.id, recordLabel: staffRecordLabel(user.id), role };
+}
+
+/** The "by" value an actor writes into a record outside OpsAuditLog: never an e-mail. */
+function recordLabelOf(actor) {
+  if (!actor) return 'ops';
+  if (actor.kind === 'user') return staffRecordLabel(actor.userId);
+  return String(actor.recordLabel || actor.label || actor.kind);
 }
 
 const ID_LIMIT = 256;
@@ -313,6 +341,8 @@ function auditOpsWrites(req, res, next) {
 module.exports = {
   OpsError,
   SCRIPT_ACTOR,
+  staffRecordLabel,
+  recordLabelOf,
   actorFromOps,
   actorFromUser,
   writeAudit,

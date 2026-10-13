@@ -83,11 +83,11 @@ describe('POST /api/ops/users/:userId/disable and /enable', () => {
     const state = res.body.data.user;
     assert.equal(state.id, member.id);
     assert.ok(state.disabledAt);
-    assert.equal(state.disabledBy, 'sloan@example.test');
+    assert.equal(state.disabledBy, `ops:${admin.id.slice(0, 8)}`, 'the record label, never the e-mail');
     assert.equal(state.disabledReason, 'fraud report #12');
     const row = userRow(member.id);
     assert.ok(row.disabledAt instanceof Date);
-    assert.equal(row.disabledBy, 'sloan@example.test');
+    assert.equal(row.disabledBy, `ops:${admin.id.slice(0, 8)}`);
     assert.equal(row.sessionsResetAt.getTime(), row.disabledAt.getTime(), 'a disable resets the staff sessions');
     assert.equal(prisma.store.mcpToken.filter((t) => t.userId === member.id).length, 0);
     assert.equal(prisma.store.ssoTicket.filter((t) => t.userId === member.id).length, 0);
@@ -114,7 +114,8 @@ describe('POST /api/ops/users/:userId/disable and /enable', () => {
     assert.equal(row.disabledReason, null);
     const enabled = prisma.store.opsAuditLog.find((r) => r.action === 'account.enable');
     assert.equal(enabled.reason, 'cleared after review');
-    assert.equal(enabled.detail.previous.disabledBy, 'sloan@example.test');
+    assert.equal(enabled.detail.previous.disabledBy, `ops:${admin.id.slice(0, 8)}`);
+    assert.equal(enabled.actorLabel, 'sloan@example.test', 'the audit row keeps who acted');
     assert.equal(enabled.detail.previous.disabledReason, 'fraud report #12');
     assert.match(enabled.detail.previous.disabledAt, /^\d{4}-\d\d-\d\dT/);
     assert.deepEqual(prisma.store.userRoleGrant.filter((g) => g.userId === member.id).map((g) => g.role), ['developer']);

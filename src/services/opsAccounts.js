@@ -2,7 +2,7 @@
  * Disable / re-enable a DataDance account from ops (admin issue #2).
  *
  * Disable, in one transaction guarded by `updateMany({ id, disabledAt: null })`:
- *   1. set disabledAt, disabledBy (the actor's label) and disabledReason;
+ *   1. set disabledAt, disabledBy (the actor's record label, never an e-mail) and disabledReason;
  *   2. delete the account's McpToken rows (OAuthRefreshToken rows cascade): partner and MCP access end;
  *   3. delete the account's SsoTicket rows: App SSO consent sessions end;
  *   4. write the audit row.
@@ -13,7 +13,7 @@
  * again (src/services/staffSession.js). Role grants are kept through disable and enable.
  */
 const prisma = require('../utils/prisma');
-const { OpsError, writeAudit, isoOrNull } = require('./opsAudit');
+const { OpsError, writeAudit, isoOrNull, recordLabelOf } = require('./opsAudit');
 const { lockAdmins, otherEnabledAdmins, requireReason, findTarget } = require('./userRoles');
 
 function presentState(user) {
@@ -41,7 +41,7 @@ async function disableAccount({ userId, reason, actor, surface = 'ops', requestI
       throw new OpsError(409, 'LAST_ADMIN', 'At least one enabled ddc_admin must remain.');
     }
     const now = new Date();
-    const state = { disabledAt: now, disabledBy: String(actor.label), disabledReason: why };
+    const state = { disabledAt: now, disabledBy: recordLabelOf(actor), disabledReason: why };
     const changed = await tx.user.updateMany({
       where: { id: target.id, disabledAt: null },
       data: { ...state, sessionsResetAt: now },

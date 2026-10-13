@@ -232,23 +232,41 @@ async function auditedWrite(audit, entry, write, changed = () => true) {
   });
 }
 
+/** A reconcile claim older than this was left by a crash and may be taken over. */
+const RECONCILE_CLAIM_STALE_MS = 15 * 60 * 1000;
+
 /**
- * An audited call on a payout that already has a transaction hash claims the payout as it was read
- * and writes its audit row in that claim, before the hash is re-checked or the payout attested.
- * False when the payout moved meanwhile.
+ * The reconcile step of a confirmed payout (attest it, mark its redemption paid) runs for one
+ * caller at a time: the claim sets `reconcileClaimedAt` with a conditional update on the payout as
+ * it was read (confirmed, same hash, no live claim), so of two calls at once exactly one wins and
+ * the other changes and sends nothing. With an audit, the claim and its row commit together, before
+ * the attestation is sent. Answers the claim time, or null when the call lost.
  */
-async function claimForAudit(audit, existing, step) {
-  if (!audit) return true;
+async function claimReconcile(audit, existing) {
+  const claimedAt = new Date();
+  const staleBefore = new Date(claimedAt.getTime() - RECONCILE_CLAIM_STALE_MS);
   const claimed = await auditedWrite(
     audit,
-    payoutAuditEntry(existing, step, existing.status),
+    payoutAuditEntry(existing, 'reconcile', existing.status),
     (db) => db.disbursementItem.updateMany({
-      where: { id: existing.id, status: existing.status, txHash: existing.txHash },
-      data: { failureReason: existing.failureReason },
+      where: {
+        id: existing.id,
+        status: 'confirmed',
+        txHash: existing.txHash,
+        OR: [{ reconcileClaimedAt: null }, { reconcileClaimedAt: { lt: staleBefore } }],
+      },
+      data: { reconcileClaimedAt: claimedAt },
     }),
     (result) => result.count === 1,
   );
-  return claimed.count === 1;
+  return claimed.count === 1 ? claimedAt : null;
+}
+
+async function releaseReconcile(id, claimedAt) {
+  await prisma.disbursementItem.updateMany({
+    where: { id, reconcileClaimedAt: claimedAt },
+    data: { reconcileClaimedAt: null },
+  });
 }
 
 function reloadItem(id) {
@@ -274,12 +292,18 @@ async function processItem(itemId, { audit } = {}) {
   if (existing.status === 'confirmed' && existing.txHash) {
     // Attested and not a redemption: nothing left to do (no change, no audit row).
     if (existing.attestationTxHash && !existing.redemptionId) return existing;
-    if (!(await claimForAudit(audit, existing, 'reconcile'))) return reloadItem(existing.id);
-    const attested = existing.attestationTxHash
-      ? existing
-      : await attestConfirmedItem(existing, existing.partner?.slug || null);
-    await markRewardPaid(attested);
-    return attested;
+    const claimedAt = await claimReconcile(audit, existing);
+    // The loser sees the payout as the winner left it.
+    if (!claimedAt) return reloadItem(existing.id);
+    try {
+      const attested = existing.attestationTxHash
+        ? existing
+        : await attestConfirmedItem(existing, existing.partner?.slug || null);
+      await markRewardPaid(attested);
+    } finally {
+      await releaseReconcile(existing.id, claimedAt);
+    }
+    return reloadItem(existing.id);
   }
 
   if (existing.txHash && existing.status === 'submitted') {

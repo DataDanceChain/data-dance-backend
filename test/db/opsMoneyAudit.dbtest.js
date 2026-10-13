@@ -8,6 +8,11 @@
  * the change rolls back with it (no payment, ledger, payout, purchase or points change, and no
  * transfer is attempted).
  *
+ * Calls that race each other are run at once: two attests (or a confirm and an attest) send one
+ * chain attestation; two reconciles of a confirmed payout attest it once; two deductions never take
+ * a balance below zero; two credits with one Idempotency-Key credit once; two fulfilments for one
+ * buyer never overdraw it; a repeat reject changes nothing.
+ *
  * The refusal is a CHECK constraint this file adds for its own run only (it refuses the rows of one
  * per-run admin) and drops afterwards. The chain is the in-memory fake (test/helpers/fakeAttestChain.js)
  * and the payout sender is a stub that records its calls: nothing is sent anywhere. Fixture rows use
@@ -41,12 +46,27 @@ const realChain = require('../../src/utils/commerceAttestChain');
 const { FakeChain } = require('../helpers/fakeAttestChain');
 
 const chain = new FakeChain();
+// A test can make every chain call slow (`chainGate.delayMs`), so two calls overlap.
+const chainGate = { delayMs: 0 };
 replaceModule(path.join(__dirname, '../../src/utils/commerceAttestChain.js'), {
   ...realChain,
-  attestHashOnChain: (hash) => realChain.attestHashOnChain(hash, {
-    provider: chain.provider, wallet: chain.wallet(), attester: chain.attester, log: { warn() {} },
-  }),
+  attestHashOnChain: async (hash) => {
+    if (chainGate.delayMs) await new Promise((resolve) => setTimeout(resolve, chainGate.delayMs));
+    return realChain.attestHashOnChain(hash, {
+      provider: chain.provider, wallet: chain.wallet(), attester: chain.attester, log: { warn() {} },
+    });
+  },
 });
+
+/** Run `fn` with every chain call taking `ms`. */
+async function slowChain(ms, fn) {
+  chainGate.delayMs = ms;
+  try {
+    return await fn();
+  } finally {
+    chainGate.delayMs = 0;
+  }
+}
 
 // The payout sender: records each transfer it is asked for and answers a confirmed hash. A test
 // can make it slow (`sender.delayMs`, so two calls overlap) or fail once (`sender.failNext`).
@@ -307,6 +327,29 @@ describe('payments', () => {
     }
   });
 
+  it('reject: rejecting a rejected payment changes nothing (same notes, no new row), also two at once', async () => {
+    const payment = await topUp('pay-reject-twice');
+    const first = await post(`/payments/${payment.id}/reject`, auth.admin, { notes: 'slip does not match' });
+    assert.equal(first.status, 200, JSON.stringify(first.body));
+    const again = await post(`/payments/${payment.id}/reject`, auth.admin, { notes: 'a second note' });
+    assert.equal(again.status, 200, JSON.stringify(again.body));
+    const row = await prisma.payment.findUnique({ where: { id: payment.id } });
+    assert.equal(row.status, 'rejected');
+    assert.equal(row.notes, 'slip does not match', 'the notes stay as the first reject left them');
+    await settle();
+    assert.deepEqual((await rowsFor(payment.id)).map((r) => r.action), ['payment.reject']);
+
+    const raced = await topUp('pay-reject-race');
+    const results = await Promise.all([
+      post(`/payments/${raced.id}/reject`, auth.admin, { notes: 'first' }),
+      post(`/payments/${raced.id}/reject`, auth.admin, { notes: 'second' }),
+    ]);
+    assert.deepEqual(results.map((r) => r.status), [200, 200], JSON.stringify(results.map((r) => r.body)));
+    await settle();
+    assert.equal((await rowsFor(raced.id)).length, 1, 'one reject, one row');
+    assert.equal(await genericRows(), 0);
+  });
+
   it('reject: one payment.reject row with the note as its reason; a refused row leaves the payment pending', async () => {
     const payment = await topUp('pay-reject');
     const res = await post(`/payments/${payment.id}/reject`, auth.admin, { notes: 'slip does not match' });
@@ -342,6 +385,63 @@ describe('merchant credit', () => {
     assert.equal(await prisma.organizationTransaction.count({ where: { userId: merchant.id } }), 1);
     assert.equal((await rowsFor(merchant.id)).length, 1);
     assert.equal(await genericRows(), 0);
+  });
+});
+
+describe('merchant credit with an Idempotency-Key', () => {
+  const credit = (merchant, body, key, authorization = auth.admin) => {
+    const req = request(app).post(`/api/ops/merchants/${merchant.id}/credit`).set('Authorization', authorization);
+    if (key) req.set('Idempotency-Key', key);
+    return req.send(body);
+  };
+
+  it('one key credits once, also when two arrive at once; the repeat answers the first credit', async () => {
+    const merchant = await user('idem-merchant', { organization: true });
+    const key = `${RUN}-credit-key-1`;
+    const body = { amount: 25, note: 'goodwill credit' };
+    const results = await Promise.all([credit(merchant, body, key), credit(merchant, body, key)]);
+    assert.deepEqual(results.map((r) => r.status), [200, 200], JSON.stringify(results.map((r) => r.body)));
+    assert.equal(results[0].body.data.transaction.id, results[1].body.data.transaction.id);
+    assert.deepEqual(results.map((r) => Boolean(r.body.data.replayed)).sort(), [false, true]);
+    const later = await credit(merchant, body, key);
+    assert.equal(later.status, 200);
+    assert.equal(later.body.data.replayed, true);
+    assert.equal(later.body.data.balance, 25);
+    assert.equal(await prisma.organizationTransaction.count({ where: { userId: merchant.id } }), 1);
+    await settle();
+    assert.equal((await rowsFor(merchant.id)).length, 1, 'one credit, one row');
+    assert.equal(await genericRows(), 0);
+  });
+
+  it('the same key with another amount or note is refused (409); a malformed key is 400; no key credits each time', async () => {
+    const merchant = await user('idem-merchant-2', { organization: true });
+    const key = `${RUN}-credit-key-2`;
+    assert.equal((await credit(merchant, { amount: 10, note: 'goodwill credit' }, key)).status, 200);
+    const other = await credit(merchant, { amount: 11, note: 'goodwill credit' }, key);
+    assert.equal(other.status, 409, JSON.stringify(other.body));
+    assert.equal(other.body.code, 'IDEMPOTENCY_KEY_REUSED');
+    const bad = await credit(merchant, { amount: 10, note: 'goodwill credit' }, 'short');
+    assert.equal(bad.status, 400);
+    assert.equal(bad.body.code, 'INVALID_IDEMPOTENCY_KEY');
+    assert.equal((await credit(merchant, { amount: 10, note: 'goodwill credit' })).status, 200);
+    assert.equal((await credit(merchant, { amount: 10, note: 'goodwill credit' })).status, 200);
+    assert.equal(await prisma.organizationTransaction.count({ where: { userId: merchant.id } }), 3);
+    // The same key on another merchant is another credit.
+    const second = await user('idem-merchant-3', { organization: true });
+    assert.equal((await credit(second, { amount: 10, note: 'goodwill credit' }, key)).body.data.replayed, undefined);
+  });
+});
+
+describe('points adjust', () => {
+  it('two deductions at once never take the balance below zero', async () => {
+    const member = await user('points-race', { totalPoints: 50 });
+    const deduct = () => post(`/users/${member.id}/points`, auth.admin, { amount: -30, note: 'duplicate grant' });
+    const results = await Promise.all([deduct(), deduct()]);
+    assert.deepEqual(results.map((r) => r.status).sort(), [200, 400], JSON.stringify(results.map((r) => r.body)));
+    assert.equal((await prisma.user.findUnique({ where: { id: member.id } })).totalPoints, 20);
+    assert.equal(await prisma.point.count({ where: { userId: member.id } }), 1);
+    const rows = await rowsFor(member.id);
+    assert.deepEqual(rows.map((r) => [r.action, r.detail.balanceBefore, r.detail.balanceAfter]), [['points.adjust', 50, 20]]);
   });
 });
 
@@ -456,6 +556,93 @@ describe('order attestation', () => {
     const saved = await prisma.purchaseOrder.findUnique({ where: { id: order.id } });
     assert.ok(saved.attestationTxHash, 'the hash the chain call returned is stored on the order');
     assert.ok(rows[0].createdAt <= saved.updatedAt);
+  });
+});
+
+describe('order attestation: one chain send at a time', () => {
+  async function unattestedOrder(name, paymentStatus = 'confirmed') {
+    const buyer = await user(`${name}-buyer`, { organization: true });
+    const seller = await user(`${name}-seller`, { organization: true });
+    const order = await prisma.purchaseOrder.create({
+      data: { id: id(name), orderNumber: id(name).toUpperCase(), buyerId: buyer.id, sellerId: seller.id, subtotal: 30, total: 30 },
+    });
+    const payment = await prisma.payment.create({
+      data: {
+        id: id(`${name}-pay`), paymentNumber: id(`${name}-pay`).toUpperCase(), orderId: order.id, payerId: buyer.id, payeeId: seller.id,
+        amount: 30, method: 'bank_transfer', status: paymentStatus, paidAt: paymentStatus === 'confirmed' ? new Date() : null,
+      },
+    });
+    return { order, payment };
+  }
+
+  it('two attests at once: one chain attestation and one row; the other is refused (409) and writes nothing', async () => {
+    const { order } = await unattestedOrder('attest-race');
+    const sent = chain.sent.length;
+    const results = await slowChain(300, () => Promise.all([
+      post(`/orders/${order.id}/attest`, auth.admin),
+      post(`/orders/${order.id}/attest`, auth.admin),
+    ]));
+    assert.deepEqual(results.map((r) => r.status).sort(), [200, 409], JSON.stringify(results.map((r) => r.body)));
+    assert.equal(results.find((r) => r.status === 409).body.code, 'ATTESTATION_IN_FLIGHT');
+    assert.equal(chain.sent.length, sent + 1, 'one chain attestation');
+    const saved = await prisma.purchaseOrder.findUnique({ where: { id: order.id } });
+    assert.ok(saved.attestationTxHash);
+    assert.equal(saved.attestationClaimedAt, null, 'the claim is released');
+    await settle();
+    assert.deepEqual((await rowsFor(order.id)).map((r) => r.action), ['order.attest']);
+
+    const after = await post(`/orders/${order.id}/attest`, auth.admin);
+    assert.equal(after.status, 200);
+    assert.equal(chain.sent.length, sent + 1, 'an attested order is not sent again');
+  });
+
+  it('a payment confirm and a manual attest at once: one chain attestation', async () => {
+    const { order, payment } = await unattestedOrder('confirm-attest-race', 'pending');
+    const sent = chain.sent.length;
+    const [confirmed, attested] = await slowChain(300, () => Promise.all([
+      post(`/payments/${payment.id}/confirm`, auth.admin),
+      post(`/orders/${order.id}/attest`, auth.admin),
+    ]));
+    assert.equal(confirmed.status, 200, JSON.stringify(confirmed.body));
+    assert.ok([200, 409].includes(attested.status), JSON.stringify(attested.body));
+    assert.equal(chain.sent.length, sent + 1, 'one chain attestation');
+    await settle();
+    assert.deepEqual((await rowsFor(order.id)).map((r) => r.action), ['order.attest']);
+    assert.equal((await prisma.purchaseOrder.findUnique({ where: { id: order.id } })).attestationClaimedAt, null);
+  });
+
+  it('a chain call that fails releases the claim, and the next attest sends', async () => {
+    const { order } = await unattestedOrder('attest-fails');
+    const sent = chain.sent.length;
+    chain.failures.sendTransaction = new Error('rpc unavailable');
+    let failed;
+    try {
+      failed = await post(`/orders/${order.id}/attest`, auth.admin);
+    } finally {
+      delete chain.failures.sendTransaction;
+    }
+    assert.equal(failed.status, 200, JSON.stringify(failed.body));
+    assert.equal(failed.body.data.chainPending, true);
+    const pending = await prisma.purchaseOrder.findUnique({ where: { id: order.id } });
+    assert.equal(pending.attestationTxHash, null);
+    assert.equal(pending.attestationClaimedAt, null, 'released after the failed call');
+    const retried = await post(`/orders/${order.id}/attest`, auth.admin);
+    assert.equal(retried.status, 200, JSON.stringify(retried.body));
+    assert.equal(chain.sent.length, sent + 1);
+    assert.ok((await prisma.purchaseOrder.findUnique({ where: { id: order.id } })).attestationTxHash);
+  });
+
+  it('without an ops session (the buyer paths) the same claim holds: two at once send once', async () => {
+    const { order } = await unattestedOrder('attest-race-plain');
+    const { attestPaidOrder } = require('../../src/services/commerceAttest');
+    const sent = chain.sent.length;
+    const results = await slowChain(300, () => Promise.allSettled([attestPaidOrder(order.id), attestPaidOrder(order.id)]));
+    assert.deepEqual(results.map((r) => r.status).sort(), ['fulfilled', 'rejected']);
+    assert.equal(results.find((r) => r.status === 'rejected').reason.code, 'ATTESTATION_IN_FLIGHT');
+    assert.equal(chain.sent.length, sent + 1);
+    const saved = await prisma.purchaseOrder.findUnique({ where: { id: order.id } });
+    assert.ok(saved.attestationTxHash && saved.attestationHash);
+    assert.equal(saved.attestationClaimedAt, null);
   });
 });
 
@@ -586,6 +773,45 @@ describe('payouts', () => {
     assert.deepEqual((await rowsFor(item.id)).map((row) => row.detail.step), ['recheck', 'recheck']);
   });
 
+  it('process: two calls at once on a confirmed, unattested payout reconcile it once (one attestation, one row)', async () => {
+    const item = await prisma.disbursementItem.create({
+      data: {
+        payoutId: id('reconcile-race'),
+        origin: 'internal_reward',
+        recordClass: recordClassForOrigin('internal_reward'),
+        walletAddress: wallet(),
+        amount: 3,
+        asset: 'USDT',
+        chainId: chainId(),
+        tokenAddress: tokenAddress(),
+        reason: 'db test',
+        status: 'confirmed',
+        txHash: ethers.hexlify(ethers.randomBytes(32)),
+        submittedAt: new Date(),
+        confirmedAt: new Date(),
+      },
+    });
+    const sent = chain.sent.length;
+    const before = transfers.length;
+    const results = await slowChain(300, () => Promise.all([
+      post(`/disbursements/items/${item.id}/process`, auth.admin),
+      post(`/disbursements/items/${item.id}/process`, auth.admin),
+    ]));
+    assert.deepEqual(results.map((r) => r.status), [200, 200], JSON.stringify(results.map((r) => r.body)));
+    assert.equal(chain.sent.length, sent + 1, 'one attestation');
+    assert.equal(transfers.length, before, 'a confirmed payout is never sent again');
+    const saved = await prisma.disbursementItem.findUnique({ where: { id: item.id } });
+    assert.ok(saved.attestationTxHash);
+    assert.equal(saved.reconcileClaimedAt, null, 'the claim is released');
+    await settle();
+    assert.deepEqual((await rowsFor(item.id)).map((r) => [r.action, r.detail.step]), [['disbursement.process', 'reconcile']]);
+
+    const again = await post(`/disbursements/items/${item.id}/process`, auth.admin);
+    assert.equal(again.status, 200);
+    assert.equal(chain.sent.length, sent + 1);
+    assert.equal((await rowsFor(item.id)).length, 1, 'an attested payout needs nothing more');
+  });
+
   async function redemption(name) {
     return prisma.pointsRedemption.create({
       data: { email: `${id(name)}@example.test`, emailNormalized: `${id(name)}@example.test`, points: 300, amount: 3, asset: 'USDT' },
@@ -658,6 +884,28 @@ describe('data request fulfilment', () => {
     assert.equal(rows[0].detail.purchaseId, row.purchaseId);
     assert.equal(rows[0].detail.orderId, row.orderId);
     assert.equal(rows[0].detail.amount, 30);
+  });
+
+  it('fulfil: two fulfilments for one buyer at once never overdraw the balance', async () => {
+    const buyer = await user('demand-race-buyer', { organization: true });
+    await kyc(buyer.id);
+    await deposit(buyer.id, 40);
+    const ask = () => demandService.createDemand(buyer.id, {
+      category: 'mobility', region: 'SG', recordCount: 2, description: 'Two anonymised rows', bidUsd: 40,
+    });
+    const [first, second] = [await ask(), await ask()];
+    const results = await Promise.all([
+      post(`/demands/${first.id}/fulfill`, auth.admin, { dataNFTId: chosen.id }),
+      post(`/demands/${second.id}/fulfill`, auth.admin, { dataNFTId: chosen.id }),
+    ]);
+    assert.deepEqual(results.map((r) => r.status).sort(), [200, 400], JSON.stringify(results.map((r) => r.body)));
+    assert.equal(results.find((r) => r.status === 400).body.code, 'insufficient_balance');
+    assert.equal(await prisma.dataNFTPurchase.count({ where: { buyerId: buyer.id } }), 1);
+    const spent = await prisma.organizationTransaction.aggregate({ _sum: { amount: true }, where: { userId: buyer.id, type: 'WITHDRAW', status: 'COMPLETED' } });
+    assert.equal(spent._sum.amount, 30, 'one purchase was paid; the balance stays at 10');
+    await settle();
+    const rows = [...(await rowsFor(first.id)), ...(await rowsFor(second.id))];
+    assert.deepEqual(rows.map((r) => r.action), ['demand.fulfill']);
   });
 
   it('fulfil: when the audit row is refused, nothing is bought and the request stays open', async () => {

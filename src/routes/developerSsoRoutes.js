@@ -148,7 +148,12 @@ router.post('/clients', registrationOpen, protect, registrationRole, rateLimiter
         error_description: error.message,
       });
     }
-    logger.error('Developer client registration failed', { message: error && error.message });
+    // The error's code and name only: a failed write's message can carry the row it refused.
+    consoleLog.error('Developer client registration failed', {
+      reqId: req.reqId || null,
+      errorCode: errorCode(error && error.code),
+      errorName: errorName(error && error.name),
+    });
     return res.status(500).json({
       error: 'server_error',
       error_description: 'Could not create the client.',

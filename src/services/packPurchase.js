@@ -8,6 +8,26 @@ function httpError(statusCode, code, message) {
   return Object.assign(new Error(message), { statusCode, code });
 }
 
+/** A transaction-scoped lock on one buyer's USD balance (released when the transaction ends). */
+async function lockBuyerBalance(tx, buyerId) {
+  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('ddc:org-balance'), hashtext(${String(buyerId)}))`;
+}
+
+/** The buyer's USD balance: completed deposits minus completed withdrawals. */
+async function usdBalance(db, buyerId) {
+  const [depositSum, withdrawSum] = await Promise.all([
+    db.organizationTransaction.aggregate({
+      _sum: { amount: true },
+      where: { userId: buyerId, type: 'DEPOSIT', status: 'COMPLETED' },
+    }),
+    db.organizationTransaction.aggregate({
+      _sum: { amount: true },
+      where: { userId: buyerId, type: 'WITHDRAW', status: 'COMPLETED' },
+    }),
+  ]);
+  return (depositSum._sum.amount || 0) - (withdrawSum._sum.amount || 0);
+}
+
 /**
  * Buy a published pack from the buyer's USD balance. `inTransaction(tx, { purchase, commerce,
  * totalAmount })` runs inside the purchase transaction (a throw rolls the purchase back); its
@@ -47,22 +67,15 @@ async function purchasePublishedPack({ buyerId, dataNFTId, quantity = 1, metadat
     throw httpError(403, 'org_buyer_required', 'Only a merchant account can buy a dataset licence.');
   }
 
-  const [depositSum, withdrawSum] = await Promise.all([
-    prisma.organizationTransaction.aggregate({
-      _sum: { amount: true },
-      where: { userId: buyerId, type: 'DEPOSIT', status: 'COMPLETED' },
-    }),
-    prisma.organizationTransaction.aggregate({
-      _sum: { amount: true },
-      where: { userId: buyerId, type: 'WITHDRAW', status: 'COMPLETED' },
-    }),
-  ]);
-  const balance = (depositSum._sum.amount || 0) - (withdrawSum._sum.amount || 0);
-  if (balance < totalAmount) {
-    throw httpError(400, 'insufficient_balance', 'Insufficient balance to complete this purchase.');
-  }
-
   const result = await prisma.$transaction(async (tx) => {
+    // The balance is read and spent under a per-buyer lock inside this transaction: two purchases
+    // (or data-request fulfilments) for the same buyer at once run one after the other, and the
+    // second sees the first one's withdrawal, so together they can never overdraw the balance.
+    await lockBuyerBalance(tx, buyerId);
+    if ((await usdBalance(tx, buyerId)) < totalAmount) {
+      throw httpError(400, 'insufficient_balance', 'Insufficient balance to complete this purchase.');
+    }
+
     const purchase = await tx.dataNFTPurchase.create({
       data: { dataNFTId, buyerId, quantity: qty },
       include: { dataNFT: { include: { snapshots: true, tags: true } } },

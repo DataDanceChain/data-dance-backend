@@ -864,7 +864,9 @@ function alreadyConfirmed() {
  * Ops rejects a payment: the payment, its ledger row (FAILED), the invoice settlement and (when
  * `audit` is given) the audit row commit together. A confirmed payment is refused (409
  * PAYMENT_ALREADY_CONFIRMED), also when a confirmation lands while this call runs: its completed
- * ledger row is never turned to FAILED here (a reversal is a separate action).
+ * ledger row is never turned to FAILED here (a reversal is a separate action). Rejecting a payment
+ * that is already rejected changes nothing: its notes stay, and no ledger change or audit row is
+ * written (also when two rejects run at once).
  */
 async function rejectPaymentByOps(paymentId, notes, operator = 'ops', { audit } = {}) {
   await prisma.$transaction(async (tx) => {
@@ -873,15 +875,21 @@ async function rejectPaymentByOps(paymentId, notes, operator = 'ops', { audit } 
       throw Object.assign(new Error('Payment not found'), { statusCode: 404 });
     }
     if (payment.status === 'confirmed') throw alreadyConfirmed();
+    if (payment.status === 'rejected') return;
     const claimed = await tx.payment.updateMany({
-      where: { id: paymentId, status: { not: 'confirmed' } },
+      where: { id: paymentId, status: { notIn: ['confirmed', 'rejected'] } },
       data: {
         status: 'rejected',
         matchStatus: 'unmatched',
         notes: notes || payment.notes,
       },
     });
-    if (claimed.count !== 1) throw alreadyConfirmed();
+    if (claimed.count !== 1) {
+      // Another call moved it meanwhile: a confirmation is refused, a rejection is this one's no-op.
+      const now = await tx.payment.findUnique({ where: { id: paymentId }, select: { status: true } });
+      if (now && now.status === 'rejected') return;
+      throw alreadyConfirmed();
+    }
     if (payment.organizationTransactionId) {
       const row = await tx.organizationTransaction.findUnique({
         where: { id: payment.organizationTransactionId },

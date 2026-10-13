@@ -191,6 +191,69 @@ function attestationData({ payload, attestationHash, attestationTxHash }) {
   };
 }
 
+/**
+ * Only one caller at a time may send an order's attestation on chain: the claim sets
+ * `attestationClaimedAt` on an order that has no attestation tx hash and no live claim, with a
+ * conditional update, so of two calls at once (two attests, or a payment confirm and a manual
+ * attest) exactly one wins and the other sends nothing (409 ATTESTATION_IN_FLIGHT). The claim is
+ * released when the chain call returns. One left behind by a crash is taken over after
+ * ATTEST_CLAIM_STALE_MS (the chain call itself gives up within about a minute).
+ */
+const ATTEST_CLAIM_STALE_MS = 15 * 60 * 1000;
+
+function attestationInFlight() {
+  return Object.assign(new Error('This order\'s attestation is already being sent. Try again shortly.'), {
+    statusCode: 409,
+    code: 'ATTESTATION_IN_FLIGHT',
+  });
+}
+
+/** Claim the order's chain send with `db` (a transaction client or prisma). True when this call won. */
+async function claimAttestation(db, orderId, claimedAt) {
+  const staleBefore = new Date(claimedAt.getTime() - ATTEST_CLAIM_STALE_MS);
+  const claimed = await db.purchaseOrder.updateMany({
+    where: {
+      id: orderId,
+      attestationTxHash: null,
+      OR: [{ attestationClaimedAt: null }, { attestationClaimedAt: { lt: staleBefore } }],
+    },
+    data: { attestationClaimedAt: claimedAt },
+  });
+  return claimed.count === 1;
+}
+
+/**
+ * After the chain call: store the tx hash it returned (unless one is stored meanwhile) and release
+ * this call's claim. Returns the order as it now is.
+ */
+async function finishClaimedAttestation(orderId, claimedAt, chain) {
+  if (chain && chain.ok && looksLikeTxHash(chain.txHash)) {
+    await prisma.purchaseOrder.updateMany({
+      where: { id: orderId, attestationTxHash: null },
+      data: { attestationTxHash: chain.txHash, attestedAt: new Date() },
+    });
+  }
+  await releaseAttestationClaim(orderId, claimedAt);
+  return prisma.purchaseOrder.findUnique({ where: { id: orderId } });
+}
+
+async function releaseAttestationClaim(orderId, claimedAt) {
+  await prisma.purchaseOrder.updateMany({
+    where: { id: orderId, attestationClaimedAt: claimedAt },
+    data: { attestationClaimedAt: null },
+  });
+}
+
+/** The chain call of a claimed send; the claim is released if it throws. */
+async function sendClaimedAttestation(orderId, claimedAt, attestationHash) {
+  try {
+    return await attestHashOnChain(attestationHash);
+  } catch (error) {
+    await releaseAttestationClaim(orderId, claimedAt);
+    throw error;
+  }
+}
+
 /** Store the attestation (no audit: the caller is not an ops route). */
 async function persistAttestation(orderId, attestation) {
   const updated = await prisma.purchaseOrder.update({
@@ -206,8 +269,11 @@ async function persistAttestation(orderId, attestation) {
  * nothing and sends nothing; the row records whether a chain submission follows. The tx hash that
  * submission returns is stored on the order afterwards (the row stays as written: append-only).
  */
-async function persistAuditedAttestation(order, attestation, { audit, submitted, chainSend }) {
+async function persistAuditedAttestation(order, attestation, { audit, submitted, chainSend, claimedAt }) {
   return prisma.$transaction(async (tx) => {
+    // A chain send first claims the order, in the same transaction as its audit row: a lost claim
+    // writes nothing and sends nothing; a refused row releases the claim with everything else.
+    if (chainSend && !(await claimAttestation(tx, order.id, claimedAt))) throw attestationInFlight();
     const updated = await tx.purchaseOrder.update({
       where: { id: order.id },
       data: attestationData(attestation),
@@ -249,35 +315,42 @@ async function attestPaidOrder(orderId, { txHash, submittedBy, audit } = {}) {
   const payload = existingPayload || await buildReceiptForOrder(order);
   const attestationHash = hashLicenceReceipt(payload);
   const proof = await verifySubmittedTxHash(txHash, attestationHash, { orderId: order.id, submittedBy });
-  let attestationTxHash = proof
+  const attestationTxHash = proof
     ? proof.txHash
     : (looksLikeTxHash(order.attestationTxHash) ? order.attestationTxHash : null);
   let chain = null;
 
   if (audit) {
     const chainSend = !attestationTxHash;
+    const claimedAt = new Date();
     let row = await persistAuditedAttestation(order, { payload, attestationHash, attestationTxHash }, {
       audit,
       submitted: Boolean(proof),
       chainSend,
+      claimedAt,
     });
     if (chainSend) {
-      chain = await attestHashOnChain(attestationHash);
-      if (chain.ok && looksLikeTxHash(chain.txHash)) {
-        row = await prisma.purchaseOrder.update({
-          where: { id: order.id },
-          data: { attestationTxHash: chain.txHash, attestedAt: new Date() },
-        });
-      }
+      chain = await sendClaimedAttestation(order.id, claimedAt, attestationHash);
+      row = await finishClaimedAttestation(order.id, claimedAt, chain);
     }
     return attestResult(order, publicAttestation(row), { chain, proof });
   }
 
   if (!attestationTxHash) {
-    chain = await attestHashOnChain(attestationHash);
-    if (chain.ok && looksLikeTxHash(chain.txHash)) {
-      attestationTxHash = chain.txHash;
-    }
+    const claimedAt = new Date();
+    if (!(await claimAttestation(prisma, order.id, claimedAt))) throw attestationInFlight();
+    chain = await sendClaimedAttestation(order.id, claimedAt, attestationHash);
+    await prisma.purchaseOrder.updateMany({
+      where: { id: order.id, attestationClaimedAt: claimedAt },
+      data: {
+        attestationPayload: payload,
+        attestationHash,
+        attestedAt: new Date(),
+        ...(chain.ok && looksLikeTxHash(chain.txHash) ? { attestationTxHash: chain.txHash } : {}),
+      },
+    });
+    const row = await finishClaimedAttestation(order.id, claimedAt, null);
+    return attestResult(order, publicAttestation(row), { chain, proof });
   }
 
   const saved = await persistAttestation(order.id, {
@@ -301,6 +374,7 @@ async function attestPaidOrderSafe(orderId, options) {
 }
 
 module.exports = {
+  ATTEST_CLAIM_STALE_MS,
   LICENCE_SCHEMA,
   LICENCE_VERSION,
   LICENCE_PURPOSE,

@@ -316,20 +316,31 @@ exports.adjustPoints = async (req, res) => {
       return res.status(404).json({ status: 'fail', message: 'User not found' });
     }
 
-    if (delta < 0 && user.totalPoints + delta < 0) {
-      return res.status(400).json({
-        status: 'fail',
-        message: `Insufficient balance: ${user.totalPoints}, cannot deduct ${Math.abs(delta)}`,
-      });
-    }
-
     const slug = reason.replace(/[^a-zA-Z0-9]+/g, '-').slice(0, 40).toLowerCase() || 'adjustment';
+    // The session's record label, never an e-mail: the end user reads this source id back.
     const admin = req.opsAdmin?.username || 'ops';
     const sourceId = `ops-manual-${Date.now()}-${slug}__${admin}`;
 
     const actor = actorFromOps(req.opsAdmin);
-    const balanceBefore = user.totalPoints;
     const result = await prisma.$transaction(async (tx) => {
+      // The balance is checked in the change itself: a deduction only applies while the account
+      // still holds at least that much, so two deductions at once can never go below zero.
+      const moved = await tx.user.updateMany({
+        where: { id: userId, ...(delta < 0 ? { totalPoints: { gte: -delta } } : {}) },
+        data: { totalPoints: { increment: delta } },
+      });
+      if (moved.count !== 1) {
+        const current = await tx.user.findUnique({ where: { id: userId }, select: { totalPoints: true } });
+        if (!current) throw Object.assign(new Error('User not found'), { statusCode: 404 });
+        throw Object.assign(
+          new Error(`Insufficient balance: ${current.totalPoints}, cannot deduct ${Math.abs(delta)}`),
+          { statusCode: 400 },
+        );
+      }
+      const updated = await tx.user.findUnique({
+        where: { id: userId },
+        select: { totalPoints: true, email: true },
+      });
       const point = await tx.point.create({
         data: {
           userId,
@@ -338,11 +349,7 @@ exports.adjustPoints = async (req, res) => {
           sourceId,
         },
       });
-      const updated = await tx.user.update({
-        where: { id: userId },
-        data: { totalPoints: { increment: delta } },
-        select: { totalPoints: true, email: true },
-      });
+      const balanceBefore = updated.totalPoints - delta;
       // Same transaction: if the audit row cannot be written, the points do not move.
       const audit = await writeAudit(tx, {
         actor,
@@ -359,7 +366,7 @@ exports.adjustPoints = async (req, res) => {
         surface: 'ops',
         requestId: req.reqId || null,
       });
-      return { point, user: updated, audit };
+      return { point, user: updated, audit, balanceBefore };
     });
     req.auditWritten = true;
 
@@ -371,7 +378,7 @@ exports.adjustPoints = async (req, res) => {
         source: 'OPS_ADJUSTMENT',
         sourceId,
         note: reason,
-        balanceBefore,
+        balanceBefore: result.balanceBefore,
         balanceAfter: result.user.totalPoints,
         email: result.user.email,
         adjustedBy: req.opsAdmin?.username,
@@ -379,7 +386,10 @@ exports.adjustPoints = async (req, res) => {
       },
     });
   } catch (error) {
-    console.error('Ops adjust points error:', error);
+    if (error && error.statusCode && error.statusCode < 500) {
+      return res.status(error.statusCode).json({ status: 'fail', message: error.message });
+    }
+    console.error('Ops adjust points error:', error && error.name);
     return res.status(500).json({ status: 'error', message: 'Server error' });
   }
 };

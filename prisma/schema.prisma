@@ -688,6 +688,8 @@ model PurchaseOrder {
   attestationTxHash    String?
   attestedAt           DateTime?
   attestationPayload   Json?
+  /// Set while one caller sends this order's attestation on chain (src/services/commerceAttest.js).
+  attestationClaimedAt DateTime?
   pointsUnitPriceUsd   Float?
   serviceFeeAmount     Float           @default(0)
   createdAt            DateTime        @default(now())
@@ -924,6 +926,8 @@ model DisbursementItem {
   failureReason       String?
   submittedAt         DateTime?
   confirmedAt         DateTime?
+  /// Set while one caller runs a confirmed payout's reconcile step (src/services/disbursement/service.js).
+  reconcileClaimedAt  DateTime?
   createdAt           DateTime             @default(now())
   updatedAt           DateTime             @updatedAt
   batch               DisbursementBatch?   @relation(fields: [batchId], references: [id])

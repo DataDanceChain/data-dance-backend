@@ -49,7 +49,8 @@ describe('personal ops session (kind: user)', () => {
       userId: admin.id,
       email: 'admin@example.test',
       name: 'Admin',
-      username: 'admin@example.test',
+      // Records outside the audit log get this label, never the e-mail.
+      username: `ops:${admin.id.slice(0, 8)}`,
       role: 'ddc_admin',
       roles: ['ddc_admin'],
       permissions: ['ops.read', 'ops.write', 'ops.support', 'ops.payouts', 'ops.admin'],

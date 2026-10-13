@@ -12,6 +12,8 @@ the server checks on every request. Every change is written to an append-only au
   exchanges it with `POST /api/ops/auth/exchange { code, code_verifier }` for an ops session
   (`OPS_USER_TOKEN_TTL_SEC`, default 12 h, no refresh). The account must be enabled and hold
   `ddc_admin` or `operator` when the code is minted, when it is exchanged, and on every request.
+  The exchange has its own rate limit (10 failures per 15 minutes per address), separate from the
+  password login's, so a stale or repeated code never locks the login out.
 - **Which wallet sign-in may mint a code.** A verified session (`ver: 2`, from a Web3Auth ID token)
   signed in within the last 10 minutes, issued after the account's last disable / re-enable.
   Refusals: 403 `VERIFIED_SESSION_REQUIRED`, 403 `RECENT_SIGN_IN_REQUIRED`, 401
@@ -43,6 +45,17 @@ node scripts/opsRoles.js revoke --email <e> --role <role> --reason "<why>" [--ap
 
 `developer` gives no ops access: it lets a partner register SSO clients in the developer console
 while self-serve registration is closed. A missing permission answers 403 `FORBIDDEN_ROLE`.
+
+### Who acted, outside the audit log
+
+Records that users, merchants or the demo login can read name the actor by a label, never by
+e-mail: a personal session writes `ops:` and the first 8 characters of the account id (the shared
+login writes `shared`, the role script `script`). This covers a point's source id,
+`PrivacyRequest.resolvedBy`, `kycReviewedBy`, the ledger metadata of a payment decision or merchant
+credit (`confirmedBy`, `rejectedBy`, `operator`), a campaign's `createdBy` / `updatedBy` /
+`publishedBy` and events, data request events, `UserRoleGrant.grantedBy` and `User.disabledBy`.
+Who the person is stays in `OpsAuditLog` only (`actorUserId`, `actorLabel`). `GET /auth/me`
+answers the label as `username` and the account's own e-mail as `email`.
 
 ### Sessions
 
@@ -96,7 +109,7 @@ JWT_SECRET=<existing-jwt-secret>
 | GET | `/api/ops/points/export` | Same filters, CSV download |
 | GET | `/api/ops/users/search?q=` | Ops Bearer token |
 | GET | `/api/ops/users/:userId` | The full user view: account, roles, points, referrals, data licence, privacy requests, developer clients, merchant. With `ops.support` also: identity (Web3Auth verifier ids, the network rebind's addresses and evidence), sign-in issues, history, and who acted (`account.disabledBy` / `disabledReason`, `roles[].grantedBy`, `privacyRequests[].resolvedBy`); without it these are `null` |
-| POST | `/api/ops/users/:userId/points` | `ops.write`, body: `{ amount, note }` (the note is the audit reason) |
+| POST | `/api/ops/users/:userId/points` | `ops.write`, body: `{ amount, note }` (the note is the audit reason). A deduction is checked against the balance inside the change, so deductions at once never go below zero |
 | GET | `/api/ops/campaigns` | List campaign drafts / scheduled / live / ended |
 | POST | `/api/ops/campaigns` | Create draft. Slot-filled fields only, no HTML |
 | PATCH | `/api/ops/campaigns/:id` | Edit draft or scheduled |
@@ -123,12 +136,12 @@ per change and none for a call that changes nothing:
 | Route | Action |
 |---|---|
 | `POST /payments/:id/confirm` | `payment.confirm`; the call that confirms an order's payment also attests the order and writes its `order.attest` row (same actor). A repeat confirm changes nothing and attests nothing |
-| `POST /payments/:id/reject` | `payment.reject`. A confirmed payment is refused: 409 `PAYMENT_ALREADY_CONFIRMED` (a reversal will be its own action) |
-| `POST /merchants/:userId/credit` | `merchant.credit` |
-| `POST /orders/:id/attest` | `order.attest` (written with the stored hash, before the chain call; the tx hash it returns is stored on the order) |
-| `POST /disbursements/items/:id/process` | `disbursement.process` (written with the claim, before any transfer; one caller at a time claims a payout, also a submitted one being re-checked) |
+| `POST /payments/:id/reject` | `payment.reject`. A confirmed payment is refused: 409 `PAYMENT_ALREADY_CONFIRMED` (a reversal will be its own action). Rejecting a rejected payment changes nothing: same notes, no row |
+| `POST /merchants/:userId/credit` | `merchant.credit`. An optional `Idempotency-Key` header (8 to 128 of `A-Z a-z 0-9 . _ : -`): a repeat with the same key answers the first credit (`replayed: true`, no new row); the same key with another amount or note is 409 `IDEMPOTENCY_KEY_REUSED` |
+| `POST /orders/:id/attest` | `order.attest` (written with the stored hash and the claim, before the chain call; the tx hash it returns is stored on the order). One chain send per order at a time: a second attest, or a payment confirm's attestation, while one is being sent is 409 `ATTESTATION_IN_FLIGHT` and sends nothing |
+| `POST /disbursements/items/:id/process` | `disbursement.process` (written with the claim, before any transfer; one caller at a time claims a payout, also a submitted one being re-checked and a confirmed one being reconciled) |
 | `POST /disbursements/redemptions/:id/disburse` | `disbursement.disburse` (written with the new payout, before any transfer) |
-| `POST /demands/:id/fulfill` | `demand.fulfill` (purchase, request status and row in one transaction) |
+| `POST /demands/:id/fulfill` | `demand.fulfill` (purchase, request status and row in one transaction; the buyer's balance is checked inside it, one purchase per buyer at a time) |
 | `POST /campaigns/:id/raffle/draw` | `raffle.draw` (draws run one at a time per campaign) |
 
 Every other successful ops write gets one generic `ops.write` row with the method, route, params
@@ -141,20 +154,34 @@ registration is closed (in the same transaction as the client: no row, no client
 
 ## Migration
 
-`20261017100000_ops_roles_audit` adds three nullable columns to `"User"` and four tables with foreign
-keys to it. Both need short locks on `"User"`; behind a long-running reader they would queue, and
-every sign-in would queue behind them. The migration therefore sets `lock_timeout = '3s'`: on a
-busy table it fails within seconds and changes nothing (it runs as one transaction).
+Two migrations come with the ops roles; both only add, and both start with `SET lock_timeout =
+'3s'`:
 
-- Run `prisma migrate deploy` as usual. If it fails with `55P03 canceling statement due to lock
-  timeout`, mark it rolled back and deploy again (a few seconds later, or in a quiet window):
+- `20261017100000_ops_roles_audit` adds three nullable columns to `"User"` and four tables with
+  foreign keys to it.
+- `20261017100100_attestation_claims` adds one nullable column to `"PurchaseOrder"` and one to
+  `"DisbursementItem"` (the attestation and reconcile claims).
+
+Each needs short table locks. Behind a long-running reader they would queue, and every sign-in
+would queue behind them; with the lock timeout, a migration on a busy table fails within seconds
+and changes nothing (each runs as one transaction).
+
+**Order: migrate first, then start the new image.** The new image reads the new columns on every
+signed-in request, so it needs them before it serves. The old image ignores them, so it keeps
+serving while the migration runs.
+
+- Run `prisma migrate deploy` (for example in a one-off container of the new image) while the old
+  image is still serving. If it fails with `55P03
+  canceling statement due to lock timeout`, keep the old image running, mark the failed migration
+  rolled back and deploy again (a few seconds later, or in a quiet window), then start the new
+  image only once it has applied:
 
   ```bash
-  npx prisma migrate resolve --rolled-back 20261017100000_ops_roles_audit
+  npx prisma migrate resolve --rolled-back 20261017100000_ops_roles_audit   # or the one that failed
   npx prisma migrate deploy
   ```
 
-- Any other failure: stop and read the error; do not retry blindly.
+- Any other failure: keep the old image running, stop and read the error; do not retry blindly.
 
 ## Frontend
 

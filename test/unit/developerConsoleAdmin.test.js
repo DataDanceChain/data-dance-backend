@@ -355,6 +355,34 @@ describe('POST /api/developer/sso/clients while registration is closed', () => {
     assert.equal(prisma.store.ssoDeveloperClient.length, 0);
   });
 
+  it('a failed registration logs the error code and name only, never its message (which can carry the refused row)', async () => {
+    const { consoleLog } = require('../../src/routes/developerSsoRoutes');
+    const original = prisma.opsAuditLog.create;
+    const originalLog = consoleLog.error;
+    const logged = [];
+    prisma.opsAuditLog.create = async () => {
+      throw Object.assign(new Error('Failing row contains (tge@example.test, ddc_client_x, Partner app)'), {
+        name: 'PrismaClientKnownRequestError',
+        code: 'P2010',
+      });
+    };
+    consoleLog.error = (event, entry) => logged.push([event, entry]);
+    let res;
+    try {
+      res = await register(auth.developer);
+    } finally {
+      prisma.opsAuditLog.create = original;
+      consoleLog.error = originalLog;
+    }
+    assert.equal(res.status, 500);
+    assert.deepEqual(logged, [[
+      'Developer client registration failed',
+      { reqId: logged[0][1].reqId, errorCode: 'P2010', errorName: 'PrismaClientKnownRequestError' },
+    ]]);
+    const text = JSON.stringify(logged);
+    for (const leak of ['tge@example.test', 'Partner app', 'Failing row']) assert.ok(!text.includes(leak), leak);
+  });
+
   it('any other account gets 403 registration_closed and nothing is written', async () => {
     for (const name of ['plain', 'operator']) {
       const res = await register(auth[name]);
