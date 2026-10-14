@@ -39,7 +39,8 @@
 #                         records); scripts/reportDuplicateCampaignGrants.js. Each timed. Then the read-only setting is
 #                         reset. <image>: default the one migrate used.
 #   apply-switch [image]  mainnetSwitch --plan, --apply --yes (timed), --plan; then the record repair as in the window:
-#                         scripts/backfillSocialPostIdentity.js --apply (timed: points_repair), and --apply once more
+#                         scripts/backfillSocialPostIdentity.js --apply (timed: points_repair; refused when its output
+#                         has no 'other sources:' line, an image without the record part), and --apply once more
 #                         (timed: repair_check), which must change nothing; then --rollback --run <id> --yes (timed),
 #                         --plan, on the copy only. Before --apply a digest of every User row without updatedAt is kept
 #                         in the copy (table rehearsal_users_before); after --apply exactly the users whose old-network
@@ -764,7 +765,7 @@ image_scripts() {
 # ('  user <id>: ...') stay in the records; the totals are printed.
 backfill_counts() { { grep -vE '^    row |^  user ' "$1" || true; } | sed 's/^/  /'; }
 # "<social rows updated> <records restored> <copies superseded>" from a --apply output; '-' for a part the output does not
-# have (an image whose script has no record part), '?' when the social part's line is missing.
+# have (an image whose script has no record part: apply-switch refuses it), '?' when the social part's line is missing.
 repair_changes() {
   awk '/^  updated: [0-9]+$/ { u = $2 }
     /^  restored own identity: [0-9]+/ { r = $4 }
@@ -848,10 +849,11 @@ do_report() {
 }
 
 # The record repair of the window (after the user migration): backfillSocialPostIdentity.js --apply, timed
-# (points_repair), then --apply once more, timed (repair_check), which must change nothing. Counts only are printed; the
-# whole outputs (row and user ids) stay in the records. The repair is not rolled back with the user migration: on a copy
-# it already repaired (REPAIRED_FOR = this copy's RESTORED_AT) the first run finds nothing to do, so its time is not
-# recorded.
+# (points_repair), then --apply once more, timed (repair_check), which must change nothing. An output without the record
+# part ('other sources: ') is refused before any time is recorded: the window repairs both parts, so a time for the social
+# posts alone would understate it. Counts only are printed; the whole outputs (row and user ids) stay in the records. The
+# repair is not rolled back with the user migration: on a copy it already repaired (REPAIRED_FOR = this copy's
+# RESTORED_AT) the first run finds nothing to do, so its time is not recorded.
 record_repair() {
   local t0 t1 first again done_for
   done_for=$(state_get REPAIRED_FOR)
@@ -861,7 +863,8 @@ record_repair() {
   grep -q '^mode apply:' "$CX_OUT" || cx_fail "backfillSocialPostIdentity.js --apply did not run in apply mode"
   backfill_counts "$CX_OUT"
   first=$(repair_changes "$CX_OUT")
-  grep -q '^other sources: ' "$CX_OUT" || warn "this image's backfillSocialPostIdentity.js has no record part (other sources): the time covers the social posts only"
+  grep -q '^other sources: ' "$CX_OUT" \
+    || die "this image's backfillSocialPostIdentity.js has no record part (no 'other sources:' line in its output): the window repairs both parts, so no points_repair time is recorded; build the image from a backend with the record part, then cleanup, restore and migrate (the user migration's --apply and the social part's writes stay on this copy)"
   if [ -n "$done_for" ] && [ "$done_for" = "$(state_get RESTORED_AT)" ]; then
     warn "an earlier apply-switch repaired this copy's records (restored $done_for): this run finds them done ($first), so points_repair keeps that run's time; for a new time: cleanup, restore, migrate"
   else
@@ -872,7 +875,7 @@ record_repair() {
   [ "$CX_RC" = 0 ] || cx_fail "the second backfillSocialPostIdentity.js --apply failed on the copy"
   again=$(repair_changes "$CX_OUT")
   case "$again" in
-    "0 0 0"|"0 - -") pass "the second --apply changed nothing (social rows updated, records restored, copies superseded: $again)";;
+    "0 0 0") pass "the second --apply changed nothing (social rows updated, records restored, copies superseded: $again)";;
     *) die "the second backfillSocialPostIdentity.js --apply still changed rows or printed no counts (social rows updated, records restored, copies superseded: $again): the repair does not settle on this copy (whole outputs in the records)";;
   esac
   timing_add repair_check $((t1 - t0)) "record repair check (backfill --apply again): no change"

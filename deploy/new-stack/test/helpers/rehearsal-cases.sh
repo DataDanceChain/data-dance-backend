@@ -463,10 +463,17 @@ rm -f "$W/s/run"; touch "$W/s/rolledback"
 fresh_keep; STUB_SCRIPTS="scripts/mainnetSwitch.js scripts/reportDuplicateCampaignGrants.js" reh apply-switch
 [ "$RC" = 1 ] && grep -q '^FAIL scripts/backfillSocialPostIdentity.js is not in ddcnew/backend:abcdef012345: the window runs the record repair after --apply' "$W/out" && [ ! -s "$W/s/oneoffs" ] \
   && ok "apply-switch with an image without backfillSocialPostIdentity.js: refused before any one-off container" || { show 20; bad "image without the backfill (rc=$RC)"; }
+# A backfill without the record part, on a copy no apply-switch has repaired yet (REPAIRED_FOR taken out for this case).
+stenv="$W/ddcnew/rehearsal/state.env"; repaired_line=$(grep '^REPAIRED_FOR=' "$stenv")
+( umask 077; { grep -v '^REPAIRED_FOR=' "$stenv" || true; } > "$stenv.case" ) && mv -f "$stenv.case" "$stenv"
+nrep0=$(nrep); nchk0=$(cnt "$(printf '^repair_check\t')" "$W/ddcnew/rehearsal/timings.tsv")
 fresh_keep; STUB_REPAIR=nopart2 reh apply-switch
-[ "$RC" = 0 ] && grep -q "^WARN this image's backfillSocialPostIdentity.js has no record part (other sources): the time covers the social posts only" "$W/out" \
-  && grep -q '^PASS the second --apply changed nothing (social rows updated, records restored, copies superseded: 0 - -)$' "$W/out" \
-  && ok "apply-switch with a backfill without the record part: a WARN (the time covers the social posts only), the check on the social part" || { show 20; bad "backfill without the record part (rc=$RC)"; }
+[ "$RC" = 1 ] && grep -q "^FAIL this image's backfillSocialPostIdentity.js has no record part (no 'other sources:' line in its output): the window repairs both parts, so no points_repair time is recorded" "$W/out" \
+  && [ "$(nrep)" = "$nrep0" ] && [ "$(cnt "$(printf '^repair_check\t')" "$W/ddcnew/rehearsal/timings.tsv")" = "$nchk0" ] && ! grep -q '^REPAIRED_FOR=' "$stenv" \
+  && [ "$(cnt '^cmd node scripts/backfillSocialPostIdentity.js --apply$' "$W/s/oneoffs")" = 1 ] && ! grep -q -- '--rollback' "$W/s/oneoffs" && ! grep -q '^WARN ' "$W/out" \
+  && ok "apply-switch with a backfill without the record part: refused after its first run, no points_repair or repair_check time recorded" || { show 20; bad "backfill without the record part (rc=$RC)"; }
+rm -f "$W/s/run"; touch "$W/s/rolledback"   # the run that FAIL left applied: as if rolled back, for the next cases
+printf '%s\n' "$repaired_line" >> "$stenv"
 fresh_keep; STUB_DIGEST_BAD=1 reh apply-switch
 [ "$RC" = 1 ] && grep -q "after --rollback 3 users differ from before --apply in a column other than updatedAt" "$W/out" && ok "apply-switch: a rollback that leaves 3 users different from before --apply -> FAIL" || { show 20; bad "rollback leaves users different (rc=$RC)"; }
 fresh_keep; STUB_DIFF_APPLIED="1199 0" reh apply-switch

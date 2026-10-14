@@ -58,8 +58,9 @@ Without the flag nothing changes. Order and pass criteria: [APPROVAL.md](APPROVA
 `60-rehearsal.sh` rehearses the cutover (runbook 4.2 and 4.3) inside the new stack, on a copy: it restores the newest
 verified P1 daily dump into the database `ddc_rehearsal_copy` of the new stack's Postgres, migrates it with the release
 image, reports on it, runs the user migration's `--apply`, the record repair (`backfillSocialPostIdentity.js --apply`,
-twice: the second run must change nothing) and then the user migration's `--rollback` on it, times every step and drops
-it.
+twice: the second run must change nothing; an image whose backfill has no record part, no `other sources:` line in its
+output, is refused before a time is recorded) and then the user migration's `--rollback` on it, times every step and
+drops it.
 The subcommands, in order:
 
     ./remote.sh run 60-rehearsal.sh preflight REHEARSAL_G8=scrub    # read-only

@@ -94,7 +94,8 @@
 #      restore with the scrub, migrate, report, apply-switch, summary, cleanup) with its timings; the users after
 #      --apply and after --rollback against their state before; the record repair inside apply-switch (two runs of
 #      the backfill's --apply between --apply and --rollback, the second must change nothing; counts only printed; a
-#      copy already repaired keeps the first time; an image without the script refused); the window estimate (19
+#      copy already repaired keeps the first time; an image without the script refused before anything runs, a backfill
+#      without the record part refused before a time is recorded); the window estimate (19
 #      parts of runbook section 6, NOT MEASURED parts block the PASS and are named once, every part measured gives
 #      PASS, too long gives WARN, the total with two decimals compared as printed); record <key> <seconds> for a part
 #      measured by hand (the key allowlisted, a whole number of seconds); cleanup removing the
