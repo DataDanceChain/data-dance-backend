@@ -1,7 +1,8 @@
 /**
  * Record identity backfill (scripts/backfillSocialPostIdentity.js, part 2), pure parts: which
  * stored rows hold the previous release's post link key, the identity each record gets back, and
- * which copy keeps it. The database side is in test/db/crawlerPostIdentity.dbtest.js.
+ * which copy keeps it; and part 1's claims across pages. The database side is in
+ * test/db/crawlerPostIdentity.dbtest.js.
  */
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
@@ -18,6 +19,7 @@ const {
   SUPERSEDED_PREFIX,
   CERTAIN_PERMALINK_SQL,
   parseArgs,
+  backfillSocialPostIdentity,
 } = require('../../scripts/backfillSocialPostIdentity');
 
 const amazonMeta = { sourceUrl: 'https://www.amazon.com/gp/css/order-history' };
@@ -214,5 +216,39 @@ describe('superseded identity', () => {
     assert.equal(parseArgs([]).apply, false);
     assert.equal(parseArgs(['--apply']).apply, true);
     assert.throws(() => parseArgs(['--delete']), /Unknown argument/);
+  });
+});
+
+describe('social backfill claims (part 1)', () => {
+  // Pages of one row each, in (userId, createdAt, id) order, from a table where no other row holds
+  // an identity: only the identities claimed in this run decide.
+  const pagedClient = (rows) => {
+    let offset = 0;
+    return {
+      $queryRaw: async () => rows.slice(offset, (offset += 1)),
+      crawlerData: { findMany: async () => [] },
+    };
+  };
+  const post = (id, userId, href, current) => {
+    const payload = { href, caption: id };
+    const row = { id, userId, source: 'x', payload, metadata: {}, createdKey: '2026-10-01T00:00:00.000000' };
+    if (!current) return { ...row, sourceId: href, contentHash: generateContentHash(payload) };
+    return { ...row, sourceId: 'title:post:https://x.com/i/status/5', contentHash: generateContentHash(payload, { source: 'x', userId }) };
+  };
+
+  it('hold for one user across pages and start empty for the next user', async () => {
+    const rows = [
+      post('a1', 'user-a', 'https://x.com/a/status/5'),
+      post('a2', 'user-a', 'https://twitter.com/A/status/5'),
+      post('b1', 'user-b', 'https://x.com/a/status/5'),
+      post('c1', 'user-c', 'https://x.com/a/status/5', true),
+      post('c2', 'user-c', 'https://x.com/a/status/5?s=20'),
+    ];
+    const report = await backfillSocialPostIdentity({ client: pagedClient(rows), batch: 1 });
+    assert.deepEqual([report.scanned, report.updated, report.current], [5, 2, 1]);
+    assert.deepEqual(
+      report.conflicts.map((c) => [c.id, c.keptBy]),
+      [['a2', 'earlier row in this run'], ['c2', 'earlier row in this run']],
+    );
   });
 });

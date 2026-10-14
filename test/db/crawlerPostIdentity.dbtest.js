@@ -458,4 +458,106 @@ describe('Connect upload identity (Postgres)', () => {
       assert.ok(fresh.pointsEarned > 0);
     });
   });
+
+  // A record whose title key is the link key another record's row is still stored under waits for
+  // that record: --apply repairs it in a later pass of the same transaction, so one run settles.
+  // Rows that block each other stay listed.
+  describe('backfill of records waiting for another record\'s link key', () => {
+    const NAMES = ['kim', 'lou'];
+    const ids = NAMES.map(id);
+    const short = (rowId) => rowId.slice(RUN.length + 1);
+    const at = (s) => new Date(`2026-10-12T02:00:${String(s).padStart(2, '0')}.000Z`);
+    const sha = (text) => crypto.createHash('sha256').update(text).digest('hex');
+    const temuMeta = { sourceUrl: 'https://www.temu.com/bgt_order.html' };
+    const r = RUN.toLowerCase();
+    // A chain: W's title key is Y's link key, Y's title key is Z's link key.
+    const zed = { title: `Zed ${r}`, href: `https://www.tiktok.com/@u${r}/video/1:2024-01-01` };
+    const why = { title: `https://tiktok.com/@u${r}/video/1`, date: '2024-01-01', href: `https://x.com/q${r}/status/9:d` };
+    const dub = { title: `https://x.com/q${r}/status/9`, date: 'd', href: `https://www.instagram.com/p/Chain${r}/` };
+    // Two rows that block each other.
+    const pee = { title: `https://tiktok.com/@c${r}/video/2`, date: 'd', href: `https://www.tiktok.com/@c${r}/video/3:e` };
+    const que = { title: `https://tiktok.com/@c${r}/video/3`, date: 'e', href: `https://www.tiktok.com/@c${r}/video/2:d` };
+    const keys = {
+      zed: `title:temu.com:https://tiktok.com/@u${r}/video/1:2024-01-01`,
+      why: `title:temu.com:https://x.com/q${r}/status/9:d`,
+      dub: `title:temu.com:https://instagram.com/p/Chain${r}`,
+      pee: `title:temu.com:https://tiktok.com/@c${r}/video/3:e`,
+      que: `title:temu.com:https://tiktok.com/@c${r}/video/2:d`,
+    };
+
+    before(async () => {
+      for (const name of NAMES) await user(name);
+      const task = {};
+      for (const name of NAMES) {
+        task[name] = (await prisma.crawlerTask.create({
+          data: { id: id(`task-${name}-temu`), title: 'temu', source: 'temu', taskId: 'temu_orders', userId: id(name) },
+        })).id;
+      }
+      const rows = [['kim', 'dub', dub, 0], ['kim', 'why', why, 1], ['kim', 'zed', zed, 2], ['lou', 'pee', pee, 3], ['lou', 'que', que, 4]];
+      for (const [name, key, payload, s] of rows) {
+        await prisma.crawlerData.create({
+          data: {
+            id: id(key), source: 'temu', type: 'order', timestamp: new Date('2026-10-01T10:00:00Z'), metadata: temuMeta, payload,
+            taskId: task[name], userId: id(name), contentHash: sha(JSON.stringify({ postUrl: keys[key] })), sourceId: keys[key], createdAt: at(s),
+          },
+        });
+      }
+    });
+
+    after(async () => {
+      await prisma.point.deleteMany({ where: { userId: { in: ids } } });
+      await prisma.crawlerData.deleteMany({ where: { userId: { in: ids } } });
+      await prisma.crawlerTask.deleteMany({ where: { userId: { in: ids } } });
+      await prisma.user.deleteMany({ where: { id: { in: ids } } });
+    });
+
+    const snapshot = () =>
+      prisma.crawlerData.findMany({ where: { userId: { in: ids } }, orderBy: { id: 'asc' }, select: { id: true, sourceId: true, contentHash: true } });
+    const counts = (rep) => ({
+      linkKeyRows: rep.linkKeyRows, records: rep.records, passes: rep.passes, restored: rep.restored, restoredByKind: rep.restoredByKind,
+      heldAlready: rep.heldAlready, superseded: rep.superseded, conflicts: rep.conflicts.map((c) => short(c.id)).sort(),
+    });
+    const expected = {
+      linkKeyRows: 5, records: 5, passes: 3, restored: 3, restoredByKind: { order: 0, title: 3, content: 0 },
+      heldAlready: 0, superseded: 0, conflicts: ['pee', 'que'],
+    };
+
+    it('a dry run plans every pass and writes nothing', async () => {
+      const rows = await snapshot();
+      const report = await backfillRecordIdentity({ userIds: ids });
+      assert.equal(report.mode, 'dry-run');
+      assert.deepEqual(counts(report), expected);
+      assert.match(report.conflicts[0].reason, /block each other/);
+      assert.deepEqual(await snapshot(), rows);
+    });
+
+    it('one --apply repairs the chain in three passes and leaves the rows that block each other', async () => {
+      const report = await backfillRecordIdentity({ userIds: ids, apply: true, batch: 1 });
+      assert.deepEqual(counts(report), expected);
+      const by = Object.fromEntries((await snapshot()).map((row) => [short(row.id), row]));
+      assert.equal(by.zed.sourceId, `title:temu.com:zed ${r}:`);
+      assert.equal(by.why.sourceId, keys.zed);
+      assert.equal(by.dub.sourceId, keys.why);
+      assert.equal(by.zed.contentHash, generateContentHash(zed));
+      assert.equal(by.why.contentHash, generateContentHash(why));
+      assert.equal(by.dub.contentHash, generateContentHash(dub));
+      assert.equal(by.pee.sourceId, keys.pee);
+      assert.equal(by.que.sourceId, keys.que);
+    });
+
+    it('a second --apply writes nothing', async () => {
+      const rows = await snapshot();
+      const report = await backfillRecordIdentity({ userIds: ids, apply: true });
+      assert.deepEqual(counts(report), { ...expected, linkKeyRows: 2, records: 2, passes: 1, restored: 0, restoredByKind: { order: 0, title: 0, content: 0 } });
+      assert.deepEqual(await snapshot(), rows);
+    });
+
+    it('the current upload finds each repaired record as stored', async () => {
+      const item = (payload) => ({ source: 'temu', type: 'order', timestamp: '2026-10-12T00:00:00Z', metadata: temuMeta, payload });
+      for (const payload of [zed, why, dub]) {
+        const result = await upload('kim', [item(payload)]);
+        assert.deepEqual([result.uploadedCount, result.duplicatesCount, result.pointsEarned], [0, 1, 0]);
+      }
+    });
+  });
 });
