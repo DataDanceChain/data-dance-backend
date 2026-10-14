@@ -80,6 +80,7 @@ GET {issuer}/oauth/authorize
   &code_challenge=<BASE64URL(SHA256(code_verifier))>
   &code_challenge_method=S256
   [&login_hint=user%40example.com]
+  [&referral_prompt=hide]
 ```
 
 Same tab only: the consent page frame-busts, so never use an iframe or popup.
@@ -110,6 +111,12 @@ Validation order and what the browser sees:
 An unknown scope is `invalid_scope` (redirected per §4.2). `state` is mandatory, 22–512
 characters (at least 128 bits as base64url; a shorter one is `invalid_request`, redirected per
 §4.2). `login_hint` only pre-fills the DataDance login form.
+
+`referral_prompt` is optional and partner-only. Omit it, or send `show`, and the DataDance login
+page keeps the invite-code field. Send `hide` when this campaign already collects the code after
+the user returns: the field is not shown, and DataDance does not attach an invite code on this
+sign-in. Any other value is `invalid_request` (redirected per §4.2). A `referral_code` sent
+together with `hide` is ignored.
 
 **`prompt=none`** — this build answers `302 … error=login_required` immediately (see §12).
 

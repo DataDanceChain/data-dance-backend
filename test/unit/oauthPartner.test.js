@@ -338,6 +338,50 @@ describe('startAuthorization', () => {
       assert.equal(prisma.oAuthAuthorization.rows[0].referralCode, null);
     });
   });
+
+  describe('referral_prompt (partner client only)', () => {
+    it('shows the invite field when the parameter is omitted or show', async () => {
+      const url = await startAuthorization(req, partnerQuery());
+      assert.equal(prisma.oAuthAuthorization.rows[0].hideReferralPrompt, false);
+      assert.equal(new URL(url).searchParams.has('referral_prompt'), false);
+
+      prisma.reset();
+      prisma.user.rows.push({ ...user }, { ...orgUser });
+      const shown = await startAuthorization(req, partnerQuery({ referral_prompt: 'show' }));
+      assert.equal(prisma.oAuthAuthorization.rows[0].hideReferralPrompt, false);
+      assert.equal(new URL(shown).searchParams.has('referral_prompt'), false);
+    });
+
+    it('hides the invite field, and does not store a code sent with hide', async () => {
+      const url = await startAuthorization(req, partnerQuery({ referral_prompt: 'hide', referral_code: 'AB23CD' }));
+      const consent = new URL(url);
+      assert.equal(prisma.oAuthAuthorization.rows[0].hideReferralPrompt, true);
+      assert.equal(prisma.oAuthAuthorization.rows[0].referralCode, null);
+      assert.equal(consent.searchParams.get('referral_prompt'), 'hide');
+      const data = await getConsentRequest(consent.searchParams.get('request'));
+      assert.equal(data.referralPrompt, 'hide');
+      assert.equal(data.referralCode, null);
+    });
+
+    it('rejects any other value with invalid_request and stores no row', async () => {
+      await rejects(startAuthorization(req, partnerQuery({ referral_prompt: 'skip' })), { error: 'invalid_request', redirectable: true });
+      assert.equal(prisma.oAuthAuthorization.rows.length, 0);
+    });
+
+    it('is ignored for MCP clients', async () => {
+      await seedMcpClient();
+      const url = await startAuthorization(req, {
+        response_type: 'code',
+        client_id: 'ddc_oauth_mcp1',
+        redirect_uri: 'https://claude.ai/api/mcp/auth_callback',
+        code_challenge: pkce().challenge,
+        code_challenge_method: 'S256',
+        referral_prompt: 'hide',
+      });
+      assert.equal(prisma.oAuthAuthorization.rows[0].hideReferralPrompt, false);
+      assert.equal(new URL(url).searchParams.has('referral_prompt'), false);
+    });
+  });
 });
 
 describe('getConsentRequest', () => {
@@ -378,6 +422,7 @@ describe('getConsentRequest', () => {
     const url2 = await startAuthorization(req, partnerQuery());
     const data2 = await getConsentRequest(new URL(url2).searchParams.get('request'));
     assert.equal(data2.referralCode, null);
+    assert.equal(data2.referralPrompt, 'show');
   });
 });
 

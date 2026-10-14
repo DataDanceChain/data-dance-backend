@@ -516,6 +516,7 @@ async function startAuthorization(req, query, res) {
   const state = query.state === undefined || query.state === null ? '' : String(query.state);
   const iss = issuerFrom(req);
   let row;
+  let hideReferralPrompt = false;
   try {
     if (query.response_type !== 'code') {
       throw new OAuthError(400, 'unsupported_response_type', 'Only response_type=code is supported.');
@@ -570,6 +571,19 @@ async function startAuthorization(req, query, res) {
       // Store only the bare code ("DDC-ab23cd" → "AB23CD"); legacy codes are kept as sent.
       referralCode = normalizeReferralCodeInput(rawReferralCode.trim().replace(/\s+/g, ''));
     }
+    // Partner only. `referral_prompt=hide` tells the Wallet login page not to collect an invite
+    // code on this hop (the partner already asks for one after the user comes back). `show` and
+    // an omitted value keep today's field. A code passed together with hide is not stored: the
+    // page will neither display nor send it.
+    if (partner && query.referral_prompt !== undefined && query.referral_prompt !== null && String(query.referral_prompt) !== '') {
+      const promptValue = String(query.referral_prompt);
+      if (promptValue === 'hide') {
+        hideReferralPrompt = true;
+        referralCode = null;
+      } else if (promptValue !== 'show') {
+        throw new OAuthError(400, 'invalid_request', 'referral_prompt must be hide or show.');
+      }
+    }
     // Bind BEFORE the row is written, so a row never exists without the hash of the cookie that
     // was actually set on this response.
     const initiatorNonce = bindInitiator(req, res);
@@ -583,6 +597,7 @@ async function startAuthorization(req, query, res) {
         resource: expected,
         scope,
         referralCode,
+        hideReferralPrompt,
         expiresAt: new Date(Date.now() + (client.requestTtlMs || REQUEST_TTL_MS)),
         initiatorHash: initiatorNonce ? hashInitiator(initiatorNonce) : null,
         initiatorBoundAt: initiatorNonce ? new Date() : null,
@@ -597,6 +612,7 @@ async function startAuthorization(req, query, res) {
   consent.searchParams.set('request', row.id);
   const loginHint = partner ? plausibleLoginHint(query.login_hint) : '';
   if (loginHint) consent.searchParams.set('login_hint', loginHint);
+  if (hideReferralPrompt) consent.searchParams.set('referral_prompt', 'hide');
   return consent.toString();
 }
 
@@ -628,7 +644,8 @@ async function getConsentRequest(id) {
     resource: row.resource,
     // Prefill only: the Wallet login/registration page may show this, but binding it to the
     // account only ever happens through the normal login/registration path the user performs.
-    referralCode: formatReferralCodeForDisplay(row.referralCode || null),
+    referralCode: row.hideReferralPrompt ? null : formatReferralCodeForDisplay(row.referralCode || null),
+    referralPrompt: row.hideReferralPrompt ? 'hide' : 'show',
     expiresAt: row.expiresAt,
     // Only a hint for the Wallet (post the Allow without a tap). Never a decision: the code is
     // minted by the credentialed POST /api/oauth/consent, which re-checks the switch itself.

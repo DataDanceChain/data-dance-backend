@@ -1052,6 +1052,10 @@ model OAuthAuthorization {
   /// can prefill it; it is NOT applied automatically — binding still only happens through the
   /// normal login/registration path the user performs.
   referralCode        String?
+  /// Partner asked the Wallet not to collect an invite code on this sign-in
+  /// (GET /oauth/authorize?referral_prompt=hide). The login page hides the field and does not
+  /// send a code. false (the default, including every row written before this column) shows it.
+  hideReferralPrompt  Boolean   @default(false)
   user                User?     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([clientId])
