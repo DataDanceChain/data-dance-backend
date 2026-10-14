@@ -14,10 +14,17 @@ from a Mac through `remote.sh`. **No CI job and no deploy runs them**, and nothi
 1. `cp local.env.example local.env` and fill in `DDC_SSH_TARGET` and `DDC_OP_SECRET_REF` from the private runbook.
    `local.env` is gitignored. `remote.sh` and `survey/ro-ssh.sh` refuse to connect, and do not ask 1Password, while it
    is missing, a value is empty, a value is still `CHANGE_ME`, or a value has the wrong shape.
-2. Read-only calls need no flag: `./remote.sh preflight`, `./remote.sh run p2-disk.sh preview` (or `expand-check`),
+2. **One 1Password approval per deploy:** `./sshmux.sh open` before the first step (prints `shared connection open
+   until HH:MM`; 180 minutes by default, `./sshmux.sh open <minutes>` for 1-240) and `./sshmux.sh close` after the last
+   one. In between, every `remote.sh` and `survey/ro-ssh.sh` call runs through that one login and asks 1Password
+   nothing; `./sshmux.sh status` says `open until HH:MM` or `closed`. Keep the same `TMPDIR` for every step (the
+   Terminal default). Without it, or once it has ended (end time, network, the Mac sleeping), each call logs in as
+   before and asks 1Password again; a call cut off by the end of the shared connection is never retried. Details:
+   [APPROVAL.md](APPROVAL.md) section 5, "Shared connection".
+3. Read-only calls need no flag: `./remote.sh preflight`, `./remote.sh run p2-disk.sh preview` (or `expand-check`),
    `./remote.sh run p1-backup.sh status`, `./remote.sh run 30-nginx.sh status`, `./remote.sh run 50-partner-page.sh status`,
    `./remote.sh run 60-rehearsal.sh preflight` and `./remote.sh run 60-rehearsal.sh summary`.
-3. **Every call that writes to the server needs Sloan's approval**, given per call as `DDC_APPROVED=yes`; `remote.sh`
+4. **Every call that writes to the server needs Sloan's approval**, given per call as `DDC_APPROVED=yes`; `remote.sh`
    refuses a write call without it. The order of the steps is in [APPROVAL.md](APPROVAL.md) section 4.
 
 ## Hosts and ports
@@ -108,7 +115,8 @@ changes, its pass criteria and its undo: [APPROVAL.md](APPROVAL.md) section 10.
 | File | What it is |
 |---|---|
 | `remote.sh` | the only entry point from the Mac: preflight, pack and upload the sources (`pack-web`/`upload-web`, `pack-api`/`upload-api`), upload, run; every call's output goes to `logs/` (gitignored) |
-| `sshpw.sh` | login guard: reads `local.env`, asks 1Password before anything connects, never lets ssh send an empty password |
+| `sshpw.sh` | login guard: reads `local.env`, asks 1Password before anything connects, never lets ssh send an empty password; finds the shared connection of `sshmux.sh` |
+| `sshmux.sh` | one 1Password approval per deploy: `open [minutes]` logs in once and shares that login (an OpenSSH master in a private 0700 directory under `TMPDIR`) with every `remote.sh` / `ro-ssh.sh` call until its end time; `status`; `close` |
 | `local.env.example` | template for the untracked `local.env` |
 | `00-preflight.sh` | read-only checks on the server |
 | `p1-backup.sh`, `p2-disk.sh` | P1 backups (dump, verify, nightly cron) and P2 disk cleanup and expansion check |

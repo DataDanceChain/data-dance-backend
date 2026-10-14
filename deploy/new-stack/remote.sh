@@ -26,6 +26,8 @@
 # Login safety (sshpw.sh): local.env and `op read` are checked BEFORE ssh starts and nothing connects if either fails;
 # nothing connects either when the askpass file cannot be created completely (mktemp or write failure); the askpass
 # kills ssh instead of letting it send an empty password; password method only; NumberOfPasswordPrompts=1.
+# One approval per deploy: after `./sshmux.sh open` every call (the uploads' one call per file included) runs through
+# that shared connection and asks 1Password nothing; without it, or once it has ended, each call logs in as above.
 # NAME=value arguments to `run` are environment overrides, accepted only from an allowlist (SERVER_ENV_ALLOWED). The
 # rehearsal hosts and ports are among them (API_HOST, APP_HOST, API_PORT, WEB_PORT, DB_PORT; common.sh), and so are
 # REHEARSAL_CLIENT_ID (20-env.sh; required on its first run) and TAKE_OVER_VHOSTS=yes (30-nginx.sh apply; only after
@@ -56,6 +58,12 @@ TS=$(date +%Y%m%d-%H%M%S)
 need_approval() { [ "${DDC_APPROVED:-}" = yes ] || { echo "refusing: this call changes the server; Sloan's approval -> DDC_APPROVED=yes"; exit 2; }; }
 rssh() { # rssh <remote command> ; stdin is forwarded
   local a="" rc
+  if sshpw_mux_alive; then   # the shared connection of sshmux.sh: no 1Password read, no askpass, no new login
+    rc=0
+    ssh "${SSHPW_OPTS[@]}" "${SSHPW_MUX_OPTS[@]}" -o ServerAliveInterval=30 "$SSHPW_TARGET" "$1" || rc=$?
+    [ "$rc" != 255 ] || sshpw_mux_lost
+    return $rc
+  fi
   sshpw_precheck || return 3
   a=$(mktemp "${TMPDIR:-/tmp}/askpass.XXXXXX") && sshpw_make_askpass "$a" || { rm -f "$a"; echo "REFUSING TO CONNECT: the askpass file could not be created (TMPDIR=${TMPDIR:-/tmp}); not connected" >&2; return 3; }
   rc=0
