@@ -1,12 +1,14 @@
 /**
  * One-time backfill of record identity, in two parts.
  *
- * 1. Social posts: give the X / Instagram / Threads / TikTok rows stored before the per-user
- *    permalink identity that identity (sourceId and contentHash), so the first sync after the
- *    release finds each post as already stored instead of storing it, and paying for it, a second
- *    time. When one user already holds several rows of the same post (a changed like count used to
- *    look like a new post), the oldest row takes the new identity and the others keep theirs: they
- *    are listed by id under "conflicts" for ops to decide.
+ * 1. Social posts: give the X / Instagram / Threads / TikTok / Facebook rows stored before the
+ *    per-user permalink identity that identity (sourceId and contentHash), so the first sync after
+ *    the release finds each post as already stored instead of storing it, and paying for it, a
+ *    second time. When one user already holds several rows of the same post (a changed like count
+ *    or caption used to look like a new post), the oldest row takes the new identity and the others
+ *    keep theirs: they are listed by id under "conflicts" for ops to decide. Facebook rows that hold
+ *    no post link (stored from App versions before 2.0.6, which sent the profile page) keep their
+ *    title key; the upload looks them up by it (legacyPostTitleSourceId in crawlerRecordIdentity.js).
  *
  * 2. Other records: the previous release stored some rows of other sources (orders, trips, events)
  *    under a post link key (`title:<host>:<link>`) when the row held a social link. Each such
@@ -389,6 +391,7 @@ const CERTAIN_PERMALINK_SQL = {
   instagram: `${HOST_SQL('instagram\\.com')}/(p|reel|reels|tv)/[a-z0-9_-]{4,64}${TAIL_SQL}`,
   threads: `${HOST_SQL('threads\\.(net|com)')}/@?[a-z0-9_][a-z0-9_.]{0,63}/post/[a-z0-9_-]{4,64}${TAIL_SQL}`,
   tiktok: `${HOST_SQL('tiktok\\.com')}/@[a-z0-9_.]{1,64}/(video|photo)/[0-9]{1,25}${TAIL_SQL}`,
+  facebook: `${HOST_SQL('facebook\\.com')}/[a-z0-9_][a-z0-9_.-]{0,99}/posts/[a-z0-9_-]{4,200}${TAIL_SQL}`,
 };
 
 /** SQL: this social row holds a link that socialPostUrl() reads as a permalink. Never NULL. */

@@ -4,7 +4,7 @@
  *
  * Supported: findUnique / findFirst / findMany / count / create / update / upsert / updateMany /
  * delete / deleteMany / groupBy (`by` one or more columns, optional `_max` and `_count`) with `where`
- * conditions on scalar equality, null, { gt, gte, lt, lte, not, in, equals }, `NOT: {...}`,
+ * conditions on scalar equality, null, { gt, gte, lt, lte, not, in, equals, startsWith }, `NOT: {...}`,
  * `OR: [...]` and JSON path filters (`{ path: [...], equals }`); `{ increment }` in update data;
  * `include` for the relations declared below (to-one with optional `select`, to-many with optional
  * `where`); column defaults on create for the models that declare them below.
@@ -31,6 +31,7 @@ function matchValue(actual, cond) {
         case 'not': return !matchValue(actual, value);
         case 'in': return value.map(fold).includes(fold(actual));
         case 'equals': return fold(actual) === fold(value);
+        case 'startsWith': return typeof actual === 'string' && fold(actual).startsWith(fold(value));
         default: throw new Error(`mockPrisma: unsupported operator "${op}"`);
       }
     });
@@ -38,7 +39,7 @@ function matchValue(actual, cond) {
   return actual === cond;
 }
 
-const OPERATORS = new Set(['gt', 'gte', 'lt', 'lte', 'not', 'in', 'equals', 'mode']);
+const OPERATORS = new Set(['gt', 'gte', 'lt', 'lte', 'not', 'in', 'equals', 'startsWith', 'mode']);
 
 /** `{ gt: 1 }` is a condition; `{ web3authVerifier: 'x', web3authVerifierId: 'y' }` is a compound key. */
 function isConditionObject(cond) {
