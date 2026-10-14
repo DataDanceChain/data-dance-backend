@@ -82,6 +82,7 @@ model User {
   ssoTickets               SsoTicket[]
   disbursementItems        DisbursementItem[]
   networkRebind            Web3AuthNetworkRebind?
+  linkedMethods            Web3AuthLinkedMethod[]
   dataDemands              DataDemand[]
 
   @@unique([web3authVerifier, web3authVerifierId])
@@ -1214,6 +1215,23 @@ model Web3AuthNetworkRebind {
 
   @@index([runId])
   @@index([oldAddress])
+}
+
+/// An additional sign-in method linked to an account (WEB3AUTH_LINK_TRUSTED_METHODS=on): a login
+/// connection that verifies the e-mail address itself proved the account's address. The User row
+/// keeps its own pair (web3authVerifier, web3authVerifierId) and its wallet; walletAddress here is
+/// the wallet this method derives, kept as a record and never bound to the account.
+model Web3AuthLinkedMethod {
+  id            String   @id @default(uuid())
+  userId        String
+  verifier      String
+  verifierId    String
+  walletAddress String
+  createdAt     DateTime @default(now())
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([verifier, verifierId])
+  @@index([userId])
 }
 
 /// One scripts/mainnetSwitch.js --apply run; backupTable holds the pre-run User columns.
