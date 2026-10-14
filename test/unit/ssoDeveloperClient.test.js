@@ -144,4 +144,41 @@ describe('self-serve SSO clients', () => {
     );
     assert.equal(await resolveClient('tge').then(() => true, () => false), false);
   });
+
+  it('serves points_history to a first-party row only while this environment lists it, never to a developer client', async () => {
+    await prisma.ssoDeveloperClient.create({
+      data: {
+        id: 'planet-2',
+        clientId: 'sso-rehearsal',
+        clientName: 'Data Planet',
+        contactEmail: 'planet@datadance.ai',
+        secretHash: SECRET_HASH,
+        redirectUris: [PARTNER_REDIRECT],
+        enabled: true,
+        kind: 'partner',
+        createdAt: new Date(),
+      },
+    });
+    const created = await createDeveloperClient({
+      client_name: 'Northwind',
+      contact_email: 'dev@example.com',
+      redirect_uris: [PARTNER_REDIRECT],
+    });
+    const before = process.env.SSO_TGE_STATUS_FIELDS;
+    try {
+      delete process.env.SSO_TGE_STATUS_FIELDS;
+      assert.equal((await resolveClient('sso-rehearsal')).statusFields.includes('points_history'), false, 'off by default');
+      process.env.SSO_TGE_STATUS_FIELDS = 'points,referral';
+      assert.equal((await resolveClient('sso-rehearsal')).statusFields.includes('points_history'), false);
+      process.env.SSO_TGE_STATUS_FIELDS = 'points,points_history';
+      const planet = await resolveClient('sso-rehearsal');
+      assert.equal(planet.statusFields.includes('points_history'), true);
+      // The fixed first-party fields do not depend on the list.
+      assert.equal(planet.statusFields.includes('referral_network'), true);
+      assert.equal((await resolveClient(created.clientId)).statusFields.includes('points_history'), false);
+    } finally {
+      if (before === undefined) delete process.env.SSO_TGE_STATUS_FIELDS;
+      else process.env.SSO_TGE_STATUS_FIELDS = before;
+    }
+  });
 });

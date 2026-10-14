@@ -47,6 +47,19 @@ const PARTNER_STATUS_FIELDS = Object.freeze([
   'referral_network',
 ]);
 
+/**
+ * Served to a first-party row only while THIS environment lists them in SSO_TGE_STATUS_FIELDS —
+ * the same switch that serves them to the env-configured partner — so deploying an endpoint never
+ * turns it on by itself. `points_history` waits on the consent wording for `points` (see the
+ * catalog entry in src/constants/partnerClient.js).
+ */
+const ENV_SWITCHED_PARTNER_FIELDS = Object.freeze(['points_history']);
+
+function firstPartyStatusFields(cfg) {
+  const listed = new Set(cfg.statusFields);
+  return [...PARTNER_STATUS_FIELDS, ...ENV_SWITCHED_PARTNER_FIELDS.filter((field) => listed.has(field))];
+}
+
 class DeveloperClientError extends Error {
   constructor(status, code, message) {
     super(message);
@@ -161,7 +174,7 @@ function shapeDeveloperClient(row, req) {
     requestTtlMs: PARTNER_REQUEST_TTL_MS,
     codeTtlMs: PARTNER_CODE_TTL_MS,
     accessTtlSec: PARTNER_ACCESS_TTL_SEC,
-    statusFields: firstParty ? [...PARTNER_STATUS_FIELDS] : [...DEVELOPER_STATUS_FIELDS],
+    statusFields: firstParty ? firstPartyStatusFields(cfg) : [...DEVELOPER_STATUS_FIELDS],
     requireVerifiedSession: firstParty ? cfg.requireVerifiedSession : false,
     autoApprove: firstParty ? { ...cfg.autoApprove } : { app: false, web: false },
     secretHash: row.secretHash,

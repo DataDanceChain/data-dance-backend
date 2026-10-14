@@ -30,6 +30,8 @@ const LEGACY_PARTNER_RESOURCE_PATH = '/partner/tge';
  * The four field scopes (email, wallet, points, referral) gate a single FIELD each: a token without
  * them simply does not carry that field, which is why the handlers omit the key instead of
  * answering 403 (a partner that asked for less must still get the rest of the response).
+ * `sso:points` (alias `tge:points`) is also the endpoint scope of GET /partner/tge/points/history (the balance and its
+ * ledger are one grant): there, and only there, a token without it is 403 insufficient_scope.
  */
 const PARTNER_SCOPES = Object.freeze([
   'sso:identity',
@@ -181,6 +183,22 @@ const STATUS_FIELD_CATALOG = Object.freeze({
     nullMeaning:
       'Never null. Not served in this environment → 404 not_available; a user with no network → empty upline and a downline total of 0.',
     cacheTtlSec: PARTNER_REFERRAL_CACHE_MAX_AGE_SEC,
+  },
+  // Also a whole ENDPOINT, under the scope that already shows the balance (`sso:points`): 403
+  // insufficient_scope without it, 404 not_available unless this environment lists it.
+  // Rollout: list it only once the consent line for `points` reads "balance and history" in every
+  // consent language; a grant made under the balance-only wording must not start reading history.
+  points_history: {
+    endpoint: 'points/history',
+    scope: 'sso:points',
+    presence: 'endpoint',
+    source:
+      "Point rows of the token's own user (id, amount, source mapped to a kind through an allow-list, createdAt), newest first; balance from User.totalPoints as on /status",
+    meaning:
+      "{ sub, balance, as_of, cache_max_age, items, next_cursor }. Each item is exactly { id, amount, kind, created_at }: an opaque stable id, the signed amount, one of upload | referral | task | campaign | adjustment | redemption | other, and the ISO creation time. Keyset pages (createdAt, id) newest first, limit 1-100 (default 50), optional since (inclusive) / until (exclusive). Never Point.sourceId, the raw source name, staff labels, order or redemption references, URLs, or any other user's data.",
+    nullMeaning:
+      'Never null. Not served in this environment → 404 not_available; an account with no ledger rows → empty items and next_cursor null.',
+    cacheTtlSec: PARTNER_POINTS_CACHE_MAX_AGE_SEC,
   },
 });
 const DEFAULT_STATUS_FIELDS = Object.freeze([]);

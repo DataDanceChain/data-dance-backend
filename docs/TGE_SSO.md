@@ -104,6 +104,8 @@ Validation order and what the browser sees:
 - **Field scopes** — `tge:email`, `tge:wallet`, `tge:points`, `tge:referral`. Each unlocks exactly
   one field. A token without one is **not** an error: the call succeeds and the field is simply
   **absent from the body**. Ask only for what the campaign uses; the user sees the list.
+  `tge:points` is also the endpoint scope of `/partner/tge/points/history` (§7c): the balance and
+  the history behind it are one grant, and only there a token without it is `403`.
 
 An unknown scope is `invalid_scope` (redirected per §4.2). `state` is mandatory, 22–512
 characters (at least 128 bits as base64url; a shorter one is `invalid_request`, redirected per
@@ -287,6 +289,7 @@ the **scope** the user granted, and DataDance's per-environment freeze list
 | `data_licence_granted` | `tge:status` | `/status` | `DataLicenceConsent` active for the current policy version. Unrelated to partner eligibility | unknown / not frozen | 60 s |
 | `points.balance` | `tge:points` | `/status` | `User.totalPoints` — the denormalised balance, maintained from the `Point` ledger inside the same transactions. The ledger is the source of truth; summing it per request is too expensive for a 120/min endpoint | never null while served; a new account is `0` | **0 — never cache** |
 | `points.as_of` | `tge:points` | `/status` | server clock at read time | never null | — |
+| `items[]` (points history) | `tge:points` | `/points/history` | this user's `Point` ledger rows, each reduced to `id`, `amount`, `kind`, `created_at` — §7c. Also needs `points_history` in the freeze list (endpoint `404` otherwise) | never null; an empty ledger is `[]` | **0 — never cache** |
 | `referral.code` | `tge:referral` | `/status` | the user's own short code (`User.referralCode`) **when the account already holds one in display form**, the same one the Wallet shows. A partner read never allocates one | the account has no display code yet (an older account whose code is still in the legacy form); it appears as soon as the Wallet allocates it | 60 s |
 | `referral.inviter_sub` | `tge:referral` | `/status` | `Referral.inviterId` for this user as invitee — the `sub` of whoever invited them, for an upline rebate | nobody invited this user | 60 s |
 | `referral.inviter_code` | `tge:referral` | `/status` | the inviter's own short code (their `User.referralCode`) in the same `DDC-XXXXXX` display form as `referral.code` — the code they share anyway, for the "upline inviter" row of a campaign page. Never their name, e-mail or anything else; a partner read never allocates one | nobody invited this user, or the inviter has no display code yet (legacy form) | 60 s |
@@ -362,13 +365,74 @@ Authorization: Bearer ddc_tge_…
   downline reaches ~10^5 people, or chains thousands deep, DataDance will move this to a
   precomputed closure — the response does not change.
 
+### 7c. Points history — `GET /partner/tge/points/history`
+
+Scope `tge:points` — the same grant that shows `points.balance` on `/status` (consent line
+`points`, "your points balance and history") — **and** the environment must list
+`points_history` in `SSO_TGE_STATUS_FIELDS`: off unless listed. Same token check, rate limit
+(120/min per token, shared with every other read) and read-only guarantee as `/me` and
+`/status`; every read is recorded.
+
+Gates, in this order: no or bad token → `401 invalid_token`; not listed in this environment →
+`404 {"error":"not_available"}` (checked before the scope, so "not served here" is never
+mistaken for "not granted"); token without `tge:points` → `403 insufficient_scope` with
+`scope="sso:points"` in the challenge; disabled account → `403 account_disabled`.
+
+```http
+GET /partner/tge/points/history?limit=50 HTTP/1.1
+Authorization: Bearer ddc_tge_…
+```
+
+```json
+{ "sub": "c3…", "balance": 145, "as_of": "2026-10-14T10:00:00.000Z", "cache_max_age": 0,
+  "items": [ { "id": "6f1c…", "amount": -30, "kind": "redemption", "created_at": "2026-10-12T09:30:00.000Z" },
+             { "id": "0a9e…", "amount": 25,  "kind": "task",       "created_at": "2026-10-11T08:00:00.000Z" },
+             { "id": "b41d…", "amount": 150, "kind": "upload",     "created_at": "2026-10-01T12:00:00.000Z" } ],
+  "next_cursor": null }
+```
+
+- **Whose ledger.** Always the token's own user; there is no parameter that names a user
+  (`?sub=` / `?user_id=` are `400`, as everywhere).
+- **Items** — exactly `id`, `amount`, `kind`, `created_at`, newest first:
+  - `id` — opaque and stable: the same ledger row always has the same id. Use it to deduplicate.
+  - `amount` — signed; a deduction (redemption, a negative adjustment) is negative.
+  - `kind` — one of `upload` (data contributions), `referral` (referral rewards at any level,
+    including the share of an invitee's task reward), `task` (task rewards), `campaign` (campaign,
+    badge and event grants, boosts), `adjustment` (operator corrections, either sign),
+    `redemption` (points spent on a reward), `other` (anything else). The mapping is an explicit
+    allow-list on DataDance's side; a new kind of entry reads as `other` until it is mapped, so
+    treat unknown and `other` alike. The list may grow; new values are announced.
+  - `created_at` — when the entry was written (ISO-8601, UTC, millisecond precision).
+- **Never in an item:** the internal source name, task / order / redemption references, staff
+  labels on adjustments, URLs, other users' ids or anything else about another user.
+- **`balance`** is `User.totalPoints`, exactly the value `/status` returns as `points.balance` at
+  the same moment; `as_of` is the server time of the read; `cache_max_age` is `0` and the
+  response is `Cache-Control: no-store`. For an account whose every balance change has a ledger
+  entry, the items of a full walk (no `since` / `until`) sum to `balance`; `balance` is the
+  authoritative figure.
+- **Paging.** `?limit=` 1–100 (default 50). Pass `next_cursor` back as `?cursor=` until it is
+  `null`. Order is `(created_at, id)` descending — a total order, so entries that share a
+  millisecond are neither skipped nor repeated. Entries written while you page are not mixed into
+  later pages; they appear on your next first page.
+- **Window.** Optional `?since=` (inclusive) and `?until=` (exclusive): an ISO-8601 date (read as
+  UTC midnight) or a date-time **with** a zone (`Z` or `±hh:mm`); a time without a zone is `400`.
+  The cursor carries the window: later pages may repeat the same values or omit them, but a
+  different window with a cursor is `400`. `balance` is always the whole account's balance, never
+  the window's sum.
+- **Cursor.** Opaque — do not parse or build it. It is signed by DataDance and bound to the user it
+  was issued for: an edited, truncated or foreign cursor, or another user's cursor, is
+  `400 invalid_request`. A cursor stays usable while the session's tokens are; if DataDance
+  rotates its keys, outstanding cursors become invalid and paging restarts from the first page.
+- **Errors:** `400 invalid_request` — bad `limit`, `since`, `until` or `cursor`, a changed window,
+  or a parameter given twice; the rest as in the gates above.
+
 Errors (RFC 6750, `WWW-Authenticate: Bearer realm="ddc-sso", error=…, resource_metadata=…`):
 
 | Status | `error` | When |
 | --- | --- | --- |
 | 401 | `invalid_token` | missing, expired, revoked, wrong-audience (e.g. an MCP token), or the client is switched off |
-| 403 | `insufficient_scope` | token lacks the **endpoint** scope (`tge:identity` / `tge:status` / `tge:referral_network`; `scope="…"` in the challenge). A missing **field** scope is never an error — the field is just absent |
-| 404 | `not_available` | `/referral-network` only: this environment does not serve the network |
+| 403 | `insufficient_scope` | token lacks the **endpoint** scope (`tge:identity` / `tge:status` / `tge:referral_network`, or `tge:points` on `/points/history`; `scope="…"` in the challenge). A missing **field** scope is never an error — the field is just absent |
+| 404 | `not_available` | `/referral-network` and `/points/history` only: this environment does not serve that endpoint |
 | 403 | `account_disabled` | the DataDance account is disabled |
 | 429 | `slow_down` | per-token rate limit |
 
@@ -400,7 +464,8 @@ surface). A token or revocation request whose client credentials verify is **not
 your backend exchanges every user's code and revokes every logout from one address — but by a
 per-client ceiling sized for a campaign peak (3000/min by default, counted separately for token and
 revoke; it exists to stop a runaway loop, not to meter you). Per token:
-`/partner/tge/*` 120/min — unchanged by `points` and `referral`. The limit is sized for a partner
+`/partner/tge/*` 120/min — unchanged by `points`, `referral` and the points history (one shared
+budget for every read). The limit is sized for a partner
 backend reading once per user session; it is not a bulk-export budget. `429` bodies use the OAuth
 error shape with `error=slow_down` and carry `Retry-After`. Inside DataDance, consent decisions are
 limited to 10 per user per minute.
@@ -460,6 +525,9 @@ somebody else's.)
 - **`referral`** — the user's own code, their inviter's `sub` and that inviter's own invite code
   (`inviter_code`, added for decision 47), and a level-1 count. The complete network is the
   separate endpoint of §7b, under its own scope, and stays ids and dates only.
+- **Points history** (§7c) is new in contract v0.7: the user's own ledger as id, signed amount,
+  neutral kind and time, under the existing `tge:points` grant, and off per environment until the
+  Wallet's consent line names the history.
 - **A Web3Auth signing-key rotation can pause DataDance logins.** DataDance accepts Web3Auth ID
   tokens only from signing keys it has explicitly approved (pinned). If Web3Auth starts signing
   with a key DataDance has not approved yet, users cannot log in to DataDance — and therefore
@@ -497,6 +565,9 @@ somebody else's.)
 - [ ] T15 — the client secret exists only in the partner backend; never in a browser or a URL.
 - [ ] T19 — with `tge:referral_network`: page the whole downline and check the union equals `total`
       with no duplicates; a response with `anomalies: ["cycle"]` is excluded from payouts.
+- [ ] T20 — with `tge:points` and `points_history` served: page the whole history at `limit=100`,
+      check no `id` repeats, the items sum to `balance` for a test account whose balance is all
+      ledger entries, and an edited cursor is `400`.
 
 ## 14. DataDance operations
 
@@ -540,8 +611,14 @@ unconditionally — the issuer is never derived from a request header), `APP_PUB
 - Rotate: move the current hash to `…_PREVIOUS`, set the new hash, set `…_ROTATION_UNTIL`,
   recreate the container; after the deadline remove the previous hash.
 - Freeze a status field: add it to `SSO_TGE_STATUS_FIELDS` and recreate. `email`,
-  `wallet_address`, `points`, `referral`, `referral_network` and `avatar` are **off** until listed, so deploying this change
+  `wallet_address`, `points`, `referral`, `referral_network`, `points_history` and `avatar` are **off** until listed, so deploying this change
   set alone exposes nothing new. Boot refuses an unknown field name. `avatar` then appears on `/me` only when the account has a picture URL.
+- `points_history` (§7c) is listed only **after** the Wallet's consent line for `points` reads
+  "balance and history" in every consent language (data-dance-frontend, `receivesPoints`): a grant
+  given under the balance-only wording must not start reading the ledger. The list also switches
+  the endpoint for first-party developer-console clients, so it is one switch per environment.
+  The cursor's signing key is derived from `SSO_SESSION_SECRET`; rotating that secret only makes
+  partners restart paging.
 - `SSO_REQUIRE_VERIFIED_SESSION=true` requires the consenting user's DataDance JWT to carry
   `ver >= 2` (issued by the verified Web3Auth login); older sessions get `login_required`.
 - Partner tokens are `McpToken` rows with `source = 'partner'`; they are hidden from the

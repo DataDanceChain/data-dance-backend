@@ -1,6 +1,7 @@
 /**
- * Read-only partner (TGE) resource: `/partner/tge/me`, `/partner/tge/status` and
- * `/partner/tge/referral-network`, `POST /partner/tge/referral/bind/check` (a read: checks a code) —
+ * Read-only partner (TGE) resource: `/partner/tge/me`, `/partner/tge/status`,
+ * `/partner/tge/referral-network` and `/partner/tge/points/history`,
+ * `POST /partner/tge/referral/bind/check` (a read: checks a code) —
  * plus ONE deliberate write, `POST /partner/tge/referral/bind` (decision 30 A, two-step since item
  * 35), which is the only route here outside the read-only guard.
  *
@@ -47,6 +48,7 @@ const { createLogger } = require('../utils/logger');
 const prisma = require('../utils/prisma');
 const { installReadOnlyGuard, runReadOnly } = require('../utils/prismaReadOnly');
 const { buildReferralNetwork, NetworkRequestError } = require('../services/referralNetwork');
+const { buildPointsHistory, PointsHistoryRequestError } = require('../services/partnerPointsHistory');
 
 const logger = createLogger('partnerTge');
 
@@ -347,6 +349,41 @@ router.get('/referral-network', requirePartnerToken, readOnlyRequest, networkSer
     return res.json(body);
   } catch (error) {
     if (error instanceof NetworkRequestError) return sendError(req, res, 400, 'invalid_request', error.description);
+    return next(error);
+  }
+});
+
+/**
+ * GET /partner/tge/points/history — the token's own user's points ledger, newest first, with the
+ * balance /status reports (see src/services/partnerPointsHistory.js for the item shape, the kind
+ * allow-list and the keyset cursor). Gates, in the same order as /referral-network: a valid partner
+ * token (401) → this environment lists `points_history` (404 not_available) → the token carries
+ * `tge:points`, the grant that already shows the balance (403 insufficient_scope) → the account is
+ * active (403 account_disabled). Read-only scope, the shared per-token limit, and one G6 access
+ * record with the item count. The body carries a live balance, so it is never cacheable.
+ */
+function pointsHistoryServed(req, res, next) {
+  if (!req.partner.client.statusFields.includes('points_history')) {
+    res.set('Cache-Control', 'no-store');
+    return res.status(404).json({ error: 'not_available', error_description: 'The points history is not served in this environment.' });
+  }
+  return next();
+}
+
+router.get('/points/history', requirePartnerToken, readOnlyRequest, pointsHistoryServed, requireScope('sso:points'), async (req, res, next) => {
+  try {
+    const { user } = req.partner;
+    const { cursor, limit, since, until } = req.query || {};
+    const body = await buildPointsHistory(user, { cursor, limit, since, until });
+    res.set('Cache-Control', 'no-store');
+    recordAccess(req, 'points-history', body, {
+      itemCount: body.items.length,
+      more: body.next_cursor !== null,
+      asOf: body.as_of,
+    });
+    return res.json(body);
+  } catch (error) {
+    if (error instanceof PointsHistoryRequestError) return sendError(req, res, 400, 'invalid_request', error.description);
     return next(error);
   }
 });
