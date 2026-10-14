@@ -247,6 +247,14 @@ remote_overrides_check() {
   case "${REHEARSAL_G8:-}" in ""|scrub|keep) ;; *) die "REHEARSAL_G8 must be scrub or keep (60-rehearsal.sh restore, gate G8)";; esac
 }
 
+# 60-rehearsal.sh record <key> <seconds>: the parts of the cutover window that are measured by hand, outside the script,
+# and the only keys `record` writes (remote.sh applies the same check before connecting).
+REHEARSAL_HAND_KEYS="offsite_copy"
+rehearsal_record_check() { # <key> <seconds>
+  case " $REHEARSAL_HAND_KEYS " in *" ${1:-} "*) ;; *) die "record: '${1:-}' is not a part measured by hand (allowed: $REHEARSAL_HAND_KEYS)";; esac
+  [[ "${2:-}" =~ ^[1-9][0-9]{0,4}$ ]] && [ "$2" -le 86400 ] || die "record: <seconds> must be a whole number from 1 to 86400, not '${2:-}'"
+}
+
 sha256() { if command -v sha256sum >/dev/null; then sha256sum | cut -c1-64; else shasum -a 256 | cut -c1-64; fi; }
 
 # Canonical absolute path, whether or not the path (or its last components) exists yet: symlinks of the existing

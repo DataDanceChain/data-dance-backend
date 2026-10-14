@@ -39,7 +39,12 @@ CREATE TABLE "Web3AuthNetworkRebind" (id text PRIMARY KEY);
 CREATE TABLE "Web3AuthNetworkRebindRun" (id text PRIMARY KEY);
 CREATE TABLE "_prisma_migrations" (id text PRIMARY KEY);
 INSERT INTO "_prisma_migrations" VALUES ('m1'), ('m2');
+-- the records the record repair rewrites: 50 of 500 under a post link key
+CREATE TABLE "CrawlerData" (id text PRIMARY KEY, "userId" text REFERENCES "User"(id), "sourceId" text);
+INSERT INTO "CrawlerData" SELECT 'cd-' || g, 'uid-secret-' || (g % 300 + 1), CASE WHEN g % 10 = 0 THEN 'title:amazon.com:https://x.com/a/status/' || g ELSE 'order-' || g END
+  FROM generate_series(1, 500) g;
 SQL
+linked() { pq "$1" <<< "SELECT count(*) FROM \"CrawlerData\" WHERE \"sourceId\" LIKE 'title:%:https://%';"; }
 live_state() { pq ddc_rehearsal <<< "SELECT (SELECT count(*) FROM \"User\") || ' ' || (SELECT count(*) FROM \"Point\") || ' ' || md5(string_agg(md5(ROW(u.*)::text), '' ORDER BY id)) || ' ' || coalesce(shobj_description((SELECT oid FROM pg_database WHERE datname = 'ddc_rehearsal'), 'pg_database'), '-') || ' ' || current_setting('default_transaction_read_only') FROM \"User\" u;"; }
 LIVE0=$(live_state)
 DUMP="$W/backup/pg/ddc-daily-20261013-0315.dump"
@@ -117,6 +122,12 @@ SQL
         rm -f "${S:?}/run"; touch "${S:?}/rolledback"
         echo '{"mode": "rollback", "go": true, "rolled_back": true, "run_id": "20261013120000_ab12", "accounts_restored": 300, "records_deleted": 300}';;
       "node scripts/backfillSocialPostIdentity.js") printf 'mode dry-run: scanned 0 social rows\n  would update: 0\n';;
+      "node scripts/backfillSocialPostIdentity.js --apply")   # the record repair: the link-key rows get their order id back (a real UPDATE on the copy)
+        n=$({ printf '%s\n' "WITH r AS (UPDATE \"CrawlerData\" SET \"sourceId\" = 'order-' || substr(id, 4) WHERE \"sourceId\" LIKE 'title:%:https://%' RETURNING 1) SELECT count(*) FROM r;"
+              # STUB_REPAIR_USER=1: the repair also changes a user (the users check after --rollback must catch it)
+              if [ "${STUB_REPAIR_USER:-0}" = 1 ]; then printf '%s\n' "UPDATE \"User\" SET email = 'repair@example.com' WHERE id = 'uid-secret-8';"; fi
+            } | "$D" exec -i "$STUB_PG" psql -X -q -v ON_ERROR_STOP=1 -U ddcuser -d ddc_rehearsal_copy -tA) || exit 3
+        printf 'mode apply: scanned 0 social rows\n  updated: 0\nother sources: %s rows stored under a post link key, %s records (%s rows read)\n  restored own identity: %s (order id %s, title key 0, content only 0; content hash kept, held by another row: 0)\n  marked superseded (later copies): 0 (stored under a link key 0, under the identity itself 0)\n' "$n" "$n" "$n" "$n" "$n";;
       "node scripts/reportDuplicateCampaignGrants.js") printf 'one-time campaign grants written more than once: 0 group(s)\n';;
       *) exit 1;;
     esac; exit 0;;
@@ -148,7 +159,7 @@ reh preflight
 [ "$RC" = 0 ] && grep -q '^PASS REHEARSAL PREFLIGHT PASS' "$W/out" && grep -q '^PASS ddc_rehearsal_copy does not exist yet' "$W/out" && grep -q 'databases in the new cluster: ddc_rehearsal=' "$W/out" \
   && ok "preflight on a real Postgres 17: PASS (the copy absent, the cluster's databases listed)" || { show 30; bad "preflight (rc=$RC)"; }
 reh restore
-[ "$RC" = 0 ] && grep -q '^PASS tables=5 rows=1302 User=300' "$W/out" && [[ "$(copy_comment)" == "ddcnew-rehearsal-copy: restored by deploy/new-stack/60-rehearsal.sh, never production ddc-daily-20261013-0315.dump" ]] \
+[ "$RC" = 0 ] && grep -q '^PASS tables=6 rows=1802 User=300' "$W/out" && [[ "$(copy_comment)" == "ddcnew-rehearsal-copy: restored by deploy/new-stack/60-rehearsal.sh, never production ddc-daily-20261013-0315.dump" ]] \
   && [ "$(counts $COPY)" = "$(counts ddc_rehearsal)" ] && grep -q 'pg_restore --list ok: .* entries, with the User table' "$W/out" \
   && ok "restore on a real Postgres 17: the copy created with its mark (COMMENT ON DATABASE), the real dump restored, the exact counts equal the live database's" || { show 30; bad "restore (rc=$RC, comment: $(copy_comment))"; }
 sl=$(sens ddc_rehearsal); sc=$(sens $COPY)
@@ -158,7 +169,7 @@ reh migrate
 [ "$RC" = 0 ] && grep -q '^PASS the copy has Web3AuthNetworkRebind and Web3AuthNetworkRebindRun' "$W/out" && ok "migrate: the real rebind-table query finds both tables on the copy" || { show; bad "migrate (rc=$RC)"; }
 reh report
 ro_after=$(pq $COPY <<< "SELECT current_setting('default_transaction_read_only');")
-[ "$RC" = 0 ] && grep -q '^PASS a new session on ddc_rehearsal_copy is read-only' "$W/out" && grep -q 'tables: identical 5, more rows 0, new 0, missing or fewer rows 0' "$W/out" && [ "$ro_after" = off ] \
+[ "$RC" = 0 ] && grep -q '^PASS a new session on ddc_rehearsal_copy is read-only' "$W/out" && grep -q 'tables: identical 6, more rows 0, new 0, missing or fewer rows 0' "$W/out" && [ "$ro_after" = off ] \
   && ok "report: the real ALTER DATABASE ... SET default_transaction_read_only makes new sessions read-only, RESET undoes it; the real counts match the dump's" || { show 30; bad "report (rc=$RC, read-only after: $ro_after)"; }
 pq postgres <<< "ALTER DATABASE $COPY SET default_transaction_read_only = on;"
 w=$(pq $COPY <<< 'INSERT INTO "_prisma_migrations" VALUES ($$x$$);' 2>&1 || true)
@@ -170,6 +181,15 @@ left=$(pq $COPY <<< "SELECT count(*) FROM information_schema.tables WHERE table_
   && grep -q '^PASS after --rollback every one of the 300 users equals its state before --apply in every column but updatedAt' "$W/out" \
   && grep -q '^updatedAt differs from before --apply on 250 users' "$W/out" && [ "$left" = 0 ] \
   && ok "apply-switch on real rows: --apply (the script's SQL: backup, clear 250 pairs, updatedAt set) changes exactly those 250 users; after --rollback all 300 equal their state before in every column but updatedAt, which stays changed on 250 (counted apart); the kept users dropped" || { show 30; bad "apply-switch (rc=$RC, kept table left: $left)"; }
+tt="$W/ddcnew/rehearsal/timings.tsv"
+[ "$RC" = 0 ] && [ "$(linked $COPY)" = 0 ] && [ "$(linked ddc_rehearsal)" = 50 ] \
+  && grep -q "$(printf '^points_repair\t[0-9]*\t.*: 0 50 0$')" "$tt" && grep -q "$(printf '^repair_check\t')" "$tt" \
+  && grep -q '^PASS the second --apply changed nothing (social rows updated, records restored, copies superseded: 0 0 0)$' "$W/out" \
+  && ok "apply-switch on real rows: the record repair rewrites the copy's 50 link-key rows (points_repair), the second run finds none (repair_check); the live database keeps its 50; the users check after --rollback is unaffected" || { show 30; bad "record repair (rc=$RC, copy $(linked $COPY), live $(linked ddc_rehearsal))"; }
+# A record repair that also changed a user: the users check after --rollback catches it.
+reh cleanup; reh restore; STUB_REPAIR_USER=1 reh apply-switch
+[ "$RC" = 1 ] && grep -q 'after --rollback 1 users differ from before --apply in a column other than updatedAt' "$W/out" \
+  && ok "apply-switch on real rows: a record repair that also changes a user's e-mail address -> FAIL at the users check after --rollback" || { show 20; bad "repair changing a user (rc=$RC)"; }
 # A rollback that leaves one user different in a column outside the four switch columns: FAIL (a digest of the four
 # columns alone would have passed it).
 reh cleanup; reh restore; STUB_ROLLBACK_EXTRA=1 reh apply-switch
