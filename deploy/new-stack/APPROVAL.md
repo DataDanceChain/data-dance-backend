@@ -27,7 +27,7 @@ new stack**.
 | F | DNS: proxied records for `API_HOST` and `APP_HOST` that point at the production host (address in the private runbook), and a WAF custom rule (Block): `(http.host in {"<API_HOST>" "<APP_HOST>"} and not ip.src in {<team addresses>})`. The default names' records exist since 10-05. | whoever holds the `datadance.ai` zone | external check |
 | G | The team's address list for that WAF rule. | Sloan | F |
 | H | Web3Auth **mainnet** project allow-list: add `https://<APP_HOST>`. | Sloan | logins in rehearsal |
-| I | `local.env` on the operator's Mac (values from the private runbook) and 1Password CLI approval at each login. | Sloan | remote runs |
+| I | `local.env` on the operator's Mac (values from the private runbook) and 1Password CLI approval: **once per deploy** with `./sshmux.sh open` (section 4), otherwise at each login. | Sloan | remote runs |
 | J | The rehearsal keeps `OPS_ADMIN_USERNAME` / `OPS_ADMIN_PASSWORD` from production (own-stack ops console, not a third party; blank answers 503 "not configured"). Keep, or blank them for the rehearsal? Default: kept. | Sloan | data step |
 | K | The gate in section 7, each item with its own approval, **before any production data is restored**. | Sloan | data step |
 | L | Apple Wallet pass signing in the rehearsal. **Default: no production key.** The rehearsal gets a throwaway RSA key and a self-signed `signerCert.pem` (`10-build.sh`), so pass creation fails or yields a pass Wallet rejects; boot is unaffected. Real pass signing in the rehearsal needs an approval and a script change (`40-up.sh` refuses the production files). The cutover copies the production `signerKey.pem`, `signerCert.pem` and `apn_key.p8` under its own approval. | Sloan | nothing (default holds) |
@@ -300,7 +300,15 @@ uses the real size.
 
 ## 4. Execution order
 
-Run from the Mac in `deploy/new-stack/`, with `local.env` filled in. Every write call needs `DDC_APPROVED=yes`, and each
+Run from the Mac in `deploy/new-stack/`, with `local.env` filled in. **One 1Password approval per deploy:** run
+`./sshmux.sh open` before the first step and `./sshmux.sh close` after the last one (section 5, "Shared connection").
+`open` reads the server password once (that is the approval), logs in once and prints `shared connection open until
+HH:MM` (default 180 minutes, `./sshmux.sh open <minutes>` for 1-240); every `remote.sh` and `survey/ro-ssh.sh` call
+until then, the uploads' one call per file included, runs through that login and asks 1Password nothing.
+`./sshmux.sh status` prints `open until HH:MM` or `closed`. Run every step with the same `TMPDIR` as `open` (the
+Terminal default): the socket is looked up under it. Without `open`, or once the shared connection has ended, each call
+logs in as before (and says so on stderr when a shared connection had been open). Every write call needs
+`DDC_APPROVED=yes`, and each
 call is logged to `logs/` on the Mac **and**, for every write run, to `/root/ddcnew/logs/<ts>-<script>-<pid>.log` (600)
 on the server. **Ctrl-C on the Mac does not stop a script on the server:** there is no tty, so Ctrl-C or a dropped
 connection ends only the local ssh; the script runs to its end and keeps writing its server-side log. To stop it, log in
@@ -426,8 +434,27 @@ Consequences the data step (separate approval) must honour:
   runs with all output discarded, and nothing connects if 1Password does not answer. Nothing connects either when the
   askpass file cannot be created completely (`mktemp` or write failure, disk full). If `op` fails later inside the
   askpass, the askpass kills its parent, only after checking that the parent is ssh, before ssh can send a password.
-  Password method only, `NumberOfPasswordPrompts=1`. When the login method changes (gate G4), `sshpw.sh`, `remote.sh`
-  and `survey/ro-ssh.sh` change with it.
+  Password method only, `NumberOfPasswordPrompts=1`. When the login method changes (gate G4), `sshpw.sh`, `remote.sh`,
+  `survey/ro-ssh.sh` and `sshmux.sh` change with it.
+- **Shared connection (`sshmux.sh`, one 1Password approval per deploy):** `open` loads `local.env` like every helper,
+  then reads the password with one `op read` (its precheck: nothing connects when it fails or returns nothing), pipes
+  it to ssh's stdin (never an argument, the environment or a file) for an askpass that prints that one line, and starts
+  an OpenSSH master: `ControlMaster=yes`, `ControlPersist=<minutes>m`, the same login options (password method only,
+  `NumberOfPasswordPrompts=1`), `-f -N`. The askpass file is removed as soon as the master is up; with nothing on its
+  stdin it kills ssh before a password is sent. The socket sits in `${TMPDIR}/ddc-sshmux-<uid>`, created 0700; a
+  directory that is not this user's, not 0700 or a link is refused, as is a socket path with characters ssh would
+  expand or one too long for a Unix socket. The end time (open + minutes) is recorded next to the socket with the
+  master's pid; at that time the master stops taking calls (`ssh -O stop`, a call still running finishes first), done
+  by a watchdog of `open` and, should that be gone, by the next call; `ControlPersist` also ends it after that many
+  minutes without a call. `remote.sh` and `survey/ro-ssh.sh` use it only when a master answers on the socket (`ssh -O
+  check`), the record names that master and its end time lies ahead; then they ask 1Password nothing and create no
+  askpass, and connect with `ControlMaster=no`, `ProxyCommand=false` and `BatchMode=yes`, so a master that dies between
+  the check and the call cannot turn into a direct login: ssh exits 255 with no TCP connection and no password sent.
+  **If the master dies mid-run** (network, the Mac sleeping, `close`): the call running through it fails with 255 and
+  is **not retried** (a write script runs on to its end on the server and keeps its server-side log; read it before
+  repeating anything); the next call notices, removes the stale socket, says so on stderr and **logs in the usual way**
+  (1Password asked again, as without `sshmux.sh`); `./sshmux.sh open` restores one approval for the remaining steps.
+  `close` ends the master at once (`ssh -O exit`) and removes the directory. Only one `open` runs at a time.
 - **Ports and database names:** ports (`API_PORT`, `WEB_PORT`, `DB_PORT`) are loopback-only, disjoint from 10000,
   9000-9003 and 15432, and refused while anything but this stack's own container listens on them (`30-nginx.sh` checks
   the two it points the vhosts at, `40-up.sh` all three, `00-preflight.sh` reports them). The database names `ddc`,
@@ -510,7 +537,10 @@ by side. It must end with `summary: fails=0`. It covers:
   one-line sidecar, and a missing, malformed or contradicting record each stop in step 1 before any build; a `.env*`
   file or a `.dockerignore` without `**/.env` in the commit stops at the unchanged checks. Without the flag (an archive
   present) the clean public fetch runs as before (its URL pointed at the throwaway clone) and `.env` keeps its four lines.
-- The SSH login guard against a throwaway loopback sshd, using scratch copies with a test `local.env`; `local.env`
+- The SSH login guard against a throwaway loopback sshd, using scratch copies with a test `local.env`; the shared
+  connection against the same sshd (section 10f: `open` = one 1Password read and one login, six calls through it =
+  no further read, no new TCP connection and no new login; `close`; the usual login again after it; a dead master, a
+  master gone between the check and the call, an expired master; refusals before anything connects); `local.env`
   refusals (missing, placeholders, empty, wrong shape) with stub `op` and `ssh` that record every call; `remote.sh`'s
   refusals before connecting (`;`, `$()`, backticks, a blank, a newline and a carriage return in each override, bad
   settings or client ids, `run 00-preflight.sh`); the preflight's git-tree hash and settings lines; `00-preflight.sh` as root in a throwaway container (Race's stand-ins listed and

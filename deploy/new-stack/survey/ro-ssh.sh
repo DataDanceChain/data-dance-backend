@@ -9,8 +9,13 @@ set -u
 # Login safety (deploy/new-stack/sshpw.sh): local.env and 1Password are checked BEFORE ssh starts and nothing connects
 # if either fails; nothing connects either when the askpass file cannot be created completely; the askpass kills ssh
 # instead of letting it send an empty password; password method only; NumberOfPasswordPrompts=1.
+# After ../sshmux.sh open, the script runs through that shared connection instead: no 1Password read, no askpass.
 # shellcheck source=../sshpw.sh
 . "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/../sshpw.sh"
+if sshpw_mux_alive; then
+  timeout "${RO_SSH_TIMEOUT:-300}" ssh "${SSHPW_OPTS[@]}" "${SSHPW_MUX_OPTS[@]}" "$SSHPW_TARGET" 'bash -s' < "$1" > "$2" 2>&1
+  rc=$?; [ "$rc" != 255 ] || sshpw_mux_lost; echo "ro-ssh exit=$rc"; exit $rc
+fi
 sshpw_precheck || { echo "ro-ssh exit=3 (not connected)"; exit 3; }
 A=$(mktemp "${TMPDIR:-/tmp}/askpass.XXXXXX") && sshpw_make_askpass "$A" || { rm -f "${A:-}"; echo "ro-ssh exit=3 (askpass not created; not connected)"; exit 3; }
 SSH_ASKPASS="$A" SSH_ASKPASS_REQUIRE=force DISPLAY=none timeout "${RO_SSH_TIMEOUT:-300}" \

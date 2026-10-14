@@ -126,6 +126,16 @@
 #      REHEARSAL_REDIRECT_URIS and no previous env stops. The backend named in .env must know every listed field and
 #      allowlist (its source as 10-build.sh unpacks it), else 20-env.sh stops before it writes. 3a. this checkout boots
 #      on the env with the allow-list (developerRegistration=allowlist:<n> on the money-path line).
+# One 1Password approval per deploy (10-14):
+#   10f. sshmux.sh against the throwaway sshd of 10c (scratch copies, a fake op that counts its runs, the socket under a
+#      short private TMPDIR): open refuses bad minutes, a socket path over 86 characters, a directory that is not 0700,
+#      a failing or empty 1Password read (nothing connects); open = exactly 1 op run and 1 login, a 0700 directory, no
+#      askpass left, one line of output; status; six calls through the master (ro-ssh.sh, remote.sh run, the piped page
+#      password, upload-api's three files, upload) = 0 op runs, 0 new TCP connections, 0 new logins; close; the usual
+#      login again after close (precheck + askpass per call); a dead master (stale socket), a master gone between the
+#      check and the call (exit 255, no TCP connection: ControlMaster=no, ProxyCommand=false, BatchMode=yes), an
+#      expired master (stopped by the next call, and by the watchdog without one); the stdin askpass kills ssh on an
+#      empty stdin (0 failed logins); no master left.
 # Every SSH test uses scratch COPIES of the scripts with a test local.env (loopback only): the package's own local.env,
 # if one exists, is never used to connect, and the real 1Password CLI is never called.
 # Containers and images: every docker run and docker build of this run carries the label ddcnew-localtest=<run id>
@@ -1491,6 +1501,147 @@ EOF
      && ! printf '%s\n' "$out" | grep -qF -f "$SS/page-pw" && ! cat "$CP2"/logs/* | grep -qF -f "$SS/page-pw"; then
     ok "real ssh: the piped page password reaches the remote script's stdin unchanged (sha256 prefix $want), with PARTNER_ALLOWED_IP as its environment; 1Password ran $nop times (precheck, askpass) and read 0 bytes of stdin; the password is not in the output or logs/"
   else printf '%s\n' "$out" | sed 's/^/    /'; bad "page password through the real ssh (rc=$rc op runs=$nop op stdin bytes=$sop)"; fi
+  # ---------------------------------------------------------------------------------------------------------------
+  echo; echo "== 10f. one 1Password approval per deploy (sshmux.sh): open, status, close; remote.sh and ro-ssh.sh through the shared connection (the same throwaway sshd)"
+  # Scratch COPIES of the whole package with the test local.env; sshpw.sh differs in the same two lines as in 10c (a
+  # fake op that counts its runs; port + known_hosts), asserted below. The socket directory lives under a short private
+  # TMPDIR (a Unix socket path has at most 103 characters on macOS).
+  MX="$T/sshmux/deploy/new-stack"; mkdir -p "$MX/survey" "$MX/partner-info" "$MX/out"
+  cp "$PKG"/*.sh "$PKG/compose.yaml" "$MX/"; cp "$PKG/partner-info/index.html" "$MX/partner-info/"; cp "$PKG/survey/ro-ssh.sh" "$MX/survey/"; cp "$SS/pkg/local.env" "$MX/local.env"
+  # fake op: one line per run in op.count; op.fail -> fails like an authorization timeout; op.empty -> prints nothing
+  printf '#!/bin/sh\necho run >> "%s/op.count"\n[ -e "%s/op.fail" ] && { echo "[ERROR] authorization timeout" >&2; exit 1; }\n[ -e "%s/op.empty" ] && exit 0\nprintf "%%s\\n" "%s"\n' "$SS" "$SS" "$SS" "$TESTPW" > "$SS/op-count"
+  chmod 700 "$SS/op-count"
+  sed "s#^SSHPW_OP_BIN=/opt/homebrew/bin/op #SSHPW_OP_BIN=$SS/op-count #" "$PKG/sshpw.sh" > "$MX/sshpw.sh"
+  printf 'SSHPW_OPTS+=(-p %s -o UserKnownHostsFile=%s)\n' "$PORT" "$SS/known_hosts" >> "$MX/sshpw.sh"
+  nd=$( { for f in sshmux.sh remote.sh common.sh; do diff "$PKG/$f" "$MX/$f"; done; diff "$PKG/survey/ro-ssh.sh" "$MX/survey/ro-ssh.sh"; diff "$PKG/sshpw.sh" "$MX/sshpw.sh"; } | grep -c '^>' || true)
+  MXT=$(mktemp -d /tmp/ddcmux.XXXXXX); MXD="$MXT/ddc-sshmux-$(id -u)"
+  MXP=$(TMPDIR="$MXT" bash -c '. "$1/sshpw.sh" && sshpw_load_local_env && sshpw_mux_path' _ "$MX")
+  rm -f "$SS/op.count" "$SS/op.fail" "$SS/op.empty"
+  nop() { if [ -f "$SS/op.count" ]; then wc -l < "$SS/op.count" | tr -d ' '; else echo 0; fi; }
+  nacc() { docker logs "$C" 2>&1 | grep -c 'Accepted password for root' || true; }
+  mx() { TMPDIR="$MXT" bash "$MX/sshmux.sh" "$@"; }                       # sshmux.sh of the copy
+  mxro() { TMPDIR="$MXT" bash "$MX/survey/ro-ssh.sh" "$MX/probe.sh" "$MX/probe.out"; }
+  mpid() { [ -f "$MXP.until" ] && cut -d' ' -f2 "$MXP.until"; }
+  gone() { local i=0; while kill -0 "$1" 2>/dev/null && [ "$i" -lt "${2:-10}" ]; do sleep 1; i=$((i + 1)); done; ! kill -0 "$1" 2>/dev/null; }
+  docker exec -i "$C" sh -c 'mkdir -p /root/ddcnew/deploy && cat > /root/ddcnew/deploy/p2-disk.sh && chmod 700 /root/ddcnew/deploy/p2-disk.sh' <<'EOF'
+#!/bin/bash
+printf 'P2-STUB %s\n' "$*"
+EOF
+  printf 'echo PROBE-OK; hostname >/dev/null\n' > "$MX/probe.sh"
+  if [ "$nd" = 2 ] && [ "${#MXP}" -le 86 ] && [[ "$MXP" == "$MXD"/* ]]; then
+    # status before open: closed, 1Password not asked
+    rc=0; out=$(mx status 2>&1) || rc=$?
+    [ "$rc" = 1 ] && [ "$out" = closed ] && [ "$(nop)" = 0 ] && ok "sshmux.sh status before open: closed (exit 1), 1Password not asked" || bad "status before open (rc=$rc out=$out op=$(nop))"
+    # refusals before anything: minutes out of range, a socket path too long, a directory that is not private, 1Password failing or empty
+    c0=$(nconn); r=""
+    for v in 0 241 1.5 abc -5; do rc=0; out=$(mx open "$v" 2>&1) || rc=$?; [ "$rc" = 2 ] || r="$r $v:$rc"; done
+    LT_LONG="$T/$(printf 'x%.0s' $(seq 1 60))"; mkdir -p "$LT_LONG"
+    rc=0; out=$(TMPDIR="$LT_LONG" bash "$MX/sshmux.sh" open 2>&1) || rc=$?; { [ "$rc" = 3 ] && printf '%s\n' "$out" | grep -q 'too long for a Unix socket'; } || r="$r long:$rc"
+    mkdir -m 755 "$MXD"; rc=0; out=$(mx open 2>&1) || rc=$?; { [ "$rc" = 3 ] && printf '%s\n' "$out" | grep -q 'is not a private directory of this user'; } || r="$r mode755:$rc"; rmdir "$MXD"
+    touch "$SS/op.fail"; rc=0; out=$(mx open 2>&1) || rc=$?; rm -f "$SS/op.fail"; { [ "$rc" = 3 ] && printf '%s\n' "$out" | grep -q 'REFUSING TO CONNECT: 1Password did not return'; } || r="$r opfail:$rc"
+    touch "$SS/op.empty"; rc=0; out=$(mx open 2>&1) || rc=$?; rm -f "$SS/op.empty"; { [ "$rc" = 3 ] && printf '%s\n' "$out" | grep -q 'REFUSING TO CONNECT: 1Password did not return'; } || r="$r opempty:$rc"
+    sleep 2; c1=$(nconn)
+    [ -z "$r" ] && [ "$c1" = "$c0" ] && [ "$(nop)" = 2 ] && [ ! -e "$MXP" ] && [ -z "$(ls "$MXD"/askpass.* 2>/dev/null)" ] \
+      && ok "sshmux.sh open refuses minutes 0, 241, 1.5, abc, -5 (exit 2), a socket path over 86 characters and a socket directory that is not 0700 (exit 3) without asking 1Password; a failing or empty 1Password read (one read each) stops it before anything connects (exit 3): no TCP connection, no socket, no askpass left" \
+      || bad "open refusals:$r (connections $c0->$c1, op runs $(nop))"
+    # open: exactly one 1Password read, one login, a 0700 directory, no askpass left, one line of output
+    rm -f "$SS/op.count"; a0=$(nacc); rc=0; out=$(mx open 2>&1) || rc=$?; a1=$(nacc); MPID=$(mpid)
+    mode=$(ls -ld "$MXD" 2>/dev/null | cut -c1-10); left=$( { ls "$MXD"/askpass.* "$MXT"/askpass.* 2>/dev/null || true; } | grep -c . || true)
+    if [ "$rc" = 0 ] && [[ "$out" =~ ^shared\ connection\ open\ until\ [0-2][0-9]:[0-5][0-9]$ ]] && [ "$(nop)" = 1 ] && [ $((a1 - a0)) = 1 ] \
+       && [ "$mode" = drwx------ ] && [ "$left" = 0 ] && [ -S "$MXP" ] && [ -n "$MPID" ] && kill -0 "$MPID" 2>/dev/null; then
+      ok "sshmux.sh open: '$out' (the only output), exactly 1 run of 1Password, 1 login on sshd, the socket directory is $mode, no askpass file left; master pid $MPID"
+    else bad "open (rc=$rc out=$out op=$(nop) accepted $a0->$a1 mode=$mode askpass-left=$left pid=$MPID)"; fi
+    ps -ww -o command= -p "${MPID:-1}" 2>/dev/null | grep -qF "$TESTPW" && bad "the test password is in the master's arguments" || ok "the master's arguments do not carry the password (it reached ssh on a pipe only)"
+    rc=0; out=$(mx open 2>&1) || rc=$?
+    [ "$rc" = 0 ] && printf '%s\n' "$out" | grep -q '^shared connection already open until ' && [ "$(nop)" = 1 ] && ok "a second open while the master is alive: 'already open', 1Password not asked" || bad "second open (rc=$rc out=$out op=$(nop))"
+    rc=0; out=$(mx status 2>&1) || rc=$?
+    [ "$rc" = 0 ] && [[ "$out" =~ ^open\ until\ [0-2][0-9]:[0-5][0-9]$ ]] && [ "$(nop)" = 1 ] && ok "sshmux.sh status: '$out' (exit 0), 1Password not asked" || bad "status while open (rc=$rc out=$out)"
+    # six calls through the master (eight ssh sessions: upload-api sends three files): no 1Password read, no new TCP connection, no new login
+    BSHA=0123456789abcdef0123456789abcdef01234567; BF="$MX/out/ddc-backend-$BSHA.tar.gz"
+    mkdir -p "$T/mxsrc"; head -c 1048576 /dev/urandom > "$T/mxsrc/blob"; tar -czf "$BF" -C "$T/mxsrc" blob
+    printf 'commit=%s\narchive_sha256=x\nold_app_commit=x\nold_app_switches=1\n' "$BSHA" > "$BF.old-app"
+    (cd "$MX/out" && shasum -a 256 "$(basename "$BF")" "$(basename "$BF").old-app" > "$(basename "$BF").sha256")
+    ( umask 077; printf 'lt-%s\n' "$(openssl rand -hex 16)" > "$SS/mx-page-pw" )
+    docker exec -i "$C" sh -c 'cat > /root/ddcnew/deploy/50-partner-page.sh && chmod 700 /root/ddcnew/deploy/50-partner-page.sh' <<'EOF'
+#!/bin/bash
+IFS= read -r line; printf 'remote got-sha=%s args=%s ip=%s\n' "$(printf '%s' "$line" | sha256sum | cut -c1-16)" "$*" "${PARTNER_ALLOWED_IP:-}"
+EOF
+    want=$(tr -d '\n' < "$SS/mx-page-pw" | shasum -a 256 | cut -c1-16)
+    c0=$(nconn); a0=$(nacc); f0=$(nfail); r=""
+    rc=0; out=$(mxro 2>&1) || rc=$?; { [ "$rc" = 0 ] && grep -q PROBE-OK "$MX/probe.out"; } || r="$r ro-ssh:$rc"
+    rc=0; out=$(TMPDIR="$MXT" bash "$MX/remote.sh" run p2-disk.sh preview 2>&1 < /dev/null) || rc=$?; { [ "$rc" = 0 ] && printf '%s\n' "$out" | grep -qx 'P2-STUB preview'; } || r="$r run:$rc"
+    rc=0; out=$(TMPDIR="$MXT" DDC_APPROVED=yes bash "$MX/remote.sh" run 50-partner-page.sh apply PARTNER_ALLOWED_IP=203.0.113.7 < "$SS/mx-page-pw" 2>&1) || rc=$?
+    { [ "$rc" = 0 ] && printf '%s\n' "$out" | grep -qx "remote got-sha=$want args=apply ip=203.0.113.7"; } || r="$r stdin:$rc"
+    rc=0; out=$(TMPDIR="$MXT" DDC_APPROVED=yes bash "$MX/remote.sh" upload-api "$BSHA" 2>&1 < /dev/null) || rc=$?
+    { [ "$rc" = 0 ] && printf '%s\n' "$out" | grep -qx "ddc-backend-$BSHA.tar.gz: OK" && printf '%s\n' "$out" | grep -qx "ddc-backend-$BSHA.tar.gz.old-app: OK"; } || r="$r upload-api:$rc"
+    rc=0; out=$(TMPDIR="$MXT" DDC_APPROVED=yes bash "$MX/remote.sh" upload 2>&1 < /dev/null) || rc=$?; { [ "$rc" = 0 ] && printf '%s\n' "$out" | grep -qx 'files=13'; } || r="$r upload:$rc"
+    rc=0; out=$(mxro 2>&1) || rc=$?; { [ "$rc" = 0 ] && grep -q PROBE-OK "$MX/probe.out"; } || r="$r ro-ssh2:$rc"
+    sleep 2; c1=$(nconn); a1=$(nacc); f1=$(nfail)
+    if [ -z "$r" ] && [ "$(nop)" = 1 ] && [ "$c1" = "$c0" ] && [ "$a1" = "$a0" ] && [ "$f1" = "$f0" ]; then
+      ok "6 calls through the shared connection (ro-ssh.sh twice, remote.sh run, run 50-partner-page.sh apply with the page password piped through, upload-api: its 3 files, upload: files=13): 0 further 1Password reads (1 in all), 0 new TCP connections, 0 new logins, 0 failed logins"
+    else bad "calls through the shared connection:$r (op runs $(nop), connections $c0->$c1, accepted $a0->$a1, failed $f0->$f1)"; fi
+    docker exec -i "$C" sh -c 'cat > /root/ddcnew/deploy/p2-disk.sh && chmod 700 /root/ddcnew/deploy/p2-disk.sh' <<'EOF'
+#!/bin/bash
+printf 'P2-STUB %s\n' "$*"
+EOF
+    # close: the master ends, its directory goes; then each call logs in the usual way again (precheck + askpass: 2 reads)
+    rc=0; out=$(mx close 2>&1) || rc=$?
+    [ "$rc" = 0 ] && [ "$out" = "shared connection closed" ] && [ ! -e "$MXD" ] && gone "$MPID" 5 && ok "sshmux.sh close: '$out', master $MPID gone, $MXD removed" || bad "close (rc=$rc out=$out dir=$(ls -d "$MXD" 2>/dev/null))"
+    rc=0; out=$(mx status 2>&1) || rc=$?; [ "$rc" = 1 ] && [ "$out" = closed ] || bad "status after close (rc=$rc out=$out)"
+    rm -f "$SS/op.count"; a0=$(nacc); r=""
+    rc=0; out=$(mxro 2>&1) || rc=$?; { [ "$rc" = 0 ] && grep -q PROBE-OK "$MX/probe.out" && ! printf '%s\n' "$out" | grep -q 'sshmux:'; } || r="$r ro-ssh:$rc"
+    rc=0; out=$(TMPDIR="$MXT" bash "$MX/remote.sh" run p2-disk.sh preview 2>&1 < /dev/null) || rc=$?; { [ "$rc" = 0 ] && printf '%s\n' "$out" | grep -qx 'P2-STUB preview'; } || r="$r run:$rc"
+    sleep 1; a1=$(nacc)
+    [ -z "$r" ] && [ "$(nop)" = 4 ] && [ $((a1 - a0)) = 2 ] && ok "after close: ro-ssh.sh and remote.sh run log in the usual way again, silently (2 calls: 2 logins, 4 runs of 1Password: precheck and askpass each, as before sshmux.sh)" \
+      || bad "old path after close:$r (op runs $(nop), accepted $a0->$a1)"
+    rc=0; out=$(mx close 2>&1) || rc=$?; [ "$rc" = 0 ] && [ "$out" = "no shared connection open" ] || bad "close with nothing open (rc=$rc out=$out)"
+    # a dead master (SIGKILL: its socket file stays): the next call says so, cleans up and logs in the usual way, no failed login
+    mx open > /dev/null 2>&1; MPID=$(mpid); kill -9 "${MPID:-0}" 2>/dev/null; gone "${MPID:-0}" 5
+    rm -f "$SS/op.count"; a0=$(nacc); f0=$(nfail); rc=0; out=$(mxro 2>&1) || rc=$?; sleep 1; a1=$(nacc); f1=$(nfail)
+    [ -n "$MPID" ] && [ "$rc" = 0 ] && grep -q PROBE-OK "$MX/probe.out" && printf '%s\n' "$out" | grep -q '^sshmux: the shared connection has ended (its master no longer answers); this call logs in the usual way' \
+      && [ ! -e "$MXP" ] && [ ! -e "$MXP.until" ] && [ "$(nop)" = 2 ] && [ $((a1 - a0)) = 1 ] && [ "$f1" = "$f0" ] \
+      && ok "a dead master (SIGKILL, its socket file left behind): ro-ssh.sh says so on stderr, removes the stale socket and record, logs in the usual way (1 login, 2 runs of 1Password), 0 failed logins" \
+      || bad "dead master (pid=$MPID rc=$rc op=$(nop) accepted $a0->$a1 failed $f0->$f1): $out"
+    # the master dies between the check and the call: ssh cannot fall back to a direct connection (ProxyCommand=false,
+    # BatchMode=yes): exit 255, no TCP connection, no password sent; remote.sh says so and does not retry
+    mx open > /dev/null 2>&1; MPID=$(mpid); kill -9 "${MPID:-0}" 2>/dev/null; gone "${MPID:-0}" 5
+    RB="$T/racebin"; mkdir -p "$RB"; rm -f "$SS/race.once"
+    printf '#!/bin/sh\ncase " $* " in *" -O check "*) if [ ! -e "%s/race.once" ]; then touch "%s/race.once"; echo "Master running (pid=%s)" >&2; exit 0; fi;; esac\nexec %s "$@"\n' "$SS" "$SS" "$MPID" "$(command -v ssh)" > "$RB/ssh"; chmod 755 "$RB/ssh"
+    rm -f "$SS/op.count"; c0=$(nconn); f0=$(nfail); a0=$(nacc); rc=0
+    out=$(PATH="$RB:$PATH" TMPDIR="$MXT" bash "$MX/remote.sh" run p2-disk.sh preview 2>&1 < /dev/null) || rc=$?; sleep 2; c1=$(nconn); f1=$(nfail); a1=$(nacc)
+    [ -n "$MPID" ] && [ -e "$SS/race.once" ] && [ "$rc" = 255 ] && ! printf '%s\n' "$out" | grep -q P2-STUB && printf '%s\n' "$out" | grep -q '^sshmux: the shared connection ended during this call (ssh exit 255)' \
+      && [ "$(nop)" = 0 ] && [ "$c1" = "$c0" ] && [ "$f1" = "$f0" ] && [ "$a1" = "$a0" ] \
+      && ok "the master gone between the check and the call: ssh exits 255 without a TCP connection (no fallback to a direct login, no password), 1Password not asked; remote.sh names it and retries nothing" \
+      || bad "race (pid=$MPID rc=$rc op=$(nop) connections $c0->$c1 failed $f0->$f1): $out"
+    mx close > /dev/null 2>&1
+    # past the end time: the next call stops the master (-O stop) and logs in the usual way
+    mx open > /dev/null 2>&1; MPID=$(mpid); printf '%s %s\n' "$(( $(date +%s) - 60 ))" "$MPID" > "$MXP.until"
+    rm -f "$SS/op.count"; rc=0; out=$(mxro 2>&1) || rc=$?
+    [ -n "$MPID" ] && [ "$rc" = 0 ] && grep -q PROBE-OK "$MX/probe.out" && printf '%s\n' "$out" | grep -q '^sshmux: the shared connection reached its end time [0-2][0-9]:[0-5][0-9]: stopped; this call logs in the usual way' \
+      && [ "$(nop)" = 2 ] && gone "$MPID" 5 && [ ! -e "$MXP.until" ] \
+      && ok "past its end time: ro-ssh.sh stops the master (it exits), says so and logs in the usual way" || bad "expired master (pid=$MPID rc=$rc op=$(nop)): $out"
+    # the watchdog: with no call at all, the master stops within about 10 s once its end time has passed
+    mx open > /dev/null 2>&1; MPID=$(mpid); printf '%s %s\n' "$(( $(date +%s) - 1 ))" "$MPID" > "$MXP.until"
+    [ -n "$MPID" ] && gone "$MPID" 25 && [ ! -e "$MXP" ] && ok "the watchdog of open stops an expired master by itself (no helper call): gone, socket removed" || bad "watchdog did not stop master $MPID"
+    mx close > /dev/null 2>&1
+    # the stdin askpass never lets ssh send an empty password: no line on stdin -> it kills ssh, 0 failed logins
+    f0=$(nfail); rc=0
+    ( . "$MX/sshpw.sh"; sshpw_load_local_env || exit 9; a="$SS/askpass-stdin"; sshpw_make_askpass "$a" stdin || exit 9
+      SSH_ASKPASS="$a" SSH_ASKPASS_REQUIRE=force DISPLAY=none ssh "${SSHPW_OPTS[@]}" "$SSHPW_TARGET" 'echo "LOG""GED-IN"' < /dev/null ) > "$SS/ssh-stdin-empty.out" 2>&1 || rc=$?
+    sleep 2; f1=$(nfail)
+    [ "$rc" != 0 ] && [ "$rc" != 9 ] && [ "$f1" = "$f0" ] && ! grep -q LOGGED-IN "$SS/ssh-stdin-empty.out" && grep -q 'no password on stdin: stopping ssh' "$SS/ssh-stdin-empty.out" \
+      && ok "the stdin askpass of open with nothing on stdin kills ssh before it sends a password: 0 failed logins (exit $rc)" || bad "stdin askpass with empty stdin (rc=$rc failed $f0->$f1)"
+    ( . "$MX/sshpw.sh"; sshpw_load_local_env; sshpw_make_askpass "$SS/ap-stdin" stdin && sshpw_askpass_ok "$SS/ap-stdin" stdin && ! sshpw_askpass_ok "$SS/ap-stdin" \
+      && ! grep -q "$SS/op-count" "$SS/ap-stdin" ) && ok "the stdin askpass passes sshpw_askpass_ok only as the stdin variant, and does not call op" || bad "stdin askpass file checks"
+    left=$(pgrep -f "ControlPath=$MXT" 2>/dev/null | grep -c . || true)
+    [ "$left" = 0 ] && ok "no ssh master of this section left running" || { bad "$left ssh master(s) of this section left"; pkill -f "ControlPath=$MXT" 2>/dev/null || true; }
+    grep -qF "$TESTPW" "$MX/probe.out" "$SS"/ssh-*.out "$MX"/logs/* 2>/dev/null && bad "the test password appeared in an output of 10f" || ok "the password appears in no output or log of 10f"
+  else bad "10f setup: the copies differ in $nd lines (want 2) or the socket path is unusable ($MXP)"; fi
+  grep -qF '"${SSHPW_MUX_OPTS[@]}"' "$PKG/remote.sh" && grep -qF '"${SSHPW_MUX_OPTS[@]}"' "$PKG/survey/ro-ssh.sh" \
+    && grep -qF 'SSHPW_MUX_OPTS=(-o ControlMaster=no -o "ControlPath=$p" -o ProxyCommand=false -o BatchMode=yes)' "$PKG/sshpw.sh" \
+    && [ "$(grep -c 'if sshpw_mux_alive; then' "$PKG/remote.sh" "$PKG/survey/ro-ssh.sh" | cut -d: -f2 | tr '\n' ' ')" = "1 1 " ] \
+    && ok "remote.sh and ro-ssh.sh use the shared connection only through sshpw_mux_alive, with ControlMaster=no, ProxyCommand=false and BatchMode=yes" || bad "shared-connection wiring in remote.sh / ro-ssh.sh / sshpw.sh"
+  rm -rf "$MXT"
   docker rm -f "$C" >/dev/null 2>&1 || true
   echo "throwaway sshd container removed"
 else
@@ -1499,7 +1650,7 @@ fi
 
 echo; echo "== 10d. remote.sh env overrides: allowlist (a COPY of remote.sh with a stub sshpw.sh: nothing can connect)"
 R="$T/remote"; mkdir -p "$R"; cp "$PKG/remote.sh" "$PKG/common.sh" "$R/"
-printf '%s\n' 'SSHPW_OPTS=(-o BatchMode=yes)' 'sshpw_precheck() { echo "STUB: would connect now (stopped)"; return 1; }' 'sshpw_make_askpass() { :; }' > "$R/sshpw.sh"
+printf '%s\n' 'SSHPW_OPTS=(-o BatchMode=yes)' 'sshpw_mux_alive() { return 1; }' 'sshpw_precheck() { echo "STUB: would connect now (stopped)"; return 1; }' 'sshpw_make_askpass() { :; }' > "$R/sshpw.sh"
 for a in PATH=/tmp BASH_ENV=/tmp/x LD_PRELOAD=/tmp/x.so DDC_LOCAL_TEST=1 NEW_DIR=/tmp/x OLD_ENV=/tmp/x BACKUP_DIR=/tmp/x DDC_MEMINFO=/tmp/x BUILD_WATCH_INTERVAL=1 lower_case=1; do
   rc=0; out=$(DDC_APPROVED=yes bash "$R/remote.sh" run 40-up.sh "$a" 2>&1 < /dev/null) || rc=$?
   [ "$rc" = 2 ] && printf '%s\n' "$out" | grep -q "override ${a%%=*} is not allowed" && ! printf '%s\n' "$out" | grep -q STUB || bad "override ${a%%=*}: rc=$rc $out"
