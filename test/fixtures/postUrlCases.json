@@ -1,5 +1,5 @@
 {
-  "about": "Social post permalinks and their canonical form. Server: socialPostUrl(source, { href }) in src/utils/crawlerRecordIdentity.js. Client: canonicalPostUrl(href, source) in src/crawler/connect/postUrl.ts. An empty canonical means the link is not a post of that source.",
+  "about": "Social post permalinks and their canonical form. Server: socialPostUrl(source, { href }) in src/utils/crawlerRecordIdentity.js. Client: canonicalPostUrl(href, source) in src/crawler/connect/postUrl.ts. An empty canonical means the link is not a post of that source. facebookLinks: links on a Facebook host, which are never an order id. Server: isFacebookLink(value) in src/utils/crawlerRecordIdentity.js. Client: isFacebookLink(value) in src/crawler/connect/postUrl.ts.",
   "cases": [
     {
       "source": "x",
@@ -552,6 +552,110 @@
       "href": "https://www.facebook.com/jane.doe/posts/pfbid0SaturdayMarket",
       "canonical": "",
       "note": "only X, Instagram, Threads, TikTok and Facebook have post permalinks"
+    }
+  ],
+  "facebookLinks": [
+    {
+      "value": "https://www.facebook.com/jane.doe/posts/pfbid0SaturdayMarket",
+      "facebook": true
+    },
+    {
+      "value": "https://facebook.com/jane.doe/videos/vb.100001/7777777777/",
+      "facebook": true,
+      "note": "a Facebook link that is not a post link of the rule"
+    },
+    {
+      "value": "http://m.facebook.com/profile.php?id=100001",
+      "facebook": true
+    },
+    {
+      "value": "https://web.facebook.com/jane.doe",
+      "facebook": true
+    },
+    {
+      "value": "https://business.facebook.com:443/jane.doe",
+      "facebook": true
+    },
+    {
+      "value": "https://u@www.facebook.com/jane.doe",
+      "facebook": true
+    },
+    {
+      "value": "https://fb.com/jane.doe",
+      "facebook": true
+    },
+    {
+      "value": "https://www.fb.com/jane.doe",
+      "facebook": true
+    },
+    {
+      "value": " https://FACEBOOK.COM/jane.doe ",
+      "facebook": true
+    },
+    {
+      "value": "facebook.com/jane.doe",
+      "facebook": true,
+      "note": "without its scheme"
+    },
+    {
+      "value": "https://www.facebook.com./jane.doe/videos/vb.100001/7777777777/",
+      "facebook": true,
+      "note": "a trailing dot"
+    },
+    {
+      "value": "https://facebook.com../jane.doe",
+      "facebook": true,
+      "note": "trailing dots"
+    },
+    {
+      "value": "fb.com./jane.doe",
+      "facebook": true,
+      "note": "a trailing dot, without its scheme"
+    },
+    {
+      "value": "",
+      "facebook": false
+    },
+    {
+      "value": "SO-1001",
+      "facebook": false
+    },
+    {
+      "value": "112-1234567-1234567",
+      "facebook": false
+    },
+    {
+      "value": "https://notfacebook.com/jane.doe",
+      "facebook": false
+    },
+    {
+      "value": "https://facebook.com.example.net/jane.doe",
+      "facebook": false
+    },
+    {
+      "value": "https://example.com/?u=https://facebook.com/jane.doe",
+      "facebook": false,
+      "note": "a Facebook link inside another link"
+    },
+    {
+      "value": "https://www.instagram.com/p/ABC123def/",
+      "facebook": false
+    },
+    {
+      "value": "https://fb.watch/abcdef/",
+      "facebook": false
+    },
+    {
+      "value": "https://facebook.co/jane.doe",
+      "facebook": false
+    },
+    {
+      "value": "javascript://facebook.com/jane.doe",
+      "facebook": false
+    },
+    {
+      "value": "ftp://facebook.com/jane.doe",
+      "facebook": false
     }
   ]
 }

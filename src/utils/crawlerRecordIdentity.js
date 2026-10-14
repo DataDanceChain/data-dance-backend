@@ -207,8 +207,45 @@ function socialPostUrl(source, payload) {
   return '';
 }
 
+/**
+ * True for a link on a Facebook host: facebook.com or fb.com, bare or behind any subdomain, with
+ * or without a trailing dot, with or without its scheme. The same test as the web client's
+ * isFacebookLink (src/crawler/connect/postUrl.ts); the facebookLinks list in
+ * test/fixtures/postUrlCases.json is run by both sides.
+ */
+function isFacebookLink(value) {
+  const text = typeof value === 'string' ? value.trim() : '';
+  if (!text || text.length > 2048) return false;
+  for (const candidate of [text, `https://${text}`]) {
+    let url;
+    try {
+      url = new URL(candidate);
+    } catch {
+      continue;
+    }
+    if (url.protocol !== 'https:' && url.protocol !== 'http:') continue;
+    const host = url.hostname.toLowerCase().replace(/\.+$/, '');
+    if (['facebook.com', 'fb.com'].some((name) => host === name || host.endsWith(`.${name}`))) return true;
+  }
+  return false;
+}
+
+/**
+ * The record's own id, which identifies it across all users of the source; null when it has none.
+ * A Facebook row's id is never a link on a Facebook host: a post link is its permalink key
+ * (socialPostUrl, per user), and any other Facebook link is skipped, so such a row falls back to
+ * its title key (per user) instead of one key shared by everyone who sent that link.
+ */
 function officialRecordId(source, payload) {
   const row = asRecord(payload);
+  if (normalizeCrawlerSource(source) === 'facebook') {
+    for (const value of [row.orderId, row.orderid, row.id, row.bookingId, row.tripId]) {
+      if (!value) continue;
+      const text = String(value).trim();
+      if (!isFacebookLink(text)) return text || null;
+    }
+    return null;
+  }
   if (source === 'amazon') return String(row.orderid || row.orderId || '').trim() || null;
   if (source === 'luma') return String(row.eventId || row.taskId || row.id || '').trim() || null;
   if (source === 'airbnb') return String(row.tripId || row.id || '').trim() || null;
@@ -376,6 +413,7 @@ module.exports = {
   payloadDate,
   hostFromMetadata,
   isClientSmoothedRecord,
+  isFacebookLink,
   officialRecordId,
   SOCIAL_PERMALINK_SOURCES,
   socialPostUrl,

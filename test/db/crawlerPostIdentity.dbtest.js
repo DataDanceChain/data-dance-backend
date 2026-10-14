@@ -567,7 +567,7 @@ describe('Connect upload identity (Postgres)', () => {
   // Facebook rows as the App uploads them: from 2.0.6 the post link (src/crawler/connect/postUrl.ts),
   // before that the profile page, keyed by title.
   describe('Facebook posts keyed by their permalink', () => {
-    const NAMES = ['fbn', 'fbm', 'fba', 'fbo', 'fbr', 'fbd', 'fbu', 'fbw'];
+    const NAMES = ['fbn', 'fbm', 'fba', 'fbo', 'fbr', 'fbd', 'fbu', 'fbw', 'fbv', 'fbx'];
     const ids = NAMES.map(id);
     const post = (name) => `https://facebook.com/jane.doe/posts/pfbid0${RUN}${name}`;
     const profile = (name) => `https://www.facebook.com/profile.php?id=${RUN}${name}`;
@@ -657,6 +657,22 @@ describe('Connect upload identity (Postgres)', () => {
         titleKey(caption('Dim sum with the team')),
       ].sort());
       assert.equal(await crawlerPoints('fbd'), fbPointsFor(4) + fbPoints);
+    });
+
+    it('a Facebook link the rule does not read as a post is never one key for all users', async () => {
+      // an older video link: every video of the page shows it; 2.0.6 sends it as the order id too
+      const VIDEOS = `https://www.facebook.com/jane.doe/videos/vb.${RUN}/7777777777/`;
+      const sent = (name, text) => {
+        const row = fb(name, VIDEOS, text);
+        return { ...row, payload: { ...row.payload, orderId: VIDEOS, orderid: VIDEOS, id: VIDEOS } };
+      };
+      const SUNSET = caption('Sunset timelapse from the Peak');
+      const RACE = caption('Dragon boat race highlights from Stanley');
+      assert.deepEqual(counts(await upload('fbv', [sent('fbv', SUNSET), sent('fbv', RACE)])), [2, 0, fbPointsFor(2)]);
+      assert.deepEqual(counts(await upload('fbv', [sent('fbv', SUNSET), sent('fbv', RACE)])), [0, 2, 0]);
+      assert.deepEqual((await rowsOf('fbv')).map((r) => r.sourceId).sort(), [titleKey(SUNSET), titleKey(RACE)].sort());
+      assert.deepEqual(counts(await upload('fbx', [sent('fbx', caption('Lantern festival lights'))])), [1, 0, fbPoints]);
+      assert.equal(await prisma.crawlerData.count({ where: { source: 'facebook', sourceId: VIDEOS } }), 0);
     });
 
     it('o1-o3: an earlier App version only, as before', async () => {

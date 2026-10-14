@@ -47,7 +47,9 @@ prisma.crawlerData.createMany = async ({ data, skipDuplicates }) => {
 const { uploadCrawlerData, generateContentHash } = require('../../src/services/crawlerService');
 const {
   extractSourceId,
+  hasRecordIdentity,
   legacyPostTitleSourceId,
+  officialRecordId,
   socialPostUrl,
 } = require('../../src/utils/crawlerRecordIdentity');
 
@@ -67,6 +69,8 @@ const FERRY = 'https://facebook.com/permalink.php?story_fbid=pfbid0Harbour&id=10
 const MORNING_1 = 'https://facebook.com/jane.doe/posts/pfbid0MorningOne';
 const MORNING_2 = 'https://facebook.com/jane.doe/posts/pfbid0MorningTwo';
 const TRAIL = 'https://facebook.com/jane.doe/posts/pfbid0LionRock';
+// An older video link the rule does not read as a post: every video of the page shares it.
+const VIDEOS = 'https://www.facebook.com/jane.doe/videos/vb.100001/7777777777/';
 const CAPTION = {
   market: 'Saturday market in Sham Shui Po, film and a quiet stall.',
   marketEdited: 'Saturday market in Sham Shui Po: film and a quiet stall.',
@@ -84,6 +88,11 @@ const item = (href, caption, profile = PROFILE) => ({
   metadata: { sourceUrl: profile, host: 'facebook.com', cleaned: true, extract: 'generic' },
   payload: { title: caption, productTitle: caption, date: '', href, caption, text: caption },
 });
+/** A row whose link the rule does not read as a post, with the link also as its order id (as 2.0.6 sends it). */
+const linkAsId = (href, caption) => {
+  const row = item(href, caption);
+  return { ...row, payload: { ...row.payload, orderId: href, orderid: href, id: href } };
+};
 const upload = async (userId, items) => {
   const result = await quiet(() => uploadCrawlerData(items.map((i) => structuredClone(i)), userId));
   return [result.uploadedCount, result.duplicatesCount, result.pointsEarned];
@@ -126,6 +135,34 @@ describe('Facebook post identity', () => {
     const tweet = { href: 'https://x.com/DataDance/status/1845000000000000001', title: 'Launch day' };
     assert.equal(legacyPostTitleSourceId('x', tweet, { host: 'x.com' }), '');
     assert.equal(legacyPostTitleSourceId('instagram', { href: 'https://www.instagram.com/p/ABC123def/', title: 'A' }, {}), '');
+  });
+
+  it('a Facebook link is never the order id of a Facebook row: the row keeps its title key', () => {
+    const row = linkAsId(VIDEOS, CAPTION.trail);
+    assert.equal(socialPostUrl('facebook', row.payload), '');
+    assert.equal(officialRecordId('facebook', row.payload), null);
+    assert.equal(extractSourceId('facebook', row.payload, row.metadata), `title:facebook.com:${CAPTION.trail.toLowerCase()}:`);
+    for (const link of [
+      'https://www.facebook.com./jane.doe/posts/pfbid0SaturdayMarket',
+      'https://fb.com/jane.doe/posts/ab.cd',
+      'facebook.com/jane.doe/posts/pfbid0SaturdayMarket',
+      ' https://web.facebook.com/jane.doe ',
+    ]) {
+      assert.equal(officialRecordId('facebook', { orderId: link, orderid: link, id: link }), null, link);
+      assert.equal(officialRecordId('Facebook', { id: link }), null, link);
+    }
+    assert.equal(officialRecordId('facebook', { orderId: [VIDEOS] }), null);
+    // a row with nothing else (no post link, no title) has no identity, so the upload refuses it
+    assert.equal(hasRecordIdentity('facebook', { orderId: VIDEOS, orderid: VIDEOS, id: VIDEOS }), false);
+    // an id that is not a Facebook link is still the id, read after a skipped link
+    assert.equal(officialRecordId('facebook', { orderId: 'FB-1001' }), 'FB-1001');
+    assert.equal(officialRecordId('facebook', { orderId: VIDEOS, id: ' FB-1002 ' }), 'FB-1002');
+    // a post link is the permalink key, as before
+    assert.equal(extractSourceId('facebook', { orderId: MARKET, title: 'A' }), `title:post:${MARKET}`);
+    // other sources keep their order id, whatever it holds
+    assert.equal(officialRecordId('shein', { orderId: VIDEOS }), VIDEOS);
+    assert.equal(extractSourceId('amazon', { orderid: VIDEOS }), VIDEOS);
+    assert.equal(extractSourceId('instagram', { orderId: VIDEOS, title: 'A' }), VIDEOS);
   });
 });
 
@@ -221,6 +258,16 @@ describe('Facebook uploads (in-memory store)', () => {
     }
     const lookups = reads.filter((where) => where.sourceId && where.sourceId.startsWith);
     assert.deepEqual(lookups, [{ userId: 'user-a', source: { in: ['facebook'] }, sourceId: { startsWith: 'title:post:' } }]);
+  });
+
+  it('rows with a Facebook link as order id: each video of a page is a record of its own, per user', async () => {
+    // Before, every row with this link shared one key across all users.
+    assert.deepEqual(await upload('user-n', [linkAsId(VIDEOS, CAPTION.trail), linkAsId(VIDEOS, CAPTION.ferry)]), [2, 0, 20]);
+    assert.deepEqual(await upload('user-n', [linkAsId(VIDEOS, CAPTION.trail), linkAsId(VIDEOS, CAPTION.ferry)]), [0, 2, 0]);
+    assert.deepEqual(rowsOf('user-n').map((r) => r.sourceId), [CAPTION.trail, CAPTION.ferry].map((c) => `title:facebook.com:${c.toLowerCase()}:`));
+    assert.deepEqual(await upload('user-m', [linkAsId(VIDEOS, CAPTION.market)]), [1, 0, 10]);
+    // an earlier App version's row of one of them (the profile page as href) is the same title key
+    assert.deepEqual(await upload('user-n', [item(PROFILE, CAPTION.trail)]), [0, 1, 0]);
   });
 
   it('the older title key is read for Facebook only', async () => {
