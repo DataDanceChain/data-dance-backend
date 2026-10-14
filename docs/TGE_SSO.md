@@ -577,7 +577,7 @@ Environment (see `env.example`): `SSO_ENVIRONMENT`, `SSO_TGE_ENABLED`, `SSO_TGE_
 `SSO_TGE_STATUS_FIELDS`, `SSO_REQUIRE_VERIFIED_SESSION`, plus `PUBLIC_BASE_URL` (now required
 unconditionally — the issuer is never derived from a request header), `APP_PUBLIC_URL`,
 `WEB3AUTH_ALLOWED_VERIFIERS`, `WEB3AUTH_JWKS_PIN_MODE`, `WEB3AUTH_JWKS_PINNED_THUMBPRINTS`,
-`OAUTH_PUBLIC_REGISTRATION_ENABLED` and `SSO_DEVELOPER_REGISTRATION`.
+`OAUTH_PUBLIC_REGISTRATION_ENABLED`, `SSO_DEVELOPER_REGISTRATION` and `SSO_DEVELOPER_ALLOWED_EMAILS`.
 
 - `src/server.js` calls `assertPartnerConfig()` at boot and refuses to start with every problem
   listed (missing hash, http redirect URI outside localhost, fragment, unknown status field,
@@ -592,7 +592,7 @@ unconditionally — the issuer is never derived from a request header), `APP_PUB
   secret values (`jwksPinMode=… jwksPins=<count>`, never the pins). See the README section
   "金融级加固：合作方 SSO".
 - **Self-serve client registration** (`POST /api/developer/sso/clients`) is closed unless
-  `SSO_DEVELOPER_REGISTRATION=on`. The default, `off`, also applies when the variable is unset or
+  `SSO_DEVELOPER_REGISTRATION=on` or `allowlist`. The default, `off`, also applies when the variable is unset or
   blank. Closed, the endpoint answers every caller, signed in or not, `403` with
   `{"error":"registration_closed", "error_description":"Self-serve client registration is closed.
   Contact DataDance to register a client."}`, before any database access, so nothing is written.
@@ -604,9 +604,49 @@ unconditionally — the issuer is never derived from a request header), `APP_PUB
   (`ownerUserId`) and `kind` `developer`. A self-serve console must therefore send the
   user's token (`Authorization: Bearer <DataDance JWT>`). To register a client by hand, set `on`,
   restart, register while signed in, set `off` and restart again.
-- The value is read once at boot, so a change needs a restart. Any value other than `off` or `on`
-  refuses to start in production; elsewhere it is one warning and reads as `off`. The money-path
-  boot line reports it as `developerRegistration=open|closed`, next to `publicClientRegistration`.
+- **`allowlist` opens registration to named accounts only** (DataDance's own team and invited
+  partners' developers), listed in `SSO_DEVELOPER_ALLOWED_EMAILS` as comma-separated DataDance
+  account e-mails. Entries are trimmed and compared case-insensitively. An anonymous caller gets
+  `401`, as with `on`. A signed-in account may register only when both of these hold:
+  - its own account e-mail is on the list. The e-mail comes from the account row the login check
+    loaded and never from the request body, so naming a listed address in `contact_email` changes
+    nothing;
+  - that e-mail is a verified login e-mail. The `User` row has no e-mail-verified flag and Web3Auth
+    ID tokens carry no `email_verified` claim. `WEB3AUTH_EMAIL_TRUSTED_VERIFIERS` stands in for it, as
+    in the network re-bind. It lists the connections that verify the address themselves: Google,
+    e-mail passwordless (the e-mail one-time-code login) and Apple. The rule has three parts:
+    1. the session came from a verified Web3Auth login (JWT `ver >= 2`, the test
+       `SSO_REQUIRE_VERIFIED_SESSION` uses). Password and legacy sessions do not count;
+    2. the account is linked to one of those connections (`User.web3authVerifier`). `external-wallet`
+       never counts, because its e-mail column holds the wallet address;
+    3. the identity that connection proved is the address itself: `User.web3authVerifierId` equals the
+       account e-mail, case-insensitively. A legacy account linked through the wallet its token proved
+       keeps an e-mail that a request body once supplied, so it does not count. An Apple account whose
+       verifier id is not its e-mail does not count either.
+
+  Every other signed-in account gets the same `403 registration_closed` body as `off`, so the
+  answer never tells whether an address is listed. The refusal happens before the per-IP rate
+  limiter, so refused calls do not use up a listed developer's quota. Each refusal writes one
+  `developer_registration.refused` log line with the account id and a reason code (`not_listed`,
+  `session_not_verified`, `connection_not_trusted`, `email_not_login_identity`), never the e-mail.
+  A client registered this way is a `developer` client (login scopes only), never a `partner` row,
+  and is owned by the registering account. To give a developer access, add their DataDance account
+  e-mail and restart. They then sign in to the developer console with Google or the e-mail code.
+  If a listed developer is still refused, find their account id in the log and check the reason.
+  In the developer console (`/developers/`), the probe without a token gets `401` in this mode, so
+  every signed-in account sees the form. A refused account gets `registration_closed` on submit,
+  and the console then hides the form and shows its "Need a client? Contact DataDance" panel.
+  `WEB3AUTH_EMAIL_TRUSTED_VERIFIERS` must name the connections of the network the deployment runs
+  on. While `WEB3AUTH_NETWORK_REBIND=off`, nothing else reads that variable, so setting it there
+  for this check changes no login.
+- The values are read once at boot, so a change needs a restart. Any mode other than `off`, `on` or
+  `allowlist` refuses to start in production. In `allowlist` mode, so does a list entry that is not
+  an e-mail address. The error names the entry positions and never an address. Outside production,
+  either case is one warning and reads as closed. An empty list, in production too, starts with a
+  warning and admits nobody. So does an empty `WEB3AUTH_EMAIL_TRUSTED_VERIFIERS`. A list set while
+  the mode is `off` or `on` is ignored, with a warning; `on` still admits every signed-in account.
+  The money-path boot line reports `developerRegistration=closed|open|allowlist:<count>`, next to
+  `publicClientRegistration`. The count is the number of listed e-mails.
 - Generate a secret: `node scripts/genPartnerSecret.js` (prints once; nothing is written).
 - Rotate: move the current hash to `…_PREVIOUS`, set the new hash, set `…_ROTATION_UNTIL`,
   recreate the container; after the deadline remove the previous hash.
