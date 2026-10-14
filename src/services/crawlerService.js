@@ -17,6 +17,8 @@ const {
   isClientSmoothedRecord,
   isTitleBackedSourceId,
   legacyPostTitleSourceId,
+  needsPermalinkTitleLookup,
+  POST_KEY_PREFIX,
   socialPostUrl,
   sourceIdentityKey,
 } = require('../utils/crawlerRecordIdentity');
@@ -442,6 +444,28 @@ async function checkUploadLimits(userId) {
 }
 
 /**
+ * Transition (Facebook): the older title keys (legacyPostTitleSourceId) of the rows this user holds
+ * under a permalink key, as `source:sourceId` keys. Read only when the upload has items keyed by
+ * title that need the lookup (needsPermalinkTitleLookup), and only for this user and those sources.
+ */
+async function permalinkRowTitleKeys(tx, userId, items) {
+  const keys = new Set();
+  const sources = [
+    ...new Set(items.filter((item) => needsPermalinkTitleLookup(item.source, item.sourceId)).map((item) => item.source)),
+  ];
+  if (sources.length === 0) return keys;
+  const rows = await tx.crawlerData.findMany({
+    where: { userId, source: { in: sources }, sourceId: { startsWith: POST_KEY_PREFIX } },
+    select: { source: true, payload: true, metadata: true },
+  });
+  for (const row of rows) {
+    const key = legacyPostTitleSourceId(row.source, row.payload, row.metadata);
+    if (key) keys.add(sourceIdentityKey(row.source, key));
+  }
+  return keys;
+}
+
+/**
  * Upload crawler data with validation and reward calculation
  */
 async function uploadCrawlerData(data, userId) {
@@ -574,9 +598,15 @@ async function uploadCrawlerData(data, userId) {
         existingTitle.map((row) => sourceIdentityKey(row.source, row.sourceId)),
       );
       const existingHashes = new Set(existingByHash.map((row) => row.contentHash));
+      // Transition (Facebook), the other way round: a title-keyed upload of a post this user holds
+      // under its permalink key (needsPermalinkTitleLookup).
+      const permalinkTitleKeys = await permalinkRowTitleKeys(tx, userId, preValidatedItems);
       const seenSourceKeys = new Set();
       const seenHashes = new Set();
-      
+      // Older title keys of the permalink items accepted so far in this upload. Only title-keyed
+      // items check them, so two posts with one caption are still two records.
+      const seenLegacyKeys = new Set();
+
       // Filter out duplicates
       for (const item of preValidatedItems) {
         const identityKey = sourceIdentityKey(item.source, item.sourceId);
@@ -590,9 +620,13 @@ async function uploadCrawlerData(data, userId) {
         // Transition (Facebook): the same user already holds this post under its older title key.
         const legacyKey = item.legacySourceId ? sourceIdentityKey(item.source, item.legacySourceId) : '';
         const legacyHit = Boolean(legacyKey) && (existingTitleKeys.has(legacyKey) || seenSourceKeys.has(legacyKey));
+        // Transition (Facebook): the same user already holds this title-keyed post under its permalink.
+        const permalinkHit =
+          needsPermalinkTitleLookup(item.source, item.sourceId) &&
+          (permalinkTitleKeys.has(identityKey) || seenLegacyKeys.has(identityKey));
         const hashHit = existingHashes.has(item.contentHash) || seenHashes.has(item.contentHash);
-        if (officialHit || titleHit || legacyHit || hashHit) {
-          const duplicateType = officialHit || titleHit || legacyHit ? 'order' : 'content';
+        if (officialHit || titleHit || legacyHit || permalinkHit || hashHit) {
+          const duplicateType = officialHit || titleHit || legacyHit || permalinkHit ? 'order' : 'content';
           duplicates.push({
             index: item.originalIndex,
             reason: 'duplicate_data',
@@ -604,6 +638,7 @@ async function uploadCrawlerData(data, userId) {
           });
         } else {
           if (identityKey) seenSourceKeys.add(identityKey);
+          if (legacyKey) seenLegacyKeys.add(legacyKey);
           seenHashes.add(item.contentHash);
           validItems.push(item);
         }

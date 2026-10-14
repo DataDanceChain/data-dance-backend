@@ -6,8 +6,9 @@
  * (userId, source, sourceId) per user, and createMany({ skipDuplicates }) silently skips a row that
  * hits either. So: two users who saw the same post both keep it; one post under host / handle
  * variants is one record; an order keeps its own identity whatever links it holds; points go only
- * to rows really written; a Facebook post is one record per user by its permalink, and a row an
- * earlier App version stored under its title is found by that title; the social-identity backfill
+ * to rows really written; a Facebook post is one record per user by its permalink, a row an
+ * earlier App version stored under its title is found by that title, and an upload from an earlier
+ * App version is found by the title key of the user's permalink row; the social-identity backfill
  * rewrites old rows (Facebook rows with a post link among them) without deleting any; and
  * the record backfill gives rows of other sources stored under a post link key their order / title
  * identity back, keeps the earliest copy of one record as its holder and marks the others
@@ -566,7 +567,7 @@ describe('Connect upload identity (Postgres)', () => {
   // Facebook rows as the App uploads them: from 2.0.6 the post link (src/crawler/connect/postUrl.ts),
   // before that the profile page, keyed by title.
   describe('Facebook posts keyed by their permalink', () => {
-    const NAMES = ['fbn', 'fbm', 'fba', 'fbo', 'fbr'];
+    const NAMES = ['fbn', 'fbm', 'fba', 'fbo', 'fbr', 'fbd', 'fbu', 'fbw'];
     const ids = NAMES.map(id);
     const post = (name) => `https://facebook.com/jane.doe/posts/pfbid0${RUN}${name}`;
     const profile = (name) => `https://www.facebook.com/profile.php?id=${RUN}${name}`;
@@ -642,6 +643,32 @@ describe('Connect upload identity (Postgres)', () => {
       assert.equal((await rowsOf('fbo', { source: 'facebook' })).length, 2);
     });
 
+    it('the post link first, then an earlier App version (a second device) with the same title: a duplicate', async () => {
+      const page = [fb('fbd', post('market'), MARKET), fb('fbd', post('ferry'), caption('Evening ferry')), fb('fbd', post('morning1'), MORNING), fb('fbd', post('morning2'), MORNING)];
+      assert.deepEqual(counts(await upload('fbd', page)), [4, 0, fbPointsFor(4)]);
+      const earlier = [fb('fbd', profile('fbd'), MARKET), fb('fbd', profile('fbd'), caption('Evening ferry')), fb('fbd', profile('fbd'), MORNING)];
+      assert.deepEqual(counts(await upload('fbd', earlier)), [0, 3, 0]);
+      assert.deepEqual(counts(await upload('fbd', earlier)), [0, 3, 0]);
+      // a post the 2.0.6 device never sent is new
+      assert.deepEqual(counts(await upload('fbd', [fb('fbd', profile('fbd'), caption('Dim sum with the team'))])), [1, 0, fbPoints]);
+      const rows = await rowsOf('fbd', { source: 'facebook' });
+      assert.deepEqual(rows.map((r) => r.sourceId).sort(), [
+        ...['market', 'ferry', 'morning1', 'morning2'].map((n) => `title:post:${post(n)}`),
+        titleKey(caption('Dim sum with the team')),
+      ].sort());
+      assert.equal(await crawlerPoints('fbd'), fbPointsFor(4) + fbPoints);
+    });
+
+    it('o1-o3: an earlier App version only, as before', async () => {
+      const COMMENT = caption('Wow, that view from the top is amazing, we should all go together next weekend!');
+      const o1 = [fb('fbu', profile('fbu'), MARKET), fb('fbu', profile('fbu'), caption('Evening ferry')), fb('fbu', profile('fbu'), MORNING), fb('fbu', profile('fbu'), COMMENT)];
+      assert.deepEqual(counts(await upload('fbu', o1)), [4, 0, fbPointsFor(4)]);
+      const edited = caption('Saturday market in Sham Shui Po: film and a quiet stall.');
+      assert.deepEqual(counts(await upload('fbu', [fb('fbu', profile('fbu'), edited), fb('fbu', profile('fbu'), caption('Evening ferry'))])), [1, 1, fbPoints]);
+      assert.deepEqual(counts(await upload('fbw', [fb('fbw', profile('fbw'), MARKET), fb('fbw', profile('fbw'), caption('Dim sum with the team'))])), [2, 0, fbPointsFor(2)]);
+      assert.deepEqual([(await rowsOf('fbu')).length, (await rowsOf('fbw')).length], [5, 2]);
+    });
+
     describe('backfill of rows that already hold the post link', () => {
       // Rows the App (2.0.6) stored against a server without the Facebook rule: the post link as
       // href, a title key, and the hash of the whole payload. Two of them are one post whose caption
@@ -715,6 +742,14 @@ describe('Connect upload identity (Postgres)', () => {
         assert.deepEqual(counts(again), [0, 1, 0]);
         assert.deepEqual(counts(await upload('fbr', [fb('fbr', post('noodles'), caption('Noodles, again'))])), [0, 1, 0]);
         assert.equal(await crawlerPoints('fbr'), points);
+      });
+
+      it('after the backfill an earlier App version re-syncing the same posts stores nothing and pays nothing', async () => {
+        const before = [await snapshot(), await pointsOf()];
+        // the profile page as href, so the rows are keyed by title: fbr-1 and fbr-3 now hold the permalink key
+        const earlier = [FIRST, LATER, caption('Noodles'), caption('Old')].map((text) => fb('fbr', profile('fbr'), text));
+        assert.deepEqual(counts(await upload('fbr', earlier)), [0, 4, 0]);
+        assert.deepEqual([await snapshot(), await pointsOf()], before);
       });
     });
   });

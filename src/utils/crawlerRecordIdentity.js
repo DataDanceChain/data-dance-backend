@@ -9,6 +9,8 @@
 const { isCatalogCrawlerSource, normalizeCrawlerSource } = require('../constants/crawlerSources');
 
 const TITLE_BACKED_PREFIX = 'title:';
+/** Prefix of a post's permalink key (per user, like every title: key). */
+const POST_KEY_PREFIX = `${TITLE_BACKED_PREFIX}post:`;
 
 /** Core hosts that may fall back to title: when the client sent a smoothed row. */
 const TITLE_BACKED_SMOOTHED_CORE = new Set(['luma', 'airbnb', 'booking']);
@@ -255,7 +257,7 @@ function titleSourceId(source, payload, metadata = {}) {
  */
 function extractSourceId(source, payload, metadata = {}) {
   const postUrl = socialPostUrl(source, payload);
-  if (postUrl) return `${TITLE_BACKED_PREFIX}post:${postUrl}`.slice(0, 190);
+  if (postUrl) return `${POST_KEY_PREFIX}${postUrl}`.slice(0, 190);
 
   const official = officialRecordId(source, payload);
   if (official) return official;
@@ -280,6 +282,22 @@ function legacyPostTitleSourceId(source, payload, metadata = {}) {
   if (!LEGACY_TITLE_KEY_SOURCES.has(normalizeCrawlerSource(source))) return '';
   if (!socialPostUrl(source, payload)) return '';
   return titleSourceId(source, payload, metadata) || '';
+}
+
+/**
+ * The same transition the other way round. An upload without the post link (App versions before
+ * 2.0.6, or another uploader such as the browser extension) is keyed by its title, and the same
+ * user may already hold that post under its permalink key (stored by 2.0.6, or given that key by
+ * the backfill). Such an item is already stored when one of the user's rows under a permalink key
+ * has this title key as its legacyPostTitleSourceId. True for the items that need that lookup:
+ * Facebook items keyed by title, not by a permalink.
+ */
+function needsPermalinkTitleLookup(source, sourceId) {
+  return (
+    LEGACY_TITLE_KEY_SOURCES.has(normalizeCrawlerSource(source)) &&
+    isTitleBackedSourceId(sourceId) &&
+    !sourceId.startsWith(POST_KEY_PREFIX)
+  );
 }
 
 function hasRecordIdentity(source, payload) {
@@ -351,6 +369,7 @@ function calculateDataQuality(item) {
 
 module.exports = {
   TITLE_BACKED_PREFIX,
+  POST_KEY_PREFIX,
   asRecord,
   normalizeText,
   payloadTitle,
@@ -364,6 +383,7 @@ module.exports = {
   sourceIdentityKey,
   extractSourceId,
   legacyPostTitleSourceId,
+  needsPermalinkTitleLookup,
   hasRecordIdentity,
   calculateDataQuality,
 };

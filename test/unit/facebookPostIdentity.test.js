@@ -176,6 +176,53 @@ describe('Facebook uploads (in-memory store)', () => {
     assert.deepEqual(rowsOf('user-a').map((r) => r.sourceId), [`title:facebook.com:${CAPTION.comment.toLowerCase()}:`, `title:post:${TRAIL}`]);
   });
 
+  it('the post link first, then an earlier App version with the same title: a duplicate', async () => {
+    // 2.0.6 stores the posts under their permalinks; a second device still on an earlier version
+    // sends the profile page, so its rows are keyed by title.
+    const page = [item(MARKET, CAPTION.market), item(FERRY, CAPTION.ferry), item(MORNING_1, CAPTION.morning), item(MORNING_2, CAPTION.morning)];
+    assert.deepEqual(await upload('user-a', page), [4, 0, 40]);
+    const earlier = [item(PROFILE, CAPTION.market), item(PROFILE, CAPTION.ferry), item(PROFILE, CAPTION.morning)];
+    assert.deepEqual(await upload('user-a', earlier), [0, 3, 0]);
+    assert.deepEqual(await upload('user-a', earlier), [0, 3, 0]);
+    // a post the earlier version reads under another title is new to this key (accepted), as is a new post
+    assert.deepEqual(await upload('user-a', [item(PROFILE, CAPTION.marketEdited), item(PROFILE, CAPTION.trail)]), [2, 0, 20]);
+    assert.equal(rowsOf('user-a').length, 6);
+  });
+
+  it('the post link and the title key of one post in one upload: one record, whichever comes first', async () => {
+    assert.deepEqual(await upload('user-a', [item(MARKET, CAPTION.market), item(PROFILE, CAPTION.market)]), [1, 1, 10]);
+    assert.deepEqual(await upload('user-n', [item(PROFILE, CAPTION.ferry), item(FERRY, CAPTION.ferry)]), [1, 1, 10]);
+    // two posts with one caption stay two records; a title-keyed copy of that caption is one of them
+    assert.deepEqual(await upload('user-m', [item(MORNING_1, CAPTION.morning), item(MORNING_2, CAPTION.morning), item(PROFILE, CAPTION.morning)]), [2, 1, 20]);
+  });
+
+  it('the lookup is per user: another user who holds the post under its permalink does not count', async () => {
+    assert.deepEqual(await upload('user-n', [item(MARKET, CAPTION.market)]), [1, 0, 10]);
+    const other = 'https://www.facebook.com/profile.php?id=100002';
+    assert.deepEqual(await upload('user-m', [item(other, CAPTION.market, other)]), [1, 0, 10]);
+  });
+
+  it('a title-keyed upload looks up permalink rows only when it has Facebook items keyed by title', async () => {
+    assert.deepEqual(await upload('user-a', [item(MARKET, CAPTION.market)]), [1, 0, 10]);
+    const reads = [];
+    const findMany = prisma.crawlerData.findMany;
+    prisma.crawlerData.findMany = async (args) => {
+      reads.push(args.where);
+      return findMany(args);
+    };
+    try {
+      await upload('user-a', [item(FERRY, CAPTION.ferry)]);
+      const meta = { sourceUrl: 'https://x.com/home', host: 'x.com', extract: 'generic' };
+      await upload('user-a', [{ source: 'x', type: 'post', timestamp: '2026-10-14T01:00:00.000Z', metadata: meta, payload: { title: CAPTION.market, date: '', href: 'https://x.com/home' } }]);
+      assert.equal(reads.some((where) => where.sourceId && where.sourceId.startsWith), false);
+      await upload('user-a', [item(PROFILE, CAPTION.market)]);
+    } finally {
+      prisma.crawlerData.findMany = findMany;
+    }
+    const lookups = reads.filter((where) => where.sourceId && where.sourceId.startsWith);
+    assert.deepEqual(lookups, [{ userId: 'user-a', source: { in: ['facebook'] }, sourceId: { startsWith: 'title:post:' } }]);
+  });
+
   it('the older title key is read for Facebook only', async () => {
     const meta = { sourceUrl: 'https://x.com/home', host: 'x.com', extract: 'generic' };
     const x = (payload) => ({ source: 'x', type: 'post', timestamp: '2026-10-14T01:00:00.000Z', metadata: meta, payload });
