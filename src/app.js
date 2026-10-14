@@ -191,7 +191,7 @@ app.use('/api/go', goRoutes);
 app.use('/api/app', appRoutes);
 // Self-serve SSO client registration answers its switch (SSO_DEVELOPER_REGISTRATION) before anything
 // else, so it is mounted here, ahead of crawlerRoutes: closed, every caller gets 403 registration_closed.
-// Open, the route itself requires a signed-in account (`protect`). Before, that requirement came only
+// Open (on, or allowlist), the route itself requires a signed-in account (`protect`). Before, that requirement came only
 // from crawlerRoutes' blanket login check on everything under /api. The router claims only
 // /api/developer/sso/*. test/unit/appMountOrder.test.js covers both.
 const developerSsoRoutes = require('./routes/developerSsoRoutes');

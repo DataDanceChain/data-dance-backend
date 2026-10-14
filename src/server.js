@@ -19,8 +19,9 @@ warnIfChainSignerUnavailable();
 // once, now. A bad value is one warning and falls back (no minimum / default URL), never a failure.
 initVersionPolicy();
 
-// Self-serve SSO client registration: SSO_DEVELOPER_REGISTRATION=off|on (default off), read once,
-// now. Any other value refuses to start in production; elsewhere it is one warning and reads as off.
+// Self-serve SSO client registration: SSO_DEVELOPER_REGISTRATION=off|on|allowlist (default off), read
+// once, now, with SSO_DEVELOPER_ALLOWED_EMAILS. Any other value, or an allowlist entry that is not an
+// e-mail address, refuses to start in production; elsewhere it is one warning and reads as closed.
 initDeveloperRegistration();
 
 // Partner (TGE) SSO: refuse to boot half-configured. Throws with every problem listed; the
@@ -51,7 +52,7 @@ if (moneyPath.enforced) {
       `jwksPinMode=${moneyPath.jwksPinMode} jwksPins=${moneyPath.jwksPinCount} ` +
       `sessionSecretSeparate=${moneyPath.sessionSecretSeparate} issuer=${moneyPath.publicBaseUrl} ` +
       `consentOrigin=${moneyPath.appPublicUrl} publicClientRegistration=${moneyPath.publicRegistration ? 'open' : 'closed'} ` +
-      `developerRegistration=${moneyPath.developerRegistration ? 'open' : 'closed'}`,
+      `developerRegistration=${moneyPath.developerRegistration}`,
   );
 }
 
