@@ -54,8 +54,11 @@
 #   REHEARSAL_REDIRECT_URIS [https://tge-rehearsal.invalid/oauth/callback]  (.invalid never resolves: boot-valid placeholder)
 #   REHEARSAL_INITIATE_LOGIN_URI [empty -> /api/sso/* answer client_disabled]
 #   OAUTH_PUBLIC_REGISTRATION [false]  (runbook 5.2: recommended, Sloan to confirm)
-#   W3A_GOOGLE / W3A_EMAIL / W3A_APPLE / W3A_X  mainnet connection names (only Google is documented; the
-#                                              other three are confirmed from real tokens at rehearsal A step 6)
+#   W3A_GOOGLE / W3A_EMAIL / W3A_APPLE / W3A_X  Sapphire Mainnet built-in login names
+#       [web3auth-google-sapphire, web3auth-auth0-email-passwordless-sapphire, web3auth-auth0-apple-sapphire,
+#        web3auth-auth0-twitter-sapphire]: no "-mainnet" suffix (the devnet names end in "-sapphire-devnet"; a real
+#       Mainnet e-mail login carried web3auth-auth0-email-passwordless-sapphire on 2026-10-14). Override one only
+#       when a real Mainnet token names it differently.
 # Local test only (DDC_LOCAL_TEST=1): OLD_ENV, NEW_DIR, FE_ENV_TGE may point at synthetic files outside /root.
 set -euo pipefail
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -68,10 +71,10 @@ REHEARSAL_DB="${REHEARSAL_DB:-ddc_rehearsal}"
 REHEARSAL_REDIRECT_URIS="${REHEARSAL_REDIRECT_URIS:-https://tge-rehearsal.invalid/oauth/callback}"
 REHEARSAL_INITIATE_LOGIN_URI="${REHEARSAL_INITIATE_LOGIN_URI:-}"
 OAUTH_PUBLIC_REGISTRATION="${OAUTH_PUBLIC_REGISTRATION:-false}"
-W3A_GOOGLE="${W3A_GOOGLE:-web3auth-google-sapphire-mainnet}"
-W3A_EMAIL="${W3A_EMAIL:-web3auth-auth0-email-passwordless-sapphire-mainnet}"
-W3A_APPLE="${W3A_APPLE:-web3auth-auth0-apple-sapphire-mainnet}"
-W3A_X="${W3A_X:-web3auth-auth0-twitter-sapphire-mainnet}"
+W3A_GOOGLE="${W3A_GOOGLE:-web3auth-google-sapphire}"
+W3A_EMAIL="${W3A_EMAIL:-web3auth-auth0-email-passwordless-sapphire}"
+W3A_APPLE="${W3A_APPLE:-web3auth-auth0-apple-sapphire}"
+W3A_X="${W3A_X:-web3auth-auth0-twitter-sapphire}"
 DB_USER=ddcnew
 OUT="$NEW_DIR/.env.rehearsal"
 OUT_DB="$NEW_DIR/.env.db"
@@ -244,6 +247,7 @@ setv WEB3AUTH_WALLET_MATCH public_key
 setv WEB3AUTH_JWKS_PIN_MODE enforce
 setv WEB3AUTH_NETWORK_REBIND on
 setv WEB3AUTH_REBIND_VERIFIERS "$W3A_GOOGLE,$W3A_EMAIL,$W3A_APPLE,$W3A_X"
+# Only logins that verify the address themselves (Google, e-mail passwordless, Apple); never X.
 setv WEB3AUTH_EMAIL_TRUSTED_VERIFIERS "$W3A_GOOGLE,$W3A_EMAIL,$W3A_APPLE"
 # Old App builds after the mainnet switch get "please update" instead of a failed login (backend PR #38).
 setv WEB3AUTH_RETIRED_CLIENT_IDS "$RETIRED_ID"
@@ -260,7 +264,10 @@ setv SSO_SESSION_SECRET "$(cat "$SEC/sso_session_secret_rehearsal")"
 setv SSO_TGE_AUTO_APPROVE app,web
 setv SSO_TGE_REFERRAL_BIND true
 setv SSO_TGE_APP_PRESENTATION webview
-setv SSO_TGE_STATUS_FIELDS registered_at,wallet_bound,referral_network,referral,avatar
+# The freeze list (docs/TGE_SSO.md section 14): points = the balance on /partner/tge/status, points_history =
+# GET /partner/tge/points/history (section 7c), both under the tge:points grant. points_history is listed only with a
+# web build whose consent line for points reads "balance and history" (data-dance-frontend a077c74 and later).
+setv SSO_TGE_STATUS_FIELDS registered_at,wallet_bound,referral_network,referral,avatar,points,points_history
 setv SSO_REQUIRE_VERIFIED_SESSION false
 setv OAUTH_PUBLIC_REGISTRATION_ENABLED "$OAUTH_PUBLIC_REGISTRATION"
 setv DISBURSEMENT_PAUSED true

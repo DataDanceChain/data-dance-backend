@@ -111,6 +111,10 @@
 #   10d. remote.sh: 60-rehearsal.sh preflight and summary need no approval, every other subcommand does; REHEARSAL_G8
 #      passes as scrub or keep and is refused otherwise, before connecting; record takes only an allowlisted key and a
 #      whole number of seconds, checked before connecting.
+# Web3Auth Mainnet login names and the partner fields (10-14):
+#   3. the three Web3Auth lists carry the Mainnet built-in login names (no -mainnet suffix), X never e-mail-trusted; a
+#      W3A_* override reaches all three; SSO_TGE_STATUS_FIELDS includes points and points_history. 3a. the backend's
+#      boot line reports that list.
 # Every SSH test uses scratch COPIES of the scripts with a test local.env (loopback only): the package's own local.env,
 # if one exists, is never used to connect, and the real 1Password CLI is never called.
 # Containers and images: every docker run and docker build of this run carries the label ddcnew-localtest=<run id>
@@ -368,6 +372,30 @@ grep -qF "settings: API_HOST=$D_API_HOST APP_HOST=$D_APP_HOST API_PORT=$D_API_PO
 grep -qx "rehearsal client id: $CID (override)" "$T/run1.out" && grep -qx "rehearsal client id: $CID (recorded in $T/ddcnew/settings.env)" "$T/run2.out" \
   && grep -qx "SSO_TGE_CLIENT_ID=\"$CID\"" "$T/ddcnew/.env.rehearsal" && grep -q "^PASS SSO_TGE_CLIENT_ID=$CID: matches" "$T/run1.out" \
   && ok "SSO_TGE_CLIENT_ID=$CID from REHEARSAL_CLIENT_ID on run 1, from the record on run 2 (no override)" || bad "client id from the override and the record"
+# The Sapphire Mainnet built-in login names (no -mainnet suffix) in the three Web3Auth lists, X never e-mail-trusted,
+# and the partner fields the rehearsal serves (docs/TGE_SSO.md section 14: points and points_history included).
+ev() { sed -n "s/^$1=\"\(.*\)\"$/\1/p" "$2" | tail -1; }
+W3A_G=web3auth-google-sapphire; W3A_E=web3auth-auth0-email-passwordless-sapphire; W3A_A=web3auth-auth0-apple-sapphire; W3A_T=web3auth-auth0-twitter-sapphire
+SF_WANT=registered_at,wallet_bound,referral_network,referral,avatar,points,points_history
+REH_ENV="$T/ddcnew/.env.rehearsal"
+[ "$(ev WEB3AUTH_ALLOWED_VERIFIERS "$REH_ENV")" = "$W3A_G,$W3A_E,$W3A_A,$W3A_T,external-wallet" ] \
+  && [ "$(ev WEB3AUTH_REBIND_VERIFIERS "$REH_ENV")" = "$W3A_G,$W3A_E,$W3A_A,$W3A_T" ] \
+  && [ "$(ev WEB3AUTH_EMAIL_TRUSTED_VERIFIERS "$REH_ENV")" = "$W3A_G,$W3A_E,$W3A_A" ] \
+  && [ "$(grep -cE '^WEB3AUTH_[A-Z_]*VERIFIERS=.*sapphire-mainnet' "$REH_ENV" || true)" = 0 ] \
+  && ok "Web3Auth lists carry the Mainnet built-in login names (no -mainnet suffix): allowed = the four + external-wallet, re-bind = the four, e-mail-trusted = Google, e-mail, Apple (never X)" \
+  || bad "Web3Auth login names in .env.rehearsal: allowed=$(ev WEB3AUTH_ALLOWED_VERIFIERS "$REH_ENV") rebind=$(ev WEB3AUTH_REBIND_VERIFIERS "$REH_ENV") trusted=$(ev WEB3AUTH_EMAIL_TRUSTED_VERIFIERS "$REH_ENV")"
+[ "$(ev SSO_TGE_STATUS_FIELDS "$REH_ENV")" = "$SF_WANT" ] && [ "$(grep -c '^SSO_TGE_STATUS_FIELDS=' "$REH_ENV")" = 1 ] \
+  && ok "SSO_TGE_STATUS_FIELDS=$SF_WANT (once; the old env's list is replaced): the points balance and the points history are served" \
+  || bad "SSO_TGE_STATUS_FIELDS in .env.rehearsal: $(grep '^SSO_TGE_STATUS_FIELDS=' "$REH_ENV" | tr '\n' ' ')"
+# The override mechanism: a W3A_* override reaches all three lists in its place, and X stays out of the e-mail-trusted list.
+d="$T/w3a-override"; mkdir -p "$d"; rc=0
+DDC_LOCAL_TEST=1 NEW_DIR="$d" OLD_ENV="$OLD" FE_ENV_TGE="$T/env.tge" REHEARSAL_CLIENT_ID="$CID" W3A_EMAIL=lt-email-login W3A_X=lt-x-login \
+  bash "$PKG/20-env.sh" > "$d.out" 2>&1 || rc=$?
+[ "$rc" = 0 ] && [ "$(ev WEB3AUTH_ALLOWED_VERIFIERS "$d/.env.rehearsal")" = "$W3A_G,lt-email-login,$W3A_A,lt-x-login,external-wallet" ] \
+  && [ "$(ev WEB3AUTH_REBIND_VERIFIERS "$d/.env.rehearsal")" = "$W3A_G,lt-email-login,$W3A_A,lt-x-login" ] \
+  && [ "$(ev WEB3AUTH_EMAIL_TRUSTED_VERIFIERS "$d/.env.rehearsal")" = "$W3A_G,lt-email-login,$W3A_A" ] \
+  && ok "W3A_EMAIL / W3A_X overrides replace the defaults in the allowed, re-bind and e-mail-trusted lists (the X override never e-mail-trusted)" \
+  || { tail -3 "$d.out"; bad "W3A_* overrides (rc=$rc)"; }
 cid20() { # <label> <NEW_DIR> [REHEARSAL_CLIENT_ID]: one 20-env.sh run, output in <NEW_DIR>.out, status in RC
   RC=0
   if [ $# -ge 3 ]; then DDC_LOCAL_TEST=1 NEW_DIR="$2" OLD_ENV="$OLD" FE_ENV_TGE="$T/env.tge" REHEARSAL_CLIENT_ID="$3" bash "$PKG/20-env.sh" > "$2.out" 2>&1 || RC=$?
@@ -448,10 +476,10 @@ if [ -f "$REPO/src/server.js" ] && [ -d "$REPO/node_modules/dotenv" ] && command
   grep -E '^(Partner SSO|Old App|BOOT CHECKS)' "$BB/out" | sed 's/^/  /'
   mp=$(grep 'Partner SSO money-path assertions OK' "$BB/out" | tail -1)
   req=0; git -C "$REPO" merge-base --is-ancestor "$( . "$PKG/common.sh"; echo "$OLD_APP_COMMIT")" HEAD 2>/dev/null && req=1
-  if [ "$rc" = 0 ] && grep -qx 'BOOT CHECKS OK' "$BB/out" && grep -q "^Partner SSO enabled \[prod\] client=$CID " "$BB/out" \
+  if [ "$rc" = 0 ] && grep -qx 'BOOT CHECKS OK' "$BB/out" && grep -q "^Partner SSO enabled \[prod\] client=$CID redirectUris=[0-9]* statusFields=$SF_WANT verifiedSession=" "$BB/out" \
      && ( DDC_LOCAL_TEST=1; . "$PKG/common.sh"; money_path_fields_check "$mp" 2 ) > "$BB/mp.out" 2>&1 \
      && ( DDC_LOCAL_TEST=1; . "$PKG/common.sh"; old_app_line_check "$(cat "$BB/out")" "$(sed -n 's/^WEB3AUTH_CLIENT_ID=//p' "$OLD" | tail -1 | cut -c1-8)" "$req" ) > "$BB/oa.out" 2>&1; then
-    ok "this checkout's src/server.js boots through every check on the env 20-env.sh wrote (client=$CID); its money-path line passes money_path_fields_check and its old-App line old_app_line_check (required: $req), as in 40-up.sh"
+    ok "this checkout's src/server.js boots through every check on the env 20-env.sh wrote (client=$CID, statusFields=$SF_WANT); its money-path line passes money_path_fields_check and its old-App line old_app_line_check (required: $req), as in 40-up.sh"
   else sed 's/^/    /' "$BB/out" "$BB/mp.out" "$BB/oa.out" 2>/dev/null | grep -v '^    {' | tail -12; bad "the backend's boot code on the env 20-env.sh wrote (rc=$rc)"; fi
   sed 's/^SSO_TGE_CLIENT_ID=.*/SSO_TGE_CLIENT_ID="tge-rehearsal"/' "$BB/env.api" > "$BB/env.retired"
   rc=0; boot "$BB/env.retired" "$BB/out.retired" || rc=$?

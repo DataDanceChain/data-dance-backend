@@ -233,8 +233,22 @@ new stack**.
   `https://tge-rehearsal.invalid/oauth/callback`, a placeholder that passes the boot check and never resolves. Re-run
   `20-env.sh` with `REHEARSAL_REDIRECT_URIS=...` once the partner's test site is known. The partner receives the secret
   through the partner info page (section 8), where it is only ciphertext.
-- **Web3Auth verifier names:** Google is documented. The other three are the expected names and are confirmed from real
-  tokens during the rehearsal; re-run with `W3A_EMAIL=... W3A_APPLE=... W3A_X=...`.
+- **Web3Auth verifier names:** the Sapphire Mainnet project's built-in logins carry no network suffix:
+  `web3auth-google-sapphire`, `web3auth-auth0-email-passwordless-sapphire`, `web3auth-auth0-apple-sapphire` and
+  `web3auth-auth0-twitter-sapphire` (the devnet ones end in `-sapphire-devnet`; a real Mainnet e-mail login carried
+  `web3auth-auth0-email-passwordless-sapphire` on 2026-10-14). These are the defaults of `W3A_GOOGLE`, `W3A_EMAIL`,
+  `W3A_APPLE` and `W3A_X`. `20-env.sh` writes all four, plus `external-wallet`, to `WEB3AUTH_ALLOWED_VERIFIERS`, the
+  four to `WEB3AUTH_REBIND_VERIFIERS`, and Google, e-mail and Apple (never X) to `WEB3AUTH_EMAIL_TRUSTED_VERIFIERS`.
+  Should a real Mainnet token name a login differently, re-run with that override (`W3A_EMAIL=...` etc.). With these
+  names `mainnetSwitch.js --plan` (`60-rehearsal.sh report`) prints a `WARNING` that the `WEB3AUTH_REBIND_VERIFIERS`
+  entries lack `sapphire-mainnet`: expected, a warning and not a blocker.
+- **Partner fields served (`SSO_TGE_STATUS_FIELDS`, the freeze list of docs/TGE_SSO.md section 14):**
+  `registered_at,wallet_bound,referral_network,referral,avatar,points,points_history`. `points` is the balance on
+  `/partner/tge/status`, `points_history` the ledger endpoint `/partner/tge/points/history` (docs/TGE_SSO.md section
+  7c); both also need the user's `tge:points` grant. **Rollout rule:** `points_history` is served only together with a
+  web build whose consent line for `points` reads "balance and history" in every language (data-dance-frontend
+  a077c74 or later). `20-env.sh` does not check the web build: build the web image from such a commit (`10-build.sh`)
+  before `20-env.sh` and `40-up.sh` put this list in front of users.
 
 ## 3. Disk
 
@@ -423,9 +437,12 @@ by side. It must end with `summary: fails=0`. It covers:
   agrees, the credential policy (removed, blanked, fail-closed on unclassified names and on credential-shaped values),
   and identical output on ubuntu:jammy (mawk, GNU tools). `REHEARSAL_CLIENT_ID`: required on the first run (no
   default), refused when malformed (65 characters, a blank, a symbol), when `tge` or `tge-rehearsal`, or when it differs
-  from the recorded one; a failing run does not record it; a re-run reuses the recorded value. The backend's own boot
-  checks (`test/helpers/backend-boot.js` runs the checkout's real `src/server.js` with `src/app.js` stubbed, so nothing
-  listens) accept the env file `20-env.sh` wrote and refuse the same file with `tge-rehearsal`.
+  from the recorded one; a failing run does not record it; a re-run reuses the recorded value. The Web3Auth lists carry
+  the Mainnet built-in login names (no `-mainnet` suffix; X never e-mail-trusted), an override of `W3A_*` reaches all
+  three lists, and `SSO_TGE_STATUS_FIELDS` is exactly the list of section 2 (with `points` and `points_history`). The
+  backend's own boot checks (`test/helpers/backend-boot.js` runs the checkout's real `src/server.js` with `src/app.js`
+  stubbed, so nothing listens) accept the env file `20-env.sh` wrote, report that list on the `Partner SSO enabled`
+  line, and refuse the same file with `tge-rehearsal`.
 - `30-nginx.sh` render on synthetic vhost fixtures (default and overridden hosts and ports) and `nginx -t` on nginx 1.18
   and stable; apply and undo stop when another host's status code changes (over https too when 443 is served); with
   Race-like entries at the default names: apply stops and changes nothing; `TAKE_OVER_VHOSTS=yes` is refused while

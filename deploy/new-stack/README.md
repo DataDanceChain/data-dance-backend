@@ -39,6 +39,15 @@ outcome: [APPROVAL.md](APPROVAL.md) section 9.
 refuses `tge` and `tge-rehearsal` at boot, and anything outside `[A-Za-z0-9._-]{1,64}`). The run records it in
 `/root/ddcnew/settings.env`; later runs reuse it and stop on a different value.
 
+`20-env.sh` also sets the Web3Auth login names and the partner fields the rehearsal api serves:
+- the Sapphire Mainnet built-in login names, without a `-mainnet` suffix: `web3auth-google-sapphire`,
+  `web3auth-auth0-email-passwordless-sapphire`, `web3auth-auth0-apple-sapphire`, `web3auth-auth0-twitter-sapphire`
+  (overridable with `W3A_GOOGLE`, `W3A_EMAIL`, `W3A_APPLE`, `W3A_X`). X is never one of the e-mail-trusted logins.
+- `SSO_TGE_STATUS_FIELDS=registered_at,wallet_bound,referral_network,referral,avatar,points,points_history`: the points
+  balance and the points history are served (both under the user's `tge:points` grant). The points history goes with a
+  web build whose consent line for points reads "balance and history" (data-dance-frontend a077c74 or later); build
+  the web image from such a commit first. Details: [APPROVAL.md](APPROVAL.md) section 2.
+
 ## Backend source
 
 By default `10-build.sh` builds the backend from a clean `git fetch --depth 1` of this public repository at the pinned
