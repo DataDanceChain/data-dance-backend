@@ -88,7 +88,6 @@ exports.authenticate = async (req, res, next) => {
 
 exports.isOrganization = (req, res, next) => {
   if (req.user && (req.user.isOrganization || req.user.userType === 'organization')) {
-    console.log('req.user in isOrganization:', req.user);
     return next();
   }
   return res.status(403).json({
