@@ -6,7 +6,9 @@
  * (userId, source, sourceId) per user, and createMany({ skipDuplicates }) silently skips a row that
  * hits either. So: two users who saw the same post both keep it; one post under host / handle
  * variants is one record; an order keeps its own identity whatever links it holds; points go only
- * to rows really written; the social-identity backfill rewrites old rows without deleting any; and
+ * to rows really written; a Facebook post is one record per user by its permalink, and a row an
+ * earlier App version stored under its title is found by that title; the social-identity backfill
+ * rewrites old rows (Facebook rows with a post link among them) without deleting any; and
  * the record backfill gives rows of other sources stored under a post link key their order / title
  * identity back, keeps the earliest copy of one record as its holder and marks the others
  * superseded, without deleting a row or changing a point. Fixture rows use a per-run id prefix and are deleted afterwards. Campaign boosts and referral
@@ -558,6 +560,162 @@ describe('Connect upload identity (Postgres)', () => {
         const result = await upload('kim', [item(payload)]);
         assert.deepEqual([result.uploadedCount, result.duplicatesCount, result.pointsEarned], [0, 1, 0]);
       }
+    });
+  });
+
+  // Facebook rows as the App uploads them: from 2.0.6 the post link (src/crawler/connect/postUrl.ts),
+  // before that the profile page, keyed by title.
+  describe('Facebook posts keyed by their permalink', () => {
+    const NAMES = ['fbn', 'fbm', 'fba', 'fbo', 'fbr'];
+    const ids = NAMES.map(id);
+    const post = (name) => `https://facebook.com/jane.doe/posts/pfbid0${RUN}${name}`;
+    const profile = (name) => `https://www.facebook.com/profile.php?id=${RUN}${name}`;
+    const caption = (text) => `${text} ${RUN}`;
+    const MARKET = caption('Saturday market in Sham Shui Po, film and a quiet stall.');
+    const MORNING = caption('Good morning from Hong Kong, coffee first today.');
+    const fb = (name, href, text, at = '2026-10-14T01:00:00.000Z') => ({
+      source: 'facebook',
+      type: 'custom',
+      timestamp: at,
+      metadata: { sourceUrl: profile(name), host: 'facebook.com', cleaned: true, extract: 'generic' },
+      payload: { title: text, productTitle: text, date: '', href, caption: text, text },
+    });
+    const counts = (r) => [r.uploadedCount, r.duplicatesCount, r.pointsEarned];
+    const titleKey = (text) => `title:facebook.com:${text.toLowerCase()}:`;
+    const fbPoints = calculateDataPoints('facebook', 1);
+    const fbPointsFor = (n) => calculateDataPoints('facebook', n);
+
+    before(async () => {
+      for (const name of NAMES) await user(name);
+    });
+
+    after(async () => {
+      await prisma.point.deleteMany({ where: { userId: { in: ids } } });
+      await prisma.crawlerData.deleteMany({ where: { userId: { in: ids } } });
+      await prisma.crawlerTask.deleteMany({ where: { userId: { in: ids } } });
+      await prisma.user.deleteMany({ where: { id: { in: ids } } });
+    });
+
+    it('n1: two posts with the same caption are both stored; the same page again stores nothing', async () => {
+      const page = [fb('fbn', post('market'), MARKET), fb('fbn', post('morning1'), MORNING), fb('fbn', post('morning2'), MORNING)];
+      assert.deepEqual(counts(await upload('fbn', page)), [3, 0, fbPointsFor(3)]);
+      assert.deepEqual(counts(await upload('fbn', page)), [0, 3, 0]);
+      const rows = await rowsOf('fbn', { source: 'facebook' });
+      assert.deepEqual(rows.map((r) => r.sourceId).sort(), ['market', 'morning1', 'morning2'].map((n) => `title:post:${post(n)}`).sort());
+      assert.equal(await crawlerPoints('fbn'), fbPointsFor(3));
+    });
+
+    it('n3: a caption edit of the same post is a duplicate and pays nothing', async () => {
+      const edited = caption('Saturday market in Sham Shui Po: film and a quiet stall.');
+      assert.deepEqual(counts(await upload('fbn', [fb('fbn', post('market'), edited)])), [0, 1, 0]);
+      assert.equal(await crawlerPoints('fbn'), fbPointsFor(3));
+    });
+
+    it('n4: a second user who sees the same post keeps a copy of their own', async () => {
+      assert.deepEqual(counts(await upload('fbm', [fb('fbm', post('market'), MARKET)])), [1, 0, fbPoints]);
+      const [mine] = await rowsOf('fbm', { source: 'facebook' });
+      const [theirs] = await rowsOf('fbn', { source: 'facebook', sourceId: `title:post:${post('market')}` });
+      assert.equal(mine.sourceId, theirs.sourceId);
+      assert.notEqual(mine.contentHash, theirs.contentHash);
+    });
+
+    it('c3: a row from an earlier App version, then the post link with the same title, is a duplicate', async () => {
+      // the earlier version: the profile page as href, two posts with one caption as one row
+      const earlier = [fb('fba', profile('fba'), MARKET), fb('fba', profile('fba'), MORNING)];
+      assert.deepEqual(counts(await upload('fba', earlier)), [2, 0, fbPointsFor(2)]);
+      const page = [fb('fba', post('market'), MARKET), fb('fba', post('morning1'), MORNING), fb('fba', post('morning2'), MORNING)];
+      assert.deepEqual(counts(await upload('fba', page)), [0, 3, 0]);
+      assert.deepEqual(counts(await upload('fba', page)), [0, 3, 0]);
+      const rows = await rowsOf('fba', { source: 'facebook' });
+      assert.deepEqual(rows.map((r) => r.sourceId).sort(), [titleKey(MARKET), titleKey(MORNING)].sort());
+      assert.equal(await crawlerPoints('fba'), fbPointsFor(2));
+    });
+
+    it('a row from an earlier App version under another title: the post is stored once (accepted)', async () => {
+      // The earlier version read a long comment as the title (or the caption changed since): that
+      // title key does not match, so the post is stored once under its permalink, then is a duplicate.
+      const comment = caption('Wow, that view from the top is amazing, we should all go together next weekend!');
+      const trail = caption('Trail run up Lion Rock before sunrise.');
+      assert.deepEqual(counts(await upload('fbo', [fb('fbo', profile('fbo'), comment)])), [1, 0, fbPoints]);
+      assert.deepEqual(counts(await upload('fbo', [fb('fbo', post('trail'), trail)])), [1, 0, fbPoints]);
+      assert.deepEqual(counts(await upload('fbo', [fb('fbo', post('trail'), trail)])), [0, 1, 0]);
+      assert.equal((await rowsOf('fbo', { source: 'facebook' })).length, 2);
+    });
+
+    describe('backfill of rows that already hold the post link', () => {
+      // Rows the App (2.0.6) stored against a server without the Facebook rule: the post link as
+      // href, a title key, and the hash of the whole payload. Two of them are one post whose caption
+      // changed; one row is from an earlier App version (profile page).
+      const FIRST = caption('Harbour walk');
+      const LATER = caption('Harbour walk at dusk');
+      const rows = [
+        ['fbr-1', fb('fbr', post('harbour'), FIRST).payload, titleKey(FIRST), '2026-10-13T00:00:01Z'],
+        ['fbr-2', fb('fbr', post('harbour'), LATER).payload, titleKey(LATER), '2026-10-13T00:00:02Z'],
+        ['fbr-3', fb('fbr', post('noodles'), caption('Noodles')).payload, titleKey(caption('Noodles')), '2026-10-13T00:00:03Z'],
+        ['fbr-4', fb('fbr', profile('fbr'), caption('Old')).payload, titleKey(caption('Old')), '2026-10-13T00:00:04Z'],
+      ];
+      const snapshot = () =>
+        prisma.crawlerData.findMany({ where: { userId: id('fbr') }, orderBy: { id: 'asc' }, select: { id: true, sourceId: true, contentHash: true } });
+      const pointsOf = async () => ({
+        points: await prisma.point.findMany({ where: { userId: id('fbr') }, orderBy: { id: 'asc' }, select: { id: true, amount: true } }),
+        total: (await prisma.user.findUnique({ where: { id: id('fbr') }, select: { totalPoints: true } })).totalPoints,
+      });
+
+      before(async () => {
+        const task = await prisma.crawlerTask.create({
+          data: { id: id('task-fbr'), title: 'Facebook Activity', source: 'facebook', taskId: 'facebook_activity', userId: id('fbr') },
+        });
+        for (const [rowId, payload, sourceId, createdAt] of rows) {
+          await prisma.crawlerData.create({
+            data: {
+              id: id(rowId), source: 'facebook', type: 'custom', timestamp: new Date('2026-10-13T00:00:00Z'),
+              metadata: { host: 'facebook.com' }, payload, taskId: task.id, userId: id('fbr'),
+              contentHash: generateContentHash(payload), sourceId, createdAt: new Date(createdAt),
+            },
+          });
+          await prisma.point.create({ data: { userId: id('fbr'), amount: fbPoints, source: 'crawler', sourceId: 'data_upload', createdAt: new Date(createdAt) } });
+        }
+        await prisma.user.update({ where: { id: id('fbr') }, data: { totalPoints: 4 * fbPoints } });
+      });
+
+      it('a dry run reports the rows with a post link and writes nothing', async () => {
+        const before = [await snapshot(), await pointsOf()];
+        const report = await backfillSocialPostIdentity({ userIds: [id('fbr')] });
+        assert.deepEqual([report.scanned, report.updated, report.current, report.noPermalink], [4, 2, 0, 1]);
+        assert.deepEqual(report.conflicts.map((c) => c.id), [id('fbr-2')]);
+        assert.deepEqual([await snapshot(), await pointsOf()], before);
+      });
+
+      it('--apply gives them the permalink key, deletes nothing and changes no points', async () => {
+        const points = await pointsOf();
+        // pages of one row: fbr-2's page finds fbr-1 already written
+        const report = await backfillSocialPostIdentity({ apply: true, userIds: [id('fbr')], batch: 1 });
+        assert.deepEqual([report.scanned, report.updated, report.current, report.noPermalink], [4, 2, 0, 1]);
+        assert.deepEqual(report.conflicts.map((c) => [c.id, c.keptBy]), [[id('fbr-2'), id('fbr-1')]]);
+        const by = Object.fromEntries((await snapshot()).map((r) => [r.id, r]));
+        assert.equal(Object.keys(by).length, 4);
+        assert.equal(by[id('fbr-1')].sourceId, `title:post:${post('harbour')}`);
+        assert.equal(by[id('fbr-1')].contentHash, generateContentHash(rows[0][1], { source: 'facebook', userId: id('fbr') }));
+        assert.equal(by[id('fbr-2')].sourceId, titleKey(LATER));
+        assert.equal(by[id('fbr-3')].sourceId, `title:post:${post('noodles')}`);
+        assert.equal(by[id('fbr-4')].sourceId, titleKey(caption('Old')));
+        assert.deepEqual(await pointsOf(), points);
+      });
+
+      it('a second --apply writes nothing', async () => {
+        const before = await snapshot();
+        const report = await backfillSocialPostIdentity({ apply: true, userIds: [id('fbr')] });
+        assert.deepEqual([report.updated, report.current, report.noPermalink, report.conflicts.length], [0, 2, 1, 1]);
+        assert.deepEqual(await snapshot(), before);
+      });
+
+      it('after the backfill the post with another caption is a duplicate and pays nothing', async () => {
+        const points = await crawlerPoints('fbr');
+        const again = await upload('fbr', [fb('fbr', 'https://www.facebook.com/jane.doe/posts/pfbid0' + RUN + 'harbour?__tn__=R', caption('Harbour walk, the long way'))]);
+        assert.deepEqual(counts(again), [0, 1, 0]);
+        assert.deepEqual(counts(await upload('fbr', [fb('fbr', post('noodles'), caption('Noodles, again'))])), [0, 1, 0]);
+        assert.equal(await crawlerPoints('fbr'), points);
+      });
     });
   });
 });

@@ -16,6 +16,7 @@ const {
   hasRecordIdentity,
   isClientSmoothedRecord,
   isTitleBackedSourceId,
+  legacyPostTitleSourceId,
   socialPostUrl,
   sourceIdentityKey,
 } = require('../utils/crawlerRecordIdentity');
@@ -474,6 +475,8 @@ async function uploadCrawlerData(data, userId) {
       // Generate content hash and source ID
       item.contentHash = generateContentHash(item.payload, { source: item.source, userId });
       item.sourceId = extractSourceId(item.source, item.payload, item.metadata);
+      // Transition (Facebook): the title key this post had before it was keyed by its permalink.
+      item.legacySourceId = legacyPostTitleSourceId(item.source, item.payload, item.metadata);
       item.originalIndex = i;
       
       preValidatedItems.push(item);
@@ -532,13 +535,14 @@ async function uploadCrawlerData(data, userId) {
         .filter((item) => item.sourceId && !isTitleBackedSourceId(item.sourceId))
         .map((item) => ({ source: item.source, sourceId: item.sourceId }));
       const titlePairs = preValidatedItems
-        .filter((item) => isTitleBackedSourceId(item.sourceId))
-        .map((item) => ({ source: item.source, sourceId: item.sourceId }));
+        .flatMap((item) => [item.sourceId, item.legacySourceId].map((sourceId) => ({ source: item.source, sourceId })))
+        .filter(({ sourceId }) => isTitleBackedSourceId(sourceId));
       const contentHashesToCheck = preValidatedItems.map(item => item.contentHash);
       
       // Official ids are global within a source (same SHEIN order cannot be
       // claimed twice). Title-backed shop ids and content hashes are per-user
-      // so two people buying "Linen shirt" do not collide.
+      // so two people buying "Linen shirt" do not collide. A Facebook post's
+      // older title key (legacySourceId) is looked up per user as well.
       const [existingOfficial, existingTitle, existingByHash] = await Promise.all([
         officialPairs.length > 0
           ? tx.crawlerData.findMany({
@@ -583,9 +587,12 @@ async function uploadCrawlerData(data, userId) {
         const titleHit =
           isTitleBackedSourceId(item.sourceId) &&
           (existingTitleKeys.has(identityKey) || seenSourceKeys.has(identityKey));
+        // Transition (Facebook): the same user already holds this post under its older title key.
+        const legacyKey = item.legacySourceId ? sourceIdentityKey(item.source, item.legacySourceId) : '';
+        const legacyHit = Boolean(legacyKey) && (existingTitleKeys.has(legacyKey) || seenSourceKeys.has(legacyKey));
         const hashHit = existingHashes.has(item.contentHash) || seenHashes.has(item.contentHash);
-        if (officialHit || titleHit || hashHit) {
-          const duplicateType = officialHit || titleHit ? 'order' : 'content';
+        if (officialHit || titleHit || legacyHit || hashHit) {
+          const duplicateType = officialHit || titleHit || legacyHit ? 'order' : 'content';
           duplicates.push({
             index: item.originalIndex,
             reason: 'duplicate_data',
@@ -955,7 +962,7 @@ async function getCrawlerStats(userId) {
 
 /**
  * Generate SHA256 hash of normalized payload data.
- * A post on X / Instagram / Threads / TikTok hashes by its owner and canonical permalink instead,
+ * A post on X / Instagram / Threads / TikTok / Facebook hashes by its owner and canonical permalink instead,
  * so a later like count is the same record for that user, while another user who saw the same
  * post keeps a record of their own (contentHash is unique across the whole table).
  */

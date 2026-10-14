@@ -164,13 +164,13 @@
       "source": "facebook",
       "href": "https://x.com/a/status/1",
       "canonical": "",
-      "note": "only X, Instagram, Threads and TikTok have post permalinks"
+      "note": "a post on another platform is not this platform's post"
     },
     {
       "source": "amazon",
       "href": "https://www.instagram.com/p/ABC123def/",
       "canonical": "",
-      "note": "only X, Instagram, Threads and TikTok have post permalinks"
+      "note": "only X, Instagram, Threads, TikTok and Facebook have post permalinks"
     },
     {
       "source": "x",
@@ -281,6 +281,277 @@
       "href": "https://threads.net/post/DAbc123x/post",
       "canonical": "https://threads.net/post/DAbc123x",
       "note": "the canonical form in first place is read when the handle form gives no id"
+    },
+    {
+      "source": "facebook",
+      "href": "https://www.facebook.com/jane.doe/posts/pfbid0SaturdayMarket?__cft__[0]=AZx&__tn__=%2CO%2CP-R",
+      "canonical": "https://facebook.com/jane.doe/posts/pfbid0SaturdayMarket"
+    },
+    {
+      "source": "facebook",
+      "href": "https://m.facebook.com/jane.doe/posts/pfbid0SaturdayMarket?comment_id=9",
+      "canonical": "https://facebook.com/jane.doe/posts/pfbid0SaturdayMarket"
+    },
+    {
+      "source": "facebook",
+      "href": "https://web.facebook.com/Jane.Doe/posts/1234567890123456",
+      "canonical": "https://facebook.com/Jane.Doe/posts/1234567890123456",
+      "note": "the user segment is kept as the link shows it"
+    },
+    {
+      "source": "facebook",
+      "href": "https://www.facebook.com/jane.doe/POSTS/pfbid0LionRock/",
+      "canonical": "https://facebook.com/jane.doe/posts/pfbid0LionRock"
+    },
+    {
+      "source": "facebook",
+      "href": "https://www.facebook.com/groups/424242/posts/1234567890",
+      "canonical": "https://facebook.com/424242/posts/1234567890",
+      "note": "the segment before posts / videos is kept"
+    },
+    {
+      "source": "facebook",
+      "href": "https://www.facebook.com/jane.doe/videos/987654321012345/?t=3",
+      "canonical": "https://facebook.com/jane.doe/videos/987654321012345"
+    },
+    {
+      "source": "facebook",
+      "href": "https://www.facebook.com/reel/99887766?s=1",
+      "canonical": "https://facebook.com/reel/99887766"
+    },
+    {
+      "source": "facebook",
+      "href": "https://www.facebook.com/share/p/1AbCdEfGh/",
+      "canonical": "https://facebook.com/share/p/1AbCdEfGh"
+    },
+    {
+      "source": "facebook",
+      "href": "https://m.facebook.com/share/v/1AbCdEfGh?mibextid=x",
+      "canonical": "https://facebook.com/share/v/1AbCdEfGh"
+    },
+    {
+      "source": "facebook",
+      "href": "https://fb.com/jane.doe/posts/pfbid0LionRock",
+      "canonical": "https://facebook.com/jane.doe/posts/pfbid0LionRock"
+    },
+    {
+      "source": "facebook",
+      "href": "https://business.facebook.com/jane.doe/posts/pfbid0LionRock",
+      "canonical": "https://facebook.com/jane.doe/posts/pfbid0LionRock"
+    },
+    {
+      "source": "facebook",
+      "href": "http://facebook.com/jane.doe/posts/pfbid0LionRock#comments",
+      "canonical": "https://facebook.com/jane.doe/posts/pfbid0LionRock"
+    },
+    {
+      "source": "facebook",
+      "href": "https://www.facebook.com/permalink.php?story_fbid=pfbid0Harbour&id=100001&ref=bookmarks",
+      "canonical": "https://facebook.com/permalink.php?story_fbid=pfbid0Harbour&id=100001"
+    },
+    {
+      "source": "facebook",
+      "href": "https://m.facebook.com/story.php?story_fbid=1234567890&id=100001",
+      "canonical": "https://facebook.com/story.php?story_fbid=1234567890&id=100001"
+    },
+    {
+      "source": "facebook",
+      "href": "https://m.facebook.com/story.php?story_fbid=1234567890&id=12",
+      "canonical": "https://facebook.com/story.php?story_fbid=1234567890",
+      "note": "id= is kept only when it is an id"
+    },
+    {
+      "source": "facebook",
+      "href": "https://www.facebook.com/photo.php?fbid=12345678&set=a.1",
+      "canonical": "https://facebook.com/photo.php?fbid=12345678"
+    },
+    {
+      "source": "facebook",
+      "href": "https://www.facebook.com/photo/?fbid=12345678&set=a.1",
+      "canonical": "https://facebook.com/photo.php?fbid=12345678"
+    },
+    {
+      "source": "facebook",
+      "href": "https://www.facebook.com/watch?v=1234567890&ref=sharing",
+      "canonical": "https://facebook.com/watch/?v=1234567890"
+    },
+    {
+      "source": "facebook",
+      "href": "https://facebook.com/jane.doe/posts/pfbid0SaturdayMarket",
+      "canonical": "https://facebook.com/jane.doe/posts/pfbid0SaturdayMarket"
+    },
+    {
+      "source": "facebook",
+      "href": "https://facebook.com/jane.doe/videos/987654321012345",
+      "canonical": "https://facebook.com/jane.doe/videos/987654321012345"
+    },
+    {
+      "source": "facebook",
+      "href": "https://facebook.com/reel/99887766",
+      "canonical": "https://facebook.com/reel/99887766"
+    },
+    {
+      "source": "facebook",
+      "href": "https://facebook.com/share/p/1AbCdEfGh",
+      "canonical": "https://facebook.com/share/p/1AbCdEfGh"
+    },
+    {
+      "source": "facebook",
+      "href": "https://facebook.com/permalink.php?story_fbid=pfbid0Harbour&id=100001",
+      "canonical": "https://facebook.com/permalink.php?story_fbid=pfbid0Harbour&id=100001"
+    },
+    {
+      "source": "facebook",
+      "href": "https://facebook.com/story.php?story_fbid=1234567890",
+      "canonical": "https://facebook.com/story.php?story_fbid=1234567890"
+    },
+    {
+      "source": "facebook",
+      "href": "https://facebook.com/photo.php?fbid=12345678",
+      "canonical": "https://facebook.com/photo.php?fbid=12345678"
+    },
+    {
+      "source": "facebook",
+      "href": "https://facebook.com/watch/?v=1234567890",
+      "canonical": "https://facebook.com/watch/?v=1234567890"
+    },
+    {
+      "source": "facebook",
+      "href": "https://www.facebook.com/profile.php?id=100001",
+      "canonical": "",
+      "note": "a profile or login page is not a post"
+    },
+    {
+      "source": "facebook",
+      "href": "https://www.facebook.com/me",
+      "canonical": "",
+      "note": "a profile or login page is not a post"
+    },
+    {
+      "source": "facebook",
+      "href": "https://www.facebook.com/jane.doe",
+      "canonical": "",
+      "note": "a profile or login page is not a post"
+    },
+    {
+      "source": "facebook",
+      "href": "https://www.facebook.com/login/?next=https%3A%2F%2Fwww.facebook.com%2Fjane.doe%2Fposts%2Fpfbid0LionRock",
+      "canonical": "",
+      "note": "a profile or login page is not a post"
+    },
+    {
+      "source": "facebook",
+      "href": "https://m.facebook.com/login.php?next=%2Fjane.doe%2Fposts%2Fpfbid0LionRock",
+      "canonical": "",
+      "note": "a profile or login page is not a post"
+    },
+    {
+      "source": "facebook",
+      "href": "https://www.facebook.com/posts/pfbid0LionRock",
+      "canonical": "",
+      "note": "posts / videos need the segment before them"
+    },
+    {
+      "source": "facebook",
+      "href": "https://www.facebook.com/jane.doe/posts/abc",
+      "canonical": "",
+      "note": "a post id has 4 to 200 letters, digits, _ or -"
+    },
+    {
+      "source": "facebook",
+      "href": "https://www.facebook.com/reel/123",
+      "canonical": "",
+      "note": "a post id has 4 to 200 letters, digits, _ or -"
+    },
+    {
+      "source": "facebook",
+      "href": "https://www.facebook.com/share/p/1Ab",
+      "canonical": "",
+      "note": "a post id has 4 to 200 letters, digits, _ or -"
+    },
+    {
+      "source": "facebook",
+      "href": "https://www.facebook.com/permalink.php?story_fbid=12&id=100001",
+      "canonical": "",
+      "note": "a post id has 4 to 200 letters, digits, _ or -"
+    },
+    {
+      "source": "facebook",
+      "href": "https://www.facebook.com/photo.php?fbid=1",
+      "canonical": "",
+      "note": "a post id has 4 to 200 letters, digits, _ or -"
+    },
+    {
+      "source": "facebook",
+      "href": "https://www.facebook.com/watch/?v=12",
+      "canonical": "",
+      "note": "a post id has 4 to 200 letters, digits, _ or -"
+    },
+    {
+      "source": "facebook",
+      "href": "https://www.facebook.com/jane.doe/posts/pfbid0%20Lion",
+      "canonical": "",
+      "note": "a post id has 4 to 200 letters, digits, _ or -"
+    },
+    {
+      "source": "facebook",
+      "href": "https://www.facebook.com/jane.doe/posts/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "canonical": "",
+      "note": "a post id has 4 to 200 letters, digits, _ or -"
+    },
+    {
+      "source": "facebook",
+      "href": "https://facebook.com.example.net/jane.doe/posts/pfbid0LionRock",
+      "canonical": ""
+    },
+    {
+      "source": "facebook",
+      "href": "https://notfacebook.com/jane.doe/posts/pfbid0LionRock",
+      "canonical": ""
+    },
+    {
+      "source": "facebook",
+      "href": "https://example.com/redirect?u=https://www.facebook.com/jane.doe/posts/pfbid0LionRock",
+      "canonical": ""
+    },
+    {
+      "source": "facebook",
+      "href": "https://l.facebook.com/l.php?u=https%3A%2F%2Fexample.com%2F",
+      "canonical": ""
+    },
+    {
+      "source": "facebook",
+      "href": "https://fb.watch/abcdEFGH/",
+      "canonical": ""
+    },
+    {
+      "source": "facebook",
+      "href": "facebook.com/jane.doe/posts/pfbid0LionRock",
+      "canonical": ""
+    },
+    {
+      "source": "instagram",
+      "href": "https://www.facebook.com/jane.doe/posts/pfbid0SaturdayMarket",
+      "canonical": "",
+      "note": "a post on another platform is not this platform's post"
+    },
+    {
+      "source": "x",
+      "href": "https://facebook.com/permalink.php?story_fbid=pfbid0Harbour&id=100001",
+      "canonical": "",
+      "note": "a post on another platform is not this platform's post"
+    },
+    {
+      "source": "facebook",
+      "href": "https://www.instagram.com/p/ABC123def/",
+      "canonical": "",
+      "note": "a post on another platform is not this platform's post"
+    },
+    {
+      "source": "amazon",
+      "href": "https://www.facebook.com/jane.doe/posts/pfbid0SaturdayMarket",
+      "canonical": "",
+      "note": "only X, Instagram, Threads, TikTok and Facebook have post permalinks"
     }
   ]
 }

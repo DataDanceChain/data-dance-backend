@@ -98,11 +98,13 @@ describe('social rows the candidate query skips', () => {
   const certain = (source, text) =>
     Buffer.byteLength(text) <= 2048 &&
     new RegExp(CERTAIN_PERMALINK_SQL[source === 'twitter' ? 'x' : source], 'is').test(text);
-  const sources = ['x', 'twitter', 'instagram', 'threads', 'tiktok'];
+  const sources = ['x', 'twitter', 'instagram', 'threads', 'tiktok', 'facebook'];
   const hosts = [
     'x.com', 'twitter.com', 'www.x.com', 'mobile.twitter.com', 'm.x.com', 'www.m.x.com', 'X.COM', 'x.com.evil.example',
     'instagram.com', 'www.instagram.com', 'threads.net', 'threads.com', 'www.threads.net', 'tiktok.com', 'm.tiktok.com',
     'evil.example', 't.co', 'x.com:443', 'user@x.com',
+    'facebook.com', 'www.facebook.com', 'm.facebook.com', 'web.facebook.com', 'fb.com', 'facebook.com.evil.example',
+    'notfacebook.com', 'facebook.com:443', 'user@facebook.com',
   ];
   const paths = [
     '/someone/status/1845', '/i/web/status/1845', '/someone/statuses/1845', '/status/status/1845', '/someone/status/abc',
@@ -110,6 +112,9 @@ describe('social rows the candidate query skips', () => {
     '/p/AbC123', '/reel/AbC1_-x', '/reels/AbCd', '/tv/AbC', '/handle/p/AbC123', '/reel/p/AbC123', '/p/AbC123/../x',
     '/@h/post/XyZ9', '/h/post/XyZ9', '/../post/XyZ9', '/post/post/XyZ9', '/@h/post/XyZ', '/@a.b/post/XyZ9a',
     '/@h/video/1001', '/@h/photo/1001', '/h/video/1001', '/@../video/1001', '/@h/video/10x',
+    '/jane.doe/posts/pfbid0Ab', '/jane.doe/posts/pfbid0Ab/x', '/posts/posts/Ab12', '/jane.doe/posts/Ab1', '/posts/Ab12',
+    '/../posts/Ab12', '/./posts/Ab12', '/a./posts/Ab12', '/.a/posts/Ab12', '/jane.doe/posts/Ab12/../../x', '/a/posts/Ab%2012',
+    `/a/posts/${'b'.repeat(200)}`, `/a/posts/${'b'.repeat(201)}`, '/a/videos/Ab12', '/reel/Ab12',
     '', '/', '//someone/status/1845',
   ];
   const tails = ['', '/', '?s=20', '#frag', '/?x=1#y', '?q=' + 'a'.repeat(2100), '\n', ' ', '/x y'];
@@ -142,6 +147,9 @@ describe('social rows the candidate query skips', () => {
     assert.ok(certain('instagram', 'https://www.instagram.com/p/AbC123/'));
     assert.ok(certain('threads', 'https://www.threads.net/@h/post/XyZ9'));
     assert.ok(certain('tiktok', 'https://www.tiktok.com/@h/video/1001'));
+    assert.ok(certain('facebook', 'https://www.facebook.com/jane.doe/posts/pfbid0SaturdayMarket?__tn__=R'));
+    // other Facebook forms are decided in code
+    assert.equal(certain('facebook', 'https://www.facebook.com/permalink.php?story_fbid=pfbid0Harbour&id=1'), false);
     // a redirect link, or another platform's link, is left to the code
     assert.equal(certain('x', 'https://t.co/r?u=https://x.com/a/status/1'), false);
     assert.equal(certain('x', 'https://www.instagram.com/p/AbC123/'), false);

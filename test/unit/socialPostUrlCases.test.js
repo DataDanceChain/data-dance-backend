@@ -11,7 +11,7 @@ const { socialPostUrl, extractSourceId, TITLE_BACKED_PREFIX } = require('../../s
 describe('socialPostUrl runs the shared post-link table', () => {
   it('has cases for every social source and a non-social one', () => {
     const sources = new Set(table.cases.map((row) => row.source));
-    for (const source of ['x', 'twitter', 'instagram', 'threads', 'tiktok', 'amazon']) {
+    for (const source of ['x', 'twitter', 'instagram', 'threads', 'tiktok', 'facebook', 'amazon']) {
       assert.ok(sources.has(source), source);
     }
   });
