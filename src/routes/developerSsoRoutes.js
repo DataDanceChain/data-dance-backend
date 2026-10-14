@@ -1,9 +1,10 @@
 /**
  * Self-serve registration for a DDC SSO client, by a signed-in DataDance account.
  * POST /api/developer/sso/clients returns the secret once. Nothing here lists existing secrets.
- * Closed unless SSO_DEVELOPER_REGISTRATION=on (src/constants/developerRegistration.js). When it is
- * on, the route itself still requires a user JWT (`protect`), so its protection does not depend on
- * where any other router is mounted.
+ * Closed unless SSO_DEVELOPER_REGISTRATION=on or allowlist (src/constants/developerRegistration.js).
+ * When it is not off, the route itself still requires a user JWT (`protect`), so its protection does
+ * not depend on where any other router is mounted. In allowlist mode only a listed account with a
+ * verified login e-mail gets past `registrationAllowed`; every other one gets the off answer.
  *
  * The account console (the frontend's /developers/ page) reads and changes the signed-in account's
  * own clients. These routes do not depend on the registration switch:
@@ -18,7 +19,7 @@ const { protect } = require('../middlewares/authMiddleware');
 const { rateLimiters } = require('../middlewares/rateLimitMiddleware');
 const { publicBaseUrl } = require('../constants/lifeContext');
 const { partnerResourceUrl } = require('../constants/partnerClient');
-const { developerRegistrationOpen } = require('../constants/developerRegistration');
+const { developerRegistrationMode, registrationDecision } = require('../constants/developerRegistration');
 const { createLogger } = require('../utils/logger');
 const {
   createDeveloperClient,
@@ -32,17 +33,44 @@ const {
 const router = express.Router();
 const logger = createLogger('developerSso');
 
-// First on the route, before the login check, the rate limiter and any database access: a closed
-// endpoint gives everyone the same answer and writes nothing.
-function registrationOpen(req, res, next) {
-  if (developerRegistrationOpen()) return next();
+function registrationClosed(res) {
   return res.status(403).json({
     error: 'registration_closed',
     error_description: 'Self-serve client registration is closed. Contact DataDance to register a client.',
   });
 }
 
-router.post('/clients', registrationOpen, protect, rateLimiters.developerClientCreate, async (req, res) => {
+// First on the route, before the login check, the rate limiter and any database access: a closed
+// endpoint gives everyone the same answer and writes nothing.
+function registrationOpen(req, res, next) {
+  if (developerRegistrationMode() !== 'off') return next();
+  return registrationClosed(res);
+}
+
+/** Where a refused registration is logged. Replaceable for tests. */
+const registrationLog = {
+  info: (event, entry) => logger.info(event, entry),
+};
+
+/**
+ * After `protect`, before the rate limiter: on lets every signed-in account through, allowlist only
+ * a listed account with a verified login e-mail (decided from the account row and the verified JWT,
+ * never from the body). Everyone else gets the off answer, so it never tells whether an address is
+ * listed, and an account that is refused does not use up the per-IP registration limit. One log line
+ * per refusal: the account id and the reason code, never the e-mail.
+ */
+function registrationAllowed(req, res, next) {
+  const decision = registrationDecision(req.user, req.authClaims);
+  if (decision.allowed) return next();
+  try {
+    registrationLog.info('developer_registration.refused', { reqId: req.reqId || null, userId: req.user.id, reason: decision.reason });
+  } catch (_) {
+    // A failed log line does not change the answer.
+  }
+  return registrationClosed(res);
+}
+
+router.post('/clients', registrationOpen, protect, registrationAllowed, rateLimiters.developerClientCreate, async (req, res) => {
   try {
     // `protect` set req.user: the client belongs to the account that registered it.
     const created = await createDeveloperClient(req.body || {}, { ownerUserId: req.user.id });
@@ -225,3 +253,4 @@ router.post('/clients/secret', noStore, protect, rateLimiters.developerClientRot
 module.exports = router;
 module.exports.consoleAudit = consoleAudit;
 module.exports.consoleLog = consoleLog;
+module.exports.registrationLog = registrationLog;
