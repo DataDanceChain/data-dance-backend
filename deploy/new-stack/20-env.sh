@@ -49,13 +49,32 @@
 #   the api refuses tge and tge-rehearsal at boot, and any id that is not [A-Za-z0-9._-]{1,64} (common.sh
 #   client_id_check applies the same rule). A run that passes records it in settings.env; later runs reuse it, and an
 #   override that differs from the record stops (99-teardown.sh removes the record).
-# Overridable for round 2 or once the partner sends its test site (defaults in brackets):
+# THE PARTNER'S LIVE SETTINGS ARE KEPT (2026-10-14: the partner signs in through this stack). The previous env is
+#   $NEW_DIR/.env.api (what the running api was created with) and $NEW_DIR/.env.rehearsal; a name both hold must have the
+#   same value in both. Without an explicit override, a re-run keeps the previous SSO_TGE_REDIRECT_URIS,
+#   SSO_TGE_INITIATE_LOGIN_URI and SSO_DEVELOPER_ALLOWED_EMAILS, takes SSO_TGE_CLIENT_ID from it when settings.env has
+#   none, and stops when the client id or the issuer and consent origin (PUBLIC_BASE_URL = API_BASE_URL = https://<API_HOST>,
+#   APP_PUBLIC_URL = FRONTEND_URL = https://<APP_HOST>) would differ from it; only REHEARSAL_CLIENT_ID= or API_HOST= /
+#   APP_HOST= given on this call may change those. No placeholder is ever filled in: a redirect or start-login URI on a
+#   .invalid host is accepted only as an explicit override (WARN), never kept.
+# Overrides (an explicit value, even an empty one, replaces the kept value; defaults in brackets, used only when the
+# previous env has no value):
 #   REHEARSAL_DB [ddc_rehearsal]
-#   REHEARSAL_REDIRECT_URIS [https://tge-rehearsal.invalid/oauth/callback]  (.invalid never resolves: boot-valid placeholder)
+#   REHEARSAL_REDIRECT_URIS [none: required when the previous env has none]  the partner's callback(s), comma-separated
 #   REHEARSAL_INITIATE_LOGIN_URI [empty -> /api/sso/* answer client_disabled]
+#   REHEARSAL_DEVELOPER_ALLOWED_EMAILS [empty = nobody may register] -> SSO_DEVELOPER_ALLOWED_EMAILS, comma-separated
+#       e-mail addresses (never printed: a count only). remote.sh cannot pass an '@', so the argument
+#       --developer-emails-stdin reads the list from the first line of stdin instead (remote.sh run forwards stdin).
 #   OAUTH_PUBLIC_REGISTRATION [false]  (runbook 5.2: recommended, Sloan to confirm)
-#   W3A_GOOGLE / W3A_EMAIL / W3A_APPLE / W3A_X  mainnet connection names (only Google is documented; the
-#                                              other three are confirmed from real tokens at rehearsal A step 6)
+#   W3A_GOOGLE / W3A_EMAIL / W3A_APPLE / W3A_X  Sapphire Mainnet built-in login names
+#       [web3auth-google-sapphire, web3auth-auth0-email-passwordless-sapphire, web3auth-auth0-apple-sapphire,
+#        web3auth-auth0-twitter-sapphire]: no "-mainnet" suffix (the devnet names end in "-sapphire-devnet"; a real
+#       Mainnet e-mail login carried web3auth-auth0-email-passwordless-sapphire on 2026-10-14). Override one only
+#       when a real Mainnet token names it differently.
+# Fixed (Sloan, 2026-10-14): every partner field (SSO_TGE_STATUS_FIELDS = the backend's whole STATUS_FIELD_CATALOG), the
+#   referral bind write on (SSO_TGE_REFERRAL_BIND=true), SSO_DEVELOPER_REGISTRATION=allowlist. A backend before PR #64
+#   (main 66bf00f; the earlier release images among them) refuses to boot on allowlist, and one without a listed field
+#   refuses that field: when $NEW_DIR/.env names the image 10-build.sh built, its source is checked for both first.
 # Local test only (DDC_LOCAL_TEST=1): OLD_ENV, NEW_DIR, FE_ENV_TGE may point at synthetic files outside /root.
 set -euo pipefail
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -65,29 +84,24 @@ require_server
 
 FE_ENV_TGE="${FE_ENV_TGE:-$NEW_DIR/src/frontend-current/.env.tge}"
 REHEARSAL_DB="${REHEARSAL_DB:-ddc_rehearsal}"
-REHEARSAL_REDIRECT_URIS="${REHEARSAL_REDIRECT_URIS:-https://tge-rehearsal.invalid/oauth/callback}"
-REHEARSAL_INITIATE_LOGIN_URI="${REHEARSAL_INITIATE_LOGIN_URI:-}"
+# REHEARSAL_REDIRECT_URIS, REHEARSAL_INITIATE_LOGIN_URI, REHEARSAL_DEVELOPER_ALLOWED_EMAILS: see "the partner's live
+# settings" below (an explicit value, else the previous env's).
 OAUTH_PUBLIC_REGISTRATION="${OAUTH_PUBLIC_REGISTRATION:-false}"
-W3A_GOOGLE="${W3A_GOOGLE:-web3auth-google-sapphire-mainnet}"
-W3A_EMAIL="${W3A_EMAIL:-web3auth-auth0-email-passwordless-sapphire-mainnet}"
-W3A_APPLE="${W3A_APPLE:-web3auth-auth0-apple-sapphire-mainnet}"
-W3A_X="${W3A_X:-web3auth-auth0-twitter-sapphire-mainnet}"
+W3A_GOOGLE="${W3A_GOOGLE:-web3auth-google-sapphire}"
+W3A_EMAIL="${W3A_EMAIL:-web3auth-auth0-email-passwordless-sapphire}"
+W3A_APPLE="${W3A_APPLE:-web3auth-auth0-apple-sapphire}"
+W3A_X="${W3A_X:-web3auth-auth0-twitter-sapphire}"
 DB_USER=ddcnew
 OUT="$NEW_DIR/.env.rehearsal"
 OUT_DB="$NEW_DIR/.env.db"
 SEC="$NEW_DIR/secrets"
+DEV_EMAILS_STDIN=0
+for a in "$@"; do
+  case "$a" in --developer-emails-stdin) DEV_EMAILS_STDIN=1;; *) die "unknown argument '$a' (the only one is --developer-emails-stdin)";; esac
+done
 
 guard_db_name "$REHEARSAL_DB"
 case "$REHEARSAL_DB" in ddc_rehearsal|ddc_rehearsal2) ;; *) die "REHEARSAL_DB must be ddc_rehearsal or ddc_rehearsal2";; esac
-client_id_resolve   # REHEARSAL_CLIENT_ID: the override or the record; required, no default
-for p in "$OUT" "$OUT_DB" "$SEC"; do guard_write_path "$p"; done
-run_begin 20-env "$@"
-settings_say
-say "rehearsal client id: $REHEARSAL_CLIENT_ID ($CLIENT_ID_SOURCE)"
-[ -r "$OLD_ENV" ] || die "old env file $OLD_ENV not readable"
-[ -r "$FE_ENV_TGE" ] || die "frontend .env.tge not found at $FE_ENV_TGE (10-build.sh unpacks it)"
-old_snapshot_begin
-settings_record
 
 # ---------------------------------------------------------------------------
 # One parser for every read and the rewrite (mawk, gawk and BSD awk compatible).
@@ -192,6 +206,103 @@ value_carries_credential() {
 }
 
 # ---------------------------------------------------------------------------
+# The partner's live settings (header). Resolved from the previous env before anything is written, so a refusal leaves
+# nothing behind (this part also runs in the parent, before run_begin runs the script again with its log).
+# ---------------------------------------------------------------------------
+PREV_FILES=()
+for f in "$NEW_DIR/.env.api" "$OUT"; do if [ -f "$f" ]; then PREV_FILES+=("$f"); fi; done
+prev_names() { local f s=""; for f in ${PREV_FILES[@]+"${PREV_FILES[@]}"}; do s="$s $(basename "$f")"; done; printf '%s' "${s# }"; }
+# prevv NAME: PREV_SET=1 and PREV_VAL=<value> when a previous env file assigns NAME, else PREV_SET=0. Stops when
+# .env.api and .env.rehearsal both assign it with different values (names only, never the values).
+prevv() {
+  local f v
+  PREV_SET=0; PREV_VAL=""
+  for f in ${PREV_FILES[@]+"${PREV_FILES[@]}"}; do
+    grep -qxF -- "$1" <<< "$(envparse names "$f")" || continue
+    v=$(getv "$f" "$1")
+    [ "$PREV_SET" = 0 ] || [ "$v" = "$PREV_VAL" ] \
+      || die "$1 differs between $(prev_names) (the previous env; values not printed): make the two files agree first (the running api was created with .env.api), or give the value on this call where the header allows it"
+    PREV_SET=1; PREV_VAL="$v"
+  done
+}
+is_set() { eval "[ -n \"\${$1+x}\" ]"; }   # whether variable $1 is set, even to an empty value (bash 3.2 has no \${!v+x})
+# kept <override variable> <env name> <default, or - for none>: KV = the value, KS = where it came from. An explicit
+# override (even empty) wins and names <env name> in EXPLICIT_NAMES; else the previous env's value; else the default.
+EXPLICIT_NAMES=""
+kept() {
+  if is_set "$1"; then KV="${!1}"; KS="override $1"; EXPLICIT_NAMES="$EXPLICIT_NAMES $2"; return 0; fi
+  prevv "$2"
+  if [ "$PREV_SET" = 1 ]; then KV="$PREV_VAL"; KS="kept from the previous env"
+  elif [ "$3" != - ]; then KV="$3"; KS="default"
+  else die "$1=<value> is required: the previous env ($([ "${#PREV_FILES[@]}" = 0 ] && echo none || prev_names)) has no $2, and no placeholder is filled in"; fi
+}
+# A .invalid host (RFC 2606) never resolves: such a URI is a placeholder no partner can sign in with.
+uris_on_invalid_host() { # <comma-separated URIs>
+  local u h
+  while IFS= read -r u; do
+    h="${u#*://}"; h="${h%%/*}"; h="${h%%\?*}"; h="${h##*@}"; h="${h%%:*}"; h=$(printf '%s' "$h" | tr 'A-Z' 'a-z')
+    case "$h" in invalid|*.invalid|*.invalid.) return 0;; esac
+  done < <(csv_items "$1")
+  return 1
+}
+PLACEHOLDERS=""
+placeholder_check() { # <env name> <override variable> <source> <value>
+  uris_on_invalid_host "$4" || return 0
+  case "$3" in override*) PLACEHOLDERS="$PLACEHOLDERS $1";; *) die "$1 in the previous env names a .invalid host (a placeholder: no partner can sign in with it): pass the partner's real value as $2=";; esac
+}
+kept REHEARSAL_REDIRECT_URIS SSO_TGE_REDIRECT_URIS -; REHEARSAL_REDIRECT_URIS="$KV"; REDIRECT_SRC="$KS"
+[ -n "$REHEARSAL_REDIRECT_URIS" ] || die "SSO_TGE_REDIRECT_URIS would be empty ($REDIRECT_SRC): the api needs the partner's callback; pass REHEARSAL_REDIRECT_URIS=<the partner's callback URI(s)>"
+placeholder_check SSO_TGE_REDIRECT_URIS REHEARSAL_REDIRECT_URIS "$REDIRECT_SRC" "$REHEARSAL_REDIRECT_URIS"
+kept REHEARSAL_INITIATE_LOGIN_URI SSO_TGE_INITIATE_LOGIN_URI ""; REHEARSAL_INITIATE_LOGIN_URI="$KV"; INITIATE_SRC="$KS"
+placeholder_check SSO_TGE_INITIATE_LOGIN_URI REHEARSAL_INITIATE_LOGIN_URI "$INITIATE_SRC" "$REHEARSAL_INITIATE_LOGIN_URI"
+# The client id: the override, the record, or (neither given) the previous env's; it must equal the previous env's
+# unless REHEARSAL_CLIENT_ID is given on this call.
+prevv SSO_TGE_CLIENT_ID; PREV_CID_SET=$PREV_SET; PREV_CID="$PREV_VAL"; CID_KEPT=0
+if [ -z "$OVR_REHEARSAL_CLIENT_ID" ] && [ -z "$(settings_recorded REHEARSAL_CLIENT_ID)" ] && [ -n "$PREV_CID" ]; then OVR_REHEARSAL_CLIENT_ID="$PREV_CID"; CID_KEPT=1; fi
+client_id_resolve   # REHEARSAL_CLIENT_ID: the override, the record or the previous env's; required, no default
+if [ "$CID_KEPT" = 1 ]; then CLIENT_ID_SOURCE="kept from the previous env"; elif [ "$CLIENT_ID_SOURCE" = override ]; then EXPLICIT_NAMES="$EXPLICIT_NAMES SSO_TGE_CLIENT_ID"; fi
+[ "$PREV_CID_SET" = 0 ] || [ "$PREV_CID" = "$REHEARSAL_CLIENT_ID" ] || [ "$CLIENT_ID_SOURCE" = override ] \
+  || die "SSO_TGE_CLIENT_ID=$REHEARSAL_CLIENT_ID ($CLIENT_ID_SOURCE) differs from the previous env's SSO_TGE_CLIENT_ID, which the partner signs in with: pass REHEARSAL_CLIENT_ID= on this call to change it on purpose"
+# The issuer and the consent origin follow the settings' hosts; they must equal the previous env's unless API_HOST= /
+# APP_HOST= is given on this call (a default or a recorded host never replaces what the partner sees).
+for nv in "PUBLIC_BASE_URL API_HOST" "API_BASE_URL API_HOST" "APP_PUBLIC_URL APP_HOST" "FRONTEND_URL APP_HOST"; do
+  n="${nv% *}"; hv="${nv#* }"; ov="OVR_$hv"
+  if [ -n "${!ov}" ]; then EXPLICIT_NAMES="$EXPLICIT_NAMES $n"; continue; fi
+  prevv "$n"
+  [ "$PREV_SET" = 0 ] || [ "$PREV_VAL" = "https://${!hv}" ] \
+    || die "$n would change from the previous env's $PREV_VAL to https://${!hv} ($hv: $SETTINGS_SOURCE): the partner checks the issuer and the consent origin; pass $hv= on this call to change it on purpose"
+done
+if [ "$DEV_EMAILS_STDIN" = 1 ] && is_set REHEARSAL_DEVELOPER_ALLOWED_EMAILS; then
+  die "--developer-emails-stdin and REHEARSAL_DEVELOPER_ALLOWED_EMAILS both given: give the list once"
+fi
+for p in "$OUT" "$OUT_DB" "$SEC"; do guard_write_path "$p"; done
+run_begin 20-env "$@"
+settings_say
+say "rehearsal client id: $REHEARSAL_CLIENT_ID ($CLIENT_ID_SOURCE)"
+[ -r "$OLD_ENV" ] || die "old env file $OLD_ENV not readable"
+[ -r "$FE_ENV_TGE" ] || die "frontend .env.tge not found at $FE_ENV_TGE (10-build.sh unpacks it)"
+# The developer allow-list: read here, in the run with the log (run_begin starts the script again; stdin goes to it).
+if [ "$DEV_EMAILS_STDIN" = 1 ]; then
+  v=""; IFS= read -r -t 30 v || [ -n "$v" ] || die "--developer-emails-stdin: no line on stdin within 30 s (pipe it: printf '%s\\n' '<address>,<address>' | ...)"
+  # shellcheck disable=SC2034  # read by name in kept() below
+  REHEARSAL_DEVELOPER_ALLOWED_EMAILS="$v"; unset v
+fi
+kept REHEARSAL_DEVELOPER_ALLOWED_EMAILS SSO_DEVELOPER_ALLOWED_EMAILS ""; DEV_EMAILS_SRC="$KS"
+[ "$DEV_EMAILS_STDIN" = 0 ] || DEV_EMAILS_SRC="override --developer-emails-stdin"
+# The backend's own shape (an address it would refuse stops its boot), within setv's characters. Positions, never values.
+DEV_EMAILS=""; DEV_EMAILS_N=0; re_mail='^[A-Za-z0-9._+-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$'
+while IFS= read -r e; do
+  DEV_EMAILS_N=$((DEV_EMAILS_N + 1))
+  [ "${#e}" -le 254 ] && [[ "$e" =~ $re_mail ]] || die "SSO_DEVELOPER_ALLOWED_EMAILS entry #$DEV_EMAILS_N ($DEV_EMAILS_SRC) is not an e-mail address (the backend would refuse to boot; the value is not printed)"
+  DEV_EMAILS="${DEV_EMAILS:+$DEV_EMAILS,}$e"
+done < <(csv_items "$KV")
+unset e KV
+say "partner settings: SSO_TGE_REDIRECT_URIS $REDIRECT_SRC ($(csv_items "$REHEARSAL_REDIRECT_URIS" | grep -c . || true) URI); SSO_TGE_INITIATE_LOGIN_URI $INITIATE_SRC ($([ -n "$REHEARSAL_INITIATE_LOGIN_URI" ] && echo set || echo empty)); SSO_DEVELOPER_ALLOWED_EMAILS $DEV_EMAILS_SRC ($DEV_EMAILS_N address(es), not printed); previous env: $([ "${#PREV_FILES[@]}" = 0 ] && echo none || prev_names)"
+[ -z "$PLACEHOLDERS" ] || warn "$(printf '%s' "${PLACEHOLDERS# }" | tr ' ' ',') names a .invalid host (explicit override): no partner can complete a sign-in with it"
+old_snapshot_begin
+settings_record
+
+# ---------------------------------------------------------------------------
 step "old env file: $OLD_ENV"
 stats=$(envparse stats "$OLD_ENV"); say "$stats"
 case "$stats" in *"unparsed=0 unterminated=0"*) pass "old file parses cleanly";; *) die "old file has unparsed lines or an unterminated quote; fix by hand first";; esac
@@ -244,6 +355,7 @@ setv WEB3AUTH_WALLET_MATCH public_key
 setv WEB3AUTH_JWKS_PIN_MODE enforce
 setv WEB3AUTH_NETWORK_REBIND on
 setv WEB3AUTH_REBIND_VERIFIERS "$W3A_GOOGLE,$W3A_EMAIL,$W3A_APPLE,$W3A_X"
+# Only logins that verify the address themselves (Google, e-mail passwordless, Apple); never X.
 setv WEB3AUTH_EMAIL_TRUSTED_VERIFIERS "$W3A_GOOGLE,$W3A_EMAIL,$W3A_APPLE"
 # Old App builds after the mainnet switch get "please update" instead of a failed login (backend PR #38).
 setv WEB3AUTH_RETIRED_CLIENT_IDS "$RETIRED_ID"
@@ -258,10 +370,20 @@ setv SSO_TGE_REDIRECT_URIS "$REHEARSAL_REDIRECT_URIS"
 setv SSO_TGE_INITIATE_LOGIN_URI "$REHEARSAL_INITIATE_LOGIN_URI"
 setv SSO_SESSION_SECRET "$(cat "$SEC/sso_session_secret_rehearsal")"
 setv SSO_TGE_AUTO_APPROVE app,web
+# POST /partner/tge/referral/bind and its scope (src/constants/partnerClient.js referralBindEnabled reads this name).
 setv SSO_TGE_REFERRAL_BIND true
 setv SSO_TGE_APP_PRESENTATION webview
-setv SSO_TGE_STATUS_FIELDS registered_at,wallet_bound,referral_network,referral,avatar
+# The freeze list (docs/TGE_SSO.md section 14): every field of the backend's STATUS_FIELD_CATALOG (Sloan, 2026-10-14:
+# everything the partner API offers today), each still behind the scope the user grants. points = the balance on
+# /partner/tge/status, points_history = GET /partner/tge/points/history (section 7c), both under tge:points; listed only
+# with a web build whose consent line for points reads "balance and history" (data-dance-frontend a077c74 and later).
+STATUS_FIELDS=registered_at,wallet_bound,data_licence_granted,email_masked,avatar,email,wallet_address,points,referral,referral_network,points_history
+setv SSO_TGE_STATUS_FIELDS "$STATUS_FIELDS"
 setv SSO_REQUIRE_VERIFIED_SESSION false
+# Self-serve SSO client registration (backend PR #64): only the listed accounts, from a verified login e-mail; an empty
+# list admits nobody.
+setv SSO_DEVELOPER_REGISTRATION allowlist
+setv SSO_DEVELOPER_ALLOWED_EMAILS "$DEV_EMAILS"
 setv OAUTH_PUBLIC_REGISTRATION_ENABLED "$OAUTH_PUBLIC_REGISTRATION"
 setv DISBURSEMENT_PAUSED true
 # 5.0: SMTP_* emptied (no mail from the rehearsal), and every other third-party credential that could reach real
@@ -287,6 +409,28 @@ for n in $OLD_NAMES; do
   esac
 done
 inlist WEB3AUTH_JWKS_PINNED_THUMBPRINTS "$OLD_NAMES" || warn "old file has no WEB3AUTH_JWKS_PINNED_THUMBPRINTS: 40-up.sh will refuse to start the api, because no configured pin can be matched against what Web3Auth serves"
+
+# ---------------------------------------------------------------------------
+# The backend 40-up.sh will start (API_IMAGE in $NEW_DIR/.env, written by 10-build.sh, which unpacks its source to
+# $NEW_DIR/src/backend-<sha12>/) must accept these values: one without a listed field, or before PR #64 (allowlist),
+# refuses to boot, and 40-up.sh would see that only after it recreated the api. Checked before anything is written.
+step "the backend that 40-up.sh will start accepts these values"
+img=""; if [ -f "$NEW_DIR/.env" ]; then img=$(sed -n 's/^API_IMAGE=//p' "$NEW_DIR/.env" | tail -n 1); fi
+if [ -z "$img" ]; then
+  warn "no API_IMAGE in $NEW_DIR/.env (10-build.sh writes it): not checked here; 40-up.sh's boot check still applies"
+else
+  be="${img#ddcnew/backend:}"; be="${be%-infra}"
+  [[ "$be" =~ ^[0-9a-f]{12}$ ]] || die "API_IMAGE=$img in $NEW_DIR/.env is not ddcnew/backend:<12 hex>[-infra]"
+  bc="$NEW_DIR/src/backend-$be/src/constants"
+  [ -f "$bc/partnerClient.js" ] && [ -f "$bc/developerRegistration.js" ] \
+    || die "the source of $img is not in $NEW_DIR/src/backend-$be (10-build.sh unpacks it there): cannot check that it accepts these values"
+  catalog=$(awk '/^const STATUS_FIELD_CATALOG = Object\.freeze\(\{/ { f = 1; next } f && /^\}\);/ { exit } f && match($0, /^  [a-z_]+: [{]/) { print substr($0, 3, RLENGTH - 5) }' "$bc/partnerClient.js")
+  missing=""; while IFS= read -r f; do grep -qxF -- "$f" <<< "$catalog" || missing="$missing $f"; done < <(csv_items "$STATUS_FIELDS")
+  [ -z "$missing" ] || die "$img does not know SSO_TGE_STATUS_FIELDS:$missing (its STATUS_FIELD_CATALOG: $(printf '%s' "$catalog" | tr '\n' ',')): it would refuse to boot"
+  grep -qE "Object\.freeze\(\[[^]]*'allowlist'" "$bc/developerRegistration.js" \
+    || die "$img predates backend PR #64 (main 66bf00f): it refuses to boot on SSO_DEVELOPER_REGISTRATION=allowlist; build a release that contains it"
+  pass "$img (source $NEW_DIR/src/backend-$be) knows every SSO_TGE_STATUS_FIELDS name ($(csv_items "$STATUS_FIELDS" | grep -c . || true) of $(printf '%s\n' "$catalog" | grep -c . || true) in its catalog) and SSO_DEVELOPER_REGISTRATION=allowlist"
+fi
 
 # ---------------------------------------------------------------------------
 step "write $OUT and $OUT_DB"
@@ -343,6 +487,19 @@ for nv in "PUBLIC_BASE_URL https://$API_HOST" "API_BASE_URL https://$API_HOST" "
 done
 case " $(getv "$CHK" PUBLIC_BASE_URL) $(getv "$CHK" APP_PUBLIC_URL) " in *" https://api.datadance.ai "*|*" https://app.datadance.ai "*) die "the issuer or the consent origin is a production host";; esac
 pass "issuer PUBLIC_BASE_URL = API_BASE_URL = https://$API_HOST; consent origin APP_PUBLIC_URL = FRONTEND_URL = https://$APP_HOST (API_HOST / APP_HOST)"
+# The partner's live settings (header): the new file keeps the previous env's values; only a name an explicit override on
+# this call covers may differ.
+kept_n=0; given=""; fresh=""
+for n in SSO_TGE_CLIENT_ID SSO_TGE_REDIRECT_URIS SSO_TGE_INITIATE_LOGIN_URI SSO_DEVELOPER_ALLOWED_EMAILS PUBLIC_BASE_URL API_BASE_URL APP_PUBLIC_URL FRONTEND_URL; do
+  if inlist "$n" "$EXPLICIT_NAMES"; then given="$given $n"; continue; fi
+  prevv "$n"
+  if [ "$PREV_SET" = 0 ]; then fresh="$fresh $n"
+  elif [ "$(getv "$CHK" "$n")" = "$PREV_VAL" ]; then kept_n=$((kept_n + 1))
+  else die "$n differs from the previous env without an explicit override on this call"; fi
+done
+[ "$(getv "$CHK" SSO_DEVELOPER_REGISTRATION)" = allowlist ] && [ "$(getv "$CHK" SSO_TGE_STATUS_FIELDS)" = "$STATUS_FIELDS" ] && [ "$(getv "$CHK" SSO_TGE_REFERRAL_BIND)" = true ] \
+  || die "SSO_DEVELOPER_REGISTRATION, SSO_TGE_STATUS_FIELDS or SSO_TGE_REFERRAL_BIND in the new file is not the value set above"
+pass "partner settings kept from the previous env: $kept_n; given on this call:${given:- none}; no previous value:${fresh:- none}. SSO_TGE_STATUS_FIELDS: all $(csv_items "$STATUS_FIELDS" | grep -c . || true) fields, SSO_TGE_REFERRAL_BIND=true, SSO_DEVELOPER_REGISTRATION=allowlist ($DEV_EMAILS_N listed)"
 c1=$(grep -c '^DISBURSEMENT_PAUSED="true"$' "$CHK" || true); c2=$(grep -cE '^BSC_PAYOUT_PRIVATE_KEY=' "$CHK" || true)
 [ "$c1" = 1 ] && [ "$c2" = 0 ] && pass "payouts off: DISBURSEMENT_PAUSED=true count=$c1, BSC_PAYOUT_PRIVATE_KEY count=$c2" || die "payout check failed ($c1/$c2)"
 step "rehearsal credential policy (names only)"

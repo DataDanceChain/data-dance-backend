@@ -229,12 +229,41 @@ new stack**.
   runs reuse it, an override that differs stops, and `99-teardown.sh` removes it with the record. The local test boots
   this checkout's own `src/server.js` on the env `20-env.sh` writes (`test/helpers/backend-boot.js`, nothing listens or
   connects) and checks that it refuses `tge-rehearsal`. The secret is generated on the server and its plaintext is kept
-  only in `/root/ddcnew/secrets/tge_rehearsal_client_secret`. `SSO_TGE_REDIRECT_URIS` defaults to
-  `https://tge-rehearsal.invalid/oauth/callback`, a placeholder that passes the boot check and never resolves. Re-run
-  `20-env.sh` with `REHEARSAL_REDIRECT_URIS=...` once the partner's test site is known. The partner receives the secret
-  through the partner info page (section 8), where it is only ciphertext.
-- **Web3Auth verifier names:** Google is documented. The other three are the expected names and are confirmed from real
-  tokens during the rehearsal; re-run with `W3A_EMAIL=... W3A_APPLE=... W3A_X=...`.
+  only in `/root/ddcnew/secrets/tge_rehearsal_client_secret`. The partner receives the secret through the partner info
+  page (section 8), where it is only ciphertext.
+- **The partner's live settings are kept (2026-10-14).** `SSO_TGE_REDIRECT_URIS` has no default: the first run needs
+  `REHEARSAL_REDIRECT_URIS=<the partner's callback>`. Every later run keeps `SSO_TGE_REDIRECT_URIS`,
+  `SSO_TGE_INITIATE_LOGIN_URI` and `SSO_DEVELOPER_ALLOWED_EMAILS` from the previous env (`.env.api`, which the running
+  api was created with, and `.env.rehearsal`; they must agree) unless the call gives the matching `REHEARSAL_*` value
+  (an empty one counts), takes the client id from it when `settings.env` has none, and stops when the client id or the
+  issuer and consent origin (`https://<API_HOST>`, `https://<APP_HOST>`) would change without `REHEARSAL_CLIENT_ID=` /
+  `API_HOST=` / `APP_HOST=` on the call. A callback on a `.invalid` host is written only from an explicit override
+  (WARN); a kept one stops the run.
+- **Web3Auth verifier names:** the Sapphire Mainnet project's built-in logins carry no network suffix:
+  `web3auth-google-sapphire`, `web3auth-auth0-email-passwordless-sapphire`, `web3auth-auth0-apple-sapphire` and
+  `web3auth-auth0-twitter-sapphire` (the devnet ones end in `-sapphire-devnet`; a real Mainnet e-mail login carried
+  `web3auth-auth0-email-passwordless-sapphire` on 2026-10-14). These are the defaults of `W3A_GOOGLE`, `W3A_EMAIL`,
+  `W3A_APPLE` and `W3A_X`. `20-env.sh` writes all four, plus `external-wallet`, to `WEB3AUTH_ALLOWED_VERIFIERS`, the
+  four to `WEB3AUTH_REBIND_VERIFIERS`, and Google, e-mail and Apple (never X) to `WEB3AUTH_EMAIL_TRUSTED_VERIFIERS`.
+  Should a real Mainnet token name a login differently, re-run with that override (`W3A_EMAIL=...` etc.). With these
+  names `mainnetSwitch.js --plan` (`60-rehearsal.sh report`) prints a `WARNING` that the `WEB3AUTH_REBIND_VERIFIERS`
+  entries lack `sapphire-mainnet`: expected, a warning and not a blocker.
+- **Partner fields served (`SSO_TGE_STATUS_FIELDS`, the freeze list of docs/TGE_SSO.md section 14):** the whole
+  catalog (Sloan, 2026-10-14: everything the partner API offers), each still behind the user's grant:
+  `registered_at,wallet_bound,data_licence_granted,email_masked,avatar,email,wallet_address,points,referral,referral_network,points_history`,
+  and the referral bind write (`SSO_TGE_REFERRAL_BIND=true`). `points` is the balance on
+  `/partner/tge/status`, `points_history` the ledger endpoint `/partner/tge/points/history` (docs/TGE_SSO.md section
+  7c); both also need the user's `tge:points` grant. **Rollout rule:** `points_history` is served only together with a
+  web build whose consent line for `points` reads "balance and history" in every language (data-dance-frontend
+  a077c74 or later). `20-env.sh` does not check the web build: build the web image from such a commit (`10-build.sh`)
+  before `20-env.sh` and `40-up.sh` put this list in front of users.
+- **Developer self-registration: `SSO_DEVELOPER_REGISTRATION=allowlist`** (Sloan, 2026-10-14) with
+  `SSO_DEVELOPER_ALLOWED_EMAILS` from `REHEARSAL_DEVELOPER_ALLOWED_EMAILS`, or from stdin with the argument
+  `--developer-emails-stdin` (remote.sh refuses an `@` in an argument; `run` forwards stdin). Empty = nobody. The
+  addresses are never printed. **The backend must contain PR #64 (main `66bf00f`):** older builds refuse to boot on
+  `allowlist`, and builds before PR #62 also on `points_history`. When `/root/ddcnew/.env` names an image,
+  `20-env.sh` checks its source (`src/backend-<sha12>/`, unpacked by `10-build.sh`) for both before it writes anything.
+  A rollback to an older image must drop these names (and `points_history`) from `.env.api` and `.env.rehearsal`.
 
 ## 3. Disk
 
@@ -423,9 +452,15 @@ by side. It must end with `summary: fails=0`. It covers:
   agrees, the credential policy (removed, blanked, fail-closed on unclassified names and on credential-shaped values),
   and identical output on ubuntu:jammy (mawk, GNU tools). `REHEARSAL_CLIENT_ID`: required on the first run (no
   default), refused when malformed (65 characters, a blank, a symbol), when `tge` or `tge-rehearsal`, or when it differs
-  from the recorded one; a failing run does not record it; a re-run reuses the recorded value. The backend's own boot
-  checks (`test/helpers/backend-boot.js` runs the checkout's real `src/server.js` with `src/app.js` stubbed, so nothing
-  listens) accept the env file `20-env.sh` wrote and refuse the same file with `tge-rehearsal`.
+  from the recorded one; a failing run does not record it; a re-run reuses the recorded value. The Web3Auth lists carry
+  the Mainnet built-in login names (no `-mainnet` suffix; X never e-mail-trusted), an override of `W3A_*` reaches all
+  three lists, and `SSO_TGE_STATUS_FIELDS` is exactly the list of section 2 (all 11 fields). The partner's live settings
+  are kept on a re-run and every stop case of section 2 holds; the developer allow-list arrives from stdin and is never
+  printed; the backend-source check passes this checkout and stops on a catalog without `points_history` or a
+  `developerRegistration.js` without `allowlist`. The
+  backend's own boot checks (`test/helpers/backend-boot.js` runs the checkout's real `src/server.js` with `src/app.js`
+  stubbed, so nothing listens) accept the env file `20-env.sh` wrote, report that list on the `Partner SSO enabled`
+  line, and refuse the same file with `tge-rehearsal`.
 - `30-nginx.sh` render on synthetic vhost fixtures (default and overridden hosts and ports) and `nginx -t` on nginx 1.18
   and stable; apply and undo stop when another host's status code changes (over https too when 443 is served); with
   Race-like entries at the default names: apply stops and changes nothing; `TAKE_OVER_VHOSTS=yes` is refused while

@@ -39,6 +39,22 @@ outcome: [APPROVAL.md](APPROVAL.md) section 9.
 refuses `tge` and `tge-rehearsal` at boot, and anything outside `[A-Za-z0-9._-]{1,64}`). The run records it in
 `/root/ddcnew/settings.env`; later runs reuse it and stop on a different value.
 
+`20-env.sh` also sets the Web3Auth login names and the partner fields the rehearsal api serves:
+- the Sapphire Mainnet built-in login names, without a `-mainnet` suffix: `web3auth-google-sapphire`,
+  `web3auth-auth0-email-passwordless-sapphire`, `web3auth-auth0-apple-sapphire`, `web3auth-auth0-twitter-sapphire`
+  (overridable with `W3A_GOOGLE`, `W3A_EMAIL`, `W3A_APPLE`, `W3A_X`). X is never one of the e-mail-trusted logins.
+- `SSO_TGE_STATUS_FIELDS` = every field of the backend's catalog (11, the points balance and history among them), each
+  under the user's grant, and `SSO_TGE_REFERRAL_BIND=true`. The points history goes with a web build whose consent line
+  for points reads "balance and history" (data-dance-frontend a077c74 or later); build the web image from such a commit
+  first.
+- `SSO_DEVELOPER_REGISTRATION=allowlist`, with `SSO_DEVELOPER_ALLOWED_EMAILS` from `REHEARSAL_DEVELOPER_ALLOWED_EMAILS` or
+  `--developer-emails-stdin` (empty = nobody). It needs a backend with PR #64 (main `66bf00f`); `20-env.sh` checks the
+  built image's source first when `/root/ddcnew/.env` names one.
+
+The partner's redirect URI(s), start-login URI, the allow-list and the client id are kept from the previous env
+(`.env.api`, `.env.rehearsal`) on every re-run unless the call gives them; the issuer cannot change without `API_HOST=`.
+The first run needs `REHEARSAL_REDIRECT_URIS` (no placeholder default). Details: [APPROVAL.md](APPROVAL.md) section 2.
+
 ## Backend source
 
 By default `10-build.sh` builds the backend from a clean `git fetch --depth 1` of this public repository at the pinned
