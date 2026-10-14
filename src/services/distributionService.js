@@ -61,7 +61,7 @@ async function distributeUplineRewards(userId, baseRewardAmount, tx, sourceTaskI
           }
         }
       });
-      logger.info(`Referral found: ${JSON.stringify(referral)}`);
+      logger.info('Referral lookup', { inviteeId: currentUserId, inviterId: referral?.inviterId ?? null });
 
       // If no referral record, means no upline, distribution chain breaks
       if (!referral) {
