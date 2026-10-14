@@ -260,8 +260,8 @@ new stack**.
 - **Developer self-registration: `SSO_DEVELOPER_REGISTRATION=allowlist`** (Sloan, 2026-10-14) with
   `SSO_DEVELOPER_ALLOWED_EMAILS` from `REHEARSAL_DEVELOPER_ALLOWED_EMAILS`, or from stdin with the argument
   `--developer-emails-stdin` (remote.sh refuses an `@` in an argument; `run` forwards stdin). Empty = nobody. The
-  addresses are never printed. **The backend must contain PR #64 (main `66bf00f`):** older builds (rc-1017 `8a91e0f`,
-  eeb8ad0) refuse to boot on `allowlist`, and eeb8ad0 also on `points_history`. When `/root/ddcnew/.env` names an image,
+  addresses are never printed. **The backend must contain PR #64 (main `66bf00f`):** older builds refuse to boot on
+  `allowlist`, and builds before PR #62 also on `points_history`. When `/root/ddcnew/.env` names an image,
   `20-env.sh` checks its source (`src/backend-<sha12>/`, unpacked by `10-build.sh`) for both before it writes anything.
   A rollback to an older image must drop these names (and `points_history`) from `.env.api` and `.env.rehearsal`.
 

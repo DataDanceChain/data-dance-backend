@@ -73,7 +73,7 @@
 #       when a real Mainnet token names it differently.
 # Fixed (Sloan, 2026-10-14): every partner field (SSO_TGE_STATUS_FIELDS = the backend's whole STATUS_FIELD_CATALOG), the
 #   referral bind write on (SSO_TGE_REFERRAL_BIND=true), SSO_DEVELOPER_REGISTRATION=allowlist. A backend before PR #64
-#   (main 66bf00f; rc-1017 8a91e0f and eeb8ad0 among them) refuses to boot on allowlist, and one without a listed field
+#   (main 66bf00f; the earlier release images among them) refuses to boot on allowlist, and one without a listed field
 #   refuses that field: when $NEW_DIR/.env names the image 10-build.sh built, its source is checked for both first.
 # Local test only (DDC_LOCAL_TEST=1): OLD_ENV, NEW_DIR, FE_ENV_TGE may point at synthetic files outside /root.
 set -euo pipefail
