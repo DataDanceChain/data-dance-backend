@@ -211,7 +211,8 @@ router.post('/app-ticket', protect, lim('ssoTicket'), async (req, res, next) => 
     const client = await loadPartnerClient(clientId, req);
     if (!client) return fail(res, 400, 'SSO_CLIENT_UNKNOWN', 'This client is not registered with DataDance.');
     // No initiate_login_uri means the hand-off cannot complete: refuse it here rather than
-    // mint a ticket that can only fail at exchange.
+    // mint a ticket that can only fail at exchange. The environment's client takes it from
+    // SSO_TGE_INITIATE_LOGIN_URI, a database partner client from its row (developer rows: never).
     if (!client.enabled || !client.initiateLoginUri) {
       logger.warn('sso.ticket_rejected', { reason: 'client_disabled', clientId: client.clientId, userId: req.user.id });
       return fail(res, 403, 'CLIENT_DISABLED', 'This client is not available.');

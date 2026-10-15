@@ -1006,6 +1006,10 @@ model SsoDeveloperClient {
   /// developer: self-serve login scopes. partner: first-party Data Planet scopes.
   kind         String   @default("developer")
   ownerUserId  String?
+  /// App hand-off target (`initiate_login_uri`). Read for kind "partner" only, and only when it is
+  /// an absolute https URL without a fragment; otherwise the hand-off answers CLIENT_DISABLED.
+  /// Set with scripts/setPartnerInitiateLoginUri.js.
+  initiateLoginUri String?
   createdAt    DateTime @default(now())
 
   @@index([contactEmail])

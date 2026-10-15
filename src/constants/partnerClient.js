@@ -514,6 +514,19 @@ function redirectUriProblem(uri, production) {
 }
 
 /**
+ * The rule for a partner's App hand-off target (`initiate_login_uri`) stored on a database partner
+ * client: the production rule SSO_TGE_INITIATE_LOGIN_URI gets at boot (absolute, https, no
+ * fragment), in every environment. '' when the value passes. The value is trimmed first, as the
+ * environment value is. Read by shapeDeveloperClient on every load and by
+ * scripts/setPartnerInitiateLoginUri.js before it writes.
+ */
+function initiateLoginUriProblem(uri) {
+  const problem = redirectUriProblem(String(uri ?? '').trim(), true);
+  // Same rule; the localhost hint is about the environment value and never applies here.
+  return problem.replace(' (http is only accepted for localhost outside production)', '');
+}
+
+/**
  * Boot-time validation (called from src/server.js). Throws a single Error listing every
  * problem so a misconfigured container never serves the partner flow half-configured.
  * Returns a secret-free summary for the boot log.
@@ -769,6 +782,7 @@ module.exports = {
   checksumWalletAddress,
   EXTERNAL_WALLET_VERIFIER,
   sha256Hex,
+  initiateLoginUriProblem,
   assertPartnerConfig,
   assertFinancialGradeConfig,
   referralBindEnabled,
