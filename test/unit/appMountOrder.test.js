@@ -132,6 +132,18 @@ describe('src/app mount order', () => {
     assert.match(res.body.data.redirectTo, /^https:\/\/tge\.example\.com\/oauth\/callback\?error=access_denied/);
   });
 
+  it('the form decision POST /oauth/consent reaches its handler with its body parsed (303 to the client)', async () => {
+    const { token } = signSsoSession({ userId: user.id, clientId: 'tge-test', jti: 'j-2' });
+    const res = await request(server)
+      .post('/oauth/consent')
+      .redirects(0)
+      .set('Origin', 'https://app.test.local')
+      .type('form')
+      .send({ requestId: 'req-mount-1', allow: 'false', access_token: token });
+    assert.equal(res.status, 303, `got ${res.status} ${res.text}`);
+    assert.match(res.headers.location, /^https:\/\/tge\.example\.com\/oauth\/callback\?error=access_denied/);
+  });
+
   it('an expired SSO session is answered by the consent principal (SSO_SESSION_EXPIRED), not by a generic 401', async () => {
     const { token } = signSsoSession({ userId: user.id, clientId: 'tge-test', jti: 'j-3' }, { ttlSec: 1, now: Date.now() - 60_000 });
     const res = await request(server).get('/api/oauth/requests/req-mount-1').set('Authorization', `Bearer ${token}`);

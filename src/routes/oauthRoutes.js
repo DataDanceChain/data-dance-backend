@@ -5,6 +5,8 @@ const { rateLimiters } = require('../middlewares/rateLimitMiddleware');
 const { createLogger } = require('../utils/logger');
 const { PARTNER_REALM, verifyClientSecret } = require('../constants/partnerClient');
 const { loadPartnerClient } = require('../services/ssoDeveloperClient');
+const { corsOrigins } = require('../constants/corsOrigins');
+const { appPublicUrl } = require('../constants/lifeContext');
 const { verifySsoSession, looksLikeSsoSession, ssoSessionRefusal } = require('./ssoRoutes');
 const {
   OAuthError,
@@ -85,6 +87,15 @@ function sendOAuthError(res, error) {
   return res.status(status).json(body);
 }
 
+/** The style of the small pages this router renders itself (no external resource, CSP default-src 'none'). */
+const PAGE_STYLE = `  body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#f6f7f9;color:#1c1f26;display:flex;min-height:100vh;align-items:center;justify-content:center;padding:16px;box-sizing:border-box}
+  main{background:#fff;border-radius:12px;max-width:440px;width:100%;padding:28px 24px;box-shadow:0 2px 12px rgba(0,0,0,.06)}
+  h1{font-size:1.2rem;margin:0 0 12px}
+  p{margin:0 0 10px;line-height:1.5}
+  code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;background:#f0f1f4;padding:2px 6px;border-radius:6px;font-size:.92em}
+  .muted{color:#5c6270;font-size:.92rem}
+`;
+
 function escapeHtml(value) {
   return String(value)
     .replace(/&/g, '&amp;')
@@ -111,13 +122,7 @@ function sendAuthorizeErrorPage(res, error) {
 <meta name="robots" content="noindex">
 <title>DataDance sign-in could not start</title>
 <style>
-  body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#f6f7f9;color:#1c1f26;display:flex;min-height:100vh;align-items:center;justify-content:center;padding:16px;box-sizing:border-box}
-  main{background:#fff;border-radius:12px;max-width:440px;width:100%;padding:28px 24px;box-shadow:0 2px 12px rgba(0,0,0,.06)}
-  h1{font-size:1.2rem;margin:0 0 12px}
-  p{margin:0 0 10px;line-height:1.5}
-  code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;background:#f0f1f4;padding:2px 6px;border-radius:6px;font-size:.92em}
-  .muted{color:#5c6270;font-size:.92rem}
-</style>
+${PAGE_STYLE}</style>
 </head>
 <body>
 <main>
@@ -382,34 +387,154 @@ function parseAuto(value) {
   return null;
 }
 
+/**
+ * The decision a consent POST carries, decided: `redirectTo` for the browser (a code, or the
+ * client's error), or a thrown OAuthError / ConsentInitiatorError / AutoApproveNotAllowedError.
+ * Shared by the JSON endpoint and the form endpoint below, so both decide exactly alike.
+ */
+async function decideFromRequest(req) {
+  const allow = parseAllow(req.body?.allow);
+  if (allow === null) {
+    throw new OAuthError(400, 'invalid_request', 'allow must be true or false.');
+  }
+  const auto = parseAuto(req.body?.auto);
+  if (auto === null) {
+    throw new OAuthError(400, 'invalid_request', 'auto must be true or false.');
+  }
+  if (auto && allow !== true) {
+    throw new OAuthError(400, 'invalid_request', 'auto requires allow=true.');
+  }
+  // req.authClaims is set by `protect` (P0 verified-login claims); an SSO session carries no
+  // claims of its own — the verified-login check happened when the ticket was minted.
+  const initiatorNonce = readInitiatorNonce(req);
+  const ctx = req.ssoSession
+    ? { kind: 'sso_ticket', clientId: req.ssoSession.clientId, initiatorNonce }
+    : { kind: 'user_jwt', claims: req.authClaims, initiatorNonce };
+  // Only an automatic Allow carries the flag, so a manual decision reaches decideConsent
+  // with exactly the context it always had.
+  if (auto) ctx.auto = true;
+  return decideConsent(req.user, req.body?.requestId, allow, ctx);
+}
+
 // The limiter runs AFTER the principal is known, so its `userOrIp` key is the user: one person's
 // decisions never throttle everyone else behind the same NAT (event Wi-Fi, carrier CGNAT). Before
 // the mount-order fix this was only true by accident (an earlier router's `protect` set req.user).
 router.post('/api/oauth/consent', consentPrincipal(protect), lim('consent'), async (req, res) => {
   try {
-    const allow = parseAllow(req.body?.allow);
-    if (allow === null) {
-      throw new OAuthError(400, 'invalid_request', 'allow must be true or false.');
-    }
-    const auto = parseAuto(req.body?.auto);
-    if (auto === null) {
-      throw new OAuthError(400, 'invalid_request', 'auto must be true or false.');
-    }
-    if (auto && allow !== true) {
-      throw new OAuthError(400, 'invalid_request', 'auto requires allow=true.');
-    }
-    // req.authClaims is set by `protect` (P0 verified-login claims); an SSO session carries no
-    // claims of its own — the verified-login check happened when the ticket was minted.
-    const initiatorNonce = readInitiatorNonce(req);
-    const ctx = req.ssoSession
-      ? { kind: 'sso_ticket', clientId: req.ssoSession.clientId, initiatorNonce }
-      : { kind: 'user_jwt', claims: req.authClaims, initiatorNonce };
-    // Only an automatic Allow carries the flag, so a manual decision reaches decideConsent
-    // with exactly the context it always had.
-    if (auto) ctx.auto = true;
-    const redirectTo = await decideConsent(req.user, req.body?.requestId, allow, ctx);
+    const redirectTo = await decideFromRequest(req);
     res.set('Cache-Control', 'no-store');
     return res.json({ status: 'success', data: { redirectTo } });
+  } catch (error) {
+    return sendOAuthError(res, error);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// The same decision as a top-level form submission
+// ---------------------------------------------------------------------------
+
+/**
+ * Web origins whose consent page may submit the decision form: the origins allowed to call this
+ * API with credentials (src/constants/corsOrigins.js) and the origin of APP_PUBLIC_URL, which is
+ * where /oauth/authorize sends the browser for consent.
+ */
+function consentFormOrigins() {
+  const origins = new Set(corsOrigins());
+  try {
+    origins.add(new URL(appPublicUrl()).origin);
+  } catch {
+    // an unparsable APP_PUBLIC_URL adds nothing
+  }
+  return origins;
+}
+
+/**
+ * The answer page of the form endpoint when nothing was decided. The browser has navigated to
+ * this API, so every refusal (from this route, `protect`, the SSO session check, the limiter or
+ * the error handler) is a short HTML page instead of JSON; see `consentFormPages`.
+ */
+function sendConsentFormPage(res, body) {
+  const status = res.statusCode >= 400 ? res.statusCode : 400;
+  const data = body && typeof body === 'object' ? body : {};
+  const message =
+    [data.message, data.error_description].find((value) => typeof value === 'string' && value.trim()) ||
+    'The sign-in could not be completed.';
+  const html = `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>DataDance sign-in was not completed</title>
+<style>
+${PAGE_STYLE}</style>
+</head>
+<body>
+<main>
+<h1>Sign-in was not completed</h1>
+<p>${escapeHtml(message)}</p>
+<p class="muted">Nothing was shared. Go back to the sign-in page and try again, or start again from the application.</p>
+</main>
+</body>
+</html>`;
+  res.set('Cache-Control', 'no-store');
+  res.set('X-Frame-Options', 'DENY');
+  res.set('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'");
+  res.set('Referrer-Policy', 'no-referrer');
+  res.removeHeader('WWW-Authenticate');
+  return res.status(status).type('html').send(html);
+}
+
+/** Every JSON answer on the form route becomes the page above (the success answer is a 303). */
+function consentFormPages(req, res, next) {
+  res.json = (body) => sendConsentFormPage(res, body);
+  next();
+}
+
+/**
+ * The form endpoint's own checks, before the principal:
+ *   - the body is application/x-www-form-urlencoded (what an HTML form sends);
+ *   - the Origin header is one of `consentFormOrigins()` — a page anywhere else cannot submit it;
+ *   - the credential is the `access_token` field (RFC 6750 §2.2: the user JWT or the consent-only
+ *     SSO session the JSON endpoint takes as a Bearer header). It is handed on as that header, so
+ *     `consentPrincipal(protect)` verifies it exactly as for the JSON endpoint. A request that
+ *     also carries an Authorization header is refused: one credential, one way.
+ * The `__Host-ddc_authz` cookie travels with the navigation itself (same site, SameSite=Lax), so
+ * the initiator check in decideConsent runs unchanged.
+ */
+function consentFormGate(req, res, next) {
+  if (!req.is('application/x-www-form-urlencoded')) {
+    return res.status(415).json({ status: 'fail', message: 'Submit the consent decision as a form.' });
+  }
+  const origin = req.get('origin');
+  if (!origin || !consentFormOrigins().has(origin)) {
+    logger.warn('oauth.consent_form_origin_refused', { origin: origin ? String(origin).slice(0, 200) : null });
+    return res.status(403).json({ status: 'fail', message: 'This sign-in page is not allowed to submit the decision.' });
+  }
+  const token = req.body?.access_token;
+  if (req.get('authorization')) {
+    return res.status(400).json({ status: 'fail', message: 'Present the credential once.' });
+  }
+  if (typeof token === 'string' && token.trim()) {
+    req.headers.authorization = `Bearer ${token.trim()}`;
+  }
+  return next();
+}
+
+/**
+ * POST /oauth/consent — the decision of POST /api/oauth/consent submitted by the Wallet's consent
+ * page as a top-level form (fields requestId, allow, auto, access_token) instead of a fetch. The
+ * Wallet uses it when its fetch of the JSON endpoint fails before any answer arrives. The
+ * principal, the limiter and `decideFromRequest` are the JSON endpoint's; the answer is a
+ * navigation: 303 to the URL the JSON endpoint would return as `redirectTo` (the client's
+ * redirect_uri with a code or an error), or a page saying why nothing was decided.
+ */
+router.post('/oauth/consent', consentFormPages, consentFormGate, consentPrincipal(protect), lim('consent'), async (req, res) => {
+  try {
+    const redirectTo = await decideFromRequest(req);
+    res.set('Cache-Control', 'no-store');
+    res.set('Referrer-Policy', 'no-referrer');
+    return res.redirect(303, redirectTo);
   } catch (error) {
     return sendOAuthError(res, error);
   }
