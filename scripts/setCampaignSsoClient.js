@@ -11,10 +11,10 @@
  * refused.
  *
  * Dry run by default: prints the card and the id before and after, and writes nothing. --apply
- * writes it with a campaign event (actor "ops-script"). The App reads the id from the public card
- * list, so a change takes effect without a restart. The "app hand-off" line says whether that client
- * can hand off now (it also needs its initiate_login_uri, SSO_TGE_ENABLED on and
- * SSO_SESSION_SECRET set); a client that cannot yet is reported, not refused.
+ * writes it and a campaign event (actor "ops-script") in one transaction. The App reads the id
+ * from the public card list, so a change takes effect without a restart. The "app hand-off" line
+ * says whether that client can hand off now (it also needs its initiate_login_uri, SSO_TGE_ENABLED
+ * on and SSO_SESSION_SECRET set); a client that cannot yet is reported, not refused.
  *
  * Usage (inside the api container, where DATABASE_URL and the SSO_* settings are loaded):
  *   node scripts/setCampaignSsoClient.js --slug <slug>                          show only
@@ -81,6 +81,8 @@ async function clientHandoffState(prisma, clientId, env) {
   }
   const row = await prisma.ssoDeveloperClient.findUnique({ where: { clientId } });
   if (!row) return 'refused: no such client';
+  // A developer row never hands off, whatever it stores (ssoDeveloperClient.shapeDeveloperClient).
+  if (row.kind !== 'partner') return `refused (CLIENT_DISABLED): client "${row.clientId}" is kind "${row.kind}"`;
   return handoffState(row, row.initiateLoginUri, env);
 }
 
@@ -136,22 +138,25 @@ async function run(argv, { prisma, env = process.env, out = (line) => console.lo
       out('dry run: nothing written. Re-run with --apply to write.');
       return EXIT.OK;
     }
-    // updatedAt is part of the write, so a card saved in between is not overwritten.
+    // updatedAt is part of the write, so a card saved in between is not overwritten. The card and
+    // its event are written together: a lost race or a failed event write leaves neither.
     const config = { ...(row.config && typeof row.config === 'object' ? row.config : {}), ssoClientId: next };
-    const { count } = await prisma.campaign.updateMany({
-      where: { id: row.id, updatedAt: row.updatedAt },
-      data: { config, updatedBy: ACTOR },
-    });
-    if (count !== 1) throw new Refusal('the card changed while this ran; nothing written');
-    await prisma.campaignEvent.create({
-      data: {
-        campaignId: row.id,
-        actor: ACTOR,
-        action: 'set-sso-client',
-        fromStatus: row.status,
-        toStatus: row.status,
-        note: `ssoClientId ${before ?? '(none)'} -> ${next ?? '(none)'}`,
-      },
+    await prisma.$transaction(async (tx) => {
+      const { count } = await tx.campaign.updateMany({
+        where: { id: row.id, updatedAt: row.updatedAt },
+        data: { config, updatedBy: ACTOR },
+      });
+      if (count !== 1) throw new Refusal('the card changed while this ran; nothing written');
+      await tx.campaignEvent.create({
+        data: {
+          campaignId: row.id,
+          actor: ACTOR,
+          action: 'set-sso-client',
+          fromStatus: row.status,
+          toStatus: row.status,
+          note: `ssoClientId ${before ?? '(none)'} -> ${next ?? '(none)'}`,
+        },
+      });
     });
     const stored = await prisma.campaign.findUnique({ where: { id: row.id } });
     out(`written:     ${storedId(stored ? stored.config : null) ?? '(none)'}`);

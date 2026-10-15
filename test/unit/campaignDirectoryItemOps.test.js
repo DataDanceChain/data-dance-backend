@@ -146,6 +146,16 @@ describe('ops campaigns accept a first-party database partner client', () => {
       assert.equal(res.statusCode, 200, JSON.stringify(res.body));
       assert.equal(rows.get('c1').config.ssoClientId, 'sso_planet');
     });
+
+    it(`${action} is refused once the stored partner client is no longer accepted`, async () => {
+      rows.set('c1', { id: 'c1', status: 'DRAFT', ...body(), config: { ssoClientId: 'sso_planet' } });
+      await prisma.ssoDeveloperClient.update({ where: { clientId: 'sso_planet' }, data: { enabled: false } });
+      const res = await call(transition, { params: { id: 'c1' }, body: { action } });
+      assert.equal(res.statusCode, 400);
+      assert.equal(res.body.message, 'Unknown SSO client "sso_planet": this server only knows "tge-local"');
+      assert.equal(rows.get('c1').status, 'DRAFT');
+      assert.equal(events.length, 0);
+    });
   }
 });
 

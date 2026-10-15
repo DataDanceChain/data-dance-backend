@@ -39,7 +39,7 @@ const ops = require('../../src/controllers/opsCampaignController');
 const { listActivePublic } = require('../../src/services/campaignEffects');
 const script = require('../../scripts/setCampaignSsoClient');
 
-const SLUGS = [PLANET_SLUG, id('other-item'), id('route-item'), id('sale'), id('home')];
+const SLUGS = [PLANET_SLUG, id('other-item'), id('route-item'), id('sale'), id('home'), id('dev-card')];
 
 function draftBody(overrides = {}) {
   return {
@@ -107,6 +107,7 @@ async function card(slug, overrides = {}) {
 
 const bySlug = (slug) => prisma.campaign.findUnique({ where: { slug } });
 const eventsOf = async (slug) => prisma.campaignEvent.findMany({ where: { campaignId: (await bySlug(slug)).id } });
+const scriptEvents = async (slug) => (await eventsOf(slug)).filter((event) => event.action === 'set-sso-client');
 
 async function runScript(argv, opts = {}) {
   const lines = [];
@@ -199,6 +200,7 @@ describe('directory items and their SSO client, on Postgres', () => {
     await card(id('home'), { template: 'HOME_CARD', config: { ssoClientId: id('planet') } });
     const before = await bySlug(PLANET_SLUG);
     const otherBefore = await bySlug(id('home'));
+    assert.equal((await scriptEvents(PLANET_SLUG)).length, 0);
     const { code, text } = await runScript([`--slug=${PLANET_SLUG}`, `--client-id=${id('env')}`, '--apply']);
     assert.equal(code, 0, text);
     assert.match(text, new RegExp(`written: +${id('env')}$`, 'm'));
@@ -209,23 +211,29 @@ describe('directory items and their SSO client, on Postgres', () => {
       assert.deepEqual(after[key], before[key], key);
     }
     assert.deepEqual(await bySlug(id('home')), otherBefore, 'another card is untouched');
-    const [event] = (await eventsOf(PLANET_SLUG)).filter((e) => e.action === 'set-sso-client');
+    const written = await scriptEvents(PLANET_SLUG);
+    assert.equal(written.length, 1, 'one event for the one write');
+    const [event] = written;
     assert.equal(event.actor, 'ops-script');
     assert.equal(event.note, `ssoClientId ${id('planet')} -> ${id('env')}`);
   });
 
   it('setting the id already stored writes nothing', async () => {
     const before = await bySlug(PLANET_SLUG);
+    const events = (await scriptEvents(PLANET_SLUG)).length;
     const { code, text } = await runScript(['--slug', PLANET_SLUG, '--client-id', id('env'), '--apply']);
     assert.equal(code, 0, text);
     assert.match(text, /unchanged: nothing to write/);
     assert.deepEqual(await bySlug(PLANET_SLUG), before);
+    assert.equal((await scriptEvents(PLANET_SLUG)).length, events, 'no write, no event');
   });
 
   it('--clear --apply removes it and keeps the rest of the config', async () => {
     const before = await bySlug(PLANET_SLUG);
+    const events = (await scriptEvents(PLANET_SLUG)).length;
     const { code, text } = await runScript(['--slug', PLANET_SLUG, '--clear', '--apply']);
     assert.equal(code, 0, text);
+    assert.equal((await scriptEvents(PLANET_SLUG)).length, events + 1, 'one event for the one write');
     assert.match(text, /after: +\(none\)/);
     assert.match(text, /-> none \(the card opens the plain link\)/);
     assert.deepEqual((await bySlug(PLANET_SLUG)).config, { ...before.config, ssoClientId: null });
@@ -233,12 +241,27 @@ describe('directory items and their SSO client, on Postgres', () => {
 
   it('refuses ids that are not accepted, with exit 1, and writes nothing', async () => {
     const before = await bySlug(PLANET_SLUG);
+    const events = (await scriptEvents(PLANET_SLUG)).length;
     for (const clientId of [id('dev'), id('paused'), id('nobody'), 'tge']) {
       const { code, text } = await runScript(['--slug', PLANET_SLUG, '--client-id', clientId, '--apply']);
       assert.equal(code, 1, text);
       assert.match(text, new RegExp(`refused: Unknown SSO client "${clientId}"`));
     }
     assert.deepEqual(await bySlug(PLANET_SLUG), before);
+    assert.equal((await scriptEvents(PLANET_SLUG)).length, events);
+  });
+
+  it('a card naming a developer client shows its hand-off as refused, and the id cannot be set', async () => {
+    await card(id('dev-card'), { config: { ssoClientId: id('dev') } });
+    const shown = await runScript(['--slug', id('dev-card')]);
+    assert.equal(shown.code, 0, shown.text);
+    assert.match(shown.text, new RegExp(`app hand-off: refused \\(CLIENT_DISABLED\\): client "${id('dev')}" is kind "developer"`));
+    assert.equal(shown.text.includes('available'), false);
+    const before = await bySlug(id('dev-card'));
+    const set = await runScript(['--slug', id('dev-card'), '--client-id', id('dev'), '--apply']);
+    assert.equal(set.code, 1, set.text);
+    assert.match(set.text, new RegExp(`refused: Unknown SSO client "${id('dev')}"`));
+    assert.deepEqual(await bySlug(id('dev-card')), before);
   });
 
   it('refuses a non-EXTERNAL card, a template without a client and an unknown slug', async () => {
@@ -256,10 +279,10 @@ describe('directory items and their SSO client, on Postgres', () => {
     assert.match(missing.text, /no campaign with slug/);
   });
 
-  it('a card saved while the script ran is not overwritten', async () => {
+  it('a card saved while the script ran is not overwritten, and no event is written', async () => {
     const before = await bySlug(PLANET_SLUG);
+    const events = (await scriptEvents(PLANET_SLUG)).length;
     const stale = {
-      ...prisma,
       ssoDeveloperClient: prisma.ssoDeveloperClient,
       campaignEvent: prisma.campaignEvent,
       campaign: {
@@ -269,10 +292,30 @@ describe('directory items and their SSO client, on Postgres', () => {
         },
         updateMany: (args) => prisma.campaign.updateMany(args),
       },
+      $transaction: (fn) => prisma.$transaction(fn),
     };
     const { code, text } = await runScript(['--slug', PLANET_SLUG, '--client-id', id('planet'), '--apply'], { prisma: stale });
     assert.equal(code, 1, text);
     assert.match(text, /the card changed while this ran; nothing written/);
     assert.deepEqual(await bySlug(PLANET_SLUG), before);
+    assert.equal((await scriptEvents(PLANET_SLUG)).length, events);
+  });
+
+  it('when the event cannot be written, the card is not changed either', async () => {
+    const before = await bySlug(PLANET_SLUG);
+    const events = (await scriptEvents(PLANET_SLUG)).length;
+    // Only the event writer handed to the transaction fails; one used outside it would succeed.
+    const brokenEvents = { create: async () => { throw new Error('event store unavailable'); } };
+    const broken = {
+      ssoDeveloperClient: prisma.ssoDeveloperClient,
+      campaign: prisma.campaign,
+      campaignEvent: prisma.campaignEvent,
+      $transaction: (fn) => prisma.$transaction((tx) => fn({ campaign: tx.campaign, campaignEvent: brokenEvents })),
+    };
+    const { code, text } = await runScript(['--slug', PLANET_SLUG, '--client-id', id('planet'), '--apply'], { prisma: broken });
+    assert.equal(code, 3, text);
+    assert.match(text, /error: event store unavailable/);
+    assert.deepEqual(await bySlug(PLANET_SLUG), before);
+    assert.equal((await scriptEvents(PLANET_SLUG)).length, events);
   });
 });
