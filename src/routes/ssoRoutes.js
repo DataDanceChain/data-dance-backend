@@ -217,6 +217,12 @@ router.post('/app-ticket', protect, lim('ssoTicket'), async (req, res, next) => 
       logger.warn('sso.ticket_rejected', { reason: 'client_disabled', clientId: client.clientId, userId: req.user.id });
       return fail(res, 403, 'CLIENT_DISABLED', 'This client is not available.');
     }
+    // Without the session key the exchange would consume the ticket and then fail: refuse first.
+    // The boot check requires the key while SSO_TGE_ENABLED is on, so this is a backstop.
+    if (!sessionSecret()) {
+      logger.error('sso.ticket_rejected', { reason: 'session_secret_missing', clientId: client.clientId, userId: req.user.id });
+      return fail(res, 403, 'CLIENT_DISABLED', 'This client is not available.');
+    }
     if (!isCEndSubject(req.user)) {
       return fail(res, 403, 'ORG_NOT_ALLOWED', 'Organization accounts cannot sign in to this partner.');
     }

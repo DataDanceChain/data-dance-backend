@@ -168,7 +168,8 @@ const REPORTED_INITIATE_LOGIN_URI_LIMIT = 1000;
 /**
  * The App hand-off target (`initiate_login_uri`) of one registry row, or '' for none — the shape
  * the environment's partner client has when SSO_TGE_INITIATE_LOGIN_URI is empty. ssoRoutes refuses
- * the hand-off (CLIENT_DISABLED) for a client without one.
+ * the hand-off (CLIENT_DISABLED) for a client without one. shapeDeveloperClient reads it only while
+ * SSO_TGE_ENABLED is on, so the kill switch stops every App hand-off, a database row's included.
  *   - kind "developer": always '' whatever the column holds; the hand-off is first-party only.
  *   - kind "partner": the stored value when it passes initiateLoginUriProblem (the production rule
  *     for SSO_TGE_INITIATE_LOGIN_URI). A value that fails reads as '' and is logged once, by client
@@ -202,7 +203,9 @@ function shapeDeveloperClient(row, req) {
     clientName: row.clientName,
     enabled: Boolean(row.enabled),
     redirectUris: Array.isArray(row.redirectUris) ? row.redirectUris : [],
-    initiateLoginUri: rowInitiateLoginUri(row),
+    // SSO_TGE_ENABLED=false stops the App hand-off for every partner client, as it does for the
+    // environment's. The row's web sign-in still follows its own `enabled` flag.
+    initiateLoginUri: cfg.enabled ? rowInitiateLoginUri(row) : '',
     tokenEndpointAuthMethod: 'client_secret_post',
     tokenEndpointAuthMethods: [...PARTNER_TOKEN_ENDPOINT_AUTH_METHODS],
     resource: partnerResourceUrl(req),

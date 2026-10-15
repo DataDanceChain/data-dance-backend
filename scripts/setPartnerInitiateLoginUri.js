@@ -10,8 +10,10 @@
  *
  * Dry run by default: prints the client and the value before and after, and writes nothing.
  * --apply writes it. The value must pass the rule the server applies when it reads the column
- * (absolute https URL, no fragment: the production rule for SSO_TGE_INITIATE_LOGIN_URI). The server
- * reads the column on every request, so a change takes effect without a restart.
+ * (absolute https URL, no user name or password, no blanks or backslashes, no fragment, at most 512
+ * characters: the production rule for SSO_TGE_INITIATE_LOGIN_URI). The server reads the column on
+ * every request, so a change takes effect without a restart. The hand-off also needs
+ * SSO_TGE_ENABLED on and SSO_SESSION_SECRET set; the "app hand-off" line says when either is missing.
  *
  * Usage (inside the api container, where DATABASE_URL and the SSO_* settings are loaded):
  *   node scripts/setPartnerInitiateLoginUri.js --client-id <id>                        show only
@@ -67,9 +69,11 @@ function shown(value) {
   return problem ? `${value}  [invalid, read as none: ${problem}]` : value;
 }
 
-/** What /api/sso/app-ticket will answer for this row with `uri` stored. */
-function handoffState(row, uri) {
+/** What /api/sso/app-ticket will answer for this row with `uri` stored, under the settings `env`. */
+function handoffState(row, uri, env) {
   if (!row.enabled) return 'refused (CLIENT_DISABLED): the client is disabled';
+  if (!readPartnerConfig(env).enabled) return 'refused (CLIENT_DISABLED): SSO_TGE_ENABLED is off';
+  if (!String(env.SSO_SESSION_SECRET || '').trim()) return 'refused (CLIENT_DISABLED): SSO_SESSION_SECRET is not set';
   if (uri === null || uri === undefined || String(uri).trim() === '') return 'refused (CLIENT_DISABLED): no initiate_login_uri';
   if (initiateLoginUriProblem(uri)) return 'refused (CLIENT_DISABLED): the stored initiate_login_uri is invalid';
   return 'available';
@@ -114,11 +118,11 @@ async function run(argv, { prisma, env = process.env, out = (line) => console.lo
     out(`enabled:     ${Boolean(row.enabled)}`);
     out(`before:      ${shown(before)}`);
     if (opts.uri === null && !opts.clear) {
-      out(`app hand-off: ${handoffState(row, before)}`);
+      out(`app hand-off: ${handoffState(row, before, env)}`);
       return EXIT.OK;
     }
     out(`after:       ${shown(next)}`);
-    out(`app hand-off: ${handoffState(row, before)} -> ${handoffState(row, next)}`);
+    out(`app hand-off: ${handoffState(row, before, env)} -> ${handoffState(row, next, env)}`);
     if (before === next) {
       out('unchanged: nothing to write');
       return EXIT.OK;

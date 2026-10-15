@@ -197,11 +197,21 @@ The URI is set per partner client. For the client configured in the environment 
 `SSO_TGE_INITIATE_LOGIN_URI`. For a first-party partner client stored in the database (kind
 `partner`) it is that client's `initiateLoginUri`, which a DataDance operator sets or clears with
 `scripts/setPartnerInitiateLoginUri.js` (dry run by default, `--apply` to write; there is no public
-API for it). The stored value must be an absolute `https` URL without a fragment, the production
-rule for `SSO_TGE_INITIATE_LOGIN_URI`; a value that fails it is treated as absent and logged once.
-A developer (self-serve) client never gets the hand-off, whatever is stored. The App's
-`partner_hosts` are derived from the same URI and the client's redirect URIs, so they follow the
-client in both cases.
+API for it). The stored value must be an absolute `https` URL with no user name or password, no
+blanks or backslashes and no fragment, at most 512 characters: the production rule for
+`SSO_TGE_INITIATE_LOGIN_URI`, which applies the same checks except the length. A value that fails
+it is treated as absent and logged once. A developer (self-serve) client never gets the hand-off,
+whatever is stored. The App's `partner_hosts` are derived from the same URI and the client's
+redirect URIs, so they follow the client in both cases. For a database client, the account
+assigned as its manager can change those redirect URIs in the account console, so its
+`partner_hosts` follow those edits too.
+
+A database partner client is treated like the environment's client in two more ways:
+
+- `SSO_TGE_ENABLED=false` stops its hand-off as well (§9).
+- `SSO_TGE_AUTO_APPROVE` applies to it. With `app`, once its URI is set, the Wallet may post the
+  Allow of an App entry without a tap; the server still runs every manual-Allow check. A developer
+  client never auto-approves.
 
 ## 6. Token request (partner backend → DataDance, server-to-server)
 
@@ -469,7 +479,13 @@ Takes effect on the next `/partner/tge/*` call. `401 invalid_client` without cre
   `401 invalid_client`, and every existing token is `401 invalid_token`. That boot also revokes
   every partner access token issued before the switch, so switching back on later does not revive
   them — only new logins work (T17). The switch takes effect at the restart, not before.
-  Tokens are ≤ 5 minutes old anyway (T13, T17).
+  Tokens are ≤ 5 minutes old anyway (T13, T17). The switch also stops the App hand-off (§5) of
+  every partner client, including a first-party client stored in the database:
+  `POST /api/sso/app-ticket` answers `403 CLIENT_DISABLED` and open hand-off sessions are refused.
+  A database client's web sign-in follows its own `enabled` flag. To stop one database client
+  alone, set `enabled=false` on its row, or clear its URI with
+  `scripts/setPartnerInitiateLoginUri.js --client-id <id> --clear --apply`. Either takes effect on
+  the next request.
 - **Account stop:** once `User.disabledAt` is deployed, a disabled user cannot complete consent
   (`access_denied`) and existing tokens get `403 account_disabled`.
 
@@ -669,7 +685,10 @@ unconditionally — the issuer is never derived from a request header), `APP_PUB
   `node scripts/setPartnerInitiateLoginUri.js --client-id <id>` shows it;
   `… --uri <https url>` or `… --clear` prints before and after and writes only with `--apply`.
   Refused for the environment's client (use `SSO_TGE_INITIATE_LOGIN_URI`), for a developer client
-  and for a URI that is not absolute https without a fragment. Takes effect on the next request.
+  and for a URI that fails the rule in §5. Takes effect on the next request. The "app hand-off" line
+  also says when `SSO_TGE_ENABLED` is off or `SSO_SESSION_SECRET` is unset, either of which refuses
+  the hand-off. The column comes from migration `20261015180000_sso_partner_initiate_login_uri`:
+  run `prisma migrate deploy` before starting an image that reads it.
 - Rotate: move the current hash to `…_PREVIOUS`, set the new hash, set `…_ROTATION_UNTIL`,
   recreate the container; after the deadline remove the previous hash.
 - Freeze a status field: add it to `SSO_TGE_STATUS_FIELDS` and recreate. `email`,

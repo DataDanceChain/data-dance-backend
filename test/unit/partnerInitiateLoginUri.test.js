@@ -140,6 +140,11 @@ const INVALID = [
   ['a relative path', '/ddc/start'],
   ['another scheme', 'ftp://login.planet.example.org/ddc'],
   ['javascript:', 'javascript:alert(1)'],
+  ['a user name before the host', 'https://login.planet.example.org@other.example/start'],
+  ['a user name and password', 'https://ops:pass@login.planet.example.org/ddc'],
+  ['a backslash before the host', 'https://other.example\\@login.planet.example.org/'],
+  ['a blank inside', 'https://login.planet.example.org/dd c'],
+  ['more than 512 characters', `https://login.planet.example.org/${'a'.repeat(480)}`],
 ];
 
 beforeEach(async () => {
@@ -450,5 +455,169 @@ describe('scripts/setPartnerInitiateLoginUri.js', () => {
       assert.equal(code, 2, `${argv.join(' ')}: ${text}`);
       assert.match(text, /^usage: /m);
     }
+  });
+});
+
+describe('the URI rule: user name, blanks, backslashes and length', () => {
+  it('accepts exactly 512 characters', () => {
+    const uri = `https://login.planet.example.org/${'a'.repeat(479)}`;
+    assert.equal(uri.length, 512);
+    assert.equal(initiateLoginUriProblem(uri), '');
+  });
+
+  it('never repeats a password in its message', () => {
+    const problem = initiateLoginUriProblem('https://ops:pw-in-uri@login.planet.example.org/ddc');
+    assert.match(problem, /user name or password/);
+    assert.match(problem, /login\.planet\.example\.org/);
+    assert.equal(problem.includes('pw-in-uri'), false, problem);
+  });
+
+  it('the boot check applies the same rule to SSO_TGE_REDIRECT_URIS and SSO_TGE_INITIATE_LOGIN_URI', () => {
+    const { assertPartnerConfig } = require('../../src/constants/partnerClient');
+    assert.doesNotThrow(() => assertPartnerConfig({ ...process.env }));
+    for (const [name, value] of [
+      ['SSO_TGE_REDIRECT_URIS', 'https://tge.example.com@other.example/oauth/callback'],
+      ['SSO_TGE_REDIRECT_URIS', 'https://other.example\\@tge.example.com/oauth/callback'],
+      ['SSO_TGE_INITIATE_LOGIN_URI', 'https://ops:pw-in-uri@tge.example.com/login/ddc'],
+    ]) {
+      assert.throws(() => assertPartnerConfig({ ...process.env, [name]: value }), (error) => {
+        assert.match(error.message, new RegExp(`${name}: .*(user name or password|blanks or backslashes)`));
+        assert.equal(error.message.includes('pw-in-uri'), false, error.message);
+        return true;
+      }, `${name}=${value}`);
+    }
+  });
+});
+
+describe('the kill switch and the session key cover a database partner client', () => {
+  async function openSession(clientId) {
+    const minted = await appTicket(clientId);
+    assert.equal(minted.status, 200, minted.text);
+    const session = (await exchange(minted.body.data.ticket)).body.data.session_token;
+    const started = await request(server).get('/oauth/authorize').query({
+      response_type: 'code',
+      client_id: clientId,
+      redirect_uri: ROW_REDIRECT,
+      state: 'state-with-enough-entropy-1234',
+      code_challenge: pkce().challenge,
+      code_challenge_method: 'S256',
+    });
+    assert.equal(started.status, 302, started.text);
+    return {
+      session,
+      cookie: ((started.headers['set-cookie'] || [])[0] || '').split(';')[0],
+      requestId: new URL(started.headers.location).searchParams.get('request'),
+    };
+  }
+
+  it('SSO_TGE_ENABLED=false: no URI, 403 CLIENT_DISABLED, no ticket, and an open session is refused', async () => {
+    await clientRow('planet-live', { initiateLoginUri: ROW_INITIATE });
+    const { session, requestId } = await openSession('planet-live');
+    const ticketsBefore = prisma.store.ssoTicket.length;
+    process.env.SSO_TGE_ENABLED = 'false';
+    try {
+      assert.equal((await loadPartnerClient('planet-live')).initiateLoginUri, '');
+      const res = await appTicket('planet-live');
+      assert.equal(res.status, 403, res.text);
+      assert.equal(res.body.code, 'CLIENT_DISABLED');
+      assert.equal(prisma.store.ssoTicket.length, ticketsBefore, 'no ticket minted');
+      const summary = await request(server).get(`/api/oauth/requests/${requestId}`).set('Authorization', `Bearer ${session}`);
+      assert.equal(summary.status, 401, summary.text);
+      assert.equal(summary.body.code, 'SSO_SESSION_EXPIRED');
+    } finally {
+      process.env.SSO_TGE_ENABLED = 'true';
+    }
+    assert.equal((await appTicket('planet-live')).status, 200, 'switching back on restores the hand-off');
+  });
+
+  it('the script says the hand-off is refused while SSO_TGE_ENABLED is off or SSO_SESSION_SECRET is unset', async () => {
+    await clientRow('planet-live', { initiateLoginUri: ROW_INITIATE });
+    const lines = [];
+    const out = (line) => lines.push(line);
+    assert.equal(await script.run(['--client-id', 'planet-live'], { prisma, env: { ...process.env, SSO_TGE_ENABLED: 'false' }, out }), 0);
+    assert.match(lines.join('\n'), /app hand-off: refused \(CLIENT_DISABLED\): SSO_TGE_ENABLED is off/);
+    lines.length = 0;
+    const noKey = { ...process.env };
+    delete noKey.SSO_SESSION_SECRET;
+    assert.equal(await script.run(['--client-id', 'planet-live'], { prisma, env: noKey, out }), 0);
+    assert.match(lines.join('\n'), /app hand-off: refused \(CLIENT_DISABLED\): SSO_SESSION_SECRET is not set/);
+  });
+
+  it('without SSO_SESSION_SECRET: 403 CLIENT_DISABLED before any ticket is minted, for both kinds of partner client', async () => {
+    await clientRow('planet-live', { initiateLoginUri: ROW_INITIATE });
+    const saved = process.env.SSO_SESSION_SECRET;
+    delete process.env.SSO_SESSION_SECRET;
+    try {
+      for (const clientId of ['planet-live', 'tge-test']) {
+        const res = await appTicket(clientId);
+        assert.equal(res.status, 403, `${clientId}: ${res.text}`);
+        assert.equal(res.body.code, 'CLIENT_DISABLED');
+      }
+      assert.equal(prisma.store.ssoTicket.length, 0);
+    } finally {
+      process.env.SSO_SESSION_SECRET = saved;
+    }
+  });
+});
+
+describe('SSO_TGE_AUTO_APPROVE and a database partner client', () => {
+  function withAutoApprove(value, fn) {
+    const saved = process.env.SSO_TGE_AUTO_APPROVE;
+    process.env.SSO_TGE_AUTO_APPROVE = value;
+    return Promise.resolve().then(fn).finally(() => {
+      if (saved === undefined) delete process.env.SSO_TGE_AUTO_APPROVE;
+      else process.env.SSO_TGE_AUTO_APPROVE = saved;
+    });
+  }
+
+  it('applies to a first-party row as to the environment\'s client, never to a developer row', async () => {
+    await clientRow('planet-live', { initiateLoginUri: ROW_INITIATE });
+    await clientRow('sso_dev', { kind: 'developer', initiateLoginUri: ROW_INITIATE });
+    await withAutoApprove('app', async () => {
+      assert.deepEqual((await loadPartnerClient('planet-live')).autoApprove, { app: true, web: false });
+      assert.deepEqual((await loadPartnerClient('sso_dev')).autoApprove, { app: false, web: false });
+    });
+    await withAutoApprove('off', async () => {
+      assert.deepEqual((await loadPartnerClient('planet-live')).autoApprove, { app: false, web: false });
+    });
+  });
+
+  it('with app: an App-entry Allow posted with auto:true is accepted for that row; with off it is not', async () => {
+    await clientRow('planet-live', { initiateLoginUri: ROW_INITIATE });
+    await withAutoApprove('app', async () => {
+      const minted = await appTicket('planet-live');
+      const session = (await exchange(minted.body.data.ticket)).body.data.session_token;
+      const started = await request(server).get('/oauth/authorize').query({
+        response_type: 'code',
+        client_id: 'planet-live',
+        redirect_uri: ROW_REDIRECT,
+        state: 'state-with-enough-entropy-1234',
+        code_challenge: pkce().challenge,
+        code_challenge_method: 'S256',
+      });
+      const cookie = ((started.headers['set-cookie'] || [])[0] || '').split(';')[0];
+      const requestId = new URL(started.headers.location).searchParams.get('request');
+      const consent = await request(server).post('/api/oauth/consent')
+        .set('Authorization', `Bearer ${session}`).set('Cookie', cookie).send({ requestId, allow: true, auto: true });
+      assert.equal(consent.status, 200, consent.text);
+      assert.match(new URL(consent.body.data.redirectTo).searchParams.get('code'), /^ddc_code_/);
+    });
+    await withAutoApprove('off', async () => {
+      const minted = await appTicket('planet-live');
+      const session = (await exchange(minted.body.data.ticket)).body.data.session_token;
+      const started = await request(server).get('/oauth/authorize').query({
+        response_type: 'code',
+        client_id: 'planet-live',
+        redirect_uri: ROW_REDIRECT,
+        state: 'state-with-enough-entropy-5678',
+        code_challenge: pkce().challenge,
+        code_challenge_method: 'S256',
+      });
+      const cookie = ((started.headers['set-cookie'] || [])[0] || '').split(';')[0];
+      const requestId = new URL(started.headers.location).searchParams.get('request');
+      const consent = await request(server).post('/api/oauth/consent')
+        .set('Authorization', `Bearer ${session}`).set('Cookie', cookie).send({ requestId, allow: true, auto: true });
+      assert.notEqual(consent.status, 200, consent.text);
+    });
   });
 });
