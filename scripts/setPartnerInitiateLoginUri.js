@@ -161,4 +161,4 @@ if (require.main === module) {
     .finally(() => prisma.$disconnect());
 }
 
-module.exports = { run, parseArgs, EXIT };
+module.exports = { run, parseArgs, handoffState, EXIT };

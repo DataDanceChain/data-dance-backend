@@ -1,5 +1,6 @@
 const prisma = require('../utils/prisma');
 const {
+  campaignSsoClientIds,
   parseDraft,
   applyCopyFields,
   assertPublishable,
@@ -8,6 +9,7 @@ const {
   toPublicCard,
 } = require('../utils/campaignRules');
 const { drawRaffle } = require('../services/campaignEffects');
+const { listFirstPartyClientIds } = require('../services/ssoDeveloperClient');
 const { translateCampaignCopy } = require('../services/campaignTranslate');
 
 function actorOf(req) {
@@ -22,6 +24,11 @@ async function writeEvent(campaignId, actor, action, fromStatus, toStatus, note)
   await prisma.campaignEvent.create({
     data: { campaignId, actor, action, fromStatus, toStatus, note: note || null },
   });
+}
+
+/** parseDraft options: the SSO client ids an EXTERNAL card may name, read once per request. */
+async function draftOptions() {
+  return { ssoClientIds: campaignSsoClientIds(await listFirstPartyClientIds()) };
 }
 
 function serialize(row) {
@@ -81,7 +88,7 @@ exports.get = async (req, res) => {
 
 exports.create = async (req, res) => {
   try {
-    const parsed = parseDraft(req.body);
+    const parsed = parseDraft(req.body, await draftOptions());
     if (parsed.error) return fail(res, 400, parsed.error);
     const actor = actorOf(req);
     const row = await prisma.campaign.create({
@@ -116,14 +123,17 @@ exports.update = async (req, res) => {
       await writeEvent(row.id, actor, 'update-copy', existing.status, existing.status);
       return res.json({ status: 'success', data: serialize(row) });
     }
-    const parsed = parseDraft({
-      ...(req.body || {}),
-      i18n: req.body?.i18n || req.body?.config?.i18n || existing.config?.i18n,
-      // The admin form has no SSO field, so a save that omits it keeps the stored id instead of
-      // silently dropping the SSO hand-off; an explicit "" still clears it.
-      ssoClientId:
-        req.body?.ssoClientId ?? req.body?.config?.ssoClientId ?? existing.config?.ssoClientId,
-    });
+    const parsed = parseDraft(
+      {
+        ...(req.body || {}),
+        i18n: req.body?.i18n || req.body?.config?.i18n || existing.config?.i18n,
+        // The admin form has no SSO field, so a save that omits it keeps the stored id instead of
+        // silently dropping the SSO hand-off; an explicit "" still clears it.
+        ssoClientId:
+          req.body?.ssoClientId ?? req.body?.config?.ssoClientId ?? existing.config?.ssoClientId,
+      },
+      await draftOptions(),
+    );
     if (parsed.error) return fail(res, 400, parsed.error);
     if (parsed.data.slug !== existing.slug) {
       return fail(res, 400, 'Slug cannot be changed after create');
@@ -168,7 +178,7 @@ exports.transition = async (req, res) => {
       if (existing.status !== 'DRAFT' && existing.status !== 'SCHEDULED') {
         return fail(res, 409, 'Only drafts can be scheduled');
       }
-      const parsed = parseDraft({ ...existing, ...req.body, slug: existing.slug });
+      const parsed = parseDraft({ ...existing, ...req.body, slug: existing.slug }, await draftOptions());
       if (parsed.error) return fail(res, 400, parsed.error);
       const publishError = assertPublishable(parsed.data);
       if (publishError) return fail(res, 400, publishError);
@@ -185,7 +195,7 @@ exports.transition = async (req, res) => {
       if (existing.status !== 'DRAFT' && existing.status !== 'SCHEDULED') {
         return fail(res, 409, 'Only drafts or scheduled campaigns can go live');
       }
-      const parsed = parseDraft({ ...existing, ...req.body, slug: existing.slug });
+      const parsed = parseDraft({ ...existing, ...req.body, slug: existing.slug }, await draftOptions());
       if (parsed.error) return fail(res, 400, parsed.error);
       const publishError = assertPublishable(parsed.data);
       if (publishError) return fail(res, 400, publishError);
