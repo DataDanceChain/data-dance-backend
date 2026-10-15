@@ -240,6 +240,20 @@ async function loadPartnerClient(clientId, req) {
   return loadDeveloperPartnerClient(clientId, req);
 }
 
+/**
+ * Client ids of the enabled first-party partner clients stored in the registry (kind "partner").
+ * A campaign card may name one of them for the App hand-off (campaignRules.campaignSsoClientIds);
+ * developer clients never get the hand-off, so they are not listed. `client`: a Prisma client.
+ */
+async function listFirstPartyClientIds(client = prisma) {
+  const rows = await client.ssoDeveloperClient.findMany({
+    where: { kind: 'partner', enabled: true },
+    select: { clientId: true },
+    orderBy: { createdAt: 'asc' },
+  });
+  return rows.map((row) => row.clientId);
+}
+
 // ---------------------------------------------------------------------------------------------
 // The account console: a signed-in account reads and changes only the rows whose ownerUserId is
 // its own id. A self-serve client belongs to the account that registered it; the first-party Data
@@ -371,6 +385,7 @@ module.exports = {
   createDeveloperClient,
   loadDeveloperPartnerClient,
   loadPartnerClient,
+  listFirstPartyClientIds,
   consoleClientId,
   listOwnedClients,
   updateOwnedClient,

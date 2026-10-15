@@ -206,6 +206,12 @@ redirect URIs, so they follow the client in both cases. For a database client, t
 assigned as its manager can change those redirect URIs in the account console, so its
 `partner_hosts` follow those edits too.
 
+The Wallet starts the hand-off from a campaign card: an `EXTERNAL` home card or directory item
+whose `config.ssoClientId` names the client (the environment's client or an enabled first-party
+database partner client). Any other card opens its link as before. A DataDance operator sets or
+clears that id with `scripts/setCampaignSsoClient.js --slug <card>` (dry run by default, `--apply`
+to write).
+
 A database partner client is treated like the environment's client in two more ways:
 
 - `SSO_TGE_ENABLED=false` stops its hand-off as well (§9).
