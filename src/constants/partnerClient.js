@@ -503,14 +503,44 @@ function redirectUriProblem(uri, production) {
   try {
     parsed = new URL(uri);
   } catch {
-    return `"${uri}" is not an absolute URL`;
+    // Everything between "//" and the last "@" is left out, so a password is not repeated.
+    return `"${String(uri).replace(/^([^:/?#]*:\/\/).*@/s, '$1…@')}" is not an absolute URL`;
+  }
+  // A user name or password before the host makes the text read as one site while the browser
+  // goes to another (https://partner.example@other.example/ opens other.example). Checked first,
+  // and the message names only scheme and host, so a password in the value is never logged.
+  if (parsed.username || parsed.password) {
+    return `"${parsed.protocol}//${parsed.host}" must not carry a user name or password before the host`;
   }
   if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return `"${uri}" must use http(s)`;
+  // The URL parser drops or rewrites blanks and backslashes, so the text would differ from the
+  // address actually used (a backslash ends the host: https://other.example\@partner.example/).
+  if (/[\s\\]/.test(uri)) return `"${uri}" must not contain blanks or backslashes`;
   if (uri.includes('#')) return `"${uri}" must not contain a fragment`;
   if (parsed.protocol === 'http:' && (production || !isLoopbackHost(parsed.hostname))) {
     return `"${uri}" must be https (http is only accepted for localhost outside production)`;
   }
   return '';
+}
+
+/**
+ * The rule for a partner's App hand-off target (`initiate_login_uri`) stored on a database partner
+ * client: the production rule SSO_TGE_INITIATE_LOGIN_URI gets at boot (absolute, https, no user
+ * name or password, no blanks or backslashes, no fragment), in every environment, and at most
+ * INITIATE_LOGIN_URI_MAX_LENGTH characters, the cap on a developer's redirect URI. '' when the
+ * value passes. The value is trimmed first, as the environment value is. Read by
+ * shapeDeveloperClient on every load and by scripts/setPartnerInitiateLoginUri.js before it writes.
+ */
+const INITIATE_LOGIN_URI_MAX_LENGTH = 512;
+
+function initiateLoginUriProblem(uri) {
+  const value = String(uri ?? '').trim();
+  if (value.length > INITIATE_LOGIN_URI_MAX_LENGTH) {
+    return `the URI is longer than ${INITIATE_LOGIN_URI_MAX_LENGTH} characters`;
+  }
+  const problem = redirectUriProblem(value, true);
+  // Same rule; the localhost hint is about the environment value and never applies here.
+  return problem.replace(' (http is only accepted for localhost outside production)', '');
 }
 
 /**
@@ -769,6 +799,7 @@ module.exports = {
   checksumWalletAddress,
   EXTERNAL_WALLET_VERIFIER,
   sha256Hex,
+  initiateLoginUriProblem,
   assertPartnerConfig,
   assertFinancialGradeConfig,
   referralBindEnabled,
