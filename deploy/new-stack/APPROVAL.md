@@ -272,6 +272,10 @@ new stack**.
   web build whose consent line for `points` reads "balance and history" in every language (data-dance-frontend
   a077c74 or later). `20-env.sh` does not check the web build: build the web image from such a commit (`10-build.sh`)
   before `20-env.sh` and `40-up.sh` put this list in front of users.
+- **Consent without a tap: `SSO_TGE_AUTO_APPROVE=app`** (2026-10-15). A consent opened inside the DataDance App (the App
+  hand-off session) is still allowed without a tap; a consent opened from a web sign-in always shows the consent page,
+  so the user can see and switch the account. `20-env.sh` writes `app` on every run and stops if the new file holds
+  another value.
 - **Developer self-registration: `SSO_DEVELOPER_REGISTRATION=allowlist`** (Sloan, 2026-10-14) with
   `SSO_DEVELOPER_ALLOWED_EMAILS` from `REHEARSAL_DEVELOPER_ALLOWED_EMAILS`, or from stdin with the argument
   `--developer-emails-stdin` (remote.sh refuses an `@` in an argument; `run` forwards stdin). Empty = nobody. The

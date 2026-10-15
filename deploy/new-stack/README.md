@@ -47,6 +47,8 @@ refuses `tge` and `tge-rehearsal` at boot, and anything outside `[A-Za-z0-9._-]{
   under the user's grant, and `SSO_TGE_REFERRAL_BIND=true`. The points history goes with a web build whose consent line
   for points reads "balance and history" (data-dance-frontend a077c74 or later); build the web image from such a commit
   first.
+- `SSO_TGE_AUTO_APPROVE=app`: a consent opened inside the DataDance App is still allowed without a tap; a consent opened
+  from a web sign-in always shows the consent page, so the user can see and switch the account.
 - `SSO_DEVELOPER_REGISTRATION=allowlist`, with `SSO_DEVELOPER_ALLOWED_EMAILS` from `REHEARSAL_DEVELOPER_ALLOWED_EMAILS` or
   `--developer-emails-stdin` (empty = nobody). It needs a backend with PR #64 (main `66bf00f`); `20-env.sh` checks the
   built image's source first when `/root/ddcnew/.env` names one.
