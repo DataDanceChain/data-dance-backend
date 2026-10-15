@@ -650,6 +650,10 @@ async function getConsentRequest(id) {
     // Only a hint for the Wallet (post the Allow without a tap). Never a decision: the code is
     // minted by the credentialed POST /api/oauth/consent, which re-checks the switch itself.
     autoApprove: partner && partner.autoApprove ? partner.autoApprove : autoApproveFor(partner ? row.clientId : null),
+    // This API also takes the decision as a top-level form submission (POST /oauth/consent,
+    // src/routes/oauthRoutes.js). The Wallet falls back to it only when this flag is true, so a
+    // Wallet build never posts that form to an API that predates it.
+    decisionForm: true,
   };
 }
 
