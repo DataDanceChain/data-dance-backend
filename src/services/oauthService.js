@@ -690,7 +690,8 @@ async function decideConsent(user, requestId, allow, ctx = {}) {
     throw new OAuthError(403, 'access_denied', 'This session is bound to a different client.');
   }
   // Auto-approval gate: a partner client only (the configured TGE client, or a first-party row of
-  // the database), and only for an entry type the switch allows. Checked before anything is consumed, so a refusal leaves the request decidable by hand.
+  // the database), and only for an entry type the switch allows. Checked before anything is
+  // consumed, so a refusal leaves the request decidable by hand.
   const entry = consentEntry(ctx);
   const autoFlags = client && client.autoApprove ? client.autoApprove : autoApproveFor(row.clientId);
   if (auto && !(partner && autoFlags[entry])) {

@@ -472,6 +472,29 @@ describe('the URI rule: user name, blanks, backslashes and length', () => {
     assert.equal(problem.includes('pw-in-uri'), false, problem);
   });
 
+  it('leaves the user name and password out when the value does not parse', () => {
+    for (const uri of [
+      'https://ops:pw-in-uri@login.planet.example.org:99999/ddc',
+      'https://ops:pw-in-uri@login.planet exa.org/ddc',
+    ]) {
+      const problem = initiateLoginUriProblem(uri);
+      assert.match(problem, /is not an absolute URL/);
+      assert.equal(problem.includes('pw-in-uri'), false, problem);
+      assert.equal(problem.includes('ops'), false, problem);
+    }
+  });
+
+  it('the console refuses blanks and backslashes in a redirect URI, as the partner rule does', async () => {
+    const { createDeveloperClient, DeveloperClientError } = require('../../src/services/ssoDeveloperClient');
+    for (const uri of ['https://other.example\\@planet.example.org/cb', 'https://planet.example.org/c b']) {
+      await assert.rejects(
+        () => createDeveloperClient({ client_name: 'Northwind', contact_email: 'dev@example.com', redirect_uris: [uri] }),
+        (error) => error instanceof DeveloperClientError && error.code === 'invalid_redirect_uri',
+        uri,
+      );
+    }
+  });
+
   it('the boot check applies the same rule to SSO_TGE_REDIRECT_URIS and SSO_TGE_INITIATE_LOGIN_URI', () => {
     const { assertPartnerConfig } = require('../../src/constants/partnerClient');
     assert.doesNotThrow(() => assertPartnerConfig({ ...process.env }));
@@ -479,9 +502,10 @@ describe('the URI rule: user name, blanks, backslashes and length', () => {
       ['SSO_TGE_REDIRECT_URIS', 'https://tge.example.com@other.example/oauth/callback'],
       ['SSO_TGE_REDIRECT_URIS', 'https://other.example\\@tge.example.com/oauth/callback'],
       ['SSO_TGE_INITIATE_LOGIN_URI', 'https://ops:pw-in-uri@tge.example.com/login/ddc'],
+      ['SSO_TGE_INITIATE_LOGIN_URI', 'https://ops:pw-in-uri@tge.example.com:99999/login/ddc'],
     ]) {
       assert.throws(() => assertPartnerConfig({ ...process.env, [name]: value }), (error) => {
-        assert.match(error.message, new RegExp(`${name}: .*(user name or password|blanks or backslashes)`));
+        assert.match(error.message, new RegExp(`${name}: .*(user name or password|blanks or backslashes|not an absolute URL)`));
         assert.equal(error.message.includes('pw-in-uri'), false, error.message);
         return true;
       }, `${name}=${value}`);
@@ -514,6 +538,7 @@ describe('the kill switch and the session key cover a database partner client', 
     await clientRow('planet-live', { initiateLoginUri: ROW_INITIATE });
     const { session, requestId } = await openSession('planet-live');
     const ticketsBefore = prisma.store.ssoTicket.length;
+    const saved = process.env.SSO_TGE_ENABLED;
     process.env.SSO_TGE_ENABLED = 'false';
     try {
       assert.equal((await loadPartnerClient('planet-live')).initiateLoginUri, '');
@@ -525,7 +550,7 @@ describe('the kill switch and the session key cover a database partner client', 
       assert.equal(summary.status, 401, summary.text);
       assert.equal(summary.body.code, 'SSO_SESSION_EXPIRED');
     } finally {
-      process.env.SSO_TGE_ENABLED = 'true';
+      process.env.SSO_TGE_ENABLED = saved;
     }
     assert.equal((await appTicket('planet-live')).status, 200, 'switching back on restores the hand-off');
   });

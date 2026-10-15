@@ -91,6 +91,9 @@ function cleanEmail(value) {
 }
 
 function isAllowedRedirect(uri) {
+  // Blanks and backslashes are rewritten by the URL parser, so the text would differ from the
+  // address used; the partner rule (redirectUriProblem) refuses them too.
+  if (/[\s\\]/.test(uri)) return false;
   try {
     const url = new URL(uri);
     if (url.username || url.password || url.hash) return false;
@@ -108,7 +111,7 @@ function cleanRedirects(value) {
     throw new DeveloperClientError(400, 'invalid_redirect_uri', 'Provide 1 to 5 redirect URIs.');
   }
   if (uris.some((uri) => uri.length > 512 || !isAllowedRedirect(uri))) {
-    throw new DeveloperClientError(400, 'invalid_redirect_uri', 'Each redirect URI must be https, or http on localhost, with no fragment.');
+    throw new DeveloperClientError(400, 'invalid_redirect_uri', 'Each redirect URI must be https, or http on localhost, with no fragment, user name, blanks or backslashes.');
   }
   return uris;
 }

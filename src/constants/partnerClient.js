@@ -503,7 +503,8 @@ function redirectUriProblem(uri, production) {
   try {
     parsed = new URL(uri);
   } catch {
-    return `"${uri}" is not an absolute URL`;
+    // Everything between "//" and the last "@" is left out, so a password is not repeated.
+    return `"${String(uri).replace(/^([^:/?#]*:\/\/).*@/s, '$1…@')}" is not an absolute URL`;
   }
   // A user name or password before the host makes the text read as one site while the browser
   // goes to another (https://partner.example@other.example/ opens other.example). Checked first,
