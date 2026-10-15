@@ -28,10 +28,11 @@
 # kills ssh instead of letting it send an empty password; password method only; NumberOfPasswordPrompts=1.
 # NAME=value arguments to `run` are environment overrides, accepted only from an allowlist (SERVER_ENV_ALLOWED). The
 # rehearsal hosts and ports are among them (API_HOST, APP_HOST, API_PORT, WEB_PORT, DB_PORT; common.sh), and so are
-# REHEARSAL_CLIENT_ID (20-env.sh; required on its first run) and TAKE_OVER_VHOSTS=yes (30-nginx.sh apply; only after
-# Sloan and Race agree, APPROVAL.md section 9). Before anything connects, every argument must be made of
-# [A-Za-z0-9._/=:,-] only, and the settings, the client id and TAKE_OVER_VHOSTS among the overrides must pass the
-# checks the server applies (common.sh remote_overrides_check). 00-preflight.sh only runs through `preflight`.
+# REHEARSAL_CLIENT_ID (20-env.sh; required on its first run), INVOICE_SELLER_USER_ID (20-env.sh; the invoice seller's
+# account id, a lower-case canonical UUID) and TAKE_OVER_VHOSTS=yes (30-nginx.sh apply; only after Sloan and Race agree,
+# APPROVAL.md section 9). Before anything connects, every argument must be made of [A-Za-z0-9._/=:,-] only, and the
+# settings, the client id, the invoice seller and TAKE_OVER_VHOSTS among the overrides must pass the checks the server
+# applies (common.sh remote_overrides_check). 00-preflight.sh only runs through `preflight`.
 # No tty is allocated: Ctrl-C or a dropped connection stops only the LOCAL ssh. The script keeps running on the
 # server to its end; its output continues in /root/ddcnew/logs/<ts>-<script>-<pid>.log (write runs; APPROVAL.md section 5).
 # stdin: `run` forwards this script's stdin, untouched, to the remote script on ssh's stdin (1Password never reads it:
@@ -64,7 +65,7 @@ rssh() { # rssh <remote command> ; stdin is forwarded
   rm -f "$a"; return $rc
 }
 # Environment overrides that may reach the server (everything else is refused, including PATH, BASH_ENV, LD_*).
-SERVER_ENV_ALLOWED="REHEARSAL_DB REHEARSAL_REDIRECT_URIS REHEARSAL_INITIATE_LOGIN_URI OAUTH_PUBLIC_REGISTRATION W3A_GOOGLE W3A_EMAIL W3A_APPLE W3A_X JWKS_NEW_PINS_VERIFIED BUILD_MEM_FLOOR_MB P1_USERS_MIN PARTNER_ALLOWED_IP API_HOST APP_HOST API_PORT WEB_PORT DB_PORT TAKE_OVER_VHOSTS REHEARSAL_CLIENT_ID REHEARSAL_G8"
+SERVER_ENV_ALLOWED="REHEARSAL_DB REHEARSAL_REDIRECT_URIS REHEARSAL_INITIATE_LOGIN_URI OAUTH_PUBLIC_REGISTRATION W3A_GOOGLE W3A_EMAIL W3A_APPLE W3A_X JWKS_NEW_PINS_VERIFIED BUILD_MEM_FLOOR_MB P1_USERS_MIN PARTNER_ALLOWED_IP API_HOST APP_HOST API_PORT WEB_PORT DB_PORT TAKE_OVER_VHOSTS REHEARSAL_CLIENT_ID REHEARSAL_G8 INVOICE_SELLER_USER_ID"
 valid_sha() { [[ "$1" =~ ^[0-9a-f]{40}$ ]] || { echo "need a full 40-hex commit id"; exit 2; }; }
 # commit_signature <repo> <sha>: the kind of the commit's signature (e.g. "SSH SIGNATURE") from its gpgsig header (a
 # header line, before the first blank line: a "gpgsig" in the message does not count); fails when there is none.
@@ -176,7 +177,8 @@ case "$cmd" in
         case " $SERVER_ENV_ALLOWED " in *" ${a%%=*} "*) envs="$envs $a"; ovr+=("$a");; *) echo "override ${a%%=*} is not allowed on the server (allowed: $SERVER_ENV_ALLOWED)"; exit 2;; esac
       else args="$args $a"; fi
     done
-    # The same checks the server applies to the settings, the client id and TAKE_OVER_VHOSTS, here, before connecting.
+    # The same checks the server applies to the settings, the client id, the invoice seller and TAKE_OVER_VHOSTS, here,
+    # before connecting.
     chk=$(env -i PATH="$PATH" ${ovr[@]+"${ovr[@]}"} bash -c '. "$1/common.sh" && remote_overrides_check' _ "$PKG" 2>&1) \
       || { echo "refusing before connecting: $(printf '%s' "$chk" | tail -n 1)"; exit 2; }
     # 60-rehearsal.sh record <key> <seconds>: only a part measured by hand, and a whole number of seconds.

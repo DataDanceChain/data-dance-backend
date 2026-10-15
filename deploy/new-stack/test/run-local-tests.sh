@@ -126,6 +126,17 @@
 #      REHEARSAL_REDIRECT_URIS and no previous env stops. The backend named in .env must know every listed field and
 #      allowlist (its source as 10-build.sh unpacks it), else 20-env.sh stops before it writes. 3a. this checkout boots
 #      on the env with the allow-list (developerRegistration=allowlist:<n> on the money-path line).
+# The invoice seller (10-15), synthetic ids only:
+#   3. INVOICE_SELLER_USER_ID (20-env.sh): 'not set' without an override, a previous or an old env value; given on the
+#      call (written once), kept on a re-run (the file byte-identical), taken from the old env when neither has one,
+#      replaced by one given on the call; with the old env's INVOICE_SELLER_USER_ID, _EMAIL, _TAX_ID and _ADDRESS every
+#      name is classified (values not printed); refused before anything is written unless a lower-case canonical UUID
+#      (from the call, the previous env or the old env) and when .env.api and .env.rehearsal disagree; 40-up.sh's
+#      writer and check carry it into .env.api unchanged; when the backend source has src/constants/invoiceSeller.js,
+#      a WARN (not a failure) while the id is not set and an INFO when the old env gives INVOICE_SELLER_EMAIL (its
+#      value not printed); neither without that file.
+#   10d. remote.sh: INVOICE_SELLER_USER_ID allowlisted; only a lower-case canonical UUID passes, anything else (case,
+#      shape, empty, injection characters) is refused before connecting.
 # Every SSH test uses scratch COPIES of the scripts with a test local.env (loopback only): the package's own local.env,
 # if one exists, is never used to connect, and the real 1Password CLI is never called.
 # Containers and images: every docker run and docker build of this run carries the label ddcnew-localtest=<run id>
@@ -183,6 +194,8 @@ DEFAULTS_SEEN=$( (unset API_HOST APP_HOST API_PORT WEB_PORT DB_PORT; . "$PKG/com
 # The rehearsal client id this suite gives 20-env.sh (REHEARSAL_CLIENT_ID: required, no default; the api refuses tge and
 # tge-rehearsal at boot since backend fd2d4e9).
 CID=lt-partner-client
+# Two SYNTHETIC invoice seller ids (INVOICE_SELLER_USER_ID: a User id, a lower-case canonical UUID); no real account's.
+SID1=11111111-2222-4333-8444-555555555555; SID2=aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee; SID2_UPPER=AAAAAAAA-BBBB-4CCC-8DDD-EEEEEEEEEEEE
 # From here on a failing command never ends the run: every check reports PASS or FAIL itself, so a broken state (a
 # mutation, a slip in a refactoring) shows up as named FAIL lines, the summary is always printed, and the cleanup of
 # this run's containers always runs (EXIT trap).
@@ -579,6 +592,104 @@ printf 'API_IMAGE=ddc-backend:latest\n' > "$B/.env"
 stopcase "API_IMAGE that is not a ddcnew/backend:<sha12> tag" "$B" "API_IMAGE=ddc-backend:latest in $B/.env is not ddcnew/backend:<12 hex>[-infra]"
 printf 'API_IMAGE=ddcnew/backend:%s-infra\n' "$BE12" > "$B/.env"; mkbe "$BREPO/src/constants/partnerClient.js" "$BREPO/src/constants/developerRegistration.js"; lv20 "$B"
 [ "$RC" = 0 ] && grep -qF "PASS ddcnew/backend:$BE12-infra (source $B/src/backend-$BE12) knows every" "$B.out" && ok "an -infra image is checked against the same source" || { tail -3 "$B.out"; bad "-infra image (rc=$RC)"; }
+
+# The invoice seller (INVOICE_SELLER_USER_ID, 10-15): given on the call, kept on a re-run, taken from the old env when
+# neither has one; refused unless a lower-case canonical UUID; through 40-up.sh's writer unchanged; with a backend
+# source that has src/constants/invoiceSeller.js, a WARN while it is not set and an INFO when the old env gives
+# INVOICE_SELLER_EMAIL. Synthetic ids only (SID1, SID2).
+S="$T/live-seller"; mklive "$S" || bad "setup: the live stack (invoice seller)"
+grep -qx 'invoice seller: INVOICE_SELLER_USER_ID not set' "$S.out" && ! grep -q '^INVOICE_SELLER_USER_ID=' "$S/.env.rehearsal" \
+  && grep -qx 'PASS INVOICE_SELLER_USER_ID in the new file: none (not set)' "$S.out" \
+  && ok "invoice seller neither given nor in the previous or the old env: 'not set', no line written" || { tail -3 "$S.out"; bad "invoice seller not set on a first run"; }
+lv20 "$S" INVOICE_SELLER_USER_ID="$SID1"; cp -p "$S/.env.rehearsal" "$T/seller1.env.rehearsal"
+[ "$RC" = 0 ] && [ "$(grep -c '^INVOICE_SELLER_USER_ID=' "$S/.env.rehearsal")" = 1 ] && grep -qx "INVOICE_SELLER_USER_ID=\"$SID1\"" "$S/.env.rehearsal" \
+  && grep -qx "invoice seller: INVOICE_SELLER_USER_ID given on this call ($SID1)" "$S.out" && grep -qx "PASS INVOICE_SELLER_USER_ID in the new file: $SID1 (given on this call)" "$S.out" \
+  && grep -qF 'PASS partner settings kept from the previous env: 8; given on this call: none;' "$S.out" \
+  && ok "INVOICE_SELLER_USER_ID=<uuid> on the call: written once, reported as 'given on this call'; the partner settings stay kept" || { tail -3 "$S.out"; bad "invoice seller given on the call (rc=$RC)"; }
+up40 "$S"
+grep -qx "INVOICE_SELLER_USER_ID=\"$SID1\"" "$S/.env.api" && ( DDC_LOCAL_TEST=1; . "$PKG/common.sh"; env_api_matches_rehearsal "$S/.env.api" "$S/.env.rehearsal" ) \
+  && ok "40-up.sh step 1b: its writer carries INVOICE_SELLER_USER_ID into .env.api unchanged and its check (.env.api = .env.rehearsal but the pins) accepts it" \
+  || bad "INVOICE_SELLER_USER_ID through 40-up.sh's writer and check"
+lv20 "$S"
+[ "$RC" = 0 ] && cmp -s "$S/.env.rehearsal" "$T/seller1.env.rehearsal" && grep -qx "invoice seller: INVOICE_SELLER_USER_ID kept from the previous env ($SID1)" "$S.out" \
+  && grep -qx "PASS INVOICE_SELLER_USER_ID in the new file: $SID1 (kept from the previous env)" "$S.out" \
+  && ok "a re-run without it keeps the previous env's id ('kept from the previous env'; the file byte-identical)" || { tail -3 "$S.out"; bad "invoice seller kept on a re-run (rc=$RC)"; }
+n=0
+for v in "$SID2_UPPER" 11111111222243338444555555555555 "{$SID1}" "urn:uuid:$SID1" "$SID1-0" "${SID1%?}" lt-not-a-uuid "$SID1;id" "$SID1 " ''; do
+  n=$((n + 1)); cp -p "$S/.env.rehearsal" "$S.before"; lv20 "$S" INVOICE_SELLER_USER_ID="$v"
+  if [ "$RC" != 0 ] && grep -qF 'FAIL INVOICE_SELLER_USER_ID (given on this call) must be a lower-case canonical UUID' "$S.out" && cmp -s "$S/.env.rehearsal" "$S.before"; then :
+  else tail -3 "$S.out"; bad "INVOICE_SELLER_USER_ID='$v' was not refused before anything was written (rc=$RC)"; fi
+done
+ok "20-env.sh refuses $n INVOICE_SELLER_USER_ID values before it writes (upper case, no hyphens, braces, a URN, an extra group, one digit short, a word, a semicolon, a trailing blank, empty)"
+setv2 "$S/.env.api" INVOICE_SELLER_USER_ID "$SID2"
+stopcase ".env.api and .env.rehearsal disagree on the invoice seller" "$S" 'INVOICE_SELLER_USER_ID differs between .env.api .env.rehearsal (the previous env; values not printed)'
+lv20 "$S" INVOICE_SELLER_USER_ID="$SID2"
+[ "$RC" = 0 ] && grep -qx "INVOICE_SELLER_USER_ID=\"$SID2\"" "$S/.env.rehearsal" && grep -qx "invoice seller: INVOICE_SELLER_USER_ID given on this call ($SID2)" "$S.out" \
+  && ok "the same disagreement with INVOICE_SELLER_USER_ID on the call: the id given is written" || { tail -3 "$S.out"; bad "invoice seller given over a disagreement (rc=$RC)"; }
+up40 "$S"; setboth "$S" INVOICE_SELLER_USER_ID "$SID2_UPPER"
+stopcase "an invoice seller in the previous env that is not a lower-case canonical UUID" "$S" 'INVOICE_SELLER_USER_ID (kept from the previous env) must be a lower-case canonical UUID'
+# The WARN and the INFO: a backend whose source has src/constants/invoiceSeller.js (this checkout's own file when it has
+# one, else a stand-in), and the same backend without it. $OLD has no INVOICE_SELLER_EMAIL: no INFO here.
+SB="$T/live-seller-be"; mklive "$SB" || bad "setup: the live stack (invoice seller, backend source)"
+sellerbe() { # <dir> <1: the source has src/constants/invoiceSeller.js | 0: it has not>
+  local c="$1/src/backend-$BE12/src/constants"
+  rm -rf "$1/src"; mkdir -p "$c"; cp "$BREPO/src/constants/partnerClient.js" "$BREPO/src/constants/developerRegistration.js" "$c/"
+  if [ "$2" = 1 ] && [ -f "$BREPO/src/constants/invoiceSeller.js" ]; then cp "$BREPO/src/constants/invoiceSeller.js" "$c/"
+  elif [ "$2" = 1 ]; then printf '%s\n' '// local test stand-in for src/constants/invoiceSeller.js' > "$c/invoiceSeller.js"; fi
+  printf 'API_IMAGE=ddcnew/backend:%s\nWEB_IMAGE=ddcnew/web:tge-localtest\n' "$BE12" > "$1/.env"
+}
+SWARN="WARN INVOICE_SELLER_USER_ID is not set: set it to the account that receives payments for orders without a merchant and for wallet top-ups; until it is set those requests are refused. Give INVOICE_SELLER_USER_ID=<uuid> on a 20-env.sh call, then run 40-up.sh"
+SINFO="INFO INVOICE_SELLER_EMAIL (old env) is ignored: copied unchanged; INVOICE_SELLER_USER_ID sets the account"
+sellerbe "$SB" 1; lv20 "$SB"
+[ "$RC" = 0 ] && [ "$(grep -cxF "$SWARN" "$SB.out")" = 1 ] && [ "$(grep -c '^WARN INVOICE_SELLER' "$SB.out")" = 1 ] && ! grep -q '^INFO ' "$SB.out" && [ -f "$SB/.env.rehearsal" ] \
+  && ok "a backend with src/constants/invoiceSeller.js and no INVOICE_SELLER_USER_ID: exactly one WARN, this text (set it to the account that receives these payments; until then those requests are refused); no INFO without INVOICE_SELLER_EMAIL; the run still passes" \
+  || { grep -E '^(WARN|FAIL|INFO)' "$SB.out"; bad "the invoice seller WARN with invoiceSeller.js (rc=$RC)"; }
+sellerbe "$SB" 0; lv20 "$SB"
+[ "$RC" = 0 ] && ! grep -q '^WARN INVOICE_SELLER_USER_ID' "$SB.out" && grep -qx "ddcnew/backend:$BE12 has no src/constants/invoiceSeller.js: no invoice seller check" "$SB.out" \
+  && ok "a backend without src/constants/invoiceSeller.js: no WARN" || { grep -E '^(WARN|FAIL)' "$SB.out"; bad "the invoice seller WARN without invoiceSeller.js (rc=$RC)"; }
+sellerbe "$SB" 1; lv20 "$SB" INVOICE_SELLER_USER_ID="$SID1"
+[ "$RC" = 0 ] && ! grep -q '^WARN INVOICE_SELLER_USER_ID' "$SB.out" \
+  && grep -qx "PASS INVOICE_SELLER_USER_ID for ddcnew/backend:$BE12: $SID1 (given on this call)" "$SB.out" \
+  && ok "a backend with src/constants/invoiceSeller.js and the id given: PASS with the id, no WARN" || { grep -E '^(WARN|FAIL|PASS INVOICE)' "$SB.out"; bad "the invoice seller with invoiceSeller.js and the id (rc=$RC)"; }
+# An old env with all four INVOICE_SELLER_* names: every name classified; the id taken from it (first run), kept (re-run),
+# replaced by one given on the call; an old env whose id is not a lower-case UUID stops the run before it writes.
+SO="$T/seller-old"; rm -rf "$SO"; mkdir -p "$SO/ddcnew"; cp "$OLD" "$SO/old.env"
+printf '%s\n' "INVOICE_SELLER_USER_ID=$SID2" 'INVOICE_SELLER_EMAIL=billing@example.org' 'INVOICE_SELLER_TAX_ID=LT-TAX-0001' >> "$SO/old.env"
+so20() { # <old env> [NAME=value ...]: a first or later 20-env.sh run on $SO/ddcnew; output in $SO/out, status in RC
+  local o="$1"; shift; RC=0
+  env DDC_LOCAL_TEST=1 NEW_DIR="$SO/ddcnew" OLD_ENV="$o" FE_ENV_TGE="$T/env.tge" REHEARSAL_CLIENT_ID="$CID" REHEARSAL_REDIRECT_URIS="$RR_T" "$@" bash "$PKG/20-env.sh" > "$SO/out" 2>&1 || RC=$?
+}
+so20 "$SO/old.env"; SOE="$SO/ddcnew/.env.rehearsal"
+[ "$RC" = 0 ] && grep -q '^PASS every name with a value is classified' "$SO/out" && grep -qx "invoice seller: INVOICE_SELLER_USER_ID copied from the old env ($SID2)" "$SO/out" \
+  && [ "$(grep -c '^INVOICE_SELLER_USER_ID=' "$SOE")" = 1 ] && grep -qx "INVOICE_SELLER_USER_ID=\"$SID2\"" "$SOE" \
+  && grep -qx 'INVOICE_SELLER_EMAIL=billing@example.org' "$SOE" && grep -qx 'INVOICE_SELLER_TAX_ID=LT-TAX-0001' "$SOE" && [ "$(grep -c '^INVOICE_SELLER_ADDRESS=' "$SOE")" = 1 ] \
+  && ! grep -qF -e billing@example.org -e LT-TAX-0001 "$SO/out" \
+  && ok "an old env with INVOICE_SELLER_USER_ID, _EMAIL, _TAX_ID and _ADDRESS: every name classified; the id taken from it ('copied from the old env', written once); e-mail, tax id and address copied unchanged and not printed" \
+  || { grep -E '^(FAIL|invoice seller)' "$SO/out"; bad "an old env with the four INVOICE_SELLER_* names (rc=$RC)"; }
+cp -p "$SOE" "$SO/reh1"; so20 "$SO/old.env"
+[ "$RC" = 0 ] && cmp -s "$SOE" "$SO/reh1" && grep -qx "invoice seller: INVOICE_SELLER_USER_ID kept from the previous env ($SID2)" "$SO/out" \
+  && ok "its re-run: 'kept from the previous env', the same file" || { grep -E '^(FAIL|invoice seller)' "$SO/out"; bad "re-run with the old env's invoice seller (rc=$RC)"; }
+# INVOICE_SELLER_EMAIL in the old env, with a backend source that has src/constants/invoiceSeller.js: one INFO (it is
+# ignored), the value neither printed nor changed; without that file no INFO. Then back to no backend source.
+sellerbe "$SO/ddcnew" 1; so20 "$SO/old.env"
+[ "$RC" = 0 ] && [ "$(grep -cxF "$SINFO" "$SO/out")" = 1 ] && ! grep -q '^WARN INVOICE_SELLER_USER_ID' "$SO/out" && ! grep -qF billing@example.org "$SO/out" \
+  && grep -qx 'INVOICE_SELLER_EMAIL=billing@example.org' "$SOE" && grep -q '^PASS every name with a value is classified' "$SO/out" \
+  && ok "INVOICE_SELLER_EMAIL in the old env and a backend with src/constants/invoiceSeller.js: one INFO that it is ignored; copied unchanged, not printed; the run passes" \
+  || { grep -E '^(FAIL|WARN|INFO)' "$SO/out"; bad "the INVOICE_SELLER_EMAIL INFO (rc=$RC)"; }
+sellerbe "$SO/ddcnew" 0; so20 "$SO/old.env"
+[ "$RC" = 0 ] && ! grep -q '^INFO INVOICE_SELLER_EMAIL' "$SO/out" && grep -qx 'INVOICE_SELLER_EMAIL=billing@example.org' "$SOE" \
+  && ok "the same old env and a backend without src/constants/invoiceSeller.js: no INFO" || { grep -E '^(FAIL|WARN|INFO)' "$SO/out"; bad "the INVOICE_SELLER_EMAIL INFO without invoiceSeller.js (rc=$RC)"; }
+rm -rf "$SO/ddcnew/src" "$SO/ddcnew/.env"
+so20 "$SO/old.env" INVOICE_SELLER_USER_ID="$SID1"
+[ "$RC" = 0 ] && [ "$(grep -c '^INVOICE_SELLER_USER_ID=' "$SOE")" = 1 ] && grep -qx "INVOICE_SELLER_USER_ID=\"$SID1\"" "$SOE" && grep -qx "invoice seller: INVOICE_SELLER_USER_ID given on this call ($SID1)" "$SO/out" \
+  && ok "an id given on the call replaces the old env's (the old line dropped, the id written once)" || { grep -E '^(FAIL|invoice seller)' "$SO/out"; bad "invoice seller given over the old env's (rc=$RC)"; }
+rm -rf "$SO/ddcnew"; mkdir -p "$SO/ddcnew"; cp "$OLD" "$SO/old-bad.env"; printf '%s\n' "INVOICE_SELLER_USER_ID=$SID2_UPPER" >> "$SO/old-bad.env"
+so20 "$SO/old-bad.env"
+[ "$RC" != 0 ] && grep -qF 'FAIL INVOICE_SELLER_USER_ID (copied from the old env) must be a lower-case canonical UUID' "$SO/out" && [ ! -e "$SOE" ] \
+  && ok "an old env whose INVOICE_SELLER_USER_ID is not a lower-case canonical UUID stops 20-env.sh before it writes" || { grep -E '^FAIL' "$SO/out"; bad "an invalid invoice seller in the old env (rc=$RC)"; }
+so20 "$SO/old-bad.env" INVOICE_SELLER_USER_ID="$SID1"
+[ "$RC" = 0 ] && grep -qx "INVOICE_SELLER_USER_ID=\"$SID1\"" "$SOE" && ! grep -qF "$SID2_UPPER" "$SOE" \
+  && ok "the same old env with INVOICE_SELLER_USER_ID=<uuid> on the call: the id given is written, the old value is not" || { grep -E '^FAIL' "$SO/out"; bad "an invalid old-env invoice seller overridden (rc=$RC)"; }
 
 echo; echo "== 3a. the backend's own boot code (src/server.js of this checkout) on the env 20-env.sh writes"
 # test/helpers/backend-boot.js runs src/server.js with every boot check, src/app.js stubbed (nothing listens or
@@ -1573,6 +1684,23 @@ done
 rc=0; out=$(DDC_APPROVED=yes bash "$R/remote.sh" run 60-rehearsal.sh restore REHEARSAL_G8=maybe 2>&1 < /dev/null) || rc=$?
 [ "$rc" = 2 ] && printf '%s\n' "$out" | grep -q '^refusing before connecting: FAIL REHEARSAL_G8 must be scrub or keep' && ! printf '%s\n' "$out" | grep -q STUB \
   && ok "60-rehearsal.sh restore REHEARSAL_G8=scrub or keep: allowlisted and passed through; REHEARSAL_G8=maybe refused before connecting" || bad "REHEARSAL_G8=maybe: rc=$rc $out"
+# INVOICE_SELLER_USER_ID (20-env.sh, 10-15): allowlisted; only a lower-case canonical UUID passes, everything else is
+# refused before connecting (by common.sh invoice_seller_id_check, or as an unsafe argument).
+out=$(DDC_APPROVED=yes bash "$R/remote.sh" run 20-env.sh "INVOICE_SELLER_USER_ID=$SID1" 2>&1 < /dev/null || true)
+printf '%s\n' "$out" | grep -q STUB && ok "INVOICE_SELLER_USER_ID=<lower-case canonical UUID> (20-env.sh) is allowlisted and passes through to the (stubbed) connection" || bad "INVOICE_SELLER_USER_ID=$SID1 refused: $out"
+out=$(DDC_APPROVED=yes bash "$R/remote.sh" run 20-env.sh REHEARSAL_CLIENT_ID=lt-partner-client "INVOICE_SELLER_USER_ID=$SID2" 2>&1 < /dev/null || true)
+printf '%s\n' "$out" | grep -q STUB || bad "INVOICE_SELLER_USER_ID with REHEARSAL_CLIENT_ID refused: $out"
+sel_bad=0; n=0
+for v in "$SID2_UPPER" "AAAAAAAA-bbbb-4ccc-8ddd-eeeeeeeeeeee" 11111111222243338444555555555555 "$SID1-0" "${SID1%?}" "urn:uuid:$SID1" "$SID1,$SID2" lt-not-a-uuid ''; do
+  n=$((n + 1)); rc=0; out=$(DDC_APPROVED=yes bash "$R/remote.sh" run 20-env.sh "INVOICE_SELLER_USER_ID=$v" 2>&1 < /dev/null) || rc=$?
+  [ "$rc" = 2 ] && printf '%s\n' "$out" | grep -q '^refusing before connecting: FAIL INVOICE_SELLER_USER_ID (given on this call) must be a lower-case canonical UUID' && ! printf '%s\n' "$out" | grep -q STUB \
+    || { sel_bad=1; bad "remote.sh run 20-env.sh INVOICE_SELLER_USER_ID='$v': rc=$rc $out"; }
+done
+for v in "$SID1;id" "$SID1\$(id)" "$SID1\`id\`" "$SID1${NL}id" "$SID1${CR}" "$SID1 x" "{$SID1}"; do
+  n=$((n + 1)); rc=0; out=$(DDC_APPROVED=yes bash "$R/remote.sh" run 20-env.sh "INVOICE_SELLER_USER_ID=$v" 2>&1 < /dev/null) || rc=$?
+  [ "$rc" = 2 ] && [ "$out" = "unsafe argument" ] || { sel_bad=1; bad "remote.sh run 20-env.sh INVOICE_SELLER_USER_ID=$(printf '%q' "$v"): rc=$rc $out"; }
+done
+[ "$sel_bad" = 0 ] && ok "remote.sh run refuses $n INVOICE_SELLER_USER_ID values before connecting: upper or mixed case, no hyphens, an extra group, one digit short, a URN, two ids, a word, empty (common.sh's rule), and ;, \$(), backticks, a newline, a carriage return, a blank, braces (unsafe argument)"
 # 60-rehearsal.sh record <key> <seconds> (a window part measured by hand): an approved write; the key from the allowlist
 # (common.sh REHEARSAL_HAND_KEYS) and a whole number of seconds, checked before connecting.
 out=$(bash "$R/remote.sh" run 60-rehearsal.sh record offsite_copy 600 2>&1 < /dev/null || true)

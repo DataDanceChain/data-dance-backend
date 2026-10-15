@@ -237,13 +237,23 @@ client_id_record() {
   settings_write "$REHEARSAL_CLIENT_ID"
   say "REHEARSAL_CLIENT_ID=$REHEARSAL_CLIENT_ID recorded in $SETTINGS_FILE: later runs reuse it"
 }
+# The invoice seller (20-env.sh writes it as INVOICE_SELLER_USER_ID): the account that receives payments for orders
+# without a merchant and for wallet top-ups. A User id, so a lower-case canonical UUID (8-4-4-4-12 hex digits) and
+# nothing else; an empty value is refused as well. The value is not printed here (20-env.sh prints the id once it
+# passed).
+invoice_seller_id_check() { # <id> <where it comes from>
+  local re='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+  [[ "$1" =~ $re ]] || die "INVOICE_SELLER_USER_ID ($2) must be a lower-case canonical UUID (8-4-4-4-12 hex digits): the account's User id, read from the database"
+}
 # KEY=value lines of the effective settings (remote.sh preflight prepends them to the piped 00-preflight.sh).
 settings_env_lines() { local n; check_settings; for n in $SETTINGS_NAMES; do printf '%s=%s\n' "$n" "${!n}"; done; }
-# remote.sh run, before it connects: the settings and the client id given as overrides, checked with the rules the
-# server applies (check_settings, client_id_check). The server checks them again, with its record.
+# remote.sh run, before it connects: the settings, the client id and the invoice seller given as overrides, checked with
+# the rules the server applies (check_settings, client_id_check, invoice_seller_id_check). The server checks them again,
+# with its record.
 remote_overrides_check() {
   check_settings
   if [ -n "$OVR_REHEARSAL_CLIENT_ID" ]; then client_id_check "$OVR_REHEARSAL_CLIENT_ID"; fi
+  if [ -n "${INVOICE_SELLER_USER_ID+x}" ]; then invoice_seller_id_check "$INVOICE_SELLER_USER_ID" "given on this call"; fi
   case "${REHEARSAL_G8:-}" in ""|scrub|keep) ;; *) die "REHEARSAL_G8 must be scrub or keep (60-rehearsal.sh restore, gate G8)";; esac
 }
 

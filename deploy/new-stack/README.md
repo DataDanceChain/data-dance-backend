@@ -55,6 +55,26 @@ The partner's redirect URI(s), start-login URI, the allow-list and the client id
 (`.env.api`, `.env.rehearsal`) on every re-run unless the call gives them; the issuer cannot change without `API_HOST=`.
 The first run needs `REHEARSAL_REDIRECT_URIS` (no placeholder default). Details: [APPROVAL.md](APPROVAL.md) section 2.
 
+## Invoice seller
+
+Set `INVOICE_SELLER_USER_ID` to the account that receives payments for orders without a merchant and for wallet
+top-ups; until it is set those requests are refused. Give it on the `20-env.sh` call ([APPROVAL.md](APPROVAL.md)
+section 4, step 9) by appending `INVOICE_SELLER_USER_ID=<uuid>`, then run `40-up.sh` so the api is recreated with it:
+
+    DDC_APPROVED=yes ./remote.sh run 20-env.sh INVOICE_SELLER_USER_ID=<uuid>
+    DDC_APPROVED=yes ./remote.sh run 40-up.sh
+
+- The value is the account's User id, a lower-case canonical UUID (8-4-4-4-12 hex digits). The operator reads it from
+  the database; it is never written into this repository.
+- `remote.sh` refuses any other shape (upper case, braces, an empty value, ...) before it connects, and `20-env.sh`
+  checks it again before it writes anything.
+- Later runs keep it from the previous env, like the partner settings; when neither the call nor the previous env has
+  one, the old `backend.env`'s value is taken (checked the same way). The run prints where the id came from
+  (`given on this call`, `kept from the previous env`, `copied from the old env` or `not set`) and the id itself.
+- When the source of the image that `10-build.sh` built has `src/constants/invoiceSeller.js`, `20-env.sh` prints a
+  `WARN` while the id is not set (not a failure), and an `INFO` when the old `backend.env` gives `INVOICE_SELLER_EMAIL`:
+  that setting is ignored (copied unchanged).
+
 ## Backend source
 
 By default `10-build.sh` builds the backend from a clean `git fetch --depth 1` of this public repository at the pinned
