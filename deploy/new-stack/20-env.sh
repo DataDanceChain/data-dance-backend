@@ -42,7 +42,8 @@
 # OLD-STACK INTEGRITY: containers and old files are fingerprinted at start and end (common.sh old_snapshot_*).
 #
 # Prints: parse statistics, the variable-NAME diff against the old file, the names it set, the db_target line and
-# sha256 comparisons (match/differ). Never a value. Multi-line quoted values, comments, blank lines, duplicate
+# sha256 comparisons (match/differ). Never a secret value (the client id and the invoice seller's account id are not
+# secrets and are printed). Multi-line quoted values, comments, blank lines, duplicate
 # names and `export` prefixes in the old file are handled; values that are kept are copied byte for byte.
 #
 # REQUIRED, no default: REHEARSAL_CLIENT_ID=<the partner's client id>, written as SSO_TGE_CLIENT_ID. Since backend fd2d4e9
@@ -71,6 +72,15 @@
 #        web3auth-auth0-twitter-sapphire]: no "-mainnet" suffix (the devnet names end in "-sapphire-devnet"; a real
 #       Mainnet e-mail login carried web3auth-auth0-email-passwordless-sapphire on 2026-10-14). Override one only
 #       when a real Mainnet token names it differently.
+#   INVOICE_SELLER_USER_ID [none]  the account that receives payments for orders without a merchant and for wallet
+#       top-ups; until it is set those requests are refused. A User id, so a lower-case canonical UUID (common.sh
+#       invoice_seller_id_check; remote.sh applies it before connecting); anything else, an empty value included, stops
+#       the run before it writes. The operator reads it from the database; it is never written into the repository.
+#       Without it on the call the previous env's value is kept (like the partner settings: .env.api and .env.rehearsal
+#       must agree), else the old env's value is taken (checked the same way), else it is not set. The id is printed (it
+#       is not a secret). When the source of the image named in $NEW_DIR/.env has src/constants/invoiceSeller.js: a WARN
+#       while it is not set (not a failure), and an INFO when the old env gives INVOICE_SELLER_EMAIL, which is ignored
+#       (copied unchanged, not printed).
 # Fixed (Sloan, 2026-10-14): every partner field (SSO_TGE_STATUS_FIELDS = the backend's whole STATUS_FIELD_CATALOG), the
 #   referral bind write on (SSO_TGE_REFERRAL_BIND=true), SSO_DEVELOPER_REGISTRATION=allowlist. A backend before PR #64
 #   (main 66bf00f; the earlier release images among them) refuses to boot on allowlist, and one without a listed field
@@ -190,8 +200,12 @@ is_signing_key() {
 CRED_ALLOWED="JWT_SECRET SSO_SESSION_SECRET SSO_TGE_CLIENT_SECRET_SHA256 APNS_KEY_ID PASS_TYPE_ID OPS_ADMIN_PASSWORD OPS_ADMIN_TOKEN_EXPIRES"
 # KEPT_PLAIN: the known non-secret names of the old backend.env, copied unchanged.
 # A new name in backend.env must be added here (or to a list above) with a reason before the rehearsal is built.
+# INVOICE_SELLER_*: the invoice seller's account id, its billing address, e-mail and tax id (invoice data; none is a
+# credential), listed so an old env that carries them passes the classification. INVOICE_SELLER_USER_ID with a value is
+# written by this script; INVOICE_SELLER_EMAIL is copied unchanged and ignored (an INFO says so; header).
 KEPT_PLAIN="APNS_TEAM_ID DDC_CHAIN_ID DDC_CHAIN_RPC_URL DISABLE_REFERRAL_REWARDS_FEATURES GEMINI_DEFAULT_MODEL
-  INVOICE_SELLER_ADDRESS JWT_EXPIRES_IN METADATA_BASE_URL NODE_ENV OPS_ADMIN_USERNAME PORT TEST_USER_EMAIL
+  INVOICE_SELLER_ADDRESS INVOICE_SELLER_EMAIL INVOICE_SELLER_TAX_ID INVOICE_SELLER_USER_ID JWT_EXPIRES_IN
+  METADATA_BASE_URL NODE_ENV OPS_ADMIN_USERNAME PORT TEST_USER_EMAIL
   X_API_URL X_MAX_REQUESTS_PER_WINDOW X_OAUTH_CALLBACK_URL X_RATE_LIMIT_WINDOW"
 KEPT_PLAIN=$(printf '%s' "$KEPT_PLAIN" | tr -s ' \n' '  ')
 # A copied value must not carry a credential whatever its name: user:password@ in a URL, a PEM private key, or a
@@ -272,6 +286,14 @@ for nv in "PUBLIC_BASE_URL API_HOST" "API_BASE_URL API_HOST" "APP_PUBLIC_URL APP
   [ "$PREV_SET" = 0 ] || [ "$PREV_VAL" = "https://${!hv}" ] \
     || die "$n would change from the previous env's $PREV_VAL to https://${!hv} ($hv: $SETTINGS_SOURCE): the partner checks the issuer and the consent origin; pass $hv= on this call to change it on purpose"
 done
+# The invoice seller (header): given on this call, else kept from the previous env; the old env's value is looked at
+# later (it is read after run_begin), only when neither has one. SELLER_SRC says where the value came from.
+kept INVOICE_SELLER_USER_ID INVOICE_SELLER_USER_ID ""; SELLER_ID="$KV"
+case "$KS" in
+  override*) SELLER_SRC="given on this call";;
+  *) if [ -n "$SELLER_ID" ]; then SELLER_SRC="kept from the previous env"; else SELLER_SRC="not set"; fi;;
+esac
+[ "$SELLER_SRC" = "not set" ] || invoice_seller_id_check "$SELLER_ID" "$SELLER_SRC"
 if [ "$DEV_EMAILS_STDIN" = 1 ] && is_set REHEARSAL_DEVELOPER_ALLOWED_EMAILS; then
   die "--developer-emails-stdin and REHEARSAL_DEVELOPER_ALLOWED_EMAILS both given: give the list once"
 fi
@@ -307,6 +329,12 @@ step "old env file: $OLD_ENV"
 stats=$(envparse stats "$OLD_ENV"); say "$stats"
 case "$stats" in *"unparsed=0 unterminated=0"*) pass "old file parses cleanly";; *) die "old file has unparsed lines or an unterminated quote; fix by hand first";; esac
 OLD_NAMES=$(envparse names "$OLD_ENV" | sort -u | tr '\n' ' ')
+# The invoice seller, when neither this call nor the previous env gives one: the old env's value.
+if [ "$SELLER_SRC" = "not set" ] && inlist INVOICE_SELLER_USER_ID "$OLD_NAMES"; then
+  SELLER_ID=$(getv "$OLD_ENV" INVOICE_SELLER_USER_ID)
+  if [ -n "$SELLER_ID" ]; then SELLER_SRC="copied from the old env"; invoice_seller_id_check "$SELLER_ID" "$SELLER_SRC"; fi
+fi
+say "invoice seller: INVOICE_SELLER_USER_ID $SELLER_SRC${SELLER_ID:+ ($SELLER_ID)}"
 
 # ---------------------------------------------------------------------------
 step "secrets (generated on this host, reused on re-runs, never printed)"
@@ -386,6 +414,9 @@ setv SSO_DEVELOPER_REGISTRATION allowlist
 setv SSO_DEVELOPER_ALLOWED_EMAILS "$DEV_EMAILS"
 setv OAUTH_PUBLIC_REGISTRATION_ENABLED "$OAUTH_PUBLIC_REGISTRATION"
 setv DISBURSEMENT_PAUSED true
+# The invoice seller (header): written here whenever it has a value (given, kept or copied from the old env), so a re-run
+# that keeps it writes the same file; the old env's own line is then dropped.
+if [ -n "$SELLER_ID" ]; then setv INVOICE_SELLER_USER_ID "$SELLER_ID"; fi
 # 5.0: SMTP_* emptied (no mail from the rehearsal), and every other third-party credential that could reach real
 # users (X, Google Wallet) or spend production quota (Gemini, Mapbox) or authenticate a partner (disbursement keys).
 BLANKED=""
@@ -430,6 +461,17 @@ else
   grep -qE "Object\.freeze\(\[[^]]*'allowlist'" "$bc/developerRegistration.js" \
     || die "$img predates backend PR #64 (main 66bf00f): it refuses to boot on SSO_DEVELOPER_REGISTRATION=allowlist; build a release that contains it"
   pass "$img (source $NEW_DIR/src/backend-$be) knows every SSO_TGE_STATUS_FIELDS name ($(csv_items "$STATUS_FIELDS" | grep -c . || true) of $(printf '%s\n' "$catalog" | grep -c . || true) in its catalog) and SSO_DEVELOPER_REGISTRATION=allowlist"
+  # The invoice seller (header), for a source with src/constants/invoiceSeller.js: a WARN while INVOICE_SELLER_USER_ID
+  # is not set; an INFO when the old env gives INVOICE_SELLER_EMAIL (its value is not printed).
+  if [ ! -f "$bc/invoiceSeller.js" ]; then say "$img has no src/constants/invoiceSeller.js: no invoice seller check"
+  else
+    if [ "$SELLER_SRC" = "not set" ]; then
+      warn "INVOICE_SELLER_USER_ID is not set: set it to the account that receives payments for orders without a merchant and for wallet top-ups; until it is set those requests are refused. Give INVOICE_SELLER_USER_ID=<uuid> on a 20-env.sh call, then run 40-up.sh"
+    else pass "INVOICE_SELLER_USER_ID for $img: $SELLER_ID ($SELLER_SRC)"; fi
+    if inlist INVOICE_SELLER_EMAIL "$OLD_NAMES" && [ -n "$(getv "$OLD_ENV" INVOICE_SELLER_EMAIL)" ]; then
+      say "INFO INVOICE_SELLER_EMAIL (old env) is ignored: copied unchanged; INVOICE_SELLER_USER_ID sets the account"
+    fi
+  fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -500,6 +542,12 @@ done
 [ "$(getv "$CHK" SSO_DEVELOPER_REGISTRATION)" = allowlist ] && [ "$(getv "$CHK" SSO_TGE_STATUS_FIELDS)" = "$STATUS_FIELDS" ] && [ "$(getv "$CHK" SSO_TGE_REFERRAL_BIND)" = true ] \
   || die "SSO_DEVELOPER_REGISTRATION, SSO_TGE_STATUS_FIELDS or SSO_TGE_REFERRAL_BIND in the new file is not the value set above"
 pass "partner settings kept from the previous env: $kept_n; given on this call:${given:- none}; no previous value:${fresh:- none}. SSO_TGE_STATUS_FIELDS: all $(csv_items "$STATUS_FIELDS" | grep -c . || true) fields, SSO_TGE_REFERRAL_BIND=true, SSO_DEVELOPER_REGISTRATION=allowlist ($DEV_EMAILS_N listed)"
+# The invoice seller (header): the new file holds the value resolved above (a lower-case canonical UUID), or none.
+sv=$(getv "$CHK" INVOICE_SELLER_USER_ID)
+[ "$sv" = "$SELLER_ID" ] || die "INVOICE_SELLER_USER_ID in the new file is not the value resolved above ($SELLER_SRC)"
+[ -z "$sv" ] || invoice_seller_id_check "$sv" "in the new file"
+unset sv
+pass "INVOICE_SELLER_USER_ID in the new file: ${SELLER_ID:-none} ($SELLER_SRC)"
 c1=$(grep -c '^DISBURSEMENT_PAUSED="true"$' "$CHK" || true); c2=$(grep -cE '^BSC_PAYOUT_PRIVATE_KEY=' "$CHK" || true)
 [ "$c1" = 1 ] && [ "$c2" = 0 ] && pass "payouts off: DISBURSEMENT_PAUSED=true count=$c1, BSC_PAYOUT_PRIVATE_KEY count=$c2" || die "payout check failed ($c1/$c2)"
 step "rehearsal credential policy (names only)"
