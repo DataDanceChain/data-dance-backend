@@ -142,10 +142,14 @@
 # Backend PR #55's ops settings (10-16), synthetic values only:
 #   3b. OPS_SHARED_LOGIN, OPS_USER_TOKEN_TTL_SEC, OPS_ADMIN_URL, PLANET_MANAGER_API_HOSTS and STAFF_UNLOCK_TOKEN: never
 #      written by 20-env.sh (absent or empty in the old env: absent or empty in the new file, "unset" on its PASS line);
-#      given by the old env in the backend's shape, each is classified and copied unchanged, also through 40-up.sh's
+#      given by the old env in an accepted shape, each is classified and copied unchanged, also through 40-up.sh's
 #      writer, and STAFF_UNLOCK_TOKEN (64 lower-case hex, a declared credential) passes the hex-key check and is never
-#      printed; every other shape (on/off only, 300..43200, an https origin, host names, 64 lower-case hex) stops the run
-#      before .env.rehearsal is installed, naming the setting and never its value.
+#      printed; every other shape (on/off only, 300..43200, an https origin with a host name and a port up to 65535,
+#      host names, 64 lower-case hex; one line, no trailing comment) stops the run before .env.rehearsal is installed,
+#      naming the setting and never its value. common.sh ops_value_refused on every case of
+#      test/helpers/ops-shape-cases.sh, and every OPS_ADMIN_URL it accepts read as an https origin by node's URL parser
+#      with the backend's opsAdminUrl() rules (the kit accepts a stricter subset of what the backend reads).
+#   3c. the same ops-shape cases in ubuntu:jammy (bash 5.1, glibc regex; LC_ALL=C from common.sh, as on the server).
 # Every SSH test uses scratch COPIES of the scripts with a test local.env (loopback only): the package's own local.env,
 # if one exists, is never used to connect, and the real 1Password CLI is never called.
 # Containers and images: every docker run and docker build of this run carries the label ddcnew-localtest=<run id>
@@ -908,10 +912,13 @@ r1=$RC; l1=$(grep '^PASS ops' "$OD/out"); ops20 edge2 'OPS_USER_TOKEN_TTL_SEC=43
   || { printf '%s\n' "$l1"; grep -E '^(FAIL|PASS ops)' "$OD/out"; bad "ops settings at their limits or empty (rc=$r1/$RC)"; }
 # Each case: <old env line>|<the reason 20-env.sh gives>. The run must print exactly one FAIL line, exactly this one (so no
 # value, however short, is in it), and neither the output nor the server-side log may hold NAME= or a value of 8 or more
-# characters.
+# characters (any line of it, for a value of several lines). These run the whole script; every shape case of
+# common.sh ops_value_refused is in test/helpers/ops-shape-cases.sh (below, and on ubuntu:jammy in 3c).
 R_ON='not on or off'; R_TTL='not a whole number of seconds from 300 to 43200'
 R_URL='not an https origin (https://<host>[:<port>], no user, path, query or fragment)'; R_HEX='not 64 lower-case hex characters'
-n=0
+R_NL='a line break or carriage return'; R_PORT='a port above 65535'; R_NUM='an IP address or a numeric last label'; R_XN='a punycode (xn--) label'
+OPS_DIE_TAIL="(values not printed; accepted shapes: header OPS SETTINGS) - their only source is the old env, which is production's own backend.env: correcting a value there changes production's file and needs its own approval; then re-run"
+n=0; f0=$fails; CR=$'\r'; NL=$'\n'
 for c in "OPS_SHARED_LOGIN=of|$R_ON" "OPS_SHARED_LOGIN=OFF|$R_ON" "OPS_SHARED_LOGIN=\"off \"|$R_ON" "OPS_SHARED_LOGIN=false|$R_ON" \
   "OPS_USER_TOKEN_TTL_SEC=299|$R_TTL" "OPS_USER_TOKEN_TTL_SEC=43201|$R_TTL" "OPS_USER_TOKEN_TTL_SEC=12h|$R_TTL" "OPS_USER_TOKEN_TTL_SEC=0300|$R_TTL" \
   "OPS_USER_TOKEN_TTL_SEC=-1|$R_TTL" "OPS_ADMIN_URL=http://admin.example.org|$R_URL" "OPS_ADMIN_URL=https://admin.example.org/ops|$R_URL" \
@@ -920,19 +927,24 @@ for c in "OPS_SHARED_LOGIN=of|$R_ON" "OPS_SHARED_LOGIN=OFF|$R_ON" "OPS_SHARED_LO
   'PLANET_MANAGER_API_HOSTS=api.example.org/x|entry #1 is not a host name' 'PLANET_MANAGER_API_HOSTS=api.example.org:443|entry #1 is not a host name' \
   'PLANET_MANAGER_API_HOSTS="api.example.org,lt host.example.org"|entry #2 is not a host name' 'PLANET_MANAGER_API_HOSTS=","|no host name' \
   "STAFF_UNLOCK_TOKEN=$(printf '%s' "$OPS_TOK" | tr 'a-f' 'A-F')|$R_HEX" "STAFF_UNLOCK_TOKEN=0x$OPS_TOK|$R_HEX" "STAFF_UNLOCK_TOKEN=${OPS_TOK%?}|$R_HEX" \
-  "STAFF_UNLOCK_TOKEN=${OPS_TOK}0|$R_HEX" "STAFF_UNLOCK_TOKEN=\"$OPS_TOK \"|$R_HEX" "STAFF_UNLOCK_TOKEN=lt-not-hex-staff-unlock|$R_HEX"; do
+  "STAFF_UNLOCK_TOKEN=${OPS_TOK}0|$R_HEX" "STAFF_UNLOCK_TOKEN=\"$OPS_TOK \"|$R_HEX" "STAFF_UNLOCK_TOKEN=lt-not-hex-staff-unlock|$R_HEX" \
+  "OPS_SHARED_LOGIN=\"on\"   # default on|$R_ON" "OPS_SHARED_LOGIN=off$CR|$R_NL" "OPS_ADMIN_URL=http://localhost:8080|$R_URL" \
+  "OPS_ADMIN_URL=https://admin.example.org:99999|$R_PORT" "OPS_ADMIN_URL=https://192.0.2.999|$R_NUM" "OPS_ADMIN_URL=https://xn--a.org|$R_XN" \
+  "PLANET_MANAGER_API_HOSTS=\"lt-a.example.org${NL}lt-b.example.org\"|$R_NL"; do
   n=$((n + 1)); line=${c%|*}; why=${c##*|}; nm=${line%%=*}; val=${line#*=}; val=${val#\"}; val=${val%\"}; ops20 "bad$n" "$line"
   if [ "$RC" != 0 ] && [ "$(grep -c '^FAIL' "$OD/out")" = 1 ] \
-     && grep -qxF "FAIL ops setting(s) of backend PR #55 in a shape the backend would not read as meant: $nm($why) - correct them in the old env (values not printed), then re-run" "$OD/out" \
+     && grep -qxF "FAIL ops setting(s) of backend PR #55 in a shape this script does not copy: $nm($why) $OPS_DIE_TAIL" "$OD/out" \
      && [ ! -e "$OD/ddcnew/.env.rehearsal" ] && [ ! -e "$OD/ddcnew/.env.rehearsal.tmp" ] \
      && [ "$(cat "$OD/out" "$OD"/ddcnew/logs/*.log 2>/dev/null | grep -cF -- "$nm=" || true)" = 0 ] \
      && { [ "${#val}" -lt 8 ] || [ "$(cat "$OD/out" "$OD"/ddcnew/logs/*.log 2>/dev/null | grep -cF -- "$val" || true)" = 0 ]; }; then :
   else grep '^FAIL' "$OD/out"; bad "$nm: the value of case #$n was not refused before .env.rehearsal was installed, or was printed (rc=$RC)"; fi
 done
-ok "20-env.sh refuses $n ops setting values before .env.rehearsal is installed, naming the setting, never printing the value: OPS_SHARED_LOGIN not on/off (a typo, upper case, a trailing blank, false), OPS_USER_TOKEN_TTL_SEC out of 300..43200 or not a whole number, OPS_ADMIN_URL not an https origin (http, a path, a query, a fragment, no scheme, a user), PLANET_MANAGER_API_HOSTS not host names (a scheme, a path, a port, a blank inside, none), STAFF_UNLOCK_TOKEN not 64 lower-case hex (upper case, 0x, 63 and 65 characters, a trailing blank, a word)"
+[ "$fails" != "$f0" ] || ok "20-env.sh refuses $n ops setting values before .env.rehearsal is installed, naming the setting and the old env as their only source, never printing the value: OPS_SHARED_LOGIN not on/off (a typo, upper case, a trailing blank, false, a trailing comment, a CRLF line end), OPS_USER_TOKEN_TTL_SEC out of 300..43200 or not a whole number, OPS_ADMIN_URL not an https origin (http, http://localhost, a path, a query, a fragment, no scheme, a user), a port above 65535, an IP address, a punycode label, PLANET_MANAGER_API_HOSTS not host names (a scheme, a path, a port, a blank inside, none, two lines), STAFF_UNLOCK_TOKEN not 64 lower-case hex (upper case, 0x, 63 and 65 characters, a trailing blank, a word)"
+if bash "$PKG/test/helpers/ops-shape-cases.sh" "$PKG" --node > "$T/ops-shape-mac.out" 2>&1; then cat "$T/ops-shape-mac.out"; ok "ops-shape cases on macOS (bash 3.2, BSD regex), checked against the backend's opsAdminUrl() rules in node"
+else cat "$T/ops-shape-mac.out"; bad "ops-shape cases on macOS"; fi
 
 unset REHEARSAL_REDIRECT_URIS   # exported for the first runs of section 3 (above)
-echo; echo "== 3c. 20-env.sh on Ubuntu 22.04 (ubuntu:jammy: mawk, GNU coreutils/grep/sed): output identical to the macOS run"
+echo; echo "== 3c. 20-env.sh on Ubuntu 22.04 (ubuntu:jammy: mawk, GNU coreutils/grep/sed): output identical to the macOS run; the ops-setting shape cases"
 # Same inputs and the same generated secrets as macOS run 2 (a copy of its NEW_DIR), every path mounted at the same
 # place, a stub docker that lists no container (like the Mac, which has no ddc-* container). Only the run/lock lines
 # may differ (pid, log name, flock is not installed on the Mac).
@@ -950,6 +962,10 @@ if docker info >/dev/null 2>&1; then
   cmp -s "$T/ddcnew/.env.rehearsal" "$J/ddcnew/.env.rehearsal" && cmp -s "$T/ddcnew/.env.db" "$J/ddcnew/.env.db" \
     && ok ".env.rehearsal and .env.db written on ubuntu:jammy are byte-identical to the macOS ones" || bad "files written on ubuntu:jammy differ"
   grep -rq DUMMYSECRET "$J/ddcnew/logs" && bad "the ubuntu:jammy server-side log carries a dummy secret" || ok "ubuntu:jammy server-side log: no DUMMYSECRET marker"
+  # The run above has no ops setting; their shape check (bash regexes: intervals, ranges) on glibc, every case of 3b's list.
+  if docker run --rm "${LT[@]}" --network none --name "opsshape-$RANDOM-$RUN_ID" -v "$PKG:/pkg:ro" ubuntu:jammy bash /pkg/test/helpers/ops-shape-cases.sh /pkg > "$T/ops-shape-jammy.out" 2>&1; then
+    cat "$T/ops-shape-jammy.out"; ok "ops-shape cases on ubuntu:jammy (bash 5.1, glibc regex): every case gets the verdict it gets on macOS"
+  else cat "$T/ops-shape-jammy.out"; bad "ops-shape cases on ubuntu:jammy"; fi
 else bad "section 3c needs Docker Desktop"; fi
 
 echo; echo "== 3d. 40-up.sh step 1b: the api env writer and check (common.sh env_api_write, env_api_matches_rehearsal), macOS and ubuntu:jammy"

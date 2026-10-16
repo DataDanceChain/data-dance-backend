@@ -36,13 +36,23 @@
 # OPS SETTINGS (backend PR #55, docs/OPS_ADMIN.md, read at b6d01cb): OPS_SHARED_LOGIN, OPS_USER_TOKEN_TTL_SEC,
 #   OPS_ADMIN_URL, PLANET_MANAGER_API_HOSTS (KEPT_PLAIN) and STAFF_UNLOCK_TOKEN (CRED_ALLOWED) are never set by this
 #   script: unset stays unset (the backend's defaults fit production), and a value the old file gives is copied unchanged
-#   only in the shape the backend reads (ops_value_refused), else the run stops (name and reason printed, never the value):
+#   only in a STRICTER subset of what the backend reads (common.sh ops_value_refused), so a copied value is read exactly
+#   as written; any other value stops the run (name and reason printed, never the value):
 #   OPS_SHARED_LOGIN on or off (the backend keeps the shared login on for anything but off, so a typo would keep it on);
 #   OPS_USER_TOKEN_TTL_SEC a whole number from 300 to 43200 (the backend clamps to that range); OPS_ADMIN_URL an https
-#   origin (no user, path, query or fragment: the backend answers 500 on /api/ops/auth/code otherwise);
-#   PLANET_MANAGER_API_HOSTS comma-separated host names; STAFF_UNLOCK_TOKEN 64 lower-case hex characters (keccak256 of
-#   the staff code; the backend treats anything else as not configured). STAFF_UNLOCK_TOKEN is a declared credential:
-#   never printed (set or unset only), and since its shape is a 32-byte hex key the hex-key refusal does not apply to it.
+#   origin with a host name and, if any, a port from 1 to 65535 (a user, path, query or fragment, a port above 65535 or
+#   a numeric last label that is no IPv4 address make /api/ops/auth/code answer 500); PLANET_MANAGER_API_HOSTS
+#   comma-separated host names; STAFF_UNLOCK_TOKEN 64 lower-case hex characters (keccak256 of the staff code; the backend
+#   treats anything else as not configured). Refused although the backend would read them correctly: other letter case
+#   (OFF, HTTPS://), blanks around the value, leading zeros (0300, :08443), http://localhost:<port>, an IP address or
+#   punycode (xn--) host, a CRLF line end, and a trailing " # comment" (dotenv and compose strip it; this script's
+#   parser keeps it in the value).
+#   SOURCE: the old file, production's own backend.env, is the only source. Every run rebuilds .env.rehearsal from it and
+#   40-up.sh rebuilds .env.api from .env.rehearsal, so a hand edit to either is overwritten on the next run (a hand-set
+#   OPS_SHARED_LOGIN=off would quietly turn back on), and correcting a refused value means changing production's file.
+#   A per-call override that keeps the previous value, as INVOICE_SELLER_USER_ID has, is a follow-up.
+#   STAFF_UNLOCK_TOKEN is a declared credential: never printed (set or unset only), and since its shape is a 32-byte hex
+#   key the hex-key refusal does not apply to it.
 # HOSTS (settings API_HOST / APP_HOST, common.sh): PUBLIC_BASE_URL = API_BASE_URL = https://<API_HOST> (the issuer the
 #   api announces) and APP_PUBLIC_URL = FRONTEND_URL = https://<APP_HOST> (the consent origin). The written file is
 #   checked for exactly these values before it is installed.
@@ -221,7 +231,7 @@ CRED_ALLOWED=$(printf '%s' "$CRED_ALLOWED" | tr -s ' \n' '  ')
 # credential), listed so an old env that carries them passes the classification. INVOICE_SELLER_USER_ID with a value is
 # written by this script; INVOICE_SELLER_EMAIL is copied unchanged and ignored (an INFO says so; header).
 # OPS_SHARED_LOGIN, OPS_USER_TOKEN_TTL_SEC, OPS_ADMIN_URL, PLANET_MANAGER_API_HOSTS: backend PR #55's plain ops settings,
-# copied only in the shape the backend reads (header OPS SETTINGS).
+# copied only in a stricter subset of the shapes the backend reads (header OPS SETTINGS).
 KEPT_PLAIN="APNS_TEAM_ID DDC_CHAIN_ID DDC_CHAIN_RPC_URL DISABLE_REFERRAL_REWARDS_FEATURES GEMINI_DEFAULT_MODEL
   INVOICE_SELLER_ADDRESS INVOICE_SELLER_EMAIL INVOICE_SELLER_TAX_ID INVOICE_SELLER_USER_ID JWT_EXPIRES_IN
   METADATA_BASE_URL NODE_ENV OPS_ADMIN_URL OPS_ADMIN_USERNAME OPS_SHARED_LOGIN OPS_USER_TOKEN_TTL_SEC
@@ -238,31 +248,9 @@ value_carries_credential() {
   elif [[ "$v" =~ $re_hex ]] || [[ "$v" =~ $re_hex0x ]]; then printf 'a 32-byte hex key'
   else return 1; fi
 }
-# Backend PR #55's ops settings (header OPS SETTINGS): never set here. A copied value must have the shape the backend
-# reads. Returns the reason (no value) when it has not.
+# Backend PR #55's ops settings (header OPS SETTINGS): never set here. A copied value must be in the stricter subset of
+# the backend's shapes that common.sh ops_value_refused accepts (the reason, never the value, when it is not).
 OPS_SETTINGS="OPS_SHARED_LOGIN OPS_USER_TOKEN_TTL_SEC OPS_ADMIN_URL PLANET_MANAGER_API_HOSTS STAFF_UNLOCK_TOKEN"
-ops_value_refused() { # <name> <value>
-  local v="$2" h i=0 lbl='[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?' re_host re_origin
-  re_host="^$lbl(\\.$lbl)*\$"; re_origin="^https://$lbl(\\.$lbl)*(:[0-9]{1,5})?/?\$"
-  case "$v" in *$'\n'*|*$'\r'*) printf 'more than one line'; return 0;; esac
-  case "$1" in
-    OPS_SHARED_LOGIN) case "$v" in on|off) return 1;; esac; printf 'not on or off';;
-    OPS_USER_TOKEN_TTL_SEC) if [[ "$v" =~ ^[1-9][0-9]{2,4}$ ]] && [ "$v" -ge 300 ] && [ "$v" -le 43200 ]; then return 1; fi
-      printf 'not a whole number of seconds from 300 to 43200';;
-    OPS_ADMIN_URL) if [ "${#v}" -le 270 ] && [[ "$v" =~ $re_origin ]]; then return 1; fi
-      printf 'not an https origin (https://<host>[:<port>], no user, path, query or fragment)';;
-    PLANET_MANAGER_API_HOSTS)
-      while IFS= read -r h; do
-        i=$((i + 1))
-        if [ "${#h}" -gt 253 ] || ! [[ "$h" =~ $re_host ]]; then printf 'entry #%d is not a host name' "$i"; return 0; fi
-      done < <(csv_items "$v")
-      if [ "$i" -gt 0 ]; then return 1; fi
-      printf 'no host name';;
-    STAFF_UNLOCK_TOKEN) if [[ "$v" =~ ^[0-9a-f]{64}$ ]]; then return 1; fi
-      printf 'not 64 lower-case hex characters';;
-    *) return 1;;
-  esac
-}
 
 # ---------------------------------------------------------------------------
 # The partner's live settings (header). Resolved from the previous env before anything is written, so a refusal leaves
@@ -628,7 +616,7 @@ done
 unset v
 [ -z "$unclassified" ] || die "name(s) with a value that the rehearsal policy does not classify:$unclassified - add each to KEPT_PLAIN (not a secret), CRED_ALLOWED (needed credential, with an APPROVAL item), the BLANKED list or the REMOVED rule in 20-env.sh, then re-run"
 pass "every name with a value is classified: set by this script=$n_set, Web3Auth unchanged=$n_w3a, kept credentials=$n_cred ($(for n in $NEW_NAMES; do inlist "$n" "$CRED_ALLOWED" && ! inlist "$n" "$SET_NAMES" && printf '%s ' "$n"; done; true)), kept plain=$n_plain, empty=$n_empty"
-[ -z "$misshapen" ] || die "ops setting(s) of backend PR #55 in a shape the backend would not read as meant:$misshapen - correct them in the old env (values not printed), then re-run"
+[ -z "$misshapen" ] || die "ops setting(s) of backend PR #55 in a shape this script does not copy:$misshapen (values not printed; accepted shapes: header OPS SETTINGS) - their only source is the old env, which is production's own backend.env: correcting a value there changes production's file and needs its own approval; then re-run"
 [ -z "$carrying" ] || die "copied value(s) that carry a credential:$carrying - blank or remove them in 20-env.sh, then re-run"
 pass "no copied value carries a URL credential, a PEM key block or a 32-byte hex key"
 ops=""
