@@ -26,12 +26,33 @@
 #            GEMINI_API_KEY, MAPBOX/REACT_APP_MAPBOX tokens, SEESAW_DISBURSEMENT_API_KEY, DISBURSEMENT_PARTNER_KEYS.
 #   KEPT     APNS_KEY_ID / APNS_TEAM_ID (the apn.Provider built at load throws without them, so the api would not
 #            boot; 10-build.sh pairs them with a THROWAWAY apn_key.p8, so Apple rejects every push), PASS_TYPE_ID,
-#            OPS_ADMIN_* (own-stack admin login; tokens are signed with the rehearsal's own JWT_SECRET).
+#            OPS_ADMIN_* (own-stack admin login; tokens are signed with the rehearsal's own JWT_SECRET), and
+#            backend PR #55's ops settings when the old file sets them (OPS SETTINGS below).
 #   FAIL-CLOSED  EVERY name that still has a value must be set by this script, in KEEP_W3A, in CRED_ALLOWED or in
 #            KEPT_PLAIN (today's known non-secret names); any other name stops the script (name printed, never the
 #            value). Every copied value is also refused if it carries user:password@ in a URL, a PEM key block or a
 #            bare 32-byte hex key, whatever its name (round 2 review: HOT_WALLET_PRIVATEKEY, DEPLOYER_PK, APIKEY,
 #            OSS_ACCESSKEYSECRET, REDIS_URL with a password, SENTRY_DSN, SLACK_WEBHOOK_URL used to slip through).
+# OPS SETTINGS (backend PR #55, docs/OPS_ADMIN.md, read at b6d01cb): OPS_SHARED_LOGIN, OPS_USER_TOKEN_TTL_SEC,
+#   OPS_ADMIN_URL, PLANET_MANAGER_API_HOSTS (KEPT_PLAIN) and STAFF_UNLOCK_TOKEN (CRED_ALLOWED) are never set by this
+#   script: unset stays unset (the backend's defaults fit production), and a value the old file gives is copied unchanged
+#   only in a STRICTER subset of what the backend reads (common.sh ops_value_refused), so a copied value is read exactly
+#   as written; any other value stops the run (name and reason printed, never the value):
+#   OPS_SHARED_LOGIN on or off (the backend keeps the shared login on for anything but off, so a typo would keep it on);
+#   OPS_USER_TOKEN_TTL_SEC a whole number from 300 to 43200 (the backend clamps to that range); OPS_ADMIN_URL an https
+#   origin with a host name and, if any, a port from 1 to 65535 (a user, path, query or fragment, a port above 65535 or
+#   a numeric last label that is no IPv4 address make /api/ops/auth/code answer 500); PLANET_MANAGER_API_HOSTS
+#   comma-separated host names; STAFF_UNLOCK_TOKEN 64 lower-case hex characters (keccak256 of the staff code; the backend
+#   treats anything else as not configured). Refused although the backend would read them correctly: other letter case
+#   (OFF, HTTPS://), blanks around the value, leading zeros (0300, :08443), http://localhost:<port>, an IP address or
+#   punycode (xn--) host, a CRLF line end, and a trailing " # comment" (dotenv and compose strip it; this script's
+#   parser keeps it in the value).
+#   SOURCE: the old file, production's own backend.env, is the only source. Every run rebuilds .env.rehearsal from it and
+#   40-up.sh rebuilds .env.api from .env.rehearsal, so a hand edit to either is overwritten on the next run (a hand-set
+#   OPS_SHARED_LOGIN=off would quietly turn back on), and correcting a refused value means changing production's file.
+#   A per-call override that keeps the previous value, as INVOICE_SELLER_USER_ID has, is a follow-up.
+#   STAFF_UNLOCK_TOKEN is a declared credential: never printed (set or unset only), and since its shape is a 32-byte hex
+#   key the hex-key refusal does not apply to it.
 # HOSTS (settings API_HOST / APP_HOST, common.sh): PUBLIC_BASE_URL = API_BASE_URL = https://<API_HOST> (the issuer the
 #   api announces) and APP_PUBLIC_URL = FRONTEND_URL = https://<APP_HOST> (the consent origin). The written file is
 #   checked for exactly these values before it is installed.
@@ -199,16 +220,22 @@ is_signing_key() {
 # (names only, never values):
 #   set by this script (SET_NAMES, includes the BLANKED ones), KEEP_W3A (below), CRED_ALLOWED, KEPT_PLAIN.
 # CRED_ALLOWED: credentials the rehearsal keeps on purpose (APPROVAL §2). APNS_KEY_ID / PASS_TYPE_ID are identifiers
-# that the boot needs; OPS_ADMIN_* is item J.
-CRED_ALLOWED="JWT_SECRET SSO_SESSION_SECRET SSO_TGE_CLIENT_SECRET_SHA256 APNS_KEY_ID PASS_TYPE_ID OPS_ADMIN_PASSWORD OPS_ADMIN_TOKEN_EXPIRES"
+# that the boot needs; OPS_ADMIN_* is item J, and so is STAFF_UNLOCK_TOKEN (backend PR #55: the staff unlock the api
+# hands to ddc_admin accounts; header OPS SETTINGS).
+CRED_ALLOWED="JWT_SECRET SSO_SESSION_SECRET SSO_TGE_CLIENT_SECRET_SHA256 APNS_KEY_ID PASS_TYPE_ID OPS_ADMIN_PASSWORD OPS_ADMIN_TOKEN_EXPIRES
+  STAFF_UNLOCK_TOKEN"
+CRED_ALLOWED=$(printf '%s' "$CRED_ALLOWED" | tr -s ' \n' '  ')
 # KEPT_PLAIN: the known non-secret names of the old backend.env, copied unchanged.
 # A new name in backend.env must be added here (or to a list above) with a reason before the rehearsal is built.
 # INVOICE_SELLER_*: the invoice seller's account id, its billing address, e-mail and tax id (invoice data; none is a
 # credential), listed so an old env that carries them passes the classification. INVOICE_SELLER_USER_ID with a value is
 # written by this script; INVOICE_SELLER_EMAIL is copied unchanged and ignored (an INFO says so; header).
+# OPS_SHARED_LOGIN, OPS_USER_TOKEN_TTL_SEC, OPS_ADMIN_URL, PLANET_MANAGER_API_HOSTS: backend PR #55's plain ops settings,
+# copied only in a stricter subset of the shapes the backend reads (header OPS SETTINGS).
 KEPT_PLAIN="APNS_TEAM_ID DDC_CHAIN_ID DDC_CHAIN_RPC_URL DISABLE_REFERRAL_REWARDS_FEATURES GEMINI_DEFAULT_MODEL
   INVOICE_SELLER_ADDRESS INVOICE_SELLER_EMAIL INVOICE_SELLER_TAX_ID INVOICE_SELLER_USER_ID JWT_EXPIRES_IN
-  METADATA_BASE_URL NODE_ENV OPS_ADMIN_USERNAME PORT TEST_USER_EMAIL
+  METADATA_BASE_URL NODE_ENV OPS_ADMIN_URL OPS_ADMIN_USERNAME OPS_SHARED_LOGIN OPS_USER_TOKEN_TTL_SEC
+  PLANET_MANAGER_API_HOSTS PORT TEST_USER_EMAIL
   X_API_URL X_MAX_REQUESTS_PER_WINDOW X_OAUTH_CALLBACK_URL X_RATE_LIMIT_WINDOW"
 KEPT_PLAIN=$(printf '%s' "$KEPT_PLAIN" | tr -s ' \n' '  ')
 # A copied value must not carry a credential whatever its name: user:password@ in a URL, a PEM private key, or a
@@ -221,6 +248,9 @@ value_carries_credential() {
   elif [[ "$v" =~ $re_hex ]] || [[ "$v" =~ $re_hex0x ]]; then printf 'a 32-byte hex key'
   else return 1; fi
 }
+# Backend PR #55's ops settings (header OPS SETTINGS): never set here. A copied value must be in the stricter subset of
+# the backend's shapes that common.sh ops_value_refused accepts (the reason, never the value, when it is not).
+OPS_SETTINGS="OPS_SHARED_LOGIN OPS_USER_TOKEN_TTL_SEC OPS_ADMIN_URL PLANET_MANAGER_API_HOSTS STAFF_UNLOCK_TOKEN"
 
 # ---------------------------------------------------------------------------
 # The partner's live settings (header). Resolved from the previous env before anything is written, so a refusal leaves
@@ -564,7 +594,7 @@ done
 pass "BACKEND_WALLET_PRIVATE_KEY and CHAIN_SIGNER_PRIVATE_KEY absent: no chain signing, no nonce use by the rehearsal (attestations stay pending)"
 say "blanked third-party credentials:${BLANKED:- (none present)}"
 # Classify EVERY name with a value (not only credential-looking ones); then check every copied value's shape.
-unclassified=""; carrying=""; n_set=0; n_w3a=0; n_cred=0; n_plain=0; n_empty=0
+unclassified=""; carrying=""; misshapen=""; n_set=0; n_w3a=0; n_cred=0; n_plain=0; n_empty=0
 for n in $NEW_NAMES; do
   if inlist "$n" "$SET_NAMES"; then n_set=$((n_set + 1)); continue; fi   # written by this script, not copied
   v=$(getv "$CHK" "$n")
@@ -575,13 +605,29 @@ for n in $NEW_NAMES; do
   else unclassified="$unclassified $n"; continue; fi
   # OPS_ADMIN_PASSWORD is a declared credential (item J): its shape is not a signal.
   [ "$n" = OPS_ADMIN_PASSWORD ] && continue
+  # Backend PR #55's ops settings: the shape the backend reads. STAFF_UNLOCK_TOKEN is a declared credential whose shape
+  # IS a 32-byte hex key, so the hex-key check below does not apply to it.
+  if inlist "$n" "$OPS_SETTINGS"; then
+    if why=$(ops_value_refused "$n" "$v"); then misshapen="$misshapen $n($why)"; fi
+    if [ "$n" = STAFF_UNLOCK_TOKEN ]; then continue; fi
+  fi
   if why=$(value_carries_credential "$v"); then carrying="$carrying $n($why)"; fi
 done
 unset v
 [ -z "$unclassified" ] || die "name(s) with a value that the rehearsal policy does not classify:$unclassified - add each to KEPT_PLAIN (not a secret), CRED_ALLOWED (needed credential, with an APPROVAL item), the BLANKED list or the REMOVED rule in 20-env.sh, then re-run"
 pass "every name with a value is classified: set by this script=$n_set, Web3Auth unchanged=$n_w3a, kept credentials=$n_cred ($(for n in $NEW_NAMES; do inlist "$n" "$CRED_ALLOWED" && ! inlist "$n" "$SET_NAMES" && printf '%s ' "$n"; done; true)), kept plain=$n_plain, empty=$n_empty"
+[ -z "$misshapen" ] || die "ops setting(s) of backend PR #55 in a shape this script does not copy:$misshapen (values not printed; accepted shapes: header OPS SETTINGS) - their only source is the old env, which is production's own backend.env: correcting a value there changes production's file and needs its own approval; then re-run"
 [ -z "$carrying" ] || die "copied value(s) that carry a credential:$carrying - blank or remove them in 20-env.sh, then re-run"
 pass "no copied value carries a URL credential, a PEM key block or a 32-byte hex key"
+ops=""
+for n in $OPS_SETTINGS; do
+  v=$(getv "$CHK" "$n")
+  if [ -z "$v" ]; then ops="$ops $n unset;"
+  elif [ "$n" = STAFF_UNLOCK_TOKEN ]; then ops="$ops $n set (not printed);"
+  else ops="$ops $n=$v;"; fi
+done
+unset v
+pass "ops settings of backend PR #55 (never set by this script; unset = the backend's default):${ops%;}"
 for n in $NEW_NAMES; do case "$n" in SSO_*|WEB3AUTH_*) inlist "$n" "$SET_NAMES $KEEP_W3A" || die "unexpected $n left";; esac; done
 pass "every SSO_* / WEB3AUTH_* name is either set by the runbook tables or in the unchanged list"
 say "SMTP_* names emptied: $(printf '%s\n' $SET_NAMES | grep -c '^SMTP_' || true)"

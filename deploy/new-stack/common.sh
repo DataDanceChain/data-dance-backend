@@ -1109,6 +1109,48 @@ old_app_env_check() {
   OLD_APP_RETIRED_COUNT=$i
 }
 
+# Backend PR #55's ops settings (20-env.sh header OPS SETTINGS; backend b6d01cb: src/services/opsSignIn.js
+# sharedLoginOn / opsUserTokenTtlSec / opsAdminUrl, ssoDeveloperLive.js planetManagerApiHosts, developerSsoRoutes.js
+# staff-unlock). 20-env.sh copies a value the old env gives only in a STRICTER subset of what the backend reads, so a
+# value that passes is read exactly as written: never misread, clamped, ignored or answered with a 500. Some values the
+# backend would read correctly are refused too (other letter case, surrounding blanks, leading zeros, http://localhost,
+# an IP address or punycode host, a trailing "# comment"; 20-env.sh header). Prints the reason, never the value, and
+# returns 0 when the value is refused.
+#   ops_value_refused <name> <value>
+# OPS_ADMIN_URL: node's new URL() throws on a port above 65535, on a host whose last label is a number (all digits, or
+# 0x and hex digits: parsed as an IPv4 address) and on an xn-- label that is not valid punycode, so opsAdminUrl() would
+# return null and /api/ops/auth/code answer 500; the port, an IP address and every xn-- label are refused here.
+ops_value_refused() { # <name> <value>
+  local v="$2" h p i=0 lbl='[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?' re_host re_origin re_num='^([0-9]+|0[xX][0-9A-Fa-f]*)$'
+  re_host="^$lbl(\\.$lbl)*\$"; re_origin="^https://$lbl(\\.$lbl)*(:[1-9][0-9]{0,4})?/?\$"
+  case "$v" in *$'\n'*|*$'\r'*) printf 'a line break or carriage return'; return 0;; esac
+  case "$1" in
+    OPS_SHARED_LOGIN) case "$v" in on|off) return 1;; esac; printf 'not on or off';;
+    OPS_USER_TOKEN_TTL_SEC) if [[ "$v" =~ ^[1-9][0-9]{2,4}$ ]] && [ "$v" -ge 300 ] && [ "$v" -le 43200 ]; then return 1; fi
+      printf 'not a whole number of seconds from 300 to 43200';;
+    OPS_ADMIN_URL)
+      if [ "${#v}" -gt 270 ] || ! [[ "$v" =~ $re_origin ]]; then
+        printf 'not an https origin (https://<host>[:<port>], no user, path, query or fragment)'; return 0
+      fi
+      h=${v#https://}; h=${h%/}; p=""
+      case "$h" in *:*) p=${h##*:}; h=${h%:*};; esac
+      if [ -n "$p" ] && [ "$p" -gt 65535 ]; then printf 'a port above 65535'; return 0; fi
+      if [[ "${h##*.}" =~ $re_num ]]; then printf 'an IP address or a numeric last label'; return 0; fi
+      case ".$h" in *.[xX][nN]--*) printf 'a punycode (xn--) label'; return 0;; esac
+      return 1;;
+    PLANET_MANAGER_API_HOSTS)
+      while IFS= read -r h; do
+        i=$((i + 1))
+        if [ "${#h}" -gt 253 ] || ! [[ "$h" =~ $re_host ]]; then printf 'entry #%d is not a host name' "$i"; return 0; fi
+      done < <(csv_items "$v")
+      if [ "$i" -gt 0 ]; then return 1; fi
+      printf 'no host name';;
+    STAFF_UNLOCK_TOKEN) if [[ "$v" =~ ^[0-9a-f]{64}$ ]]; then return 1; fi
+      printf 'not 64 lower-case hex characters';;
+    *) return 1;;
+  esac
+}
+
 # 40-up.sh step 5, backend PR #38 (head 42005be): the api prints one startup line with the old-App switches,
 #   "Old App update answer (426 APP_UPDATE_REQUIRED): WEB3AUTH_RETIRED_CLIENT_IDS count=1 first8=<8 chars>
 #    LOGIN_MISSING_IDTOKEN_MEANS_OLD_APP=on" (src/services/web3authIdentity.js describeOldAppSwitches).
