@@ -44,7 +44,8 @@ node scripts/opsRoles.js revoke --email <e> --role <role> --reason "<why>" [--ap
 | `ops.admin` (roles, disable / enable, audit, Data Planet manager) | yes | – | – | – |
 
 `developer` gives no ops access: it lets a partner register SSO clients in the developer console
-while self-serve registration is closed. A missing permission answers 403 `FORBIDDEN_ROLE`.
+while self-serve registration is closed (`SSO_DEVELOPER_REGISTRATION=off`, or `allowlist` without
+the account on the list). A missing permission answers 403 `FORBIDDEN_ROLE`.
 
 ### Who acted, outside the audit log
 
@@ -67,8 +68,8 @@ answers the label as `username` and the account's own e-mail as `email`.
   `session_revoked`), and a sign-in code minted before it is not exchanged. The person signs in
   again. In the wallet itself an unexpired wallet JWT works again after a re-enable, as before.
 - **The developer console's staff endpoints** (`GET /api/developer/sso/admin/clients`,
-  `GET /api/developer/sso/admin/staff-unlock`, and `POST /api/developer/sso/clients` while
-  self-serve registration is closed) apply the same rule as `POST /auth/code` without the
+  `GET /api/developer/sso/admin/staff-unlock`, and `POST /api/developer/sso/clients` registered
+  with a role while self-serve registration is closed) apply the same rule as `POST /auth/code` without the
   10-minute limit: 403 `verified_session_required` for `ver` < 2, 401 `session_revoked` for a
   token from before the last disable / re-enable. `GET /api/developer/sso/me` reports
   `verified_session` so the console can ask for a new sign-in before calling them.
@@ -152,7 +153,8 @@ and status, never the request body. Its target is the record the route names, or
 
 The developer console writes `console.staff_unlock` for each staff unlock it hands out and
 `console.client_register` for each client a developer or ddc_admin registers while self-serve
-registration is closed (in the same transaction as the client: no row, no client).
+registration is closed, or the allowlist does not admit the account (in the same transaction as the
+client: no row, no client; `detail.registration` is `closed` or `allowlist`).
 
 ## Migration
 

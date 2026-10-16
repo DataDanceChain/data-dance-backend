@@ -414,3 +414,91 @@ describe('POST /api/developer/sso/clients while registration is closed', () => {
     assert.equal(prisma.store.ssoDeveloperClient.length, 0);
   });
 });
+
+describe('SSO_DEVELOPER_REGISTRATION=allowlist: the list and the roles both admit', () => {
+  const GOOGLE = 'web3auth-google-sapphire';
+  const body = { client_name: 'Listed app', contact_email: 'dev@example.test', redirect_uris: ['https://listed.example.test/cb'] };
+  const register = (authorization) => {
+    const req = request(server).post('/api/developer/sso/clients');
+    if (authorization) req.set('Authorization', authorization);
+    return req.send(body);
+  };
+  let refusals;
+  let originalInfo;
+  const routes = require('../../src/routes/developerSsoRoutes');
+
+  beforeEach(async () => {
+    people.listed = await seedUser(prisma, { email: 'lead@example.test', web3authVerifier: GOOGLE, web3authVerifierId: 'lead@example.test' });
+    auth.listed = bearer(tokens.wallet(people.listed));
+    initDeveloperRegistration({
+      env: {
+        SSO_DEVELOPER_REGISTRATION: 'allowlist',
+        SSO_DEVELOPER_ALLOWED_EMAILS: 'lead@example.test',
+        WEB3AUTH_EMAIL_TRUSTED_VERIFIERS: GOOGLE,
+      },
+    });
+    refusals = [];
+    originalInfo = routes.registrationLog.info;
+    routes.registrationLog.info = (event, entry) => refusals.push({ event, entry });
+  });
+  after(() => {
+    routes.registrationLog.info = originalInfo;
+    initDeveloperRegistration({ env: {} });
+  });
+
+  it('a listed account with a verified login e-mail registers with no role and no audit row', async () => {
+    const res = await register(auth.listed);
+    assert.equal(res.status, 201, JSON.stringify(res.body));
+    assert.equal(prisma.store.ssoDeveloperClient[0].ownerUserId, people.listed.id);
+    assert.deepEqual(prisma.store.opsAuditLog, []);
+    assert.deepEqual(refusals, []);
+  });
+
+  it('the developer and ddc_admin roles register though not listed; the audit row names allowlist', async () => {
+    for (const name of ['developer', 'admin']) {
+      clearRateLimitStore();
+      const res = await register(auth[name]);
+      assert.equal(res.status, 201, `${name}: ${JSON.stringify(res.body)}`);
+    }
+    const rows = prisma.store.opsAuditLog;
+    assert.deepEqual(rows.map((row) => [row.action, row.actorUserId, row.actorRole]), [
+      ['console.client_register', people.developer.id, 'developer'],
+      ['console.client_register', people.admin.id, 'ddc_admin'],
+    ]);
+    assert.deepEqual(rows[0].detail, { kind: 'developer', registration: 'allowlist', redirectUris: 1 });
+    assert.deepEqual(refusals, []);
+  });
+
+  it('a role still needs a staff session: ver < 2 is 403 verified_session_required, nothing written', async () => {
+    const res = await register(bearer(tokens.wallet(people.developer, { ver: 1 })));
+    assert.equal(res.status, 403);
+    assert.equal(res.body.error, 'verified_session_required');
+    assert.equal(prisma.store.ssoDeveloperClient.length, 0);
+  });
+
+  it('anyone else gets 403 registration_closed, one refusal line with the allowlist reason, nothing written', async () => {
+    for (const name of ['plain', 'operator']) {
+      const res = await register(auth[name]);
+      assert.equal(res.status, 403, name);
+      assert.equal(res.body.error, 'registration_closed');
+    }
+    assert.deepEqual(refusals.map((r) => [r.entry.userId, r.entry.reason]), [
+      [people.plain.id, 'not_listed'],
+      [people.operator.id, 'not_listed'],
+    ]);
+    assert.equal(prisma.store.ssoDeveloperClient.length, 0);
+    assert.deepEqual(prisma.store.opsAuditLog, []);
+  });
+
+  it('anonymous: 401 from the login check, as with on', async () => {
+    const res = await register();
+    assert.equal(res.status, 401);
+    assert.equal(prisma.store.ssoDeveloperClient.length, 0);
+  });
+
+  it('GET /me: can_register for a listed account with a verified login e-mail and for the roles, not for anyone else', async () => {
+    const answers = {};
+    for (const name of ['listed', 'developer', 'admin', 'plain', 'operator']) answers[name] = (await get('/me', auth[name])).body.can_register;
+    assert.deepEqual(answers, { listed: true, developer: true, admin: true, plain: false, operator: false });
+  });
+});
