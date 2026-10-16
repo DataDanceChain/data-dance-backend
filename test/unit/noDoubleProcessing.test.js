@@ -39,7 +39,8 @@ require.cache[chainFile] = {
   },
 };
 
-// The payout sender records its calls; nothing is sent anywhere.
+// The payout sender records its calls; nothing is sent anywhere. A re-check finds its stored
+// transfer paid.
 const transfers = [];
 const payoutFile = require.resolve(path.join(__dirname, '../../src/services/disbursement/bscPayout.js'));
 require.cache[payoutFile] = {
@@ -50,7 +51,8 @@ require.cache[payoutFile] = {
   exports: {
     sendBscUsdt: async (args) => {
       transfers.push(args);
-      return { txHash: `0x${'cd'.repeat(32)}`, replayed: false };
+      if (args.existingTxHash) return { txHash: args.existingTxHash, state: 'confirmed', replayed: true };
+      return { txHash: `0x${'cd'.repeat(32)}`, state: 'confirmed', replayed: false };
     },
   },
 };

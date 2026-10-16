@@ -125,10 +125,26 @@ prisma.$use(async (params, next) => {
 function holdNextReconcileClaim() {
   let arrived;
   let release;
-  const reached = new Promise((resolve) => { arrived = resolve; });
+  const arrival = new Promise((resolve) => { arrived = resolve; });
   const released = new Promise((resolve) => { release = resolve; });
   claimGate = { arrived, released };
-  return { reached, release };
+  let timer;
+  // Fails (instead of waiting forever) when no call reaches a reconcile claim within 5 s.
+  const reached = Promise.race([
+    arrival,
+    new Promise((resolve, reject) => {
+      timer = setTimeout(() => reject(new Error('no call reached its reconcile claim')), 5000);
+    }),
+  ]).finally(() => clearTimeout(timer));
+  return {
+    reached,
+    release,
+    /** Lets a held call go and disarms the gate if no call reached it. */
+    reset() {
+      claimGate = null;
+      release();
+    },
+  };
 }
 
 // Modules that build their own client at load get the shared one, so after() closes it.
@@ -471,15 +487,20 @@ describe('payouts', () => {
       // The second call reads the payout (confirmed, unattested) and is held at its claim.
       const gate = holdNextReconcileClaim();
       const second = post(`/disbursements/items/${item.id}/process`).then((res) => res);
-      await gate.reached;
-      assert.equal((await first).status, 200);
-      const done = await prisma.disbursementItem.findUnique({ where: { id: item.id } });
-      assert.ok(done.attestationTxHash, 'the first call attested the payout');
-      assert.equal(done.reconcileClaimedAt, null, 'and released its claim');
-      gate.release();
-      const late = await second;
-      assert.equal(late.status, 200, JSON.stringify(late.body));
-      assert.equal(late.body.data.attestationTxHash, done.attestationTxHash, 'the late call answers the stored attestation');
+      try {
+        await gate.reached;
+        assert.equal((await first).status, 200);
+        const done = await prisma.disbursementItem.findUnique({ where: { id: item.id } });
+        assert.ok(done.attestationTxHash, 'the first call attested the payout');
+        assert.equal(done.reconcileClaimedAt, null, 'and released its claim');
+        gate.release();
+        const late = await second;
+        assert.equal(late.status, 200, JSON.stringify(late.body));
+        assert.equal(late.body.data.attestationTxHash, done.attestationTxHash, 'the late call answers the stored attestation');
+      } finally {
+        gate.reset();
+        await Promise.allSettled([first, second]);
+      }
     });
     assert.equal(chain.sent.length, sent + 1, 'one attestation');
     assert.equal(transfers.length, before, 'a confirmed payout is never sent again');
@@ -497,15 +518,20 @@ describe('payouts', () => {
       await waitFor(async () => (await prisma.disbursementItem.findUnique({ where: { id: item.id } })).status === 'confirmed');
       const gate = holdNextReconcileClaim();
       const second = post(`/disbursements/items/${item.id}/process`).then((res) => res);
-      await gate.reached;
-      assert.equal((await sending).status, 200);
-      const done = await prisma.disbursementItem.findUnique({ where: { id: item.id } });
-      assert.ok(done.attestationTxHash, 'the sending call attested the payout');
-      assert.equal(done.reconcileClaimedAt, null, 'and released its claim');
-      gate.release();
-      const late = await second;
-      assert.equal(late.status, 200, JSON.stringify(late.body));
-      assert.equal(late.body.data.attestationTxHash, done.attestationTxHash);
+      try {
+        await gate.reached;
+        assert.equal((await sending).status, 200);
+        const done = await prisma.disbursementItem.findUnique({ where: { id: item.id } });
+        assert.ok(done.attestationTxHash, 'the sending call attested the payout');
+        assert.equal(done.reconcileClaimedAt, null, 'and released its claim');
+        gate.release();
+        const late = await second;
+        assert.equal(late.status, 200, JSON.stringify(late.body));
+        assert.equal(late.body.data.attestationTxHash, done.attestationTxHash);
+      } finally {
+        gate.reset();
+        await Promise.allSettled([sending, second]);
+      }
     });
     assert.equal(transfers.length, before + 1, 'one transfer');
     assert.equal(chain.sent.length, sent + 1, 'one attestation');
