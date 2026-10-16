@@ -35,7 +35,8 @@ model User {
   web3authVerifierId       String?
   web3authLinkedAt         DateTime?
   disabledAt               DateTime?
-  /// Who disabled the account (the ops actor's label: an e-mail, 'shared' or 'script') and why.
+  /// Who disabled the account (the actor's record label: ops:<hmac prefix>, 'shared' or 'script';
+  /// never an e-mail, see docs/OPS_ADMIN.md) and why.
   disabledBy               String?
   disabledReason           String?
   /// Set by every disable and re-enable: ops sessions and wallet JWTs issued before it are refused
@@ -1286,7 +1287,8 @@ model UserRoleGrant {
   grantedAt       DateTime @default(now())
   /// null when scripts/opsRoles.js granted it
   grantedByUserId String?
-  /// the actor's label at the time: an e-mail, or 'script'
+  /// the actor's record label at the time (ops:<hmac prefix>, 'shared' or 'script'; never an
+  /// e-mail, see docs/OPS_ADMIN.md)
   grantedBy       String
   reason          String
   user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -1295,7 +1297,9 @@ model UserRoleGrant {
   @@index([role])
 }
 
-/// Append-only record of every ops, console and script change: who, when, what, why. No route
+/// Append-only record of the changes made through the ops site, the developer console's staff
+/// endpoints and scripts/opsRoles.js (src/services/opsAudit.js): who, when, what, why. Other scripts
+/// (setPartnerInitiateLoginUri, setCampaignSsoClient) do not write here yet. No route
 /// updates or deletes a row, and there are no foreign keys, so rows outlive the users they name.
 /// actorKind: user | shared | system; surface: ops | console | script (CHECKs in the migration).
 /// detail never holds a token, a secret, a code or a request body.

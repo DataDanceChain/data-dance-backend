@@ -1,7 +1,8 @@
 # Ops Admin API
 
 Internal operations panel. Operators sign in with their own DataDance account and act with a role
-the server checks on every request. Every change is written to an append-only audit log.
+the server checks on every request. Every change made through the ops site, the developer
+console's staff endpoints or `scripts/opsRoles.js` is written to an append-only audit log.
 
 ## Sign-in
 
@@ -72,7 +73,10 @@ answers the label as `username` and the account's own e-mail as `email`.
   with a role while self-serve registration is closed) apply the same rule as `POST /auth/code` without the
   10-minute limit: 403 `verified_session_required` for `ver` < 2, 401 `session_revoked` for a
   token from before the last disable / re-enable. `GET /api/developer/sso/me` reports
-  `verified_session` so the console can ask for a new sign-in before calling them.
+  `verified_session` so the console can ask for a new sign-in before calling them. A listed account
+  registering under `SSO_DEVELOPER_REGISTRATION=allowlist` is held to the second part too: a token
+  from before the last disable / re-enable does not count as listed (403 `registration_closed`,
+  refusal reason `session_revoked`; see `docs/TGE_SSO.md`).
 
 ## Environment
 
@@ -131,7 +135,10 @@ Campaigns are templates, not a CMS: `HOME_CARD`, `CONNECT_BOOST`, `REFERRAL_BOOS
 
 ## Audit log
 
-`OpsAuditLog` is append-only and has no foreign keys, so rows outlive the accounts they name. Sign-in,
+`OpsAuditLog` is append-only and has no foreign keys, so rows outlive the accounts they name. It
+covers the ops site, the developer console's staff endpoints and `scripts/opsRoles.js`. The other
+maintenance scripts do not write to it yet: `scripts/setPartnerInitiateLoginUri.js` keeps no record,
+and `scripts/setCampaignSsoClient.js` writes a campaign event (actor `ops-script`). Sign-in,
 role, account, points and Data Planet changes write their own row in the same transaction as the
 change (a failed audit write changes nothing). So do the routes that move money or balances, one row
 per change and none for a call that changes nothing:

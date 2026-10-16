@@ -664,11 +664,17 @@ unconditionally — the issuer is never derived from a request header), `APP_PUB
        keeps an e-mail that a request body once supplied, so it does not count. An Apple account whose
        verifier id is not its e-mail does not count either.
 
+  The session must also be newer than the account's last disable / enable (`User.sessionsResetAt`),
+  the rule the staff routes apply: a wallet JWT issued before it does not count as listed, so
+  re-enabling an account does not bring an older session back to this path. `on` does not apply
+  this rule.
+
   Every other signed-in account gets the same `403 registration_closed` body as `off`, so the
   answer never tells whether an address is listed. The refusal happens before the per-IP rate
   limiter, so refused calls do not use up a listed developer's quota. Each refusal writes one
   `developer_registration.refused` log line with the account id and a reason code (`not_listed`,
-  `session_not_verified`, `connection_not_trusted`, `email_not_login_identity`), never the e-mail.
+  `session_not_verified`, `connection_not_trusted`, `email_not_login_identity`, `session_revoked`),
+  never the e-mail.
   A client registered this way is a `developer` client (login scopes only), never a `partner` row,
   and is owned by the registering account. To give a developer access, add their DataDance account
   e-mail and restart. They then sign in to the developer console with Google or the e-mail code.

@@ -384,6 +384,18 @@ async function rotateOwnedSecret(ownerUserId, clientIdValue) {
 }
 
 /**
+ * The App hand-off target the admin view shows for one client (#71), or null: the environment's
+ * SSO_TGE_INITIATE_LOGIN_URI for its client (a row with that id included, as loadPartnerClient lets
+ * the environment win), a registry partner row's column when it passes the rule (rowInitiateLoginUri:
+ * an invalid value reads as none), never one for a developer row. Not narrowed by SSO_TGE_ENABLED:
+ * this is where the hand-off goes, not whether it is open now.
+ */
+function adminInitiateLoginUri(row, configured) {
+  if (configured) return configured.initiateLoginUri || null;
+  return rowInitiateLoginUri(row) || null;
+}
+
+/**
  * The DDC admin view (GET /api/developer/sso/admin/clients): every registry row, plus the
  * environment's partner when it has no row. Read-only; never a secret or a secret hash.
  */
@@ -396,6 +408,7 @@ async function listAllClients() {
   const ownerEmail = new Map(owners.map((owner) => [owner.id, owner.email]));
   const clients = rows.map((row) => ({
     ...presentOwnedClient(row),
+    initiate_login_uri: adminInitiateLoginUri(row, environmentClient(row.clientId)),
     source: 'registry',
     contact_email: row.contactEmail || null,
     owner_user_id: row.ownerUserId || null,
@@ -413,6 +426,7 @@ async function listAllClients() {
       scopes: [...availablePartnerScopes()],
       managed: true,
       created_at: null,
+      initiate_login_uri: adminInitiateLoginUri(null, configured),
       source: 'environment',
       contact_email: null,
       owner_user_id: null,

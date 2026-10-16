@@ -3,7 +3,7 @@
  * view of every SSO client, the staff network unlock, and registration by role while self-serve
  * registration is closed. Through the REAL application on the in-memory Prisma stand-in.
  */
-const { describe, it, before, beforeEach, after } = require('node:test');
+const { describe, it, before, beforeEach, afterEach, after } = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('crypto');
 const request = require('supertest');
@@ -12,6 +12,7 @@ const jwt = require('jsonwebtoken');
 const { installOpsApp, listenLoopback, seedUser, grant, bearer, tokens, ISSUER, JWT_SECRET } = require('../helpers/opsApp');
 
 const PARTNER_SECRET = 'tge-secret-dev-for-console-admin';
+const TGE_INITIATE = 'https://tge.example.com/login/ddc';
 const { prisma, app } = installOpsApp({
   env: {
     SSO_TGE_ENABLED: 'true',
@@ -19,6 +20,7 @@ const { prisma, app } = installOpsApp({
     SSO_TGE_CLIENT_NAME: 'DDC TGE',
     SSO_TGE_CLIENT_SECRET_SHA256: crypto.createHash('sha256').update(PARTNER_SECRET).digest('hex'),
     SSO_TGE_REDIRECT_URIS: 'https://tge.example.com/oauth/callback',
+    SSO_TGE_INITIATE_LOGIN_URI: TGE_INITIATE,
   },
   unset: ['STAFF_UNLOCK_TOKEN'],
 });
@@ -123,6 +125,7 @@ describe('GET /api/developer/sso/admin/clients', () => {
       data: {
         clientId: 'sso-rehearsal', clientName: 'Data Planet', contactEmail: 'planet@example.test', secretHash: SECRET_HASH,
         redirectUris: ['https://planet.example.test/cb'], enabled: true, kind: 'partner', ownerUserId: people.developer.id,
+        initiateLoginUri: 'https://planet.example.test/start',
         createdAt: new Date('2026-10-05T00:00:00Z'),
       },
     });
@@ -130,6 +133,8 @@ describe('GET /api/developer/sso/admin/clients', () => {
       data: {
         clientId: 'sso_member_app', clientName: 'Member app', contactEmail: 'member@example.test', secretHash: SECRET_HASH,
         redirectUris: ['https://member.example.test/cb'], enabled: false, kind: 'developer', ownerUserId: people.plain.id,
+        // A developer row never hands off, whatever its column holds.
+        initiateLoginUri: 'https://member.example.test/start',
         createdAt: new Date('2026-10-06T00:00:00Z'),
       },
     });
@@ -153,7 +158,7 @@ describe('GET /api/developer/sso/admin/clients', () => {
     const byId = Object.fromEntries(res.body.clients.map((c) => [c.client_id, c]));
     assert.deepEqual(Object.keys(byId).sort(), ['sso-rehearsal', 'sso_member_app', 'tge-test']);
 
-    const keys = ['client_id', 'client_name', 'kind', 'managed', 'source', 'enabled', 'redirect_uris', 'scopes', 'contact_email', 'owner_user_id', 'owner_email', 'created_at'];
+    const keys = ['client_id', 'client_name', 'kind', 'managed', 'source', 'enabled', 'redirect_uris', 'scopes', 'initiate_login_uri', 'contact_email', 'owner_user_id', 'owner_email', 'created_at'];
     for (const client of res.body.clients) assert.deepEqual(Object.keys(client).sort(), [...keys].sort(), client.client_id);
 
     assert.equal(byId['sso-rehearsal'].source, 'registry');
@@ -163,6 +168,11 @@ describe('GET /api/developer/sso/admin/clients', () => {
     assert.equal(byId['sso-rehearsal'].contact_email, 'planet@example.test');
     assert.equal(byId.sso_member_app.enabled, false);
     assert.equal(byId.sso_member_app.owner_email, 'member@example.test');
+    // The App hand-off target (#71): a partner row's column, the environment's value, never a developer row's.
+    assert.deepEqual(
+      Object.fromEntries(res.body.clients.map((c) => [c.client_id, c.initiate_login_uri])),
+      { 'sso-rehearsal': 'https://planet.example.test/start', sso_member_app: null, 'tge-test': TGE_INITIATE },
+    );
     assert.deepEqual(
       { source: byId['tge-test'].source, managed: byId['tge-test'].managed, kind: byId['tge-test'].kind, owner: byId['tge-test'].owner_user_id },
       { source: 'environment', managed: true, kind: 'partner', owner: null },
@@ -182,6 +192,21 @@ describe('GET /api/developer/sso/admin/clients', () => {
     const tge = res.body.clients.filter((c) => c.client_id === 'tge-test');
     assert.equal(tge.length, 1);
     assert.equal(tge[0].source, 'registry');
+    // The environment's value wins for its client, as at the hand-off.
+    assert.equal(tge[0].initiate_login_uri, TGE_INITIATE);
+  });
+
+  it('a partner row whose stored hand-off target fails the rule shows none, as the hand-off reads it', async () => {
+    await prisma.ssoDeveloperClient.create({
+      data: {
+        clientId: 'sso-bad-start', clientName: 'Bad start', contactEmail: 'planet@example.test', secretHash: SECRET_HASH,
+        redirectUris: [], enabled: true, kind: 'partner', ownerUserId: people.developer.id,
+        initiateLoginUri: 'http://planet.example.test/start',
+      },
+    });
+    const res = await get('/admin/clients', auth.admin);
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+    assert.equal(res.body.clients.find((c) => c.client_id === 'sso-bad-start').initiate_login_uri, null);
   });
 });
 
@@ -441,8 +466,12 @@ describe('SSO_DEVELOPER_REGISTRATION=allowlist: the list and the roles both admi
     originalInfo = routes.registrationLog.info;
     routes.registrationLog.info = (event, entry) => refusals.push({ event, entry });
   });
-  after(() => {
+  // After each test, not once at the end: the next beforeEach must save the real logger, not this
+  // test's stub, and nothing below this block may inherit a stub.
+  afterEach(() => {
     routes.registrationLog.info = originalInfo;
+  });
+  after(() => {
     initDeveloperRegistration({ env: {} });
   });
 
@@ -494,6 +523,35 @@ describe('SSO_DEVELOPER_REGISTRATION=allowlist: the list and the roles both admi
     const res = await register();
     assert.equal(res.status, 401);
     assert.equal(prisma.store.ssoDeveloperClient.length, 0);
+  });
+
+  it('a listed account\'s session from before its last disable / enable does not count; a newer one does', async () => {
+    const older = walletIssued(people.listed, 120);
+    prisma.store.user.find((u) => u.id === people.listed.id).sessionsResetAt = new Date(Date.now() - 60 * 1000);
+
+    // The off answer, as for any refused account: it never tells whether the address is listed.
+    const res = await register(older);
+    assert.equal(res.status, 403, JSON.stringify(res.body));
+    assert.equal(res.body.error, 'registration_closed');
+    assert.deepEqual(refusals.map((r) => [r.event, r.entry.userId, r.entry.reason]), [
+      ['developer_registration.refused', people.listed.id, 'session_revoked'],
+    ]);
+    assert.equal((await get('/me', older)).body.can_register, false);
+    assert.equal(prisma.store.ssoDeveloperClient.length, 0);
+
+    const newer = walletIssued(people.listed, 0);
+    assert.equal((await get('/me', newer)).body.can_register, true);
+    const ok = await register(newer);
+    assert.equal(ok.status, 201, JSON.stringify(ok.body));
+    assert.deepEqual(prisma.store.opsAuditLog, []);
+  });
+
+  it('on does not apply the reset rule: any signed-in account still registers (unchanged)', async () => {
+    initDeveloperRegistration({ env: { SSO_DEVELOPER_REGISTRATION: 'on' } });
+    prisma.store.user.find((u) => u.id === people.listed.id).sessionsResetAt = new Date(Date.now() - 60 * 1000);
+    const res = await register(walletIssued(people.listed, 120));
+    assert.equal(res.status, 201, JSON.stringify(res.body));
+    assert.deepEqual(refusals, []);
   });
 
   it('GET /me: can_register for a listed account with a verified login e-mail and for the roles, not for anyone else', async () => {

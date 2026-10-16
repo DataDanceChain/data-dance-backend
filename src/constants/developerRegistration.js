@@ -190,6 +190,8 @@ function developerRegistrationOpen() {
  * `user` is the account row and `claims` the verified JWT. Never reads the request body.
  *   { allowed: true } | { allowed: false, reason: closed | not_listed | session_not_verified |
  *                                                   connection_not_trusted | email_not_login_identity }
+ * The route adds one allowlist rule on top (src/routes/developerSsoRoutes.js modeDecision): a
+ * session issued before the account's last disable / enable does not count (session_revoked).
  */
 function registrationDecision(user, claims, state = current()) {
   if (state.mode === 'on') return { allowed: true };

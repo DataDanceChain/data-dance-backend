@@ -27,7 +27,9 @@
  * These staff uses of a wallet JWT (the two admin routes, and registering while registration is
  * closed) apply the rule of POST /api/ops/auth/code (src/services/staffSession.js): a verified
  * session (ver 2), else 403 verified_session_required; not issued before the account's last
- * disable / enable, else 401 session_revoked.
+ * disable / enable, else 401 session_revoked. A listed account in allowlist mode needs the same
+ * second part: a session from before its last disable / enable does not count as listed (see
+ * modeDecision), and it gets the off answer like any other refused account.
  */
 const express = require('express');
 const prisma = require('../utils/prisma');
@@ -48,7 +50,7 @@ const {
 } = require('../services/ssoDeveloperClient');
 const { activeRoles } = require('../services/userRoles');
 const { writeAudit, actorFromUser, OpsError } = require('../services/opsAudit');
-const { assertStaffWalletSession, verifiedSession } = require('../services/staffSession');
+const { assertStaffWalletSession, issuedBeforeReset, verifiedSession } = require('../services/staffSession');
 
 const router = express.Router();
 const logger = createLogger('developerSso');
@@ -80,6 +82,25 @@ const registrationLog = {
 };
 
 /**
+ * Whether the mode admits the account `protect` loaded by itself, and why not (the reason goes to
+ * the refusal line). on: every signed-in account. allowlist: registrationDecision (a listed account
+ * with a verified login e-mail), and the session must not be older than the account's last disable /
+ * enable (User.sessionsResetAt), as on the staff routes: the list grants a privilege, like the roles,
+ * so re-enabling an account does not bring an older session back to it. Never reads the body.
+ */
+function modeDecision(req) {
+  const decision = registrationDecision(req.user, req.authClaims);
+  if (
+    decision.allowed &&
+    developerRegistrationMode() === 'allowlist' &&
+    issuedBeforeReset(req.authClaims, req.user && req.user.sessionsResetAt)
+  ) {
+    return { allowed: false, reason: 'session_revoked' };
+  }
+  return decision;
+}
+
+/**
  * A wallet JWT acting as staff on the console (see the header): verified, and not issued before
  * the account's last disable / enable. Answers false after sending the refusal.
  */
@@ -99,15 +120,15 @@ function staffSessionOk(req, res) {
 
 /**
  * After `protect`, before the rate limiter. on lets every signed-in account through, allowlist a
- * listed account with a verified login e-mail (decided from the account row and the verified JWT,
- * never from the body). When that refuses (off, or allowlist and not admitted), the developer or
+ * listed account with a verified login e-mail and a session newer than its last disable / enable
+ * (modeDecision: the account row and the verified JWT, never the body). When that refuses (off, or allowlist and not admitted), the developer or
  * ddc_admin role may still register, from a staff session; the role is kept for the audit row.
  * Everyone else gets the off answer, so it never tells whether an address is listed, and an account
  * that is refused does not use up the per-IP registration limit. One log line per refusal: the
  * account id and the reason code, never the e-mail.
  */
 async function registrationAllowed(req, res, next) {
-  const decision = registrationDecision(req.user, req.authClaims);
+  const decision = modeDecision(req);
   if (decision.allowed) return next();
   try {
     const roles = await activeRoles(req.user.id);
@@ -311,8 +332,9 @@ router.get('/me', noStore, protect, rateLimiters.developerConsoleRead, async (re
       email: req.user.email || null,
       roles,
       admin,
-      // on: any account; allowlist: a listed account with a verified login e-mail; any mode: the roles.
-      can_register: registrationDecision(req.user, req.authClaims).allowed || admin || roles.includes('developer'),
+      // on: any account; allowlist: a listed account with a verified login e-mail (modeDecision);
+      // any mode: the roles.
+      can_register: modeDecision(req).allowed || admin || roles.includes('developer'),
       // The staff routes need a verified session: false tells the console to ask for a new sign-in.
       verified_session: verifiedSession(req.authClaims),
     });
