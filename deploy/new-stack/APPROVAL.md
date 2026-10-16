@@ -28,7 +28,7 @@ new stack**.
 | G | The team's address list for that WAF rule. | Sloan | F |
 | H | Web3Auth **mainnet** project allow-list: add `https://<APP_HOST>`. | Sloan | logins in rehearsal |
 | I | `local.env` on the operator's Mac (values from the private runbook) and 1Password CLI approval at each login. | Sloan | remote runs |
-| J | The rehearsal keeps `OPS_ADMIN_USERNAME` / `OPS_ADMIN_PASSWORD` from production (own-stack ops console, not a third party; blank answers 503 "not configured"). Keep, or blank them for the rehearsal? Default: kept. | Sloan | data step |
+| J | The rehearsal keeps `OPS_ADMIN_USERNAME` / `OPS_ADMIN_PASSWORD` from production (own-stack ops console, not a third party; blank answers 503 "not configured"), and `STAFF_UNLOCK_TOKEN` when production sets it (backend PR #55: the staff unlock the console hands to ddc_admin accounts; unset answers `not_configured`). Keep, or blank them for the rehearsal? Default: kept. | Sloan | data step |
 | K | The gate in section 7, each item with its own approval, **before any production data is restored**. | Sloan | data step |
 | L | Apple Wallet pass signing in the rehearsal. **Default: no production key.** The rehearsal gets a throwaway RSA key and a self-signed `signerCert.pem` (`10-build.sh`), so pass creation fails or yields a pass Wallet rejects; boot is unaffected. Real pass signing in the rehearsal needs an approval and a script change (`40-up.sh` refuses the production files). The cutover copies the production `signerKey.pem`, `signerCert.pem` and `apn_key.p8` under its own approval. | Sloan | nothing (default holds) |
 | M | `P1_USERS_MIN` for `p1-backup.sh verify`: the minimum number of users in a complete dump. It is a production figure, so it is in the private runbook, not here. | Sloan | P1 verify |
@@ -116,6 +116,8 @@ new stack**.
   | `PASS_TYPE_ID` (identifier), `wwdr.pem` (Apple's public WWDR certificate) | kept | Needed by the pass code path; neither is a secret. |
   | `signerKey.pem` (**production private key**: signs Apple Wallet passes as DataDance) and `signerCert.pem` | **replaced by a throwaway pair** (item L) | `10-build.sh` writes a throwaway RSA-2048 key and a self-signed certificate (mode 400) into `/root/ddcnew/keys_fixed`, and regenerates them if they are missing, mismatched or equal to production. Boot: not read (`passController.js` reads them per request). `40-up.sh` refuses to start if either file equals production and checks that the running api sees the mounted throwaway `signerKey.pem`. |
   | `OPS_ADMIN_USERNAME`, `OPS_ADMIN_PASSWORD`, `OPS_ADMIN_TOKEN_EXPIRES` | kept (item J) | Own-stack ops console; tokens are signed with the rehearsal's own `JWT_SECRET`. |
+  | `OPS_SHARED_LOGIN`, `OPS_USER_TOKEN_TTL_SEC`, `OPS_ADMIN_URL`, `PLANET_MANAGER_API_HOSTS` | kept when the old env sets them; never set by `20-env.sh` | Backend PR #55's ops settings, not credentials (`KEPT_PLAIN`); unset = the backend's default, which fits production. Copied only in the shape the backend reads (`on` or `off`; a whole number from 300 to 43200; an https origin; comma-separated host names); any other value stops `20-env.sh`, naming the setting, never the value. |
+  | `STAFF_UNLOCK_TOKEN` | kept when set (item J); never set by `20-env.sh` | Backend PR #55's staff unlock, a declared credential (`CRED_ALLOWED`): exactly 64 lower-case hex characters (keccak256 of the staff code), never printed; any other value stops `20-env.sh`. |
   | `DDC_CHAIN_RPC_URL`, `DDC_CHAIN_ID`, `METADATA_BASE_URL`, `TEST_USER_EMAIL`, ... | kept | Not credentials. |
   | `INVOICE_SELLER_ADDRESS`, `INVOICE_SELLER_EMAIL`, `INVOICE_SELLER_TAX_ID` | kept | Invoice data, not credentials (`KEPT_PLAIN`). `INVOICE_SELLER_USER_ID`: written by `20-env.sh`; `INVOICE_SELLER_EMAIL`: copied, ignored (an `INFO` says so). Both: item R, below. |
 
@@ -124,12 +126,13 @@ new stack**.
     `SECRET_PHRASE` or `KEYSTORE`, or with a `PK` token, is removed (e.g. `HOT_WALLET_PRIVATEKEY`, `DEPLOYER_PK`).
   - Every other name that still has a value must be in one class: set by `20-env.sh` (including the blanked ones), the
     unchanged Web3Auth list, the kept credentials (`APNS_KEY_ID`, `PASS_TYPE_ID`, `OPS_ADMIN_PASSWORD`,
-    `OPS_ADMIN_TOKEN_EXPIRES`; the script's own `JWT_SECRET`, `SSO_SESSION_SECRET`, `SSO_TGE_CLIENT_SECRET_SHA256`), or
-    `KEPT_PLAIN`, the explicit list of the known non-secret names. Any other name stops `20-env.sh`, printing the name and
-    never the value. So `APIKEY`, `OSS_ACCESSKEYSECRET`, `REDIS_URL`, `SENTRY_DSN`, `SLACK_WEBHOOK_URL` or any new vendor
-    key stop the script until someone classifies it.
-  - Every copied value (except the declared `OPS_ADMIN_PASSWORD`) is also refused if it carries `user:password@` in a
-    URL, a PEM key block, or a bare or `0x` 32-byte hex key, whatever its name.
+    `OPS_ADMIN_TOKEN_EXPIRES`, `STAFF_UNLOCK_TOKEN`; the script's own `JWT_SECRET`, `SSO_SESSION_SECRET`,
+    `SSO_TGE_CLIENT_SECRET_SHA256`), or `KEPT_PLAIN`, the explicit list of the known non-secret names. Any other name
+    stops `20-env.sh`, printing the name and never the value. So `APIKEY`, `OSS_ACCESSKEYSECRET`, `REDIS_URL`,
+    `SENTRY_DSN`, `SLACK_WEBHOOK_URL` or any new vendor key stop the script until someone classifies it.
+  - Every copied value (except the declared `OPS_ADMIN_PASSWORD` and `STAFF_UNLOCK_TOKEN`) is also refused if it carries
+    `user:password@` in a URL, a PEM key block, or a bare or `0x` 32-byte hex key, whatever its name. `STAFF_UNLOCK_TOKEN`
+    is a 32-byte hex key by design, so it must instead be exactly 64 lower-case hex characters.
   - All checks run on the temporary file. `.env.rehearsal` is installed only when every check passes; a failing run also
     removes a previous `.env.rehearsal`, so `40-up.sh` cannot start on it.
   - Limit: a credential stored under a name on `KEPT_PLAIN` in a shape none of the three patterns recognises would still

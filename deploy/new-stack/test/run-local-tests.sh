@@ -139,6 +139,13 @@
 #      shape, empty, injection characters) is refused before connecting.
 # The consent page for web sign-ins (10-15):
 #   3. SSO_TGE_AUTO_APPROVE=app (written once; on 20-env.sh's partner PASS line and in compose's parse of the new file).
+# Backend PR #55's ops settings (10-16), synthetic values only:
+#   3b. OPS_SHARED_LOGIN, OPS_USER_TOKEN_TTL_SEC, OPS_ADMIN_URL, PLANET_MANAGER_API_HOSTS and STAFF_UNLOCK_TOKEN: never
+#      written by 20-env.sh (absent or empty in the old env: absent or empty in the new file, "unset" on its PASS line);
+#      given by the old env in the backend's shape, each is classified and copied unchanged, also through 40-up.sh's
+#      writer, and STAFF_UNLOCK_TOKEN (64 lower-case hex, a declared credential) passes the hex-key check and is never
+#      printed; every other shape (on/off only, 300..43200, an https origin, host names, 64 lower-case hex) stops the run
+#      before .env.rehearsal is installed, naming the setting and never its value.
 # Every SSH test uses scratch COPIES of the scripts with a test local.env (loopback only): the package's own local.env,
 # if one exists, is never used to connect, and the real 1Password CLI is never called.
 # Containers and images: every docker run and docker build of this run carries the label ddcnew-localtest=<run id>
@@ -862,6 +869,67 @@ d="$T/neg-prev"; mkdir -p "$d"; cp -R "$T/ddcnew" "$d/ddcnew"; cp "$OLD" "$d/old
 [ -f "$d/ddcnew/.env.rehearsal" ] || bad "setup: no previous .env.rehearsal"
 if DDC_LOCAL_TEST=1 NEW_DIR="$d/ddcnew" OLD_ENV="$d/old.env" FE_ENV_TGE="$T/env.tge" bash "$PKG/20-env.sh" > "$d/out" 2>&1; then bad "previous-file case passed"
 else [ ! -e "$d/ddcnew/.env.rehearsal" ] && grep -q 'FAIL removed .*\.env\.rehearsal' "$d/out" && ok "a failing run removes the previous .env.rehearsal too (40-up.sh then refuses to start)" || bad "previous .env.rehearsal kept after a failing run"; fi
+# Backend PR #55's ops settings: never written by 20-env.sh; copied from the old env only in the shape the backend reads;
+# STAFF_UNLOCK_TOKEN a declared credential (exempt from the hex-key check, never printed). Synthetic values only.
+OPS_RE='^(OPS_SHARED_LOGIN|OPS_USER_TOKEN_TTL_SEC|OPS_ADMIN_URL|PLANET_MANAGER_API_HOSTS|STAFF_UNLOCK_TOKEN)='
+OPS_PASS="PASS ops settings of backend PR #55 (never set by this script; unset = the backend's default):"
+grep -qxF "$OPS_PASS OPS_SHARED_LOGIN unset; OPS_USER_TOKEN_TTL_SEC unset; OPS_ADMIN_URL unset; PLANET_MANAGER_API_HOSTS unset; STAFF_UNLOCK_TOKEN unset" "$T/run1.out" \
+  && [ "$(grep -cE "$OPS_RE" "$T/ddcnew/.env.rehearsal" || true)" = 0 ] \
+  && ok "ops settings absent from the old env: none written (the backend's defaults apply), all five 'unset' on the PASS line" \
+  || bad "ops settings on a run without them: $(grep '^PASS ops' "$T/run1.out")"
+OPS_TOK=$(printf '0123456789abcdef%.0s' 1 2 3 4)   # synthetic STAFF_UNLOCK_TOKEN: 64 lower-case hex characters
+ops20() { # <label> <line>...: 20-env.sh on the synthetic old env plus these lines (a later duplicate wins); dir in OD, status in RC
+  local l="$1"; shift; OD="$T/ops-$l"; RC=0
+  rm -rf "$OD"; mkdir -p "$OD/ddcnew"; cp "$OLD" "$OD/old.env"; printf '%s\n' "$@" >> "$OD/old.env"
+  DDC_LOCAL_TEST=1 NEW_DIR="$OD/ddcnew" OLD_ENV="$OD/old.env" FE_ENV_TGE="$T/env.tge" REHEARSAL_CLIENT_ID="$CID" REHEARSAL_REDIRECT_URIS="$RR_T" \
+    bash "$PKG/20-env.sh" > "$OD/out" 2>&1 || RC=$?
+}
+ops20 set 'OPS_SHARED_LOGIN=off' 'OPS_USER_TOKEN_TTL_SEC=3600' 'OPS_ADMIN_URL=https://admin.example.org' \
+  'PLANET_MANAGER_API_HOSTS="api-rehearsal.datadance.ai, api.example.org"' "STAFF_UNLOCK_TOKEN=$OPS_TOK"
+OE="$OD/ddcnew/.env.rehearsal"
+[ "$RC" = 0 ] && grep -qx 'OPS_SHARED_LOGIN=off' "$OE" && grep -qx 'OPS_USER_TOKEN_TTL_SEC=3600' "$OE" && grep -qx 'OPS_ADMIN_URL=https://admin.example.org' "$OE" \
+  && grep -qx 'PLANET_MANAGER_API_HOSTS="api-rehearsal.datadance.ai, api.example.org"' "$OE" && grep -qx "STAFF_UNLOCK_TOKEN=$OPS_TOK" "$OE" \
+  && [ "$(grep -cE "$OPS_RE" "$OE")" = 5 ] && grep -q '^PASS kept names: [0-9]*, values byte-identical to the old file' "$OD/out" \
+  && grep -q '^PASS every name with a value is classified: .* kept credentials=[0-9]* ([A-Z_ ]*STAFF_UNLOCK_TOKEN ' "$OD/out" && grep -q '^PASS no copied value carries' "$OD/out" \
+  && grep -qxF "$OPS_PASS OPS_SHARED_LOGIN=off; OPS_USER_TOKEN_TTL_SEC=3600; OPS_ADMIN_URL=https://admin.example.org; PLANET_MANAGER_API_HOSTS=api-rehearsal.datadance.ai, api.example.org; STAFF_UNLOCK_TOKEN set (not printed)" "$OD/out" \
+  && [ "$(cat "$OD/out" "$OD"/ddcnew/logs/*.log 2>/dev/null | grep -cF "$OPS_TOK" || true)" = 0 ] \
+  && ok "the five ops settings in the old env: classified, copied byte for byte (each once); STAFF_UNLOCK_TOKEN (64 hex) a kept credential that passes the hex-key check and is in neither the output nor the server-side log" \
+  || { grep -E '^(FAIL|PASS (ops|every|kept))' "$OD/out"; bad "the five ops settings in the old env (rc=$RC)"; }
+up40 "$OD/ddcnew"
+grep -qx "STAFF_UNLOCK_TOKEN=$OPS_TOK" "$OD/ddcnew/.env.api" && grep -qx 'OPS_SHARED_LOGIN=off' "$OD/ddcnew/.env.api" && [ "$(grep -cE "$OPS_RE" "$OD/ddcnew/.env.api")" = 5 ] \
+  && ( DDC_LOCAL_TEST=1; . "$PKG/common.sh"; env_api_matches_rehearsal "$OD/ddcnew/.env.api" "$OD/ddcnew/.env.rehearsal" ) \
+  && ok "40-up.sh step 1b: its writer carries the five ops settings into .env.api unchanged and its check accepts the file" || bad "the ops settings through 40-up.sh's writer and check"
+ops20 edge 'OPS_SHARED_LOGIN=on' 'OPS_USER_TOKEN_TTL_SEC=300' 'OPS_ADMIN_URL=https://admin.example.org:8443/' 'PLANET_MANAGER_API_HOSTS=api.example.org'
+r1=$RC; l1=$(grep '^PASS ops' "$OD/out"); ops20 edge2 'OPS_USER_TOKEN_TTL_SEC=43200' 'OPS_SHARED_LOGIN=' 'STAFF_UNLOCK_TOKEN='
+[ "$r1" = 0 ] && [ "$l1" = "$OPS_PASS OPS_SHARED_LOGIN=on; OPS_USER_TOKEN_TTL_SEC=300; OPS_ADMIN_URL=https://admin.example.org:8443/; PLANET_MANAGER_API_HOSTS=api.example.org; STAFF_UNLOCK_TOKEN unset" ] \
+  && [ "$RC" = 0 ] && grep -qxF "$OPS_PASS OPS_SHARED_LOGIN unset; OPS_USER_TOKEN_TTL_SEC=43200; OPS_ADMIN_URL unset; PLANET_MANAGER_API_HOSTS unset; STAFF_UNLOCK_TOKEN unset" "$OD/out" \
+  && grep -qx 'OPS_SHARED_LOGIN=' "$OD/ddcnew/.env.rehearsal" && grep -qx 'STAFF_UNLOCK_TOKEN=' "$OD/ddcnew/.env.rehearsal" \
+  && ok "ops settings at their limits pass (on, 300 and 43200 s, an origin with a port and a trailing slash, one host); an empty value stays empty ('unset': the backend's default)" \
+  || { printf '%s\n' "$l1"; grep -E '^(FAIL|PASS ops)' "$OD/out"; bad "ops settings at their limits or empty (rc=$r1/$RC)"; }
+# Each case: <old env line>|<the reason 20-env.sh gives>. The run must print exactly one FAIL line, exactly this one (so no
+# value, however short, is in it), and neither the output nor the server-side log may hold NAME= or a value of 8 or more
+# characters.
+R_ON='not on or off'; R_TTL='not a whole number of seconds from 300 to 43200'
+R_URL='not an https origin (https://<host>[:<port>], no user, path, query or fragment)'; R_HEX='not 64 lower-case hex characters'
+n=0
+for c in "OPS_SHARED_LOGIN=of|$R_ON" "OPS_SHARED_LOGIN=OFF|$R_ON" "OPS_SHARED_LOGIN=\"off \"|$R_ON" "OPS_SHARED_LOGIN=false|$R_ON" \
+  "OPS_USER_TOKEN_TTL_SEC=299|$R_TTL" "OPS_USER_TOKEN_TTL_SEC=43201|$R_TTL" "OPS_USER_TOKEN_TTL_SEC=12h|$R_TTL" "OPS_USER_TOKEN_TTL_SEC=0300|$R_TTL" \
+  "OPS_USER_TOKEN_TTL_SEC=-1|$R_TTL" "OPS_ADMIN_URL=http://admin.example.org|$R_URL" "OPS_ADMIN_URL=https://admin.example.org/ops|$R_URL" \
+  "OPS_ADMIN_URL=https://admin.example.org?next=1|$R_URL" "OPS_ADMIN_URL=https://admin.example.org#x|$R_URL" "OPS_ADMIN_URL=admin.example.org|$R_URL" \
+  "OPS_ADMIN_URL=https://lt-user@admin.example.org|$R_URL" 'PLANET_MANAGER_API_HOSTS=https://api.example.org|entry #1 is not a host name' \
+  'PLANET_MANAGER_API_HOSTS=api.example.org/x|entry #1 is not a host name' 'PLANET_MANAGER_API_HOSTS=api.example.org:443|entry #1 is not a host name' \
+  'PLANET_MANAGER_API_HOSTS="api.example.org,lt host.example.org"|entry #2 is not a host name' 'PLANET_MANAGER_API_HOSTS=","|no host name' \
+  "STAFF_UNLOCK_TOKEN=$(printf '%s' "$OPS_TOK" | tr 'a-f' 'A-F')|$R_HEX" "STAFF_UNLOCK_TOKEN=0x$OPS_TOK|$R_HEX" "STAFF_UNLOCK_TOKEN=${OPS_TOK%?}|$R_HEX" \
+  "STAFF_UNLOCK_TOKEN=${OPS_TOK}0|$R_HEX" "STAFF_UNLOCK_TOKEN=\"$OPS_TOK \"|$R_HEX" "STAFF_UNLOCK_TOKEN=lt-not-hex-staff-unlock|$R_HEX"; do
+  n=$((n + 1)); line=${c%|*}; why=${c##*|}; nm=${line%%=*}; val=${line#*=}; val=${val#\"}; val=${val%\"}; ops20 "bad$n" "$line"
+  if [ "$RC" != 0 ] && [ "$(grep -c '^FAIL' "$OD/out")" = 1 ] \
+     && grep -qxF "FAIL ops setting(s) of backend PR #55 in a shape the backend would not read as meant: $nm($why) - correct them in the old env (values not printed), then re-run" "$OD/out" \
+     && [ ! -e "$OD/ddcnew/.env.rehearsal" ] && [ ! -e "$OD/ddcnew/.env.rehearsal.tmp" ] \
+     && [ "$(cat "$OD/out" "$OD"/ddcnew/logs/*.log 2>/dev/null | grep -cF -- "$nm=" || true)" = 0 ] \
+     && { [ "${#val}" -lt 8 ] || [ "$(cat "$OD/out" "$OD"/ddcnew/logs/*.log 2>/dev/null | grep -cF -- "$val" || true)" = 0 ]; }; then :
+  else grep '^FAIL' "$OD/out"; bad "$nm: the value of case #$n was not refused before .env.rehearsal was installed, or was printed (rc=$RC)"; fi
+done
+ok "20-env.sh refuses $n ops setting values before .env.rehearsal is installed, naming the setting, never printing the value: OPS_SHARED_LOGIN not on/off (a typo, upper case, a trailing blank, false), OPS_USER_TOKEN_TTL_SEC out of 300..43200 or not a whole number, OPS_ADMIN_URL not an https origin (http, a path, a query, a fragment, no scheme, a user), PLANET_MANAGER_API_HOSTS not host names (a scheme, a path, a port, a blank inside, none), STAFF_UNLOCK_TOKEN not 64 lower-case hex (upper case, 0x, 63 and 65 characters, a trailing blank, a word)"
 
 unset REHEARSAL_REDIRECT_URIS   # exported for the first runs of section 3 (above)
 echo; echo "== 3c. 20-env.sh on Ubuntu 22.04 (ubuntu:jammy: mawk, GNU coreutils/grep/sed): output identical to the macOS run"
