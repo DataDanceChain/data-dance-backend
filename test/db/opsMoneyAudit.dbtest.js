@@ -312,19 +312,34 @@ describe('payments', () => {
     assert.equal(await genericRows(), 0);
   });
 
-  it('confirm and reject at once: a confirmed payment never ends with a FAILED ledger row', async () => {
+  it('confirm and reject at once: one decision applies; a confirmed payment never ends with a FAILED ledger row', async () => {
     for (let round = 0; round < 4; round += 1) {
       const payment = await topUp(`pay-confirm-reject-${round}`);
-      const [confirmed, rejected] = await Promise.all([
+      const results = await Promise.all([
         post(`/payments/${payment.id}/confirm`, auth.admin),
         post(`/payments/${payment.id}/reject`, auth.admin, { notes: 'slip does not match' }),
       ]);
-      assert.equal(confirmed.status, 200, JSON.stringify(confirmed.body));
-      assert.ok([200, 409].includes(rejected.status), JSON.stringify(rejected.body));
+      const [confirmed, rejected] = results;
+      const statuses = results.map((r) => `${r.status} ${r.body?.code || ''}`).join(', ');
+      // Either call may win; the other answers 409 and changes nothing.
+      assert.deepEqual(results.map((r) => r.status).sort(), [200, 409], `round ${round}: ${statuses}`);
       const row = await prisma.payment.findUnique({ where: { id: payment.id } });
       const ledger = await prisma.organizationTransaction.findUnique({ where: { id: payment.organizationTransactionId } });
-      assert.equal(row.status, 'confirmed', `round ${round}`);
-      assert.equal(ledger.status, 'COMPLETED', `round ${round}`);
+      if (confirmed.status === 200) {
+        assert.equal(rejected.body.code, 'PAYMENT_ALREADY_CONFIRMED', `round ${round}`);
+        assert.equal(row.status, 'confirmed', `round ${round}`);
+        assert.equal(ledger.status, 'COMPLETED', `round ${round}`);
+      } else {
+        assert.equal(confirmed.body.code, 'payment_not_pending', `round ${round}`);
+        assert.equal(row.status, 'rejected', `round ${round}`);
+        assert.equal(ledger.status, 'FAILED', `round ${round}`);
+      }
+      await settle();
+      assert.deepEqual(
+        (await rowsFor(payment.id)).map((r) => r.action),
+        [row.status === 'confirmed' ? 'payment.confirm' : 'payment.reject'],
+        `round ${round}: one row, from the call that applied`,
+      );
     }
   });
 
