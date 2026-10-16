@@ -30,7 +30,7 @@ beforeEach(async () => {
   prisma.reset();
   clearRateLimitStore();
   delete process.env.OPS_SHARED_LOGIN;
-  admin = await seedUser(prisma, { email: 'sloan@example.test' });
+  admin = await seedUser(prisma, { email: 'admin@example.test' });
   await grant(prisma, admin.id, 'ddc_admin');
   operator = await seedUser(prisma, { email: 'op@example.test' });
   await grant(prisma, operator.id, 'operator');
@@ -41,7 +41,7 @@ beforeEach(async () => {
 const getAudit = (query = '', authorization = auth.admin) =>
   request(server).get(`/api/ops/audit${query}`).set('Authorization', authorization);
 
-const ACTOR = { kind: 'user', userId: 'actor-1', label: 'sloan@example.test', role: 'ddc_admin' };
+const ACTOR = { kind: 'user', userId: 'actor-1', label: 'admin@example.test', role: 'ddc_admin' };
 
 /** Rows with fixed times, oldest first, so filters and paging have something to bite on. */
 async function seedRows() {
@@ -49,7 +49,7 @@ async function seedRows() {
     ['2026-10-01T00:00:00Z', 'role.grant', { type: 'user', id: 'u-1' }, ACTOR],
     ['2026-10-02T00:00:00Z', 'role.revoke', { type: 'user', id: 'u-1' }, ACTOR],
     ['2026-10-03T00:00:00Z', 'account.disable', { type: 'user', id: 'u-2' }, ACTOR],
-    ['2026-10-04T00:00:00Z', 'points.adjust', { type: 'user', id: 'u-2' }, { ...ACTOR, userId: 'actor-2', label: 'race@example.test' }],
+    ['2026-10-04T00:00:00Z', 'points.adjust', { type: 'user', id: 'u-2' }, { ...ACTOR, userId: 'actor-2', label: 'second-admin@example.test' }],
     ['2026-10-05T00:00:00Z', 'ops.write', { type: 'links', id: 'link-1' }, { kind: 'shared', userId: null, label: 'shared', role: 'shared' }],
   ];
   for (const [at, action, target, actor] of rows) {
@@ -70,7 +70,7 @@ describe('GET /api/ops/audit', () => {
     assert.deepEqual(data.items.map((i) => i.action), ['ops.write', 'points.adjust', 'account.disable', 'role.revoke', 'role.grant']);
     const row = data.items[1];
     assert.deepEqual(Object.keys(row).sort(), ['action', 'actor', 'createdAt', 'detail', 'id', 'reason', 'requestId', 'surface', 'target'].sort());
-    assert.deepEqual(row.actor, { kind: 'user', userId: 'actor-2', label: 'race@example.test', role: 'ddc_admin' });
+    assert.deepEqual(row.actor, { kind: 'user', userId: 'actor-2', label: 'second-admin@example.test', role: 'ddc_admin' });
     assert.deepEqual(row.target, { type: 'user', id: 'u-2', label: null });
     assert.equal(row.reason, 'points.adjust why');
     assert.deepEqual(row.detail, { n: 1 });

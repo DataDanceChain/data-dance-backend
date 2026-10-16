@@ -215,10 +215,13 @@ serving while the migration runs.
    before the deploy keep working until they expire, as long as `JWT_SECRET` stays the same. A new
    shared session lasts as long as a personal one (12 h by default), and each shared sign-in is
    audited.
-4. Once the people who use the shared login today (Sloan and Race) sign in with their own
-   accounts, set `OPS_SHARED_LOGIN=off` and restart the API. The shared credentials then get the
-   same 401 as a wrong password, and open shared sessions end on their next request. To undo,
-   remove the setting (or set it to `on`) and restart.
+4. Once every operator who uses the shared login today signs in with a personal account, set
+   `OPS_SHARED_LOGIN=off` and restart the API. The shared credentials then get the same 401 as a
+   wrong password, and open shared sessions end on their next request. Only the exact value `off`
+   (any case) turns it off; any other value leaves it on without a warning. So after the restart,
+   confirm that the shared username/password get 401 `Invalid username or password` and that an
+   open shared session gets 401 `OPS_SESSION_INVALID`. To undo, remove the setting (or set it to
+   `on`) and restart.
 
 ## Frontend
 

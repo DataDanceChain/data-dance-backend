@@ -41,7 +41,7 @@ beforeEach(async () => {
   clearRateLimitStore();
   initDeveloperRegistration({ env: {} });
   delete process.env.STAFF_UNLOCK_TOKEN;
-  people.admin = await seedUser(prisma, { email: 'sloan@example.test' });
+  people.admin = await seedUser(prisma, { email: 'admin@example.test' });
   await grant(prisma, people.admin.id, 'ddc_admin');
   people.operator = await seedUser(prisma, { email: 'op@example.test' });
   await grant(prisma, people.operator.id, 'operator');
@@ -245,7 +245,7 @@ describe('GET /api/developer/sso/admin/staff-unlock', () => {
     assert.equal(rows[0].surface, 'console');
     assert.equal(rows[0].actorKind, 'user');
     assert.equal(rows[0].actorUserId, people.admin.id);
-    assert.equal(rows[0].actorLabel, 'sloan@example.test');
+    assert.equal(rows[0].actorLabel, 'admin@example.test');
     assert.equal(rows[0].actorRole, 'ddc_admin');
     assert.ok(!JSON.stringify(rows).includes(UNLOCK), 'the unlock itself is never recorded');
   });

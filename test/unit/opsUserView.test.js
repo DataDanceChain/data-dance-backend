@@ -30,7 +30,7 @@ beforeEach(async () => {
   prisma.reset();
   clearRateLimitStore();
   delete process.env.OPS_SHARED_LOGIN;
-  admin = await seedUser(prisma, { email: 'sloan@example.test' });
+  admin = await seedUser(prisma, { email: 'admin@example.test' });
   await grant(prisma, admin.id, 'ddc_admin');
   const operator = await seedUser(prisma);
   await grant(prisma, operator.id, 'operator');
@@ -46,10 +46,10 @@ beforeEach(async () => {
     web3authVerifierId: 'member@example.test',
     web3authLinkedAt: new Date('2026-10-02T00:00:00Z'),
     disabledAt: new Date('2026-10-10T00:00:00Z'),
-    disabledBy: 'sloan@example.test',
+    disabledBy: 'admin@example.test',
     disabledReason: 'fraud report #12',
   });
-  await grant(prisma, member.id, 'developer', { grantedBy: 'sloan@example.test', reason: 'TGE partner integration' });
+  await grant(prisma, member.id, 'developer', { grantedBy: 'admin@example.test', reason: 'TGE partner integration' });
   await prisma.dataLicenceConsent.create({
     data: { userId: member.id, policyVersion: '2026-09', grantedAt: new Date('2026-09-05T00:00:00Z'), withdrawnAt: null, source: 'connect' },
   });
@@ -76,7 +76,7 @@ beforeEach(async () => {
     data: { reason: 'wallet_in_use', route: 'network_rebind', candidateBy: 'email', candidateUserId: member.id, verifier: 'web3auth-google-sapphire-mainnet' },
   });
   await writeAudit(prisma, {
-    actor: { kind: 'user', userId: admin.id, label: 'sloan@example.test', role: 'ddc_admin' },
+    actor: { kind: 'user', userId: admin.id, label: 'admin@example.test', role: 'ddc_admin' },
     action: 'account.disable',
     target: { type: 'user', id: member.id, label: 'member@example.test' },
     reason: 'fraud report #12',
@@ -106,7 +106,7 @@ describe('GET /api/ops/users/:userId', () => {
       isOrganization: false,
       createdAt: '2026-10-01T00:00:00.000Z',
       disabledAt: '2026-10-10T00:00:00.000Z',
-      disabledBy: 'sloan@example.test',
+      disabledBy: 'admin@example.test',
       disabledReason: 'fraud report #12',
     });
     assert.deepEqual(data.identity.web3auth, {
@@ -124,7 +124,7 @@ describe('GET /api/ops/users/:userId', () => {
     assert.equal(data.roles.length, 1);
     assert.deepEqual(
       { role: data.roles[0].role, grantedBy: data.roles[0].grantedBy, reason: data.roles[0].reason },
-      { role: 'developer', grantedBy: 'sloan@example.test', reason: 'TGE partner integration' },
+      { role: 'developer', grantedBy: 'admin@example.test', reason: 'TGE partner integration' },
     );
     assert.deepEqual(data.dataLicence, { policyVersion: '2026-09', grantedAt: '2026-09-05T00:00:00.000Z', withdrawnAt: null, source: 'connect' });
     assert.equal(data.privacyRequests.length, 20, 'the newest 20');
@@ -145,7 +145,7 @@ describe('GET /api/ops/users/:userId', () => {
     );
     assert.equal(data.audit.length, 1);
     assert.equal(data.audit[0].action, 'account.disable');
-    assert.deepEqual(data.audit[0].actor, { kind: 'user', userId: admin.id, label: 'sloan@example.test', role: 'ddc_admin' });
+    assert.deepEqual(data.audit[0].actor, { kind: 'user', userId: admin.id, label: 'admin@example.test', role: 'ddc_admin' });
   });
 
   it('an account with nothing extra gets empty sections, not errors', async () => {
@@ -164,17 +164,17 @@ describe('GET /api/ops/users/:userId', () => {
 
   it('an operator (ops.support) sees sign-in issues, history, identity and who acted; demo and shared do not', async () => {
     const newest = prisma.store.privacyRequest.reduce((a, b) => (a.createdAt > b.createdAt ? a : b));
-    Object.assign(newest, { status: 'resolved', resolvedAt: new Date('2026-10-05T00:00:00Z'), resolvedBy: 'sloan@example.test' });
+    Object.assign(newest, { status: 'resolved', resolvedAt: new Date('2026-10-05T00:00:00Z'), resolvedBy: 'admin@example.test' });
 
     const operatorView = (await view(member.id, auth.operator)).body.data;
     assert.equal(operatorView.identityConflicts.length, 1);
     assert.equal(operatorView.audit.length, 1);
     assert.equal(operatorView.identity.web3auth.verifierId, 'member@example.test');
     assert.equal(operatorView.identity.rebind.oldAddress, '0x2222222222222222222222222222222222222222');
-    assert.equal(operatorView.account.disabledBy, 'sloan@example.test');
+    assert.equal(operatorView.account.disabledBy, 'admin@example.test');
     assert.equal(operatorView.account.disabledReason, 'fraud report #12');
-    assert.equal(operatorView.roles[0].grantedBy, 'sloan@example.test');
-    assert.equal(operatorView.privacyRequests[0].resolvedBy, 'sloan@example.test');
+    assert.equal(operatorView.roles[0].grantedBy, 'admin@example.test');
+    assert.equal(operatorView.privacyRequests[0].resolvedBy, 'admin@example.test');
 
     process.env.OPS_SHARED_LOGIN = 'on';
     for (const [name, authorization] of [['demo', auth.demo], ['shared', bearer(tokens.shared())]]) {

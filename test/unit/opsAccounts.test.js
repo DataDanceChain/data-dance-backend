@@ -41,7 +41,7 @@ let member;
 beforeEach(async () => {
   prisma.reset();
   clearRateLimitStore();
-  admin = await seedUser(prisma, { email: 'sloan@example.test' });
+  admin = await seedUser(prisma, { email: 'admin@example.test' });
   await grant(prisma, admin.id, 'ddc_admin');
   adminAuth = bearer(tokens.ops(admin));
   member = await seedUser(prisma, {
@@ -115,7 +115,7 @@ describe('POST /api/ops/users/:userId/disable and /enable', () => {
     const enabled = prisma.store.opsAuditLog.find((r) => r.action === 'account.enable');
     assert.equal(enabled.reason, 'cleared after review');
     assert.equal(enabled.detail.previous.disabledBy, recordLabel(admin.id));
-    assert.equal(enabled.actorLabel, 'sloan@example.test', 'the audit row keeps who acted');
+    assert.equal(enabled.actorLabel, 'admin@example.test', 'the audit row keeps who acted');
     assert.equal(enabled.detail.previous.disabledReason, 'fraud report #12');
     assert.match(enabled.detail.previous.disabledAt, /^\d{4}-\d\d-\d\dT/);
     assert.deepEqual(prisma.store.userRoleGrant.filter((g) => g.userId === member.id).map((g) => g.role), ['developer']);
@@ -148,19 +148,19 @@ describe('POST /api/ops/users/:userId/disable and /enable', () => {
   });
 
   it('LAST_ADMIN: two admins disabling each other at once cannot leave none enabled', async () => {
-    const race = await seedUser(prisma, { email: 'race@example.test' });
-    await grant(prisma, race.id, 'ddc_admin');
-    // Sloan disables Race: Sloan stays enabled, so this is allowed.
-    const first = await disable(race.id, { reason: 'rotation test' });
+    const secondAdmin = await seedUser(prisma, { email: 'second-admin@example.test' });
+    await grant(prisma, secondAdmin.id, 'ddc_admin');
+    // admin disables secondAdmin: admin stays enabled, so this is allowed.
+    const first = await disable(secondAdmin.id, { reason: 'rotation test' });
     assert.equal(first.status, 200, JSON.stringify(first.body));
-    // Race's request had already passed its session check when Sloan's committed (the two run
-    // under one advisory lock): it now finds Sloan the last enabled ddc_admin and is refused.
+    // secondAdmin's request had already passed its session check when admin's committed (the two
+    // run under one advisory lock): it now finds admin the last enabled ddc_admin and is refused.
     const { disableAccount } = require('../../src/services/opsAccounts');
     await assert.rejects(
       disableAccount({
         userId: admin.id,
         reason: 'rotation test',
-        actor: { kind: 'user', userId: race.id, label: 'race@example.test', role: 'ddc_admin' },
+        actor: { kind: 'user', userId: secondAdmin.id, label: 'second-admin@example.test', role: 'ddc_admin' },
       }),
       (error) => error.code === 'LAST_ADMIN' && error.status === 409,
     );

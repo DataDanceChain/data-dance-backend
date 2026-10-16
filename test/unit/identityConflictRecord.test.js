@@ -55,7 +55,7 @@ beforeEach(async () => {
   clearRateLimitStore();
   savedEnv = Object.fromEntries(ENV_NAMES.map((name) => [name, process.env[name]]));
   withEnv({});
-  const admin = await seedUser(prisma, { email: 'sloan@example.test' });
+  const admin = await seedUser(prisma, { email: 'admin@example.test' });
   await grant(prisma, admin.id, 'ddc_admin');
   adminAuth = bearer(tokens.ops(admin));
 });

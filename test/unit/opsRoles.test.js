@@ -22,7 +22,7 @@ let adminAuth;
 beforeEach(async () => {
   prisma.reset();
   clearRateLimitStore();
-  admin = await seedUser(prisma, { email: 'sloan@example.test' });
+  admin = await seedUser(prisma, { email: 'admin@example.test' });
   await grant(prisma, admin.id, 'ddc_admin');
   adminAuth = bearer(tokens.ops(admin));
 });
@@ -52,7 +52,7 @@ describe('grant', () => {
     assert.equal(rows.length, 1, 'one row: the endpoint wrote its own, so no generic ops.write row');
     assert.equal(rows[0].action, 'role.grant');
     assert.equal(rows[0].actorUserId, admin.id);
-    assert.equal(rows[0].actorLabel, 'sloan@example.test');
+    assert.equal(rows[0].actorLabel, 'admin@example.test');
     assert.equal(rows[0].actorRole, 'ddc_admin');
     assert.equal(rows[0].targetType, 'user');
     assert.equal(rows[0].targetId, user.id);
@@ -116,14 +116,14 @@ describe('grant', () => {
 describe('revoke', () => {
   it('revokes a role and writes role.revoke with what the grant was', async () => {
     const user = await seedUser(prisma);
-    await grant(prisma, user.id, 'operator', { grantedBy: 'race@example.test', grantedAt: new Date('2026-10-02T00:00:00Z') });
+    await grant(prisma, user.id, 'operator', { grantedBy: 'second-admin@example.test', grantedAt: new Date('2026-10-02T00:00:00Z') });
     const res = await revokeRole(user.id, 'operator', { reason: 'left the ops team' });
     assert.equal(res.status, 200, JSON.stringify(res.body));
     assert.deepEqual(res.body.data, { revoked: { userId: user.id, role: 'operator' } });
     assert.deepEqual(grantsOf(user.id), []);
     const [row] = auditRows('role.revoke');
     assert.equal(row.reason, 'left the ops team');
-    assert.deepEqual(row.detail, { role: 'operator', grantedAt: '2026-10-02T00:00:00.000Z', grantedBy: 'race@example.test' });
+    assert.deepEqual(row.detail, { role: 'operator', grantedAt: '2026-10-02T00:00:00.000Z', grantedBy: 'second-admin@example.test' });
   });
 
   it('refuses a role the account does not hold (404 NOT_GRANTED) and needs a reason', async () => {
@@ -148,13 +148,13 @@ describe('revoke', () => {
   });
 
   it('refuses to leave no enabled ddc_admin (409 LAST_ADMIN); a disabled admin does not count', async () => {
-    const race = await seedUser(prisma);
-    await grant(prisma, race.id, 'ddc_admin');
+    const secondAdmin = await seedUser(prisma);
+    await grant(prisma, secondAdmin.id, 'ddc_admin');
     const former = await seedUser(prisma, { disabledAt: new Date() });
     await grant(prisma, former.id, 'ddc_admin');
 
-    // admin revokes race: admin remains, so this is allowed.
-    const first = await revokeRole(race.id, 'ddc_admin', { reason: 'rotation test' });
+    // admin revokes secondAdmin: admin remains, so this is allowed.
+    const first = await revokeRole(secondAdmin.id, 'ddc_admin', { reason: 'rotation test' });
     assert.equal(first.status, 200, JSON.stringify(first.body));
 
     // Through the script (no SELF_CHANGE there): admin is now the only enabled ddc_admin.
@@ -245,7 +245,7 @@ describe('GET /api/ops/roles', () => {
     await grant(prisma, disabled.id, 'developer');
     const all = await request(server).get('/api/ops/roles').set('Authorization', adminAuth);
     assert.equal(all.status, 200);
-    assert.deepEqual(all.body.data.items.map((i) => [i.role, i.email]).sort(), [['ddc_admin', 'sloan@example.test'], ['developer', 'gone@example.test']]);
+    assert.deepEqual(all.body.data.items.map((i) => [i.role, i.email]).sort(), [['ddc_admin', 'admin@example.test'], ['developer', 'gone@example.test']]);
     const dev = await request(server).get('/api/ops/roles?role=developer').set('Authorization', adminAuth);
     assert.equal(dev.body.data.items.length, 1);
     assert.equal(dev.body.data.items[0].disabledAt, '2026-10-05T00:00:00.000Z');
@@ -265,20 +265,20 @@ describe('scripts/opsRoles.js', () => {
   };
 
   it('is a dry run unless --apply: nothing written', async () => {
-    const race = await seedUser(prisma, { email: 'Race@Example.test' });
-    const { code, out } = await run(['grant', '--email', 'race@example.test', '--role', 'ddc_admin', '--reason', 'founding admin']);
+    const secondAdmin = await seedUser(prisma, { email: 'Second-Admin@Example.test' });
+    const { code, out } = await run(['grant', '--email', 'second-admin@example.test', '--role', 'ddc_admin', '--reason', 'founding admin']);
     assert.equal(code, 0);
     assert.match(out, /DRY RUN grant ddc_admin .* would grant/);
-    assert.deepEqual(grantsOf(race.id), []);
+    assert.deepEqual(grantsOf(secondAdmin.id), []);
     assert.equal(auditRows().length, 0);
   });
 
   it('--apply grants and writes a system audit row on the script surface', async () => {
-    const race = await seedUser(prisma, { email: 'race@example.test' });
-    const { code } = await run(['grant', '--email', 'race@example.test', '--role', 'ddc_admin', '--reason', 'founding admin', '--apply']);
+    const secondAdmin = await seedUser(prisma, { email: 'second-admin@example.test' });
+    const { code } = await run(['grant', '--email', 'second-admin@example.test', '--role', 'ddc_admin', '--reason', 'founding admin', '--apply']);
     assert.equal(code, 0);
-    assert.deepEqual(grantsOf(race.id), ['ddc_admin']);
-    const row = prisma.store.userRoleGrant.find((r) => r.userId === race.id);
+    assert.deepEqual(grantsOf(secondAdmin.id), ['ddc_admin']);
+    const row = prisma.store.userRoleGrant.find((r) => r.userId === secondAdmin.id);
     assert.equal(row.grantedBy, 'script');
     assert.equal(row.grantedByUserId, null);
     const [audit] = auditRows('role.grant');
@@ -287,7 +287,7 @@ describe('scripts/opsRoles.js', () => {
     assert.equal(audit.surface, 'script');
 
     const listed = await run(['list']);
-    assert.match(listed.out, /ddc_admin\trace@example\.test/);
+    assert.match(listed.out, /ddc_admin\tsecond-admin@example\.test/);
   });
 
   it('refuses bad arguments and unknown accounts', async () => {

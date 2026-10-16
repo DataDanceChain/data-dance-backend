@@ -28,7 +28,7 @@ beforeEach(async () => {
   delete process.env.OPS_SHARED_LOGIN;
   // The test API host (PUBLIC_BASE_URL = https://api.test.local) is a Data Planet host here.
   process.env.PLANET_MANAGER_API_HOSTS = 'api.test.local';
-  admin = await seedUser(prisma, { email: 'sloan@example.test' });
+  admin = await seedUser(prisma, { email: 'admin@example.test' });
   await grant(prisma, admin.id, 'ddc_admin');
   adminAuth = bearer(tokens.ops(admin));
   manager = await seedUser(prisma, { email: 'planet@example.test' });
