@@ -98,6 +98,8 @@ const corsOptions = {
     'Mcp-Session-Id',
     'Mcp-Method',
     'Mcp-Name',
+    // The ops site's merchant credit (POST /api/ops/merchants/:userId/credit) may send one.
+    'Idempotency-Key',
   ],
   exposedHeaders: ['Content-Range', 'X-Content-Range', 'WWW-Authenticate', 'X-Request-Id']
 };
