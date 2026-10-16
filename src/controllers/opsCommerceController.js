@@ -57,12 +57,12 @@ const IDEMPOTENCY_KEY = /^[A-Za-z0-9._:-]{8,128}$/;
 
 /**
  * The optional Idempotency-Key header of a merchant credit: null when absent or empty; a 400
- * (INVALID_IDEMPOTENCY_KEY) when it is not 8 to 128 letters, digits, dots, colons, dashes or
- * underscores.
+ * (INVALID_IDEMPOTENCY_KEY) when, trimmed, it is not 8 to 128 letters, digits, dots, colons,
+ * dashes or underscores (a value of blanks only included).
  */
 function idempotencyKeyOf(req) {
   const raw = req.get('Idempotency-Key');
-  if (raw === undefined || String(raw).trim() === '') return null;
+  if (raw === undefined || raw === '') return null;
   const key = String(raw).trim();
   if (!IDEMPOTENCY_KEY.test(key)) {
     throw Object.assign(new Error('Idempotency-Key must be 8 to 128 letters, digits, dots, colons, dashes or underscores.'), {

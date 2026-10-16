@@ -279,7 +279,7 @@ async function attestOrder(user, orderId, { txHash } = {}) {
   });
   const attestationTxHash = proof
     ? proof.txHash
-    : (full.attestationTxHash && /^0x[0-9a-fA-F]{64}$/.test(full.attestationTxHash) ? full.attestationTxHash : null);
+    : (commerceAttest.looksLikeTxHash(full.attestationTxHash) ? full.attestationTxHash : null);
   let updated;
   if (attestationTxHash) {
     updated = await prisma.purchaseOrder.update({
@@ -295,9 +295,10 @@ async function attestOrder(user, orderId, { txHash } = {}) {
     // A chain send, under the same claim as a licence order (commerceAttest): of two calls at once
     // one sends and the other gets 409 ATTESTATION_IN_FLIGHT and writes nothing; a claim older than
     // 15 minutes is taken over. The result is stored only while this call still holds its claim and
-    // the order still holds the tx hash this call read; then the claim is released. A chain call
-    // that throws releases it; a store that fails after the chain call keeps it (the attestation
-    // may be on chain), so no call sends again until it is stale.
+    // the order still holds the tx hash this call read, and the chain answer is stored as the tx
+    // hash only when it is one (looksLikeTxHash, as for a licence order); then the claim is
+    // released. A chain call that throws releases it; a store that fails after the chain call
+    // keeps it (the attestation may be on chain), so no call sends again until it is stale.
     const readTxHash = full.attestationTxHash ?? null;
     const claimedAt = new Date();
     if (!(await commerceAttest.claimAttestation(order.id, readTxHash, claimedAt))) {
@@ -309,7 +310,7 @@ async function attestOrder(user, orderId, { txHash } = {}) {
       data: {
         attestationPayload: payload,
         attestationHash,
-        attestationTxHash: chain.ok && chain.txHash ? chain.txHash : null,
+        attestationTxHash: chain.ok && commerceAttest.looksLikeTxHash(chain.txHash) ? chain.txHash : null,
         attestedAt: new Date(),
       },
     });

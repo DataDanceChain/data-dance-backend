@@ -305,7 +305,7 @@ describe('merchant credit Idempotency-Key', () => {
       assert.equal(res.statusCode, 200, `${key}: ${JSON.stringify(res.body)}`);
       assert.equal(res.body.data.transaction.idempotencyKey, key.trim());
     }
-    for (const key of ['abc1234', 'k'.repeat(129), 'with space', 'slash/key1', 'quote"key1']) {
+    for (const key of ['abc1234', 'k'.repeat(129), 'with space', 'slash/key1', 'quote"key1', '   ']) {
       const res = await credit({ amount: 1, note: 'goodwill credit' }, key);
       assert.equal(res.statusCode, 400, key);
       assert.equal(res.body.code, 'INVALID_IDEMPOTENCY_KEY');
@@ -314,12 +314,12 @@ describe('merchant credit Idempotency-Key', () => {
   });
 
   it('no key (absent or empty) writes a row without one, every time', async () => {
-    for (const key of [undefined, '', '   ']) {
+    for (const key of [undefined, '', undefined, '']) {
       const res = await credit({ amount: 2, note: 'goodwill credit' }, key);
       assert.equal(res.statusCode, 200);
       assert.equal(res.body.data.replayed, undefined);
     }
-    assert.deepEqual(prisma.organizationTransaction.rows.map((r) => r.idempotencyKey), [null, null, null]);
+    assert.deepEqual(prisma.organizationTransaction.rows.map((r) => r.idempotencyKey), [null, null, null, null]);
   });
 
   it('a key a concurrent credit took after this call\'s lookup (the database refuses the row) answers that credit, replayed', async () => {
@@ -508,6 +508,20 @@ describe('procurement order attestation claim', () => {
     chainOverride = async () => ({ ok: false, reason: 'rpc unavailable' });
     const failed = await attest(order.id);
     assert.equal(failed.attestationTxHash, null);
+    assert.equal(stored('purchaseOrder', order.id).attestationClaimedAt, null);
+    chainOverride = null;
+    const chain = useChain(new FakeChain());
+    const retried = await attest(order.id);
+    assert.equal(chain.sent.length, 1);
+    assert.match(String(retried.attestationTxHash), /^0x[0-9a-f]{64}$/);
+  });
+
+  it('a chain answer that is not a tx hash is not stored as one: the claim is released and the next call sends', async () => {
+    const order = seedOrder();
+    chainOverride = async () => ({ ok: true, txHash: 'not-a-tx-hash' });
+    const first = await attest(order.id);
+    assert.equal(first.attestationTxHash, null);
+    assert.equal(stored('purchaseOrder', order.id).attestationTxHash, null);
     assert.equal(stored('purchaseOrder', order.id).attestationClaimedAt, null);
     chainOverride = null;
     const chain = useChain(new FakeChain());
