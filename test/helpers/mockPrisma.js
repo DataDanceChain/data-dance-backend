@@ -5,7 +5,8 @@
  * Supported: findUnique / findFirst / findMany / count / create / update / upsert / updateMany /
  * delete / deleteMany / groupBy (`by` one or more columns, optional `_max` and `_count`) with `where`
  * conditions on scalar equality, null, { gt, gte, lt, lte, not, in, equals, startsWith }, `NOT: {...}`,
- * `OR: [...]` and JSON path filters (`{ path: [...], equals }`); `{ increment }` in update data;
+ * `OR: [...]` and JSON path filters (`{ path: [...], equals }`); `{ increment }` in update and
+ * updateMany data;
  * `include` for the relations declared below (to-one with optional `select`, to-many with optional
  * `where`); column defaults on create for the models that declare them below.
  * `select` is ignored on reads — the whole row comes back — so a test must never rely on it to
@@ -130,7 +131,7 @@ function makeModel(store, name, { relations = {}, defaults = () => ({}) } = {}) 
     },
     updateMany: async ({ where, data }) => {
       const hit = rows.filter((r) => matches(r, where));
-      hit.forEach((r) => Object.assign(r, data));
+      hit.forEach((r) => applyData(r, data));
       return { count: hit.length };
     },
     delete: async ({ where }) => {

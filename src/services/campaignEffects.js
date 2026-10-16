@@ -224,25 +224,35 @@ function pickWeightedWinner(entries) {
   return entries[entries.length - 1] || null;
 }
 
+/**
+ * Draw the raffle's open seats. The wins, the points they grant and the campaign event commit in
+ * one transaction.
+ *
+ * The transaction first locks the campaign row (FOR NO KEY UPDATE: it excludes another draw, not
+ * the ticket and win rows that reference the campaign), then reads the wins and the ticket
+ * holders. Two draws at once therefore run one after the other, and the second sees the first's
+ * wins: no prize ever gets more seats than its count.
+ */
 async function drawRaffle(campaign, actor) {
   if (!campaign || campaign.template !== 'RAFFLE') return { error: 'Not a raffle' };
   const rules = raffleRules(campaign);
-  const existing = await prisma.campaignRaffleWin.findMany({
-    where: { campaignId: campaign.id },
-    select: { prizeIndex: true, userId: true },
-  });
-  const takenByPrize = new Map();
-  for (const win of existing) {
-    const list = takenByPrize.get(win.prizeIndex) || [];
-    list.push(win.userId);
-    takenByPrize.set(win.prizeIndex, list);
-  }
-  const holders = await prisma.campaignRaffleTicket.findMany({
-    where: { campaignId: campaign.id, tickets: { gt: 0 } },
-    select: { userId: true, tickets: true },
-  });
   const created = [];
   await prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT 1 FROM "Campaign" WHERE id = ${campaign.id} FOR NO KEY UPDATE`;
+    const existing = await tx.campaignRaffleWin.findMany({
+      where: { campaignId: campaign.id },
+      select: { prizeIndex: true, userId: true },
+    });
+    const takenByPrize = new Map();
+    for (const win of existing) {
+      const list = takenByPrize.get(win.prizeIndex) || [];
+      list.push(win.userId);
+      takenByPrize.set(win.prizeIndex, list);
+    }
+    const holders = await tx.campaignRaffleTicket.findMany({
+      where: { campaignId: campaign.id, tickets: { gt: 0 } },
+      select: { userId: true, tickets: true },
+    });
     for (let prizeIndex = 0; prizeIndex < rules.prizes.length; prizeIndex += 1) {
       const prize = rules.prizes[prizeIndex];
       const already = takenByPrize.get(prizeIndex) || [];

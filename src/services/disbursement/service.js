@@ -124,7 +124,8 @@ async function monthToDateTotal(now = new Date()) {
   const sum = await prisma.disbursementItem.aggregate({
     _sum: { amount: true },
     where: {
-      status: { in: ['submitted', 'confirmed'] },
+      // 'processing' with a submission date: a submitted payout claimed for its re-check.
+      status: { in: ['submitted', 'processing', 'confirmed'] },
       OR: [
         { confirmedAt: { gte: start } },
         { submittedAt: { gte: start } },
@@ -198,6 +199,67 @@ async function markRewardPaid(item) {
   }
 }
 
+/** A reconcile claim older than this was left by a crash and may be taken over. */
+const RECONCILE_CLAIM_STALE_MS = 15 * 60 * 1000;
+
+/**
+ * The reconcile step of a confirmed payout (attest it, mark its redemption paid) runs for one
+ * caller at a time: the claim sets `reconcileClaimedAt` with a conditional update on the payout as
+ * it was read (confirmed, same hash, same attestation tx hash, no live claim), so of two calls at
+ * once exactly one wins and the other changes and sends nothing. A call whose read is older than
+ * another call's attestation loses too, because the attestation tx hash no longer matches; a
+ * failed attestation stores none, so the next call still retries it. Answers the claim time, or
+ * null when the call lost.
+ */
+async function claimReconcile(existing) {
+  const claimedAt = new Date();
+  const staleBefore = new Date(claimedAt.getTime() - RECONCILE_CLAIM_STALE_MS);
+  const claimed = await prisma.disbursementItem.updateMany({
+    where: {
+      id: existing.id,
+      status: 'confirmed',
+      txHash: existing.txHash,
+      attestationTxHash: existing.attestationTxHash ?? null,
+      OR: [{ reconcileClaimedAt: null }, { reconcileClaimedAt: { lt: staleBefore } }],
+    },
+    data: { reconcileClaimedAt: claimedAt },
+  });
+  return claimed.count === 1 ? claimedAt : null;
+}
+
+async function releaseReconcile(id, claimedAt) {
+  await prisma.disbursementItem.updateMany({
+    where: { id, reconcileClaimedAt: claimedAt },
+    data: { reconcileClaimedAt: null },
+  });
+}
+
+function reloadItem(id) {
+  return prisma.disbursementItem.findUnique({ where: { id }, include: { partner: true } });
+}
+
+/**
+ * A transfer confirmed: mark the payout confirmed and take its reconcile claim in the same update,
+ * then attest it and mark its redemption paid. A call that reads the payout as confirmed meanwhile
+ * finds the claim live and attests nothing, so the payout is attested once. The claim is released
+ * afterwards, also when the attestation throws.
+ */
+async function confirmAndAttest(id, data) {
+  const claimedAt = new Date();
+  const confirmed = await prisma.disbursementItem.update({
+    where: { id },
+    data: { ...data, status: 'confirmed', reconcileClaimedAt: claimedAt },
+    include: { partner: true },
+  });
+  try {
+    const attested = await attestConfirmedItem(confirmed, confirmed.partner?.slug || null);
+    await markRewardPaid(attested);
+  } finally {
+    await releaseReconcile(id, claimedAt);
+  }
+  return reloadItem(id);
+}
+
 async function processItem(itemId) {
   const existing = await prisma.disbursementItem.findFirst({
     where: { OR: [{ id: itemId }, { payoutId: String(itemId) }] },
@@ -209,39 +271,58 @@ async function processItem(itemId) {
   }
 
   if (existing.status === 'confirmed' && existing.txHash) {
-    const attested = existing.attestationTxHash
-      ? existing
-      : await attestConfirmedItem(existing, existing.partner?.slug || null);
-    await markRewardPaid(attested);
-    return attested;
+    // Attested and not a redemption: nothing left to do.
+    if (existing.attestationTxHash && !existing.redemptionId) return existing;
+    const claimedAt = await claimReconcile(existing);
+    // The loser sees the payout as the winner left it.
+    if (!claimedAt) return reloadItem(existing.id);
+    try {
+      const attested = existing.attestationTxHash
+        ? existing
+        : await attestConfirmedItem(existing, existing.partner?.slug || null);
+      await markRewardPaid(attested);
+    } finally {
+      await releaseReconcile(existing.id, claimedAt);
+    }
+    return reloadItem(existing.id);
   }
 
   if (existing.txHash && existing.status === 'submitted') {
-    const sent = await sendBscUsdt({
-      to: existing.walletAddress,
-      amount: existing.amount,
-      existingTxHash: existing.txHash,
+    // The re-check can send a new transfer (when the stored hash never confirmed), so only one
+    // caller may run it: the claim moves the payout from 'submitted' to 'processing' (keeping its
+    // hash) and exactly one updateMany wins it. The loser sees the payout as the winner left it.
+    const claimed = await prisma.disbursementItem.updateMany({
+      where: { id: existing.id, status: 'submitted', txHash: existing.txHash },
+      data: { status: 'processing' },
     });
-    const confirmed = await prisma.disbursementItem.update({
-      where: { id: existing.id },
-      data: {
-        status: 'confirmed',
-        txHash: sent.txHash,
-        confirmedAt: new Date(),
-        failureReason: null,
-      },
-      include: { partner: true },
+    if (claimed.count !== 1) return reloadItem(existing.id);
+    let sent;
+    try {
+      sent = await sendBscUsdt({
+        to: existing.walletAddress,
+        amount: existing.amount,
+        existingTxHash: existing.txHash,
+      });
+    } catch (error) {
+      // Released as it was claimed: still 'submitted' with its hash, for the next re-check.
+      await prisma.disbursementItem.updateMany({
+        where: { id: existing.id, status: 'processing', txHash: existing.txHash },
+        data: { status: 'submitted', failureReason: error.message || 'BSC payout re-check failed' },
+      });
+      throw error;
+    }
+    return confirmAndAttest(existing.id, {
+      txHash: sent.txHash,
+      confirmedAt: new Date(),
+      failureReason: null,
     });
-    const attested = await attestConfirmedItem(confirmed, confirmed.partner?.slug || null);
-    await markRewardPaid(attested);
-    return attested;
   }
 
-  if (!existing.txHash && existing.failureReason === RECONCILE_REASON) {
+  if (existing.failureReason === RECONCILE_REASON) {
     return existing;
   }
 
-  if (existing.status === 'processing' && !existing.txHash) {
+  if (existing.status === 'processing') {
     const age = Date.now() - new Date(existing.updatedAt).getTime();
     if (age < IN_FLIGHT_MS) {
       throw httpError(409, 'disbursement_in_flight', 'This payout is already being submitted');
@@ -290,22 +371,14 @@ async function processItem(itemId) {
       to: decision.walletAddress,
       amount: decision.amount,
     });
-    const confirmed = await prisma.disbursementItem.update({
-      where: { id: existing.id },
-      data: {
-        status: 'confirmed',
-        txHash: sent.txHash,
-        walletAddress: decision.walletAddress,
-        amount: decision.amount,
-        submittedAt: new Date(),
-        confirmedAt: new Date(),
-        failureReason: null,
-      },
-      include: { partner: true },
+    return await confirmAndAttest(existing.id, {
+      txHash: sent.txHash,
+      walletAddress: decision.walletAddress,
+      amount: decision.amount,
+      submittedAt: new Date(),
+      confirmedAt: new Date(),
+      failureReason: null,
     });
-    const attested = await attestConfirmedItem(confirmed, confirmed.partner?.slug || null);
-    await markRewardPaid(attested);
-    return attested;
   } catch (error) {
     const unconfigured = error.code === 'payout_signer_unconfigured';
     return prisma.disbursementItem.update({
