@@ -31,8 +31,18 @@ function pickFirst(rows) {
   return rows[0] || null;
 }
 
+/** Data Planet stays the first Activities-list item. Home cards keep their own order. */
+function directoryPlanetFirst(rows) {
+  const planet = rows.filter((row) => row.template === 'DIRECTORY_ITEM' && row.slug === 'directory-planet');
+  if (planet.length === 0) return rows;
+  const rest = rows.filter((row) => !(row.template === 'DIRECTORY_ITEM' && row.slug === 'directory-planet'));
+  const index = rest.findIndex((row) => row.template === 'DIRECTORY_ITEM');
+  if (index === -1) return planet.concat(rest);
+  return rest.slice(0, index).concat(planet, rest.slice(index));
+}
+
 async function listActivePublic(now = new Date()) {
-  const rows = await listActiveRows(null, now);
+  const rows = directoryPlanetFirst(await listActiveRows(null, now));
   return rows.map(toPublicCard);
 }
 
@@ -309,6 +319,7 @@ async function drawRaffle(campaign, actor, { audit } = {}) {
 
 module.exports = {
   listActiveRows,
+  directoryPlanetFirst,
   listActivePublic,
   connectBoostForSource,
   extraConnectPoints,

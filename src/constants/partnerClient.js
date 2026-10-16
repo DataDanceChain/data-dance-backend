@@ -16,7 +16,7 @@
 const crypto = require('crypto');
 const { getAddress } = require('ethers');
 const { publicBaseUrl } = require('./lifeContext');
-const { readDeveloperRegistration } = require('./developerRegistration');
+const { readDeveloperRegistration, describeDeveloperRegistration } = require('./developerRegistration');
 
 const PARTNER_KIND = 'partner';
 const PARTNER_REALM = 'ddc-sso';
@@ -30,6 +30,8 @@ const LEGACY_PARTNER_RESOURCE_PATH = '/partner/tge';
  * The four field scopes (email, wallet, points, referral) gate a single FIELD each: a token without
  * them simply does not carry that field, which is why the handlers omit the key instead of
  * answering 403 (a partner that asked for less must still get the rest of the response).
+ * `sso:points` (alias `tge:points`) is also the endpoint scope of GET /partner/tge/points/history (the balance and its
+ * ledger are one grant): there, and only there, a token without it is 403 insufficient_scope.
  */
 const PARTNER_SCOPES = Object.freeze([
   'sso:identity',
@@ -181,6 +183,22 @@ const STATUS_FIELD_CATALOG = Object.freeze({
     nullMeaning:
       'Never null. Not served in this environment → 404 not_available; a user with no network → empty upline and a downline total of 0.',
     cacheTtlSec: PARTNER_REFERRAL_CACHE_MAX_AGE_SEC,
+  },
+  // Also a whole ENDPOINT, under the scope that already shows the balance (`sso:points`): 403
+  // insufficient_scope without it, 404 not_available unless this environment lists it.
+  // Rollout: list it only once the consent line for `points` reads "balance and history" in every
+  // consent language; a grant made under the balance-only wording must not start reading history.
+  points_history: {
+    endpoint: 'points/history',
+    scope: 'sso:points',
+    presence: 'endpoint',
+    source:
+      "Point rows of the token's own user (id, amount, source mapped to a kind through an allow-list, createdAt), newest first; balance from User.totalPoints as on /status",
+    meaning:
+      "{ sub, balance, as_of, cache_max_age, items, next_cursor }. Each item is exactly { id, amount, kind, created_at }: an opaque stable id, the signed amount, one of upload | referral | task | campaign | adjustment | redemption | other, and the ISO creation time. Keyset pages (createdAt, id) newest first, limit 1-100 (default 50), optional since (inclusive) / until (exclusive). Never Point.sourceId, the raw source name, staff labels, order or redemption references, URLs, or any other user's data.",
+    nullMeaning:
+      'Never null. Not served in this environment → 404 not_available; an account with no ledger rows → empty items and next_cursor null.',
+    cacheTtlSec: PARTNER_POINTS_CACHE_MAX_AGE_SEC,
   },
 });
 const DEFAULT_STATUS_FIELDS = Object.freeze([]);
@@ -485,14 +503,44 @@ function redirectUriProblem(uri, production) {
   try {
     parsed = new URL(uri);
   } catch {
-    return `"${uri}" is not an absolute URL`;
+    // Everything between "//" and the last "@" is left out, so a password is not repeated.
+    return `"${String(uri).replace(/^([^:/?#]*:\/\/).*@/s, '$1…@')}" is not an absolute URL`;
+  }
+  // A user name or password before the host makes the text read as one site while the browser
+  // goes to another (https://partner.example@other.example/ opens other.example). Checked first,
+  // and the message names only scheme and host, so a password in the value is never logged.
+  if (parsed.username || parsed.password) {
+    return `"${parsed.protocol}//${parsed.host}" must not carry a user name or password before the host`;
   }
   if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return `"${uri}" must use http(s)`;
+  // The URL parser drops or rewrites blanks and backslashes, so the text would differ from the
+  // address actually used (a backslash ends the host: https://other.example\@partner.example/).
+  if (/[\s\\]/.test(uri)) return `"${uri}" must not contain blanks or backslashes`;
   if (uri.includes('#')) return `"${uri}" must not contain a fragment`;
   if (parsed.protocol === 'http:' && (production || !isLoopbackHost(parsed.hostname))) {
     return `"${uri}" must be https (http is only accepted for localhost outside production)`;
   }
   return '';
+}
+
+/**
+ * The rule for a partner's App hand-off target (`initiate_login_uri`) stored on a database partner
+ * client: the production rule SSO_TGE_INITIATE_LOGIN_URI gets at boot (absolute, https, no user
+ * name or password, no blanks or backslashes, no fragment), in every environment, and at most
+ * INITIATE_LOGIN_URI_MAX_LENGTH characters, the cap on a developer's redirect URI. '' when the
+ * value passes. The value is trimmed first, as the environment value is. Read by
+ * shapeDeveloperClient on every load and by scripts/setPartnerInitiateLoginUri.js before it writes.
+ */
+const INITIATE_LOGIN_URI_MAX_LENGTH = 512;
+
+function initiateLoginUriProblem(uri) {
+  const value = String(uri ?? '').trim();
+  if (value.length > INITIATE_LOGIN_URI_MAX_LENGTH) {
+    return `the URI is longer than ${INITIATE_LOGIN_URI_MAX_LENGTH} characters`;
+  }
+  const problem = redirectUriProblem(value, true);
+  // Same rule; the localhost hint is about the environment value and never applies here.
+  return problem.replace(' (http is only accepted for localhost outside production)', '');
 }
 
 /**
@@ -685,9 +733,9 @@ function assertFinancialGradeConfig(env = process.env) {
     appPublicUrl: String(env.APP_PUBLIC_URL).trim(),
     sessionSecretSeparate: true,
     publicRegistration: String(env.OAUTH_PUBLIC_REGISTRATION_ENABLED ?? 'true').trim().toLowerCase() !== 'false',
-    // Self-serve SSO client registration (SSO_DEVELOPER_REGISTRATION, default off). server.js refuses
-    // to start on a value that is neither off nor on before it gets here.
-    developerRegistration: readDeveloperRegistration(env).open,
+    // Self-serve SSO client registration (SSO_DEVELOPER_REGISTRATION, default off): closed | open |
+    // allowlist:<count>. server.js refuses to start on a value it cannot read before it gets here.
+    developerRegistration: describeDeveloperRegistration(readDeveloperRegistration(env)),
   };
 }
 
@@ -751,6 +799,7 @@ module.exports = {
   checksumWalletAddress,
   EXTERNAL_WALLET_VERIFIER,
   sha256Hex,
+  initiateLoginUriProblem,
   assertPartnerConfig,
   assertFinancialGradeConfig,
   referralBindEnabled,

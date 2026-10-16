@@ -3,13 +3,16 @@
  * A public registration is a developer client: login scopes only.
  * A row with kind "partner" is a first-party partner (Data Planet): the same
  * confidential flow, plus points, referral, referral network, and referral bind
- * when this environment serves that write. The plaintext secret is returned once
- * and is not written to the database or to logs.
+ * when this environment serves that write, and the App hand-off once its
+ * initiateLoginUri is set (scripts/setPartnerInitiateLoginUri.js). The plaintext
+ * secret is returned once and is not written to the database or to logs.
  */
 const crypto = require('crypto');
 const prisma = require('../utils/prisma');
+const { createLogger } = require('../utils/logger');
 const {
   sha256Hex,
+  initiateLoginUriProblem,
   PARTNER_KIND,
   PARTNER_DEFAULT_SCOPE,
   PARTNER_REQUEST_TTL_MS,
@@ -21,6 +24,8 @@ const {
   readPartnerConfig,
   availablePartnerScopes,
 } = require('../constants/partnerClient');
+
+const logger = createLogger('ssoDeveloperClient');
 
 const DEVELOPER_SCOPES = Object.freeze([
   'sso:identity',
@@ -46,6 +51,19 @@ const PARTNER_STATUS_FIELDS = Object.freeze([
   'referral',
   'referral_network',
 ]);
+
+/**
+ * Served to a first-party row only while THIS environment lists them in SSO_TGE_STATUS_FIELDS —
+ * the same switch that serves them to the env-configured partner — so deploying an endpoint never
+ * turns it on by itself. `points_history` waits on the consent wording for `points` (see the
+ * catalog entry in src/constants/partnerClient.js).
+ */
+const ENV_SWITCHED_PARTNER_FIELDS = Object.freeze(['points_history']);
+
+function firstPartyStatusFields(cfg) {
+  const listed = new Set(cfg.statusFields);
+  return [...PARTNER_STATUS_FIELDS, ...ENV_SWITCHED_PARTNER_FIELDS.filter((field) => listed.has(field))];
+}
 
 class DeveloperClientError extends Error {
   constructor(status, code, message) {
@@ -73,6 +91,9 @@ function cleanEmail(value) {
 }
 
 function isAllowedRedirect(uri) {
+  // Blanks and backslashes are rewritten by the URL parser, so the text would differ from the
+  // address used; the partner rule (redirectUriProblem) refuses them too.
+  if (/[\s\\]/.test(uri)) return false;
   try {
     const url = new URL(uri);
     if (url.username || url.password || url.hash) return false;
@@ -90,7 +111,7 @@ function cleanRedirects(value) {
     throw new DeveloperClientError(400, 'invalid_redirect_uri', 'Provide 1 to 5 redirect URIs.');
   }
   if (uris.some((uri) => uri.length > 512 || !isAllowedRedirect(uri))) {
-    throw new DeveloperClientError(400, 'invalid_redirect_uri', 'Each redirect URI must be https, or http on localhost, with no fragment.');
+    throw new DeveloperClientError(400, 'invalid_redirect_uri', 'Each redirect URI must be https, or http on localhost, with no fragment, user name, blanks or backslashes.');
   }
   return uris;
 }
@@ -149,6 +170,38 @@ async function createDeveloperClient(body = {}, { ownerUserId = null, audit } = 
   };
 }
 
+// Client id + stored value pairs already reported, so a bad value is logged once, not per request.
+const reportedInitiateLoginUris = new Set();
+const REPORTED_INITIATE_LOGIN_URI_LIMIT = 1000;
+
+/**
+ * The App hand-off target (`initiate_login_uri`) of one registry row, or '' for none — the shape
+ * the environment's partner client has when SSO_TGE_INITIATE_LOGIN_URI is empty. ssoRoutes refuses
+ * the hand-off (CLIENT_DISABLED) for a client without one. shapeDeveloperClient reads it only while
+ * SSO_TGE_ENABLED is on, so the kill switch stops every App hand-off, a database row's included.
+ *   - kind "developer": always '' whatever the column holds; the hand-off is first-party only.
+ *   - kind "partner": the stored value when it passes initiateLoginUriProblem (the production rule
+ *     for SSO_TGE_INITIATE_LOGIN_URI). A value that fails reads as '' and is logged once, by client
+ *     id and column name; the value itself is not logged.
+ */
+function rowInitiateLoginUri(row) {
+  if (row.kind !== 'partner') return '';
+  const uri = typeof row.initiateLoginUri === 'string' ? row.initiateLoginUri.trim() : '';
+  if (!uri) return '';
+  if (!initiateLoginUriProblem(uri)) return uri;
+  const key = `${row.clientId}\n${uri}`;
+  if (!reportedInitiateLoginUris.has(key)) {
+    if (reportedInitiateLoginUris.size >= REPORTED_INITIATE_LOGIN_URI_LIMIT) reportedInitiateLoginUris.clear();
+    reportedInitiateLoginUris.add(key);
+    logger.warn('sso.partner_initiate_login_uri_invalid', {
+      clientId: row.clientId,
+      field: 'SsoDeveloperClient.initiateLoginUri',
+      treatedAs: 'absent',
+    });
+  }
+  return '';
+}
+
 function shapeDeveloperClient(row, req) {
   if (!row) return null;
   const firstParty = row.kind === 'partner';
@@ -159,6 +212,9 @@ function shapeDeveloperClient(row, req) {
     clientName: row.clientName,
     enabled: Boolean(row.enabled),
     redirectUris: Array.isArray(row.redirectUris) ? row.redirectUris : [],
+    // SSO_TGE_ENABLED=false stops the App hand-off for every partner client, as it does for the
+    // environment's. The row's web sign-in still follows its own `enabled` flag.
+    initiateLoginUri: cfg.enabled ? rowInitiateLoginUri(row) : '',
     tokenEndpointAuthMethod: 'client_secret_post',
     tokenEndpointAuthMethods: [...PARTNER_TOKEN_ENDPOINT_AUTH_METHODS],
     resource: partnerResourceUrl(req),
@@ -167,7 +223,7 @@ function shapeDeveloperClient(row, req) {
     requestTtlMs: PARTNER_REQUEST_TTL_MS,
     codeTtlMs: PARTNER_CODE_TTL_MS,
     accessTtlSec: PARTNER_ACCESS_TTL_SEC,
-    statusFields: firstParty ? [...PARTNER_STATUS_FIELDS] : [...DEVELOPER_STATUS_FIELDS],
+    statusFields: firstParty ? firstPartyStatusFields(cfg) : [...DEVELOPER_STATUS_FIELDS],
     requireVerifiedSession: firstParty ? cfg.requireVerifiedSession : false,
     autoApprove: firstParty ? { ...cfg.autoApprove } : { app: false, web: false },
     secretHash: row.secretHash,
@@ -188,6 +244,20 @@ async function loadPartnerClient(clientId, req) {
   const configured = getPartnerClient(clientId, req);
   if (configured) return configured;
   return loadDeveloperPartnerClient(clientId, req);
+}
+
+/**
+ * Client ids of the enabled first-party partner clients stored in the registry (kind "partner").
+ * A campaign card may name one of them for the App hand-off (campaignRules.campaignSsoClientIds);
+ * developer clients never get the hand-off, so they are not listed. `client`: a Prisma client.
+ */
+async function listFirstPartyClientIds(client = prisma) {
+  const rows = await client.ssoDeveloperClient.findMany({
+    where: { kind: 'partner', enabled: true },
+    select: { clientId: true },
+    orderBy: { createdAt: 'asc' },
+  });
+  return rows.map((row) => row.clientId);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -361,6 +431,7 @@ module.exports = {
   createDeveloperClient,
   loadDeveloperPartnerClient,
   loadPartnerClient,
+  listFirstPartyClientIds,
   consoleClientId,
   listOwnedClients,
   updateOwnedClient,

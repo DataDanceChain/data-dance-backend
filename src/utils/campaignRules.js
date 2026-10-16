@@ -7,11 +7,12 @@ const {
   LIFE_SOURCES,
   normalizeCrawlerSource,
 } = require('../constants/crawlerSources');
-const { buildCampaignI18n, firstFilled } = require('./campaignI18n');
+const { buildCampaignI18n, firstFilled, SIMPLIFIED } = require('./campaignI18n');
 const { readPartnerConfig, isRetiredPartnerClientId } = require('../constants/partnerClient');
 
 const TEMPLATES = new Set([
   'HOME_CARD',
+  'DIRECTORY_ITEM',
   'CONNECT_BOOST',
   'REFERRAL_BOOST',
   'REDEEM_SALE',
@@ -47,7 +48,7 @@ const CONNECT_SITES = new Set(
   ACCEPTED_SOURCES.filter((source) => source && source !== 'generic'),
 );
 const FIRST_ACTIONS = new Set(['first_distillation']);
-const EXTERNAL_HOSTS = ['datadance.ai', 'x.com', 'twitter.com'];
+const EXTERNAL_HOSTS = ['datadance.ai', 'dataplanet.cc', 'x.com', 'twitter.com'];
 const POINT_SOURCE_CONNECT_BOOST = 'CAMPAIGN_CONNECT_BOOST';
 const POINT_SOURCE_REFERRAL_BOOST = 'CAMPAIGN_REFERRAL_BOOST';
 const POINT_SOURCE_FIRST_ACTION = 'CAMPAIGN_FIRST_ACTION';
@@ -149,32 +150,44 @@ function validateCta(kind, value) {
 }
 
 /**
- * The partner SSO client an EXTERNAL home card hands the App user off to, so the partner page
- * opens already signed in instead of asking for a second login. Only the one partner client this
- * deployment is configured with (SSO_TGE_CLIENT_ID) is accepted. The retired ids "tge" and
- * "tge-rehearsal" are not client ids. The id is public (it is in the partner's authorize URL).
- * Blank → null.
+ * The SSO client ids a card may name: the partner client this deployment is configured with
+ * (SSO_TGE_CLIENT_ID in `env`), then `firstPartyIds`, the enabled first-party partner clients stored
+ * in the database, which the caller loads (ssoDeveloperClient.listFirstPartyClientIds). The retired
+ * ids "tge" and "tge-rehearsal" are never client ids. Blanks and repeats are dropped, order is kept.
  */
-function parseSsoClientId(ctaKind, raw) {
+function campaignSsoClientIds(firstPartyIds = [], env = process.env) {
+  const ids = [readPartnerConfig(env).clientId, ...firstPartyIds]
+    .map((value) => String(value ?? '').trim())
+    .filter((value) => value && !isRetiredPartnerClientId(value));
+  return [...new Set(ids)];
+}
+
+/**
+ * The partner SSO client an EXTERNAL home card or directory item hands the App user off to, so the
+ * partner page opens already signed in instead of asking for a second login. Only an id in
+ * `accepted` (campaignSsoClientIds) is stored; a caller that passes no list gets the configured
+ * client only. The id is public (it is in the partner's authorize URL). Blank → null.
+ */
+function parseSsoClientId(ctaKind, raw, accepted = campaignSsoClientIds()) {
   if (ctaKind !== 'EXTERNAL') return { value: null };
   const clientId = String(raw ?? '').trim();
   if (!clientId) return { value: null };
-  // The configured id only (not getPartnerClient): saving a card must not depend on the OAuth
-  // issuer URL being set, and the id alone is what the App hands to /sso/app-ticket.
-  const configuredId = readPartnerConfig().clientId;
-  const known = configuredId && !isRetiredPartnerClientId(configuredId) ? configuredId : '';
-  if (!known || isRetiredPartnerClientId(clientId) || clientId !== known) {
-    const shown = clientId.slice(0, 64);
-    return {
-      error: known
-        ? `Unknown SSO client "${shown}": this server only knows "${known}"`
-        : `Unknown SSO client "${shown}": no partner SSO client is configured on this server`,
-    };
-  }
-  return { value: clientId };
+  // Ids only (not getPartnerClient): saving a card must not depend on the OAuth issuer URL being
+  // set, and the id alone is what the App hands to /sso/app-ticket.
+  const problem = ssoClientIdProblem(clientId, accepted);
+  return problem ? { error: problem } : { value: clientId };
 }
 
-function parseHomeConfig(body) {
+/** '' when `clientId` is one of `accepted` (campaignSsoClientIds), else why it is refused. */
+function ssoClientIdProblem(clientId, accepted) {
+  if (!isRetiredPartnerClientId(clientId) && accepted.includes(clientId)) return '';
+  const shown = String(clientId).slice(0, 64);
+  return accepted.length
+    ? `Unknown SSO client "${shown}": this server only knows ${accepted.map((id) => `"${id}"`).join(', ')}`
+    : `Unknown SSO client "${shown}": no partner SSO client is configured on this server`;
+}
+
+function parseHomeConfig(body, options = {}) {
   const ctaKind = String(body.ctaKind || 'ROUTE').trim();
   const ctaValue = String(body.ctaValue || '').trim();
   const ctaError = validateCta(ctaKind, ctaValue);
@@ -183,7 +196,7 @@ function parseHomeConfig(body) {
   if (coverImageUrl && !isCoverImageUrl(coverImageUrl)) {
     return { error: 'Cover image must be an uploaded file or an https DataDance / X URL' };
   }
-  const sso = parseSsoClientId(ctaKind, body.ssoClientId ?? body.config?.ssoClientId);
+  const sso = parseSsoClientId(ctaKind, body.ssoClientId ?? body.config?.ssoClientId, options.ssoClientIds);
   if (sso.error) return { error: sso.error };
   return {
     ctaKind,
@@ -390,8 +403,8 @@ function parseRaffleConfig(body) {
   };
 }
 
-function parseTemplateFields(template, body) {
-  if (template === 'HOME_CARD') return parseHomeConfig(body);
+function parseTemplateFields(template, body, options) {
+  if (template === 'HOME_CARD' || template === 'DIRECTORY_ITEM') return parseHomeConfig(body, options);
   if (template === 'CONNECT_BOOST') return parseConnectBoostConfig(body);
   if (template === 'REFERRAL_BOOST') return parseReferralBoostConfig(body);
   if (template === 'REDEEM_SALE') return parseRedeemSaleConfig(body);
@@ -402,7 +415,11 @@ function parseTemplateFields(template, body) {
   return { error: 'Unknown campaign template' };
 }
 
-function parseDraft(body = {}) {
+/**
+ * `options.ssoClientIds`: the SSO client ids an EXTERNAL card may name (campaignSsoClientIds);
+ * without it only the configured client is accepted.
+ */
+function parseDraft(body = {}, options = {}) {
   const slug = normalizeSlug(body.slug);
   if (!isValidSlug(slug)) {
     return { error: 'Slug must be lowercase letters, numbers, and hyphens' };
@@ -421,25 +438,17 @@ function parseDraft(body = {}) {
     pillEn: stripText(body.pillEn, 40),
     pillZh: stripText(body.pillZh, 40),
   });
-  const titleEn = i18n.title.en || firstFilled(i18n.title);
-  const titleZh = i18n.title.zh || firstFilled(i18n.title);
-  const blurbEn = i18n.blurb.en || firstFilled(i18n.blurb);
-  const blurbZh = i18n.blurb.zh || firstFilled(i18n.blurb);
   if (!firstFilled(i18n.title) || !firstFilled(i18n.blurb)) {
     return { error: 'A title and blurb are required in at least one language' };
   }
-  const parsed = parseTemplateFields(template, body);
+  const columns = copyColumns(i18n);
+  const parsed = parseTemplateFields(template, body, options);
   if (parsed.error) return parsed;
   return {
     data: {
       slug,
-      internalName: stripText(body.internalName, 80) || titleEn,
-      titleEn,
-      titleZh,
-      blurbEn,
-      blurbZh,
-      pillEn: i18n.pill.en || null,
-      pillZh: i18n.pill.zh || null,
+      internalName: stripText(body.internalName, 80) || columns.titleEn,
+      ...columns,
       template,
       startsAt,
       endsAt,
@@ -449,7 +458,11 @@ function parseDraft(body = {}) {
       purpose: stripText(body.purpose, 500),
       legalText: stripText(body.legalText, 4000),
       coverImageUrl: parsed.coverImageUrl,
-      config: { ...parsed.config, i18n },
+      config: {
+        ...parsed.config,
+        ...(template === 'APPLY_COHORT' ? questionColumns(i18n) : {}),
+        i18n,
+      },
     },
   };
 }
@@ -505,13 +518,49 @@ function findScheduleConflict(existingRows, next, excludeId) {
   });
 }
 
+function chineseCopy(map) {
+  return map[SIMPLIFIED] || map['zh-TW'];
+}
+
+/**
+ * The one-language columns of a campaign row from its i18n block. The Chinese columns hold the
+ * Simplified copy when there is one (what the admin's Simplified field shows), else Traditional.
+ */
+function copyColumns(i18n) {
+  return {
+    titleEn: i18n.title.en || firstFilled(i18n.title),
+    titleZh: chineseCopy(i18n.title) || firstFilled(i18n.title),
+    blurbEn: i18n.blurb.en || firstFilled(i18n.blurb),
+    blurbZh: chineseCopy(i18n.blurb) || firstFilled(i18n.blurb),
+    pillEn: i18n.pill.en || null,
+    pillZh: chineseCopy(i18n.pill) || null,
+  };
+}
+
+/**
+ * The question{n}En / question{n}Zh fields of an application config from its i18n block, by the
+ * copyColumns rule. They are recomputed on every save, so they always show the saved copy.
+ */
+function questionColumns(i18n) {
+  const out = {};
+  [1, 2, 3].forEach((index) => {
+    const map = i18n[`question${index}`] || {};
+    const any = firstFilled(map);
+    if (!any) return;
+    out[`question${index}En`] = map.en || any;
+    out[`question${index}Zh`] = chineseCopy(map) || any;
+  });
+  return out;
+}
+
 function mergeLocaleConfig(config, i18n) {
   const next = { ...config, i18n };
   const write = (prefix, map) => {
     if (map.en) next[`${prefix}En`] = map.en;
-    if (map.zh) next[`${prefix}Zh`] = map.zh;
-    if (map.ja) next[`${prefix}Ja`] = map.ja;
+    if (map[SIMPLIFIED]) next[`${prefix}Zh`] = map[SIMPLIFIED];
     if (map['zh-TW']) next[`${prefix}ZhTw`] = map['zh-TW'];
+    if (map.ja) next[`${prefix}Ja`] = map.ja;
+    if (map.ko) next[`${prefix}Ko`] = map.ko;
   };
   write('shareText', i18n.shareText);
   write('perkNote', i18n.perkNote);
@@ -538,6 +587,7 @@ function applyCopyFields(existing, body = {}) {
     return { error: 'A title and blurb are required in at least one language' };
   }
   const config = mergeLocaleConfig(current, i18n);
+  if (existing.template === 'APPLY_COHORT') Object.assign(config, questionColumns(i18n));
   if (existing.template === 'RAFFLE' && Array.isArray(body.prizes) && Array.isArray(config.prizes)) {
     config.prizes = config.prizes.map((prize, index) => {
       const next = body.prizes[index] || {};
@@ -552,12 +602,7 @@ function applyCopyFields(existing, body = {}) {
   }
   return {
     data: {
-      titleEn: i18n.title.en || firstFilled(i18n.title),
-      titleZh: i18n.title.zh || firstFilled(i18n.title),
-      blurbEn: i18n.blurb.en || firstFilled(i18n.blurb),
-      blurbZh: i18n.blurb.zh || firstFilled(i18n.blurb),
-      pillEn: i18n.pill.en || null,
-      pillZh: i18n.pill.zh || null,
+      ...copyColumns(i18n),
       config,
     },
   };
@@ -566,7 +611,7 @@ function applyCopyFields(existing, body = {}) {
 function toPublicCard(row) {
   const config = row.config && typeof row.config === 'object' ? row.config : {};
   const publicConfig =
-    row.template === 'HOME_CARD'
+    row.template === 'HOME_CARD' || row.template === 'DIRECTORY_ITEM'
       ? {
           shareTextEn: config.shareTextEn || null,
           shareTextZh: config.shareTextZh || null,
@@ -658,6 +703,8 @@ module.exports = {
   POINT_SOURCE_FIRST_ACTION,
   POINT_SOURCE_RAFFLE,
   EXCLUSIVE_TEMPLATES,
+  campaignSsoClientIds,
+  ssoClientIdProblem,
   parseDraft,
   applyCopyFields,
   assertPublishable,

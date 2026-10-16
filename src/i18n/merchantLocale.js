@@ -1,18 +1,15 @@
-const LOCALES = ['en', 'zh', 'zh-TW', 'ja'];
+/** The product's languages. Every Chinese tag (zh, zh-CN, zh-Hans, zh-HK, ...) is shown in zh-TW. */
+const LOCALES = ['en', 'zh-TW', 'ja', 'ko'];
 
+/** First tag of a locale or an Accept-Language value, as one of LOCALES (English when unknown). */
 function resolveLocale(input) {
   const raw = String(input || '').trim();
   if (!raw) return 'en';
-  const first = raw.split(',')[0].split(';')[0].trim();
-  const lower = first.toLowerCase();
-  if (lower === 'zh-tw' || lower === 'zh-hant' || lower.startsWith('zh-tw') || lower.startsWith('zh-hk') || lower.startsWith('zh-hant')) {
-    return 'zh-TW';
-  }
-  if (lower === 'zh' || lower.startsWith('zh-cn') || lower.startsWith('zh-sg') || lower.startsWith('zh-hans')) {
-    return 'zh';
-  }
-  if (lower.startsWith('ja')) return 'ja';
-  if (LOCALES.includes(first)) return first;
+  const first = raw.split(',')[0].split(';')[0].trim().replace(/_/g, '-');
+  const primary = first.toLowerCase().split('-')[0];
+  if (primary === 'zh') return 'zh-TW';
+  if (primary === 'ja') return 'ja';
+  if (primary === 'ko') return 'ko';
   return 'en';
 }
 
@@ -40,30 +37,6 @@ const LABELS = {
     sku: 'SKU',
     recordId: 'Record ID',
     source: 'Source',
-  },
-  zh: {
-    'order-id': '订单号',
-    email: '邮箱',
-    'buyer-email': '买家邮箱',
-    name: '姓名',
-    title: '商品',
-    product: '商品',
-    phone: '电话',
-    'ship-address': '收件地址',
-    address: '地址',
-    'ship-city': '城市',
-    city: '城市',
-    'ship-state': '州 / 省',
-    state: '州 / 省',
-    'ship-postal-code': '邮编',
-    'postal-code': '邮编',
-    'ship-country': '国家 / 地区',
-    country: '国家 / 地区',
-    quantity: '数量',
-    price: '价格',
-    sku: 'SKU',
-    recordId: '记录编号',
-    source: '来源',
   },
   'zh-TW': {
     'order-id': '訂單編號',
@@ -113,31 +86,55 @@ const LABELS = {
     recordId: 'レコードID',
     source: 'ソース',
   },
+  ko: {
+    'order-id': '주문 번호',
+    email: '이메일',
+    'buyer-email': '구매자 이메일',
+    name: '이름',
+    title: '상품',
+    product: '상품',
+    phone: '전화번호',
+    'ship-address': '배송 주소',
+    address: '주소',
+    'ship-city': '도시',
+    city: '도시',
+    'ship-state': '주 / 지역',
+    state: '주 / 지역',
+    'ship-postal-code': '우편번호',
+    'postal-code': '우편번호',
+    'ship-country': '국가 / 지역',
+    country: '국가 / 지역',
+    quantity: '수량',
+    price: '가격',
+    sku: 'SKU',
+    recordId: '레코드 ID',
+    source: '출처',
+  },
 };
 
 const ALIASES = {
-  'order-id': ['order-id', 'order_id', 'orderid', 'order id', '订单号', '訂單編號', '注文番号'],
-  email: ['email', 'e-mail', 'mail', '邮箱', '电子邮箱', '電子郵件', '電郵', 'メール'],
-  'buyer-email': ['buyer-email', 'buyer_email', 'buyeremail', 'buyer email'],
-  name: ['name', 'full_name', 'fullname', 'customer_name', 'buyer_name', '姓名', '名称', '名前', '氏名'],
-  title: ['title', 'product_name', 'item', '商品名称', '商品名', '商品'],
+  'order-id': ['order-id', 'order_id', 'orderid', 'order id', '订单号', '訂單編號', '注文番号', '주문 번호', '주문번호'],
+  email: ['email', 'e-mail', 'mail', '邮箱', '电子邮箱', '電子郵件', '電郵', 'メール', '이메일'],
+  'buyer-email': ['buyer-email', 'buyer_email', 'buyeremail', 'buyer email', '구매자 이메일'],
+  name: ['name', 'full_name', 'fullname', 'customer_name', 'buyer_name', '姓名', '名称', '名前', '氏名', '이름'],
+  title: ['title', 'product_name', 'item', '商品名称', '商品名', '商品', '상품', '상품명'],
   product: ['product'],
-  phone: ['phone', 'mobile', 'tel', 'telephone', 'phone_number', '手机', '电话', '電話', '電話番号'],
-  'ship-address': ['ship-address', 'ship_address', 'shipping_address', '收件地址', '配送先住所'],
-  address: ['address', '地址', '住所'],
+  phone: ['phone', 'mobile', 'tel', 'telephone', 'phone_number', '手机', '电话', '電話', '電話番号', '전화번호'],
+  'ship-address': ['ship-address', 'ship_address', 'shipping_address', '收件地址', '配送先住所', '배송 주소'],
+  address: ['address', '地址', '住所', '주소'],
   'ship-city': ['ship-city', 'ship_city', 'shipping_city'],
-  city: ['city', '城市', '市区町村'],
+  city: ['city', '城市', '市区町村', '도시'],
   'ship-state': ['ship-state', 'ship_state', 'shipping_state'],
   state: ['state', 'region', 'province', '州', '省', '都道府県'],
   'ship-postal-code': ['ship-postal-code', 'ship_postal_code', 'shipping_postal_code'],
-  'postal-code': ['postal-code', 'postal_code', 'zip', 'zipcode', '邮编', '郵遞區號', '郵便番号'],
+  'postal-code': ['postal-code', 'postal_code', 'zip', 'zipcode', '邮编', '郵遞區號', '郵便番号', '우편번호'],
   'ship-country': ['ship-country', 'ship_country', 'shipping_country'],
-  country: ['country', '国家', '國家', '国'],
-  quantity: ['quantity', 'qty', '数量', '數量'],
-  price: ['price', 'amount', '价格', '價格', '価格'],
+  country: ['country', '国家', '國家', '国', '국가'],
+  quantity: ['quantity', 'qty', '数量', '數量', '수량'],
+  price: ['price', 'amount', '价格', '價格', '価格', '가격'],
   sku: ['sku', 'asin'],
-  recordId: ['recordid', 'record_id', 'record-id', '记录编号', '記錄編號', 'レコードid'],
-  source: ['source', '来源', '來源', 'ソース'],
+  recordId: ['recordid', 'record_id', 'record-id', '记录编号', '記錄編號', 'レコードid', '레코드 id'],
+  source: ['source', '来源', '來源', 'ソース', '출처'],
 };
 
 const ALIAS_TO_KEY = {};
@@ -156,7 +153,7 @@ function canonicalKey(header) {
 
 function localizeHeader(header, locale) {
   const key = canonicalKey(header);
-  const table = LABELS[locale] || LABELS.en;
+  const table = LABELS[resolveLocale(locale)];
   if (table[key]) return table[key];
   if (LABELS.en[key]) return LABELS.en[key];
   return String(header);
@@ -179,12 +176,6 @@ const LICENCE_TERMS = {
     'Do not resell, sublicense, or republish the identifiable rows.',
     'A later withdrawal can shrink what you may download next time.',
   ],
-  zh: [
-    '仅可用于分析与产品研究。',
-    '不得向数据包中的人士进行直销。',
-    '不得转售、再许可或公开可识别行。',
-    '当事人日后撤回同意，可能减少你下次可下载的内容。',
-  ],
   'zh-TW': [
     '僅可用於分析與產品研究。',
     '不得向資料包中的人士進行直銷。',
@@ -197,16 +188,18 @@ const LICENCE_TERMS = {
     '識別可能な行の転売、再ライセンス、再公開はできません。',
     '本人が後から同意を撤回すると、次回ダウンロードできる内容が減ることがあります。',
   ],
+  ko: [
+    '분석 및 제품 연구 용도로만 사용할 수 있습니다.',
+    '데이터 팩에 포함된 사람에게 직접 마케팅을 할 수 없습니다.',
+    '식별 가능한 행을 재판매, 재라이선스 또는 재게시할 수 없습니다.',
+    '당사자가 나중에 동의를 철회하면 다음에 다운로드할 수 있는 내용이 줄어들 수 있습니다.',
+  ],
 };
 
 const CSV_NOTICE = {
   en: (version, buyer, purchaseId) => [
     `# DataDance buyer licence ${version}`,
     `# buyer=${buyer}; purchase=${purchaseId}; purpose=analysis-and-research; direct-marketing=no`,
-  ],
-  zh: (version, buyer, purchaseId) => [
-    `# DataDance 买方许可 ${version}`,
-    `# 买方=${buyer}; 采购=${purchaseId}; 用途=分析与研究; 直销=否`,
   ],
   'zh-TW': (version, buyer, purchaseId) => [
     `# DataDance 買方許可 ${version}`,
@@ -216,14 +209,18 @@ const CSV_NOTICE = {
     `# DataDance バイヤーライセンス ${version}`,
     `# バイヤー=${buyer}; 購入=${purchaseId}; 目的=分析・調査; ダイレクトマーケティング=不可`,
   ],
+  ko: (version, buyer, purchaseId) => [
+    `# DataDance 구매자 라이선스 ${version}`,
+    `# 구매자=${buyer}; 구매=${purchaseId}; 용도=분석·연구; 직접 마케팅=불가`,
+  ],
 };
 
 function licenceTerms(locale) {
-  return LICENCE_TERMS[locale] || LICENCE_TERMS.en;
+  return LICENCE_TERMS[resolveLocale(locale)];
 }
 
 function csvNotice({ locale, version, buyer, purchaseId }) {
-  const build = CSV_NOTICE[locale] || CSV_NOTICE.en;
+  const build = CSV_NOTICE[resolveLocale(locale)];
   return build(version, buyer, purchaseId).join('\n');
 }
 

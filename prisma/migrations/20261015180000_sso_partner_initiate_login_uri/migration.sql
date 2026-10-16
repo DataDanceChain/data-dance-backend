@@ -1,0 +1,11 @@
+-- App hand-off target for a first-party partner client stored in the database.
+--
+-- POST /api/sso/app-ticket → /sso/continue → `{initiate_login_uri}?iss=…` needs the partner's
+-- initiate_login_uri. The environment's partner client reads it from SSO_TGE_INITIATE_LOGIN_URI;
+-- a row of kind 'partner' now reads it from this column (set with
+-- scripts/setPartnerInitiateLoginUri.js). Rows of kind 'developer' never use it.
+--
+-- Additive and nullable with no default: a catalog-only change (no table rewrite), every existing
+-- row reads NULL (no hand-off, as before), and no data is changed. IDEMPOTENT, like
+-- 20261005180000_sso_partner_kind.
+ALTER TABLE "SsoDeveloperClient" ADD COLUMN IF NOT EXISTS "initiateLoginUri" TEXT;

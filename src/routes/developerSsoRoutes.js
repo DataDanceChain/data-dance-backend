@@ -1,9 +1,11 @@
 /**
  * Self-serve registration for a DDC SSO client, by a signed-in DataDance account.
  * POST /api/developer/sso/clients returns the secret once. Nothing here lists existing secrets.
- * Closed unless SSO_DEVELOPER_REGISTRATION=on (src/constants/developerRegistration.js). When it is
- * on, the route itself still requires a user JWT (`protect`), so its protection does not depend on
- * where any other router is mounted.
+ * Closed unless SSO_DEVELOPER_REGISTRATION=on or allowlist (src/constants/developerRegistration.js),
+ * or the account has the developer or ddc_admin role (below). The route itself requires a user JWT
+ * (`protect`), so its protection does not depend on where any other router is mounted. In allowlist
+ * mode only a listed account with a verified login e-mail, or one of those roles, gets past
+ * `registrationAllowed`; every other one gets the off answer.
  *
  * The account console (the frontend's /developers/ page) reads and changes the signed-in account's
  * own clients. These routes do not depend on the registration switch:
@@ -18,9 +20,9 @@
  *                                                 verified_session }
  *   GET /api/developer/sso/admin/clients        ddc_admin: every client, read-only, never a secret
  *   GET /api/developer/sso/admin/staff-unlock   ddc_admin: the staff network unlock (audited)
- * While registration is closed, a signed-in account with the developer or ddc_admin role may
- * still register a client (audited: console.client_register); anyone else, and every caller
- * without a token, gets registration_closed.
+ * While registration is off, or allowlist does not admit the account, a signed-in account with
+ * the developer or ddc_admin role may still register a client (audited: console.client_register);
+ * anyone else gets registration_closed, and so does every caller without a token while it is off.
  *
  * These staff uses of a wallet JWT (the two admin routes, and registering while registration is
  * closed) apply the rule of POST /api/ops/auth/code (src/services/staffSession.js): a verified
@@ -33,7 +35,7 @@ const { protect } = require('../middlewares/authMiddleware');
 const { rateLimiters } = require('../middlewares/rateLimitMiddleware');
 const { publicBaseUrl } = require('../constants/lifeContext');
 const { partnerResourceUrl } = require('../constants/partnerClient');
-const { developerRegistrationOpen } = require('../constants/developerRegistration');
+const { developerRegistrationMode, registrationDecision } = require('../constants/developerRegistration');
 const { createLogger } = require('../utils/logger');
 const {
   createDeveloperClient,
@@ -63,14 +65,19 @@ function hasBearer(req) {
 }
 
 // First on the route, before the login check, the rate limiter and any database access: while
-// registration is closed, a caller without a token gets the same answer as before and nothing is
-// read or written. A caller with a token goes on to `protect` and the role check below.
+// registration is off, a caller without a token gets the same answer as before and nothing is read
+// or written. Any other caller goes on to `protect` and `registrationAllowed` below (on and
+// allowlist: an anonymous caller gets protect's 401).
 function registrationOpen(req, res, next) {
-  if (developerRegistrationOpen()) return next();
+  if (developerRegistrationMode() !== 'off') return next();
   if (!hasBearer(req)) return registrationClosed(res);
-  req.registrationNeedsRole = true;
   return next();
 }
+
+/** Where a refused registration is logged. Replaceable for tests. */
+const registrationLog = {
+  info: (event, entry) => logger.info(event, entry),
+};
 
 /**
  * A wallet JWT acting as staff on the console (see the header): verified, and not issued before
@@ -90,36 +97,56 @@ function staffSessionOk(req, res) {
   }
 }
 
-// After `protect`, while registration is closed: the developer or ddc_admin role may register,
-// from a staff session. The role the registration is made with is kept for its audit row.
-async function registrationRole(req, res, next) {
-  if (!req.registrationNeedsRole) return next();
+/**
+ * After `protect`, before the rate limiter. on lets every signed-in account through, allowlist a
+ * listed account with a verified login e-mail (decided from the account row and the verified JWT,
+ * never from the body). When that refuses (off, or allowlist and not admitted), the developer or
+ * ddc_admin role may still register, from a staff session; the role is kept for the audit row.
+ * Everyone else gets the off answer, so it never tells whether an address is listed, and an account
+ * that is refused does not use up the per-IP registration limit. One log line per refusal: the
+ * account id and the reason code, never the e-mail.
+ */
+async function registrationAllowed(req, res, next) {
+  const decision = registrationDecision(req.user, req.authClaims);
+  if (decision.allowed) return next();
   try {
     const roles = await activeRoles(req.user.id);
-    if (!roles.includes('developer') && !roles.includes('ddc_admin')) return registrationClosed(res);
-    if (!staffSessionOk(req, res)) return undefined;
-    req.registrationRole = roles.includes('ddc_admin') ? 'ddc_admin' : 'developer';
-    return next();
+    if (roles.includes('developer') || roles.includes('ddc_admin')) {
+      if (!staffSessionOk(req, res)) return undefined;
+      req.registrationRole = roles.includes('ddc_admin') ? 'ddc_admin' : 'developer';
+      req.registrationMode = developerRegistrationMode();
+      return next();
+    }
   } catch (error) {
     logger.error('Developer registration role check failed', { errorName: error && error.name });
     return res.status(500).json({ error: 'server_error', error_description: 'Could not create the client.' });
   }
+  try {
+    registrationLog.info('developer_registration.refused', { reqId: req.reqId || null, userId: req.user.id, reason: decision.reason });
+  } catch (_) {
+    // A failed log line does not change the answer.
+  }
+  return registrationClosed(res);
 }
 
-/** The audit row of a registration made with a role while registration is closed. */
+/** The audit row of a registration made with a role while registration is off, or allowlist refused it. */
 function registrationAudit(req) {
   if (!req.registrationRole) return undefined;
   return (tx, row) => writeAudit(tx, {
     actor: actorFromUser(req.user, req.registrationRole),
     action: 'console.client_register',
     target: { type: 'sso_client', id: row.clientId, label: row.clientName },
-    detail: { kind: 'developer', registration: 'closed', redirectUris: Array.isArray(row.redirectUris) ? row.redirectUris.length : 0 },
+    detail: {
+      kind: 'developer',
+      registration: req.registrationMode === 'allowlist' ? 'allowlist' : 'closed',
+      redirectUris: Array.isArray(row.redirectUris) ? row.redirectUris.length : 0,
+    },
     surface: 'console',
     requestId: req.reqId || null,
   });
 }
 
-router.post('/clients', registrationOpen, protect, registrationRole, rateLimiters.developerClientCreate, async (req, res) => {
+router.post('/clients', registrationOpen, protect, registrationAllowed, rateLimiters.developerClientCreate, async (req, res) => {
   try {
     // `protect` set req.user: the client belongs to the account that registered it. A
     // registration made with a role writes its audit row in the same transaction as the client.
@@ -284,7 +311,8 @@ router.get('/me', noStore, protect, rateLimiters.developerConsoleRead, async (re
       email: req.user.email || null,
       roles,
       admin,
-      can_register: developerRegistrationOpen() || admin || roles.includes('developer'),
+      // on: any account; allowlist: a listed account with a verified login e-mail; any mode: the roles.
+      can_register: registrationDecision(req.user, req.authClaims).allowed || admin || roles.includes('developer'),
       // The staff routes need a verified session: false tells the console to ask for a new sign-in.
       verified_session: verifiedSession(req.authClaims),
     });
@@ -386,3 +414,4 @@ router.post('/clients/secret', noStore, protect, rateLimiters.developerClientRot
 module.exports = router;
 module.exports.consoleAudit = consoleAudit;
 module.exports.consoleLog = consoleLog;
+module.exports.registrationLog = registrationLog;

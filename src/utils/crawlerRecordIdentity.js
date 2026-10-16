@@ -9,6 +9,8 @@
 const { isCatalogCrawlerSource, normalizeCrawlerSource } = require('../constants/crawlerSources');
 
 const TITLE_BACKED_PREFIX = 'title:';
+/** Prefix of a post's permalink key (per user, like every title: key). */
+const POST_KEY_PREFIX = `${TITLE_BACKED_PREFIX}post:`;
 
 /** Core hosts that may fall back to title: when the client sent a smoothed row. */
 const TITLE_BACKED_SMOOTHED_CORE = new Set(['luma', 'airbnb', 'booking']);
@@ -72,10 +74,56 @@ function isClientSmoothedRecord(item) {
  * A social post's permalink, reduced to the id the platform itself uses for that post, so the same
  * post seen through another host (twitter.com, mobile.x.com), another handle spelling, or with a
  * comment / query suffix is one record. Only the social sources below use it, and only with a link
- * on that platform's own hosts: every other source keeps its order id or title identity.
+ * on that platform's own hosts: every other source keeps its order id or title identity. Each
+ * canonical form reads back as itself, so a row that carries the canonical link gets the same key
+ * as one that carries the original link. The web client derives the same forms
+ * (src/crawler/connect/postUrl.ts); test/fixtures/postUrlCases.json is the table both sides run.
  */
 const SHORTCODE = /^[A-Za-z0-9_-]{4,64}$/;
 const NUMERIC_ID = /^\d{1,25}$/;
+const FACEBOOK_ID = /^[A-Za-z0-9_-]{4,200}$/;
+
+/**
+ * The post id after a keyword segment, with its keyword: the handle form (/<handle>/<keyword>/<id>,
+ * the first keyword after the first segment) first, and the canonical form (/<keyword>/<id>) only
+ * when the handle form gives no id. null when neither does.
+ */
+function keywordPost(parts, keywords, idPattern) {
+  const isKeyword = (part) => keywords.includes(String(part || '').toLowerCase());
+  const after = (at) =>
+    at >= 0 && idPattern.test(parts[at + 1] || '') ? { keyword: parts[at].toLowerCase(), id: parts[at + 1] } : null;
+  return after(parts.findIndex((part, i) => i > 0 && isKeyword(part))) || (isKeyword(parts[0]) ? after(0) : null);
+}
+
+/**
+ * A Facebook story's permalink, in the forms the web client sends: /<user>/posts/<id>,
+ * /<user>/videos/<id>, /reel/<id>, /share/<kind>/<id>, and the query forms permalink.php and
+ * story.php (story_fbid, with id= when it is an id too), photo.php (fbid) and watch/ (v). The id
+ * is what the platform shows in the link, so the user segment and the query form are kept. A
+ * profile, login or other page of the site is not a post.
+ */
+function facebookPostUrl(parts, url) {
+  const isId = (value) => FACEBOOK_ID.test(value || '');
+  const after = (keyword) => parts.findIndex((part, i) => i > 0 && part.toLowerCase() === keyword);
+  const posts = after('posts');
+  if (posts > 0 && isId(parts[posts + 1])) return `https://facebook.com/${parts[posts - 1]}/posts/${parts[posts + 1]}`;
+  const videos = after('videos');
+  if (videos > 0 && isId(parts[videos + 1])) return `https://facebook.com/${parts[videos - 1]}/videos/${parts[videos + 1]}`;
+  const head = String(parts[0] || '').toLowerCase();
+  if (head === 'reel' && isId(parts[1])) return `https://facebook.com/reel/${parts[1]}`;
+  if (head === 'share' && parts[1] && isId(parts[2])) return `https://facebook.com/share/${parts[1]}/${parts[2]}`;
+  const query = (name) => url.searchParams.get(name) || '';
+  const story = query('story_fbid');
+  if ((head === 'permalink.php' || head === 'story.php') && isId(story)) {
+    const owner = query('id');
+    return `https://facebook.com/${head}?story_fbid=${story}${isId(owner) ? `&id=${owner}` : ''}`;
+  }
+  const photo = query('fbid');
+  if ((head === 'photo.php' || head === 'photo') && isId(photo)) return `https://facebook.com/photo.php?fbid=${photo}`;
+  const video = query('v');
+  if (head === 'watch' && isId(video)) return `https://facebook.com/watch/?v=${video}`;
+  return '';
+}
 
 const SOCIAL_PERMALINKS = {
   x: {
@@ -100,28 +148,37 @@ const SOCIAL_PERMALINKS = {
   threads: {
     hosts: ['threads.net', 'threads.com'],
     canonical(parts) {
-      const at = parts.findIndex((part, i) => i > 0 && part.toLowerCase() === 'post');
-      const code = at > 0 ? parts[at + 1] : '';
-      return SHORTCODE.test(code || '') ? `https://threads.net/post/${code}` : '';
+      // /@<handle>/post/<code>, and the canonical /post/<code> itself
+      const post = keywordPost(parts, ['post'], SHORTCODE);
+      return post ? `https://threads.net/post/${post.id}` : '';
     },
   },
   tiktok: {
     hosts: ['tiktok.com'],
     canonical(parts) {
-      const at = parts.findIndex((part, i) => i > 0 && ['video', 'photo'].includes(part.toLowerCase()));
-      const id = at > 0 ? parts[at + 1] : '';
-      return NUMERIC_ID.test(id || '') ? `https://tiktok.com/${parts[at].toLowerCase()}/${id}` : '';
+      // /@<handle>/video/<id>, /@<handle>/photo/<id>, and the canonical /video/<id>, /photo/<id>
+      const post = keywordPost(parts, ['video', 'photo'], NUMERIC_ID);
+      return post ? `https://tiktok.com/${post.keyword}/${post.id}` : '';
     },
+  },
+  facebook: {
+    // facebook.com and fb.com with any subdomain (web., business., ...), as the web client reads them
+    hosts: ['facebook.com', 'fb.com'],
+    anySubdomain: true,
+    canonical: facebookPostUrl,
   },
 };
 
 /** Sources whose rows may carry a post permalink identity. */
 const SOCIAL_PERMALINK_SOURCES = Object.keys(SOCIAL_PERMALINKS);
 
-/** True when `hostname` is one of `hosts`, bare or behind www. / m. / mobile. */
-function isPlatformHost(hostname, hosts) {
+/**
+ * True when `hostname` is one of the rule's hosts, bare or behind www. / m. / mobile. (or behind
+ * any subdomain, for a rule with `anySubdomain`).
+ */
+function isPlatformHost(hostname, { hosts, anySubdomain = false }) {
   const host = String(hostname || '').toLowerCase().replace(/^(?:www|m|mobile)\./, '');
-  return hosts.includes(host);
+  return hosts.includes(host) || (anySubdomain && hosts.some((name) => host.endsWith(`.${name}`)));
 }
 
 /**
@@ -143,15 +200,52 @@ function socialPostUrl(source, payload) {
       continue;
     }
     if (url.protocol !== 'https:' && url.protocol !== 'http:') continue;
-    if (!isPlatformHost(url.hostname, rule.hosts)) continue;
-    const canonical = rule.canonical(url.pathname.split('/').filter(Boolean));
+    if (!isPlatformHost(url.hostname, rule)) continue;
+    const canonical = rule.canonical(url.pathname.split('/').filter(Boolean), url);
     if (canonical) return canonical;
   }
   return '';
 }
 
+/**
+ * True for a link on a Facebook host: facebook.com or fb.com, bare or behind any subdomain, with
+ * or without a trailing dot, with or without its scheme. The same test as the web client's
+ * isFacebookLink (src/crawler/connect/postUrl.ts); the facebookLinks list in
+ * test/fixtures/postUrlCases.json is run by both sides.
+ */
+function isFacebookLink(value) {
+  const text = typeof value === 'string' ? value.trim() : '';
+  if (!text || text.length > 2048) return false;
+  for (const candidate of [text, `https://${text}`]) {
+    let url;
+    try {
+      url = new URL(candidate);
+    } catch {
+      continue;
+    }
+    if (url.protocol !== 'https:' && url.protocol !== 'http:') continue;
+    const host = url.hostname.toLowerCase().replace(/\.+$/, '');
+    if (['facebook.com', 'fb.com'].some((name) => host === name || host.endsWith(`.${name}`))) return true;
+  }
+  return false;
+}
+
+/**
+ * The record's own id, which identifies it across all users of the source; null when it has none.
+ * A Facebook row's id is never a link on a Facebook host: a post link is its permalink key
+ * (socialPostUrl, per user), and any other Facebook link is skipped, so such a row falls back to
+ * its title key (per user) instead of one key shared by everyone who sent that link.
+ */
 function officialRecordId(source, payload) {
   const row = asRecord(payload);
+  if (normalizeCrawlerSource(source) === 'facebook') {
+    for (const value of [row.orderId, row.orderid, row.id, row.bookingId, row.tripId]) {
+      if (!value) continue;
+      const text = String(value).trim();
+      if (!isFacebookLink(text)) return text || null;
+    }
+    return null;
+  }
   if (source === 'amazon') return String(row.orderid || row.orderId || '').trim() || null;
   if (source === 'luma') return String(row.eventId || row.taskId || row.id || '').trim() || null;
   if (source === 'airbnb') return String(row.tripId || row.id || '').trim() || null;
@@ -180,29 +274,67 @@ function allowsTitleBackedIdentity(source, metadata = {}) {
   return isClientSmoothedRecord({ source, metadata });
 }
 
+/** The title key of a row: `title:<host>:<title>:<date>`, or null when the row has no title. */
+function titleSourceId(source, payload, metadata = {}) {
+  const title = payloadTitle(payload);
+  if (!title) return null;
+  const date = payloadDate(payload);
+  const host = hostFromMetadata(metadata) || source;
+  return `${TITLE_BACKED_PREFIX}${host}:${title}:${date}`.slice(0, 190);
+}
+
 /**
  * Dedup key matching the client after clean: host + orderId / title / date.
  * Official ids stay unprefixed so already-stored Amazon (and other core)
  * sourceId values keep matching. Title-only catalog rows and smoothed
  * Luma / Airbnb / Booking generic fallbacks use a title: key unique per
  * host (not collapsed into amazon). A post on X / Instagram / Threads /
- * TikTok uses its canonical permalink, also per user (title: prefix): each
- * user who saw the post may keep it once.
+ * TikTok / Facebook uses its canonical permalink, also per user (title:
+ * prefix): each user who saw the post may keep it once.
  */
 function extractSourceId(source, payload, metadata = {}) {
   const postUrl = socialPostUrl(source, payload);
-  if (postUrl) return `${TITLE_BACKED_PREFIX}post:${postUrl}`.slice(0, 190);
+  if (postUrl) return `${POST_KEY_PREFIX}${postUrl}`.slice(0, 190);
 
   const official = officialRecordId(source, payload);
   if (official) return official;
 
   if (!allowsTitleBackedIdentity(source, metadata)) return null;
 
-  const title = payloadTitle(payload);
-  if (!title) return null;
-  const date = payloadDate(payload);
-  const host = hostFromMetadata(metadata) || source;
-  return `${TITLE_BACKED_PREFIX}${host}:${title}:${date}`.slice(0, 190);
+  return titleSourceId(source, payload, metadata);
+}
+
+/*
+ * Transition, Facebook only. Facebook rows were keyed by their title (title:<host>:<title>:<date>)
+ * before the permalink rule above, and App versions before 2.0.6 sent the profile page instead of
+ * the post link, so those rows can only be found by that title key. For a Facebook upload keyed by
+ * its permalink this returns the title key the same row had then; the upload is treated as already
+ * stored when the same user holds a row under that key. Rows that do hold a post link are given
+ * the permalink key by scripts/backfillSocialPostIdentity.js (part 1). '' for every other source
+ * and for a Facebook row without a post link. Remove once rows under the older key no longer count.
+ */
+const LEGACY_TITLE_KEY_SOURCES = new Set(['facebook']);
+
+function legacyPostTitleSourceId(source, payload, metadata = {}) {
+  if (!LEGACY_TITLE_KEY_SOURCES.has(normalizeCrawlerSource(source))) return '';
+  if (!socialPostUrl(source, payload)) return '';
+  return titleSourceId(source, payload, metadata) || '';
+}
+
+/**
+ * The same transition the other way round. An upload without the post link (App versions before
+ * 2.0.6, or another uploader such as the browser extension) is keyed by its title, and the same
+ * user may already hold that post under its permalink key (stored by 2.0.6, or given that key by
+ * the backfill). Such an item is already stored when one of the user's rows under a permalink key
+ * has this title key as its legacyPostTitleSourceId. True for the items that need that lookup:
+ * Facebook items keyed by title, not by a permalink.
+ */
+function needsPermalinkTitleLookup(source, sourceId) {
+  return (
+    LEGACY_TITLE_KEY_SOURCES.has(normalizeCrawlerSource(source)) &&
+    isTitleBackedSourceId(sourceId) &&
+    !sourceId.startsWith(POST_KEY_PREFIX)
+  );
 }
 
 function hasRecordIdentity(source, payload) {
@@ -274,18 +406,22 @@ function calculateDataQuality(item) {
 
 module.exports = {
   TITLE_BACKED_PREFIX,
+  POST_KEY_PREFIX,
   asRecord,
   normalizeText,
   payloadTitle,
   payloadDate,
   hostFromMetadata,
   isClientSmoothedRecord,
+  isFacebookLink,
   officialRecordId,
   SOCIAL_PERMALINK_SOURCES,
   socialPostUrl,
   isTitleBackedSourceId,
   sourceIdentityKey,
   extractSourceId,
+  legacyPostTitleSourceId,
+  needsPermalinkTitleLookup,
   hasRecordIdentity,
   calculateDataQuality,
 };

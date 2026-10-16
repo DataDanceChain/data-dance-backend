@@ -80,6 +80,7 @@ GET {issuer}/oauth/authorize
   &code_challenge=<BASE64URL(SHA256(code_verifier))>
   &code_challenge_method=S256
   [&login_hint=user%40example.com]
+  [&referral_prompt=hide]
 ```
 
 Same tab only: the consent page frame-busts, so never use an iframe or popup.
@@ -104,10 +105,18 @@ Validation order and what the browser sees:
 - **Field scopes** — `tge:email`, `tge:wallet`, `tge:points`, `tge:referral`. Each unlocks exactly
   one field. A token without one is **not** an error: the call succeeds and the field is simply
   **absent from the body**. Ask only for what the campaign uses; the user sees the list.
+  `tge:points` is also the endpoint scope of `/partner/tge/points/history` (§7c): the balance and
+  the history behind it are one grant, and only there a token without it is `403`.
 
 An unknown scope is `invalid_scope` (redirected per §4.2). `state` is mandatory, 22–512
 characters (at least 128 bits as base64url; a shorter one is `invalid_request`, redirected per
 §4.2). `login_hint` only pre-fills the DataDance login form.
+
+`referral_prompt` is optional and partner-only. Omit it, or send `show`, and the DataDance login
+page keeps the invite-code field. Send `hide` when this campaign already collects the code after
+the user returns: the field is not shown, and DataDance does not attach an invite code on this
+sign-in. Any other value is `invalid_request` (redirected per §4.2). A `referral_code` sent
+together with `hide` is ignored.
 
 **`prompt=none`** — this build answers `302 … error=login_required` immediately (see §12).
 
@@ -180,9 +189,35 @@ the DataDance issuer it trusts and then start `GET /oauth/authorize` itself, in 
 with its own `state` and PKCE pair — exactly as in §4. From there the flow is identical to a
 browser-initiated login, including the consent page and the callback.
 
-What the partner must configure: `SSO_TGE_INITIATE_LOGIN_URI` on the DataDance side (the hand-off
-is refused with `CLIENT_DISABLED` while it is empty), and an endpoint at that URI that ignores
-any other parameter it receives.
+What the partner must configure: an `initiate_login_uri` registered on the DataDance side (the
+hand-off is refused with `CLIENT_DISABLED` while the client has none), and an endpoint at that URI
+that ignores any other parameter it receives.
+
+The URI is set per partner client. For the client configured in the environment it is
+`SSO_TGE_INITIATE_LOGIN_URI`. For a first-party partner client stored in the database (kind
+`partner`) it is that client's `initiateLoginUri`, which a DataDance operator sets or clears with
+`scripts/setPartnerInitiateLoginUri.js` (dry run by default, `--apply` to write; there is no public
+API for it). The stored value must be an absolute `https` URL with no user name or password, no
+blanks or backslashes and no fragment, at most 512 characters: the production rule for
+`SSO_TGE_INITIATE_LOGIN_URI`, which applies the same checks except the length. A value that fails
+it is treated as absent and logged once. A developer (self-serve) client never gets the hand-off,
+whatever is stored. The App's `partner_hosts` are derived from the same URI and the client's
+redirect URIs, so they follow the client in both cases. For a database client, the account
+assigned as its manager can change those redirect URIs in the account console, so its
+`partner_hosts` follow those edits too.
+
+The Wallet starts the hand-off from a campaign card: an `EXTERNAL` home card or directory item
+whose `config.ssoClientId` names the client (the environment's client or an enabled first-party
+database partner client). Any other card opens its link as before. A DataDance operator sets or
+clears that id with `scripts/setCampaignSsoClient.js --slug <card>` (dry run by default, `--apply`
+to write).
+
+A database partner client is treated like the environment's client in two more ways:
+
+- `SSO_TGE_ENABLED=false` stops its hand-off as well (§9).
+- `SSO_TGE_AUTO_APPROVE` applies to it. With `app`, once its URI is set, the Wallet may post the
+  Allow of an App entry without a tap; the server still runs every manual-Allow check. A developer
+  client never auto-approves.
 
 ## 6. Token request (partner backend → DataDance, server-to-server)
 
@@ -287,6 +322,7 @@ the **scope** the user granted, and DataDance's per-environment freeze list
 | `data_licence_granted` | `tge:status` | `/status` | `DataLicenceConsent` active for the current policy version. Unrelated to partner eligibility | unknown / not frozen | 60 s |
 | `points.balance` | `tge:points` | `/status` | `User.totalPoints` — the denormalised balance, maintained from the `Point` ledger inside the same transactions. The ledger is the source of truth; summing it per request is too expensive for a 120/min endpoint | never null while served; a new account is `0` | **0 — never cache** |
 | `points.as_of` | `tge:points` | `/status` | server clock at read time | never null | — |
+| `items[]` (points history) | `tge:points` | `/points/history` | this user's `Point` ledger rows, each reduced to `id`, `amount`, `kind`, `created_at` — §7c. Also needs `points_history` in the freeze list (endpoint `404` otherwise) | never null; an empty ledger is `[]` | **0 — never cache** |
 | `referral.code` | `tge:referral` | `/status` | the user's own short code (`User.referralCode`) **when the account already holds one in display form**, the same one the Wallet shows. A partner read never allocates one | the account has no display code yet (an older account whose code is still in the legacy form); it appears as soon as the Wallet allocates it | 60 s |
 | `referral.inviter_sub` | `tge:referral` | `/status` | `Referral.inviterId` for this user as invitee — the `sub` of whoever invited them, for an upline rebate | nobody invited this user | 60 s |
 | `referral.inviter_code` | `tge:referral` | `/status` | the inviter's own short code (their `User.referralCode`) in the same `DDC-XXXXXX` display form as `referral.code` — the code they share anyway, for the "upline inviter" row of a campaign page. Never their name, e-mail or anything else; a partner read never allocates one | nobody invited this user, or the inviter has no display code yet (legacy form) | 60 s |
@@ -362,13 +398,74 @@ Authorization: Bearer ddc_tge_…
   downline reaches ~10^5 people, or chains thousands deep, DataDance will move this to a
   precomputed closure — the response does not change.
 
+### 7c. Points history — `GET /partner/tge/points/history`
+
+Scope `tge:points` — the same grant that shows `points.balance` on `/status` (consent line
+`points`, "your points balance and history") — **and** the environment must list
+`points_history` in `SSO_TGE_STATUS_FIELDS`: off unless listed. Same token check, rate limit
+(120/min per token, shared with every other read) and read-only guarantee as `/me` and
+`/status`; every read is recorded.
+
+Gates, in this order: no or bad token → `401 invalid_token`; not listed in this environment →
+`404 {"error":"not_available"}` (checked before the scope, so "not served here" is never
+mistaken for "not granted"); token without `tge:points` → `403 insufficient_scope` with
+`scope="sso:points"` in the challenge; disabled account → `403 account_disabled`.
+
+```http
+GET /partner/tge/points/history?limit=50 HTTP/1.1
+Authorization: Bearer ddc_tge_…
+```
+
+```json
+{ "sub": "c3…", "balance": 145, "as_of": "2026-10-14T10:00:00.000Z", "cache_max_age": 0,
+  "items": [ { "id": "6f1c…", "amount": -30, "kind": "redemption", "created_at": "2026-10-12T09:30:00.000Z" },
+             { "id": "0a9e…", "amount": 25,  "kind": "task",       "created_at": "2026-10-11T08:00:00.000Z" },
+             { "id": "b41d…", "amount": 150, "kind": "upload",     "created_at": "2026-10-01T12:00:00.000Z" } ],
+  "next_cursor": null }
+```
+
+- **Whose ledger.** Always the token's own user; there is no parameter that names a user
+  (`?sub=` / `?user_id=` are `400`, as everywhere).
+- **Items** — exactly `id`, `amount`, `kind`, `created_at`, newest first:
+  - `id` — opaque and stable: the same ledger row always has the same id. Use it to deduplicate.
+  - `amount` — signed; a deduction (redemption, a negative adjustment) is negative.
+  - `kind` — one of `upload` (data contributions), `referral` (referral rewards at any level,
+    including the share of an invitee's task reward), `task` (task rewards), `campaign` (campaign,
+    badge and event grants, boosts), `adjustment` (operator corrections, either sign),
+    `redemption` (points spent on a reward), `other` (anything else). The mapping is an explicit
+    allow-list on DataDance's side; a new kind of entry reads as `other` until it is mapped, so
+    treat unknown and `other` alike. The list may grow; new values are announced.
+  - `created_at` — when the entry was written (ISO-8601, UTC, millisecond precision).
+- **Never in an item:** the internal source name, task / order / redemption references, staff
+  labels on adjustments, URLs, other users' ids or anything else about another user.
+- **`balance`** is `User.totalPoints`, exactly the value `/status` returns as `points.balance` at
+  the same moment; `as_of` is the server time of the read; `cache_max_age` is `0` and the
+  response is `Cache-Control: no-store`. For an account whose every balance change has a ledger
+  entry, the items of a full walk (no `since` / `until`) sum to `balance`; `balance` is the
+  authoritative figure.
+- **Paging.** `?limit=` 1–100 (default 50). Pass `next_cursor` back as `?cursor=` until it is
+  `null`. Order is `(created_at, id)` descending — a total order, so entries that share a
+  millisecond are neither skipped nor repeated. Entries written while you page are not mixed into
+  later pages; they appear on your next first page.
+- **Window.** Optional `?since=` (inclusive) and `?until=` (exclusive): an ISO-8601 date (read as
+  UTC midnight) or a date-time **with** a zone (`Z` or `±hh:mm`); a time without a zone is `400`.
+  The cursor carries the window: later pages may repeat the same values or omit them, but a
+  different window with a cursor is `400`. `balance` is always the whole account's balance, never
+  the window's sum.
+- **Cursor.** Opaque — do not parse or build it. It is signed by DataDance and bound to the user it
+  was issued for: an edited, truncated or foreign cursor, or another user's cursor, is
+  `400 invalid_request`. A cursor stays usable while the session's tokens are; if DataDance
+  rotates its keys, outstanding cursors become invalid and paging restarts from the first page.
+- **Errors:** `400 invalid_request` — bad `limit`, `since`, `until` or `cursor`, a changed window,
+  or a parameter given twice; the rest as in the gates above.
+
 Errors (RFC 6750, `WWW-Authenticate: Bearer realm="ddc-sso", error=…, resource_metadata=…`):
 
 | Status | `error` | When |
 | --- | --- | --- |
 | 401 | `invalid_token` | missing, expired, revoked, wrong-audience (e.g. an MCP token), or the client is switched off |
-| 403 | `insufficient_scope` | token lacks the **endpoint** scope (`tge:identity` / `tge:status` / `tge:referral_network`; `scope="…"` in the challenge). A missing **field** scope is never an error — the field is just absent |
-| 404 | `not_available` | `/referral-network` only: this environment does not serve the network |
+| 403 | `insufficient_scope` | token lacks the **endpoint** scope (`tge:identity` / `tge:status` / `tge:referral_network`, or `tge:points` on `/points/history`; `scope="…"` in the challenge). A missing **field** scope is never an error — the field is just absent |
+| 404 | `not_available` | `/referral-network` and `/points/history` only: this environment does not serve that endpoint |
 | 403 | `account_disabled` | the DataDance account is disabled |
 | 429 | `slow_down` | per-token rate limit |
 
@@ -388,7 +485,13 @@ Takes effect on the next `/partner/tge/*` call. `401 invalid_client` without cre
   `401 invalid_client`, and every existing token is `401 invalid_token`. That boot also revokes
   every partner access token issued before the switch, so switching back on later does not revive
   them — only new logins work (T17). The switch takes effect at the restart, not before.
-  Tokens are ≤ 5 minutes old anyway (T13, T17).
+  Tokens are ≤ 5 minutes old anyway (T13, T17). The switch also stops the App hand-off (§5) of
+  every partner client, including a first-party client stored in the database:
+  `POST /api/sso/app-ticket` answers `403 CLIENT_DISABLED` and open hand-off sessions are refused.
+  A database client's web sign-in follows its own `enabled` flag. To stop one database client
+  alone, set `enabled=false` on its row, or clear its URI with
+  `scripts/setPartnerInitiateLoginUri.js --client-id <id> --clear --apply`. Either takes effect on
+  the next request.
 - **Account stop:** once `User.disabledAt` is deployed, a disabled user cannot complete consent
   (`access_denied`) and existing tokens get `403 account_disabled`.
 
@@ -400,7 +503,8 @@ surface). A token or revocation request whose client credentials verify is **not
 your backend exchanges every user's code and revokes every logout from one address — but by a
 per-client ceiling sized for a campaign peak (3000/min by default, counted separately for token and
 revoke; it exists to stop a runaway loop, not to meter you). Per token:
-`/partner/tge/*` 120/min — unchanged by `points` and `referral`. The limit is sized for a partner
+`/partner/tge/*` 120/min — unchanged by `points`, `referral` and the points history (one shared
+budget for every read). The limit is sized for a partner
 backend reading once per user session; it is not a bulk-export budget. `429` bodies use the OAuth
 error shape with `error=slow_down` and carry `Retry-After`. Inside DataDance, consent decisions are
 limited to 10 per user per minute.
@@ -460,6 +564,9 @@ somebody else's.)
 - **`referral`** — the user's own code, their inviter's `sub` and that inviter's own invite code
   (`inviter_code`, added for decision 47), and a level-1 count. The complete network is the
   separate endpoint of §7b, under its own scope, and stays ids and dates only.
+- **Points history** (§7c) is new in contract v0.7: the user's own ledger as id, signed amount,
+  neutral kind and time, under the existing `tge:points` grant, and off per environment until the
+  Wallet's consent line names the history.
 - **A Web3Auth signing-key rotation can pause DataDance logins.** DataDance accepts Web3Auth ID
   tokens only from signing keys it has explicitly approved (pinned). If Web3Auth starts signing
   with a key DataDance has not approved yet, users cannot log in to DataDance — and therefore
@@ -497,6 +604,9 @@ somebody else's.)
 - [ ] T15 — the client secret exists only in the partner backend; never in a browser or a URL.
 - [ ] T19 — with `tge:referral_network`: page the whole downline and check the union equals `total`
       with no duplicates; a response with `anomalies: ["cycle"]` is excluded from payouts.
+- [ ] T20 — with `tge:points` and `points_history` served: page the whole history at `limit=100`,
+      check no `id` repeats, the items sum to `balance` for a test account whose balance is all
+      ledger entries, and an edited cursor is `400`.
 
 ## 14. DataDance operations
 
@@ -506,7 +616,7 @@ Environment (see `env.example`): `SSO_ENVIRONMENT`, `SSO_TGE_ENABLED`, `SSO_TGE_
 `SSO_TGE_STATUS_FIELDS`, `SSO_REQUIRE_VERIFIED_SESSION`, plus `PUBLIC_BASE_URL` (now required
 unconditionally — the issuer is never derived from a request header), `APP_PUBLIC_URL`,
 `WEB3AUTH_ALLOWED_VERIFIERS`, `WEB3AUTH_JWKS_PIN_MODE`, `WEB3AUTH_JWKS_PINNED_THUMBPRINTS`,
-`OAUTH_PUBLIC_REGISTRATION_ENABLED` and `SSO_DEVELOPER_REGISTRATION`.
+`OAUTH_PUBLIC_REGISTRATION_ENABLED`, `SSO_DEVELOPER_REGISTRATION` and `SSO_DEVELOPER_ALLOWED_EMAILS`.
 
 - `src/server.js` calls `assertPartnerConfig()` at boot and refuses to start with every problem
   listed (missing hash, http redirect URI outside localhost, fragment, unknown status field,
@@ -521,7 +631,7 @@ unconditionally — the issuer is never derived from a request header), `APP_PUB
   secret values (`jwksPinMode=… jwksPins=<count>`, never the pins). See the README section
   "金融级加固：合作方 SSO".
 - **Self-serve client registration** (`POST /api/developer/sso/clients`) is closed unless
-  `SSO_DEVELOPER_REGISTRATION=on`. The default, `off`, also applies when the variable is unset or
+  `SSO_DEVELOPER_REGISTRATION=on` or `allowlist`. The default, `off`, also applies when the variable is unset or
   blank. Closed, the endpoint answers every caller, signed in or not, `403` with
   `{"error":"registration_closed", "error_description":"Self-serve client registration is closed.
   Contact DataDance to register a client."}`, before any database access, so nothing is written.
@@ -533,15 +643,69 @@ unconditionally — the issuer is never derived from a request header), `APP_PUB
   (`ownerUserId`) and `kind` `developer`. A self-serve console must therefore send the
   user's token (`Authorization: Bearer <DataDance JWT>`). To register a client by hand, set `on`,
   restart, register while signed in, set `off` and restart again.
-- The value is read once at boot, so a change needs a restart. Any value other than `off` or `on`
-  refuses to start in production; elsewhere it is one warning and reads as `off`. The money-path
-  boot line reports it as `developerRegistration=open|closed`, next to `publicClientRegistration`.
+- **`allowlist` opens registration to named accounts only** (DataDance's own team and invited
+  partners' developers), listed in `SSO_DEVELOPER_ALLOWED_EMAILS` as comma-separated DataDance
+  account e-mails. Entries are trimmed and compared case-insensitively. An anonymous caller gets
+  `401`, as with `on`. A signed-in account may register only when both of these hold:
+  - its own account e-mail is on the list. The e-mail comes from the account row the login check
+    loaded and never from the request body, so naming a listed address in `contact_email` changes
+    nothing;
+  - that e-mail is a verified login e-mail. The `User` row has no e-mail-verified flag and Web3Auth
+    ID tokens carry no `email_verified` claim. `WEB3AUTH_EMAIL_TRUSTED_VERIFIERS` stands in for it, as
+    in the network re-bind. It lists the connections that verify the address themselves: Google,
+    e-mail passwordless (the e-mail one-time-code login) and Apple. The rule has three parts:
+    1. the session came from a verified Web3Auth login (JWT `ver >= 2`, the test
+       `SSO_REQUIRE_VERIFIED_SESSION` uses). Password and legacy sessions do not count;
+    2. the account is linked to one of those connections (`User.web3authVerifier`). `external-wallet`
+       never counts, because its e-mail column holds the wallet address;
+    3. the identity that connection proved is the address itself: `User.web3authVerifierId` equals the
+       account e-mail, case-insensitively. A legacy account linked through the wallet its token proved
+       keeps an e-mail that a request body once supplied, so it does not count. An Apple account whose
+       verifier id is not its e-mail does not count either.
+
+  Every other signed-in account gets the same `403 registration_closed` body as `off`, so the
+  answer never tells whether an address is listed. The refusal happens before the per-IP rate
+  limiter, so refused calls do not use up a listed developer's quota. Each refusal writes one
+  `developer_registration.refused` log line with the account id and a reason code (`not_listed`,
+  `session_not_verified`, `connection_not_trusted`, `email_not_login_identity`), never the e-mail.
+  A client registered this way is a `developer` client (login scopes only), never a `partner` row,
+  and is owned by the registering account. To give a developer access, add their DataDance account
+  e-mail and restart. They then sign in to the developer console with Google or the e-mail code.
+  If a listed developer is still refused, find their account id in the log and check the reason.
+  In the developer console (`/developers/`), the probe without a token gets `401` in this mode, so
+  every signed-in account sees the form. A refused account gets `registration_closed` on submit,
+  and the console then hides the form and shows its "Need a client? Contact DataDance" panel.
+  `WEB3AUTH_EMAIL_TRUSTED_VERIFIERS` must name the connections of the network the deployment runs
+  on. While `WEB3AUTH_NETWORK_REBIND=off`, nothing else reads that variable, so setting it there
+  for this check changes no login.
+- The values are read once at boot, so a change needs a restart. Any mode other than `off`, `on` or
+  `allowlist` refuses to start in production. In `allowlist` mode, so does a list entry that is not
+  an e-mail address. The error names the entry positions and never an address. Outside production,
+  either case is one warning and reads as closed. An empty list, in production too, starts with a
+  warning and admits nobody. So does an empty `WEB3AUTH_EMAIL_TRUSTED_VERIFIERS`. A list set while
+  the mode is `off` or `on` is ignored, with a warning; `on` still admits every signed-in account.
+  The money-path boot line reports `developerRegistration=closed|open|allowlist:<count>`, next to
+  `publicClientRegistration`. The count is the number of listed e-mails.
 - Generate a secret: `node scripts/genPartnerSecret.js` (prints once; nothing is written).
+- App hand-off target of a database partner client (§5 "App hand-off"), inside the api container:
+  `node scripts/setPartnerInitiateLoginUri.js --client-id <id>` shows it;
+  `… --uri <https url>` or `… --clear` prints before and after and writes only with `--apply`.
+  Refused for the environment's client (use `SSO_TGE_INITIATE_LOGIN_URI`), for a developer client
+  and for a URI that fails the rule in §5. Takes effect on the next request. The "app hand-off" line
+  also says when `SSO_TGE_ENABLED` is off or `SSO_SESSION_SECRET` is unset, either of which refuses
+  the hand-off. The column comes from migration `20261015180000_sso_partner_initiate_login_uri`:
+  run `prisma migrate deploy` before starting an image that reads it.
 - Rotate: move the current hash to `…_PREVIOUS`, set the new hash, set `…_ROTATION_UNTIL`,
   recreate the container; after the deadline remove the previous hash.
 - Freeze a status field: add it to `SSO_TGE_STATUS_FIELDS` and recreate. `email`,
-  `wallet_address`, `points`, `referral`, `referral_network` and `avatar` are **off** until listed, so deploying this change
+  `wallet_address`, `points`, `referral`, `referral_network`, `points_history` and `avatar` are **off** until listed, so deploying this change
   set alone exposes nothing new. Boot refuses an unknown field name. `avatar` then appears on `/me` only when the account has a picture URL.
+- `points_history` (§7c) is listed only **after** the Wallet's consent line for `points` reads
+  "balance and history" in every consent language (data-dance-frontend, `receivesPoints`): a grant
+  given under the balance-only wording must not start reading the ledger. The list also switches
+  the endpoint for first-party developer-console clients, so it is one switch per environment.
+  The cursor's signing key is derived from `SSO_SESSION_SECRET`; rotating that secret only makes
+  partners restart paging.
 - `SSO_REQUIRE_VERIFIED_SESSION=true` requires the consenting user's DataDance JWT to carry
   `ver >= 2` (issued by the verified Web3Auth login); older sessions get `login_required`.
 - Partner tokens are `McpToken` rows with `source = 'partner'`; they are hidden from the

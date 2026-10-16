@@ -30,7 +30,7 @@ const ENV_KEYS = [
   'SSO_SESSION_SECRET', 'JWT_SECRET',
   'PUBLIC_BASE_URL', 'APP_PUBLIC_URL', 'NODE_ENV', 'PORT', 'FRONTEND_URL',
   'WEB3AUTH_VERIFY_MODE', 'WEB3AUTH_ALLOW_LEGACY_FALLBACK', 'WEB3AUTH_CLIENT_ID', 'WEB3AUTH_ALLOWED_VERIFIERS',
-  'OAUTH_PUBLIC_REGISTRATION_ENABLED', 'SSO_DEVELOPER_REGISTRATION',
+  'OAUTH_PUBLIC_REGISTRATION_ENABLED', 'SSO_DEVELOPER_REGISTRATION', 'SSO_DEVELOPER_ALLOWED_EMAILS',
 ];
 const saved = {};
 
@@ -482,9 +482,15 @@ describe('assertFinancialGradeConfig (boot, item 8)', () => {
     );
   });
 
-  it('reports whether self-serve developer registration is open: closed unless SSO_DEVELOPER_REGISTRATION=on', () => {
-    assert.equal(assertFinancialGradeConfig(hardened()).developerRegistration, false);
-    assert.equal(assertFinancialGradeConfig(hardened({ SSO_DEVELOPER_REGISTRATION: 'off' })).developerRegistration, false);
-    assert.equal(assertFinancialGradeConfig(hardened({ SSO_DEVELOPER_REGISTRATION: 'on' })).developerRegistration, true);
+  it('reports self-serve developer registration: closed unless on (open) or allowlist (the count only)', () => {
+    assert.equal(assertFinancialGradeConfig(hardened()).developerRegistration, 'closed');
+    assert.equal(assertFinancialGradeConfig(hardened({ SSO_DEVELOPER_REGISTRATION: 'off' })).developerRegistration, 'closed');
+    assert.equal(assertFinancialGradeConfig(hardened({ SSO_DEVELOPER_REGISTRATION: 'on' })).developerRegistration, 'open');
+    const allowlist = assertFinancialGradeConfig(hardened({
+      SSO_DEVELOPER_REGISTRATION: 'allowlist',
+      SSO_DEVELOPER_ALLOWED_EMAILS: 'lead@ddc-team.example, dev@tge.example.com',
+    }));
+    assert.equal(allowlist.developerRegistration, 'allowlist:2');
+    assert.equal(JSON.stringify(allowlist).includes('@'), false, 'the summary never carries an address');
   });
 });

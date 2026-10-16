@@ -6,8 +6,13 @@
  * (userId, source, sourceId) per user, and createMany({ skipDuplicates }) silently skips a row that
  * hits either. So: two users who saw the same post both keep it; one post under host / handle
  * variants is one record; an order keeps its own identity whatever links it holds; points go only
- * to rows really written; and the social-identity backfill rewrites old rows without deleting any.
- * Fixture rows use a per-run id prefix and are deleted afterwards. Campaign boosts and referral
+ * to rows really written; a Facebook post is one record per user by its permalink, a row an
+ * earlier App version stored under its title is found by that title, and an upload from an earlier
+ * App version is found by the title key of the user's permalink row; the social-identity backfill
+ * rewrites old rows (Facebook rows with a post link among them) without deleting any; and
+ * the record backfill gives rows of other sources stored under a post link key their order / title
+ * identity back, keeps the earliest copy of one record as its holder and marks the others
+ * superseded, without deleting a row or changing a point. Fixture rows use a per-run id prefix and are deleted afterwards. Campaign boosts and referral
  * hooks are stubbed so no shared rows change.
  */
 const { describe, it, before, after } = require('node:test');
@@ -38,11 +43,15 @@ stub('services/referralService.js', { onInviteeFirstValidUpload: async () => ({ 
 const prisma = require(src('utils/prisma.js'));
 const { uploadCrawlerData, generateContentHash } = require(src('services/crawlerService.js'));
 const { calculateDataPoints } = require(src('services/businessRulesService.js'));
-const { backfillSocialPostIdentity } = require('../../scripts/backfillSocialPostIdentity');
+const {
+  backfillSocialPostIdentity,
+  backfillRecordIdentity,
+  supersededIdentity,
+} = require('../../scripts/backfillSocialPostIdentity');
 
 const RUN = `cp${crypto.randomBytes(3).toString('hex')}`;
 const id = (name) => `${RUN}-${name}`;
-const USERS = ['alice', 'bob', 'carol', 'dave', 'erin', 'frank'];
+const USERS = ['alice', 'bob', 'carol', 'dave', 'erin', 'frank', 'gail'];
 const TWEET = '18450000000000' + String(Date.now()).slice(-5);
 
 async function user(name) {
@@ -215,6 +224,549 @@ describe('Connect upload identity (Postgres)', () => {
       const report = await backfillSocialPostIdentity({ apply: true, userIds: [id('erin'), id('frank')] });
       assert.deepEqual([report.updated, report.current, report.conflicts.length], [0, 2, 1]);
       assert.equal(report.conflicts[0].keptBy, id('frank-1'));
+    });
+
+    it('a post a sync stores during the run is left as a conflict; the rest of the page is written', async () => {
+      const posts = [1, 2].map((n) => `https://x.com/gail/status/${TWEET}${n + 2}`);
+      const gailTask = await prisma.crawlerTask.create({
+        data: { id: id('task-gail'), title: 'X Posts', source: 'x', taskId: 'x_posts', userId: id('gail') },
+      });
+      for (const [i, href] of posts.entries()) {
+        const payload = { href, title: `Gail ${i} 5 likes` };
+        await prisma.crawlerData.create({
+          data: {
+            id: id(`gail-${i}`), source: 'x', type: 'post', timestamp: new Date('2026-10-01T10:00:00Z'), metadata: { host: 'x.com' },
+            payload, taskId: gailTask.id, userId: id('gail'), contentHash: generateContentHash(payload), sourceId: href,
+            createdAt: new Date(`2026-10-02T00:00:0${i}Z`),
+          },
+        });
+      }
+      // Right before the page is written, a sync stores the first post under its new identity.
+      let synced = false;
+      const client = new Proxy(prisma, {
+        get(target, prop) {
+          if (prop !== '$queryRaw') return target[prop];
+          return async (strings, ...values) => {
+            if (!synced && strings.join('').includes('UPDATE "CrawlerData"')) {
+              synced = true;
+              const payload = { href: posts[0], title: 'Gail 0 6 likes' };
+              await prisma.crawlerData.create({
+                data: {
+                  id: id('gail-sync'), source: 'x', type: 'post', timestamp: new Date(), metadata: { host: 'x.com' }, payload,
+                  taskId: gailTask.id, userId: id('gail'), contentHash: generateContentHash(payload, { source: 'x', userId: id('gail') }),
+                  sourceId: `title:post:https://x.com/i/status/${TWEET}3`,
+                },
+              });
+            }
+            return target.$queryRaw(strings, ...values);
+          };
+        },
+      });
+      const report = await backfillSocialPostIdentity({ client, apply: true, userIds: [id('gail')] });
+      assert.equal(synced, true);
+      // the synced row is read on the next page, already current
+      assert.deepEqual([report.scanned, report.updated, report.current], [3, 1, 1]);
+      assert.deepEqual(report.conflicts.map((c) => [c.id, c.keptBy]), [[id('gail-0'), 'row stored or changed during the run']]);
+      const rows = Object.fromEntries((await rowsOf('gail')).map((r) => [r.id, r.sourceId]));
+      assert.equal(rows[id('gail-0')], posts[0]);
+      assert.equal(rows[id('gail-1')], `title:post:https://x.com/i/status/${TWEET}4`);
+    });
+  });
+
+  describe('backfill of records stored under a post link key', () => {
+    const NAMES = ['ann', 'ben', 'cat', 'dan', 'inv'];
+    const ids = NAMES.map(id);
+    const short = (rowId) => rowId.slice(RUN.length + 1);
+    const order = (n) => `${n}${n}${n}-${RUN}-0000${n}`;
+    const at = (s) => new Date(`2026-10-12T01:00:${String(s).padStart(2, '0')}.000Z`);
+    const sha = (text) => crypto.createHash('sha256').update(text).digest('hex');
+    const amazonMeta = { sourceUrl: 'https://www.amazon.com/gp/css/order-history' };
+    const amazonPayload = (orderid, href) => ({ orderid, title: 'Desk lamp', price: '30.00', currency: 'USD', ...(href ? { href } : {}) });
+    const bookingMeta = { sourceUrl: 'https://secure.booking.com/mytrips' };
+    const bookingPayload = (href) => ({ bookingId: `BK-${RUN}`, hotelName: 'Harbour Hotel', checkIn: '2026-09-01', href });
+    const temuMeta = { sourceUrl: 'https://www.temu.com/bgt_order.html' };
+    const temuPayload = { title: `Socks ${RUN}`, href: 'https://x.com/t/status/7' };
+    // Metadata with a host of its own: the key uses that host.
+    const amazonPostMeta = { ...amazonMeta, host: 'post' };
+    const sheinMeta = { sourceUrl: 'https://m.shein.com/user/orders', host: 'superseded' };
+    const sheinPayload = (href) => ({ orderId: `SH-20-${RUN}`, title: 'Linen shirt', price: '20.00', href });
+    // Social rows whose link is not a post permalink (a redirect link): a record with a title key.
+    const xMeta = { sourceUrl: 'https://x.com/home' };
+    const xRedirect = { href: 'https://t.co/r1?u=https://x.com/a/status/41', title: `Morning run ${RUN}` };
+    const xPostMeta = { ...xMeta, host: 'post' };
+    const xRedirectPost = { href: 'https://t.co/r2?u=https://x.com/a/status/42', title: `Evening run ${RUN}` };
+    const task = {};
+
+    // A row exactly as stored: under a post link key with the hash of the link, or under its order
+    // id with the hash of the payload.
+    async function stored(rowId, name, source, payload, metadata, sourceId, contentHash, createdAt) {
+      const key = `${name}:${source}`;
+      task[key] ||= (await prisma.crawlerTask.create({
+        data: { id: id(`task-${name}-${source}`), title: source, source, taskId: `${source}_orders`, userId: id(name) },
+      })).id;
+      await prisma.crawlerData.create({
+        data: {
+          id: id(rowId), source, type: 'order', timestamp: new Date('2026-10-01T10:00:00Z'), metadata, payload,
+          taskId: task[key], userId: id(name), contentHash, sourceId, createdAt,
+        },
+      });
+    }
+    const linked = (rowId, name, source, payload, metadata, link, createdAt) => {
+      const host = metadata.host || new URL(metadata.sourceUrl).hostname.replace(/^www\./, '');
+      return stored(rowId, name, source, payload, metadata, `title:${host}:${link}`, sha(JSON.stringify({ postUrl: link })), createdAt);
+    };
+    // The Point rows of one upload carry the same createdAt as its rows.
+    const paid = (name, amount, source, sourceId, createdAt) =>
+      prisma.point.create({ data: { userId: id(name), amount, source, sourceId, createdAt } });
+
+    const snapshot = () =>
+      prisma.crawlerData.findMany({ where: { userId: { in: ids } }, orderBy: { id: 'asc' }, select: { id: true, sourceId: true, contentHash: true } });
+    const pointsSnapshot = async () => ({
+      points: await prisma.point.findMany({ where: { userId: { in: ids } }, orderBy: { id: 'asc' }, select: { id: true, amount: true } }),
+      totals: await prisma.user.findMany({ where: { id: { in: ids } }, orderBy: { id: 'asc' }, select: { id: true, totalPoints: true } }),
+    });
+
+    before(async () => {
+      for (const name of NAMES) await user(name);
+      await prisma.referral.create({ data: { inviterId: id('inv'), inviteeId: id('ben'), code: id('inv') } });
+
+      const o1 = amazonPayload(order(1));
+      await stored('ann-o1', 'ann', 'amazon', o1, amazonMeta, order(1), generateContentHash(o1), at(0));
+      await linked('ben-o1', 'ben', 'amazon', amazonPayload(order(1), 'https://x.com/someone/status/111'), amazonMeta, 'https://x.com/someone/status/111', at(1));
+      await paid('ben', 10, 'crawler', 'data_upload', at(1));
+      await paid('ben', 10, 'CAMPAIGN_CONNECT_BOOST', 'c1', at(1));
+      await paid('inv', 1, 'upline_reward', 'crawler_data_upload', at(1));
+
+      await linked('ben-o2', 'ben', 'amazon', amazonPayload(order(2), 'https://www.instagram.com/p/AbC123/'), amazonMeta, 'https://instagram.com/p/AbC123', at(2));
+      await linked('dan-o2-link', 'dan', 'amazon', amazonPayload(order(2), 'https://www.threads.net/@h/post/XyZ9'), amazonMeta, 'https://threads.net/@h/post/XyZ9', at(3));
+      await paid('dan', 10, 'crawler', 'data_upload', at(3));
+      const d2 = amazonPayload(order(2));
+      await stored('dan-o2', 'dan', 'amazon', d2, amazonMeta, order(2), generateContentHash(d2), at(4));
+      await paid('dan', 10, 'crawler', 'data_upload', at(4));
+
+      await linked('cat-temu', 'cat', 'temu', temuPayload, temuMeta, 'https://x.com/t/status/7', at(5));
+      await linked('cat-bk-1', 'cat', 'booking', bookingPayload('https://www.tiktok.com/@h/video/1001'), bookingMeta, 'https://tiktok.com/@h/video/1001', at(6));
+      await linked('cat-bk-2', 'cat', 'booking', bookingPayload('https://www.tiktok.com/@h/video/1002'), bookingMeta, 'https://tiktok.com/@h/video/1002', at(7));
+      // a second row in that upload: its batch Point is shared by both rows
+      const luma = { eventId: `evt-${RUN}`, title: 'Meetup' };
+      await stored('cat-luma', 'cat', 'luma', luma, { sourceUrl: 'https://lu.ma/home' }, `evt-${RUN}`, generateContentHash(luma), at(7));
+      await paid('cat', 20, 'crawler', 'data_upload', at(7));
+
+      await linked('ann-o3', 'ann', 'amazon', amazonPayload(order(3), 'https://x.com/z/status/6'), amazonMeta, 'https://x.com/z/status/6', at(8));
+      // a social post under the same kind of key belongs to the social backfill and stays as it is here
+      await linked('ann-post', 'ann', 'x', { href: 'https://x.com/ann/status/123', caption: 'hi' }, { sourceUrl: 'https://x.com/' }, 'https://x.com/ann/status/123', at(9));
+
+      // orders whose metadata names the host 'post' or 'superseded'
+      await linked('ben-o7-1', 'ben', 'amazon', amazonPayload(order(7), 'https://x.com/p/status/71'), amazonPostMeta, 'https://x.com/p/status/71', at(10));
+      await paid('ben', 10, 'crawler', 'data_upload', at(10));
+      await linked('ben-o7-2', 'ben', 'amazon', amazonPayload(order(7), 'https://x.com/p/status/72'), amazonPostMeta, 'https://x.com/p/status/72', at(11));
+      await paid('ben', 10, 'crawler', 'data_upload', at(11));
+      await linked('cat-sh-1', 'cat', 'shein', sheinPayload('https://www.instagram.com/p/Shirt01/'), sheinMeta, 'https://instagram.com/p/Shirt01', at(12));
+      await paid('cat', 10, 'crawler', 'data_upload', at(12));
+      await linked('cat-sh-2', 'cat', 'shein', sheinPayload('https://www.instagram.com/p/Shirt02/'), sheinMeta, 'https://instagram.com/p/Shirt02', at(13));
+      await paid('cat', 10, 'crawler', 'data_upload', at(13));
+
+      await linked('dan-x-1', 'dan', 'x', xRedirect, xMeta, 'https://t.co/r1', at(14));
+      await linked('dan-x-2', 'dan', 'x', xRedirectPost, xPostMeta, 'https://t.co/r2', at(15));
+    });
+
+    after(async () => {
+      await prisma.point.deleteMany({ where: { userId: { in: ids } } });
+      await prisma.crawlerData.deleteMany({ where: { userId: { in: ids } } });
+      await prisma.crawlerTask.deleteMany({ where: { userId: { in: ids } } });
+      await prisma.referral.deleteMany({ where: { inviteeId: { in: ids } } });
+      await prisma.user.deleteMany({ where: { id: { in: ids } } });
+    });
+
+    const counts = (r) => ({
+      linkKeyRows: r.linkKeyRows, records: r.records, restored: r.restored, restoredByKind: r.restoredByKind,
+      heldAlready: r.heldAlready, superseded: r.superseded, supersededLinkKey: r.supersededLinkKey,
+      supersededStored: r.supersededStored, conflicts: r.conflicts.length,
+    });
+    const expected = {
+      linkKeyRows: 13, records: 9, restored: 8, restoredByKind: { order: 5, title: 3, content: 0 },
+      heldAlready: 1, superseded: 6, supersededLinkKey: 5, supersededStored: 1, conflicts: 0,
+    };
+    // per user: [superseded rows, base points, bonus points, upline points, rows without a batch Point]
+    const perUser = (r) => Object.fromEntries(r.users.map((u) => [short(u.userId), [u.rows, u.base, u.bonus, u.upline, u.noBatch]]));
+    const expectedPoints = { ben: [2, 20, 10, 1, 0], dan: [2, 20, 0, 0, 0], cat: [2, 20, 0, 0, 0] };
+
+    it('a dry run reports the plan and writes nothing', async () => {
+      const rows = await snapshot();
+      const points = await pointsSnapshot();
+      const report = await backfillRecordIdentity({ userIds: ids });
+      assert.equal(report.mode, 'dry-run');
+      assert.deepEqual(counts(report), expected);
+      // exact match for superseded rows
+      assert.equal(report.alreadySuperseded, 0);
+      assert.deepEqual(perUser(report), expectedPoints);
+      assert.deepEqual(await snapshot(), rows);
+      assert.deepEqual(await pointsSnapshot(), points);
+    });
+
+    it('--apply restores the earliest copy, marks the others superseded, deletes nothing, changes no points', async () => {
+      const before = await snapshot();
+      const points = await pointsSnapshot();
+      const report = await backfillRecordIdentity({ userIds: ids, apply: true, batch: 2 });
+      assert.deepEqual(counts(report), expected);
+
+      const rows = await snapshot();
+      assert.equal(rows.length, before.length);
+      const by = Object.fromEntries(rows.map((r) => [short(r.id), r]));
+      assert.equal(by['ann-o1'].sourceId, order(1));
+      assert.equal(by['ben-o2'].sourceId, order(2));
+      assert.equal(by['ben-o2'].contentHash, generateContentHash(amazonPayload(order(2), 'https://www.instagram.com/p/AbC123/')));
+      assert.equal(by['ann-o3'].sourceId, order(3));
+      assert.equal(by['cat-temu'].sourceId, `title:temu.com:socks ${RUN}:`);
+      assert.equal(by['cat-bk-1'].sourceId, `BK-${RUN}`);
+      for (const name of ['ben-o1', 'dan-o2-link', 'dan-o2', 'cat-bk-2', 'ben-o7-2', 'cat-sh-2']) {
+        assert.deepEqual({ sourceId: by[name].sourceId, contentHash: by[name].contentHash }, supersededIdentity(id(name)), name);
+      }
+      assert.equal(by['ben-o7-1'].sourceId, order(7));
+      assert.equal(by['cat-sh-1'].sourceId, `SH-20-${RUN}`);
+      assert.equal(by['dan-x-1'].sourceId, `title:x.com:morning run ${RUN.toLowerCase()}:`);
+      assert.equal(by['dan-x-2'].sourceId, `title:post:evening run ${RUN.toLowerCase()}:`);
+      assert.equal(by['ann-post'].sourceId, 'title:x.com:https://x.com/ann/status/123');
+      assert.equal(await prisma.crawlerData.count({ where: { source: 'amazon', sourceId: order(2) } }), 1);
+      assert.deepEqual(await pointsSnapshot(), points);
+    });
+
+    it('a second --apply writes nothing', async () => {
+      const rows = await snapshot();
+      const report = await backfillRecordIdentity({ userIds: ids, apply: true });
+      assert.deepEqual([report.linkKeyRows, report.records, report.restored, report.superseded], [0, 0, 0, 0]);
+      assert.equal(report.alreadySuperseded, 6);
+      assert.deepEqual(perUser(report), expectedPoints);
+      assert.deepEqual(await snapshot(), rows);
+    });
+
+    it('the current upload finds each record as stored and still stores a new order', async () => {
+      const item = (source, metadata, payload) => ({ source, type: 'order', timestamp: '2026-10-12T00:00:00Z', metadata, payload });
+      const again = [
+        await upload('ben', [item('amazon', amazonMeta, amazonPayload(order(1), 'https://x.com/someone/status/111'))]),
+        await upload('dan', [item('amazon', amazonMeta, amazonPayload(order(2)))]),
+        await upload('ann', [item('amazon', amazonMeta, amazonPayload(order(3)))]),
+        await upload('ben', [item('amazon', amazonMeta, amazonPayload(order(3), 'https://x.com/other/status/1'))]),
+        await upload('cat', [item('temu', temuMeta, temuPayload)]),
+        await upload('cat', [item('booking', bookingMeta, bookingPayload('https://www.tiktok.com/@h/video/1003'))]),
+        await upload('ann', [item('amazon', amazonMeta, amazonPayload(order(7)))]),
+        await upload('ann', [item('shein', { sourceUrl: 'https://m.shein.com/user/orders' }, { orderId: `SH-20-${RUN}`, title: 'Linen shirt' })]),
+        await upload('dan', [item('x', xMeta, xRedirect)]),
+        await upload('dan', [item('x', xPostMeta, xRedirectPost)]),
+      ];
+      for (const result of again) assert.deepEqual([result.uploadedCount, result.duplicatesCount, result.pointsEarned], [0, 1, 0]);
+
+      const fresh = await upload('dan', [item('amazon', amazonMeta, amazonPayload(order(9), 'https://x.com/n/status/9'))]);
+      assert.equal(fresh.uploadedCount, 1);
+      assert.ok(fresh.pointsEarned > 0);
+    });
+  });
+
+  // A record whose title key is the link key another record's row is still stored under waits for
+  // that record: --apply repairs it in a later pass of the same transaction, so one run settles.
+  // Rows that block each other stay listed.
+  describe('backfill of records waiting for another record\'s link key', () => {
+    const NAMES = ['kim', 'lou'];
+    const ids = NAMES.map(id);
+    const short = (rowId) => rowId.slice(RUN.length + 1);
+    const at = (s) => new Date(`2026-10-12T02:00:${String(s).padStart(2, '0')}.000Z`);
+    const sha = (text) => crypto.createHash('sha256').update(text).digest('hex');
+    const temuMeta = { sourceUrl: 'https://www.temu.com/bgt_order.html' };
+    const r = RUN.toLowerCase();
+    // A chain: W's title key is Y's link key, Y's title key is Z's link key.
+    const zed = { title: `Zed ${r}`, href: `https://www.tiktok.com/@u${r}/video/1:2024-01-01` };
+    const why = { title: `https://tiktok.com/@u${r}/video/1`, date: '2024-01-01', href: `https://x.com/q${r}/status/9:d` };
+    const dub = { title: `https://x.com/q${r}/status/9`, date: 'd', href: `https://www.instagram.com/p/Chain${r}/` };
+    // Two rows that block each other.
+    const pee = { title: `https://tiktok.com/@c${r}/video/2`, date: 'd', href: `https://www.tiktok.com/@c${r}/video/3:e` };
+    const que = { title: `https://tiktok.com/@c${r}/video/3`, date: 'e', href: `https://www.tiktok.com/@c${r}/video/2:d` };
+    const keys = {
+      zed: `title:temu.com:https://tiktok.com/@u${r}/video/1:2024-01-01`,
+      why: `title:temu.com:https://x.com/q${r}/status/9:d`,
+      dub: `title:temu.com:https://instagram.com/p/Chain${r}`,
+      pee: `title:temu.com:https://tiktok.com/@c${r}/video/3:e`,
+      que: `title:temu.com:https://tiktok.com/@c${r}/video/2:d`,
+    };
+
+    before(async () => {
+      for (const name of NAMES) await user(name);
+      const task = {};
+      for (const name of NAMES) {
+        task[name] = (await prisma.crawlerTask.create({
+          data: { id: id(`task-${name}-temu`), title: 'temu', source: 'temu', taskId: 'temu_orders', userId: id(name) },
+        })).id;
+      }
+      const rows = [['kim', 'dub', dub, 0], ['kim', 'why', why, 1], ['kim', 'zed', zed, 2], ['lou', 'pee', pee, 3], ['lou', 'que', que, 4]];
+      for (const [name, key, payload, s] of rows) {
+        await prisma.crawlerData.create({
+          data: {
+            id: id(key), source: 'temu', type: 'order', timestamp: new Date('2026-10-01T10:00:00Z'), metadata: temuMeta, payload,
+            taskId: task[name], userId: id(name), contentHash: sha(JSON.stringify({ postUrl: keys[key] })), sourceId: keys[key], createdAt: at(s),
+          },
+        });
+      }
+    });
+
+    after(async () => {
+      await prisma.point.deleteMany({ where: { userId: { in: ids } } });
+      await prisma.crawlerData.deleteMany({ where: { userId: { in: ids } } });
+      await prisma.crawlerTask.deleteMany({ where: { userId: { in: ids } } });
+      await prisma.user.deleteMany({ where: { id: { in: ids } } });
+    });
+
+    const snapshot = () =>
+      prisma.crawlerData.findMany({ where: { userId: { in: ids } }, orderBy: { id: 'asc' }, select: { id: true, sourceId: true, contentHash: true } });
+    const counts = (rep) => ({
+      linkKeyRows: rep.linkKeyRows, records: rep.records, passes: rep.passes, restored: rep.restored, restoredByKind: rep.restoredByKind,
+      heldAlready: rep.heldAlready, superseded: rep.superseded, conflicts: rep.conflicts.map((c) => short(c.id)).sort(),
+    });
+    const expected = {
+      linkKeyRows: 5, records: 5, passes: 3, restored: 3, restoredByKind: { order: 0, title: 3, content: 0 },
+      heldAlready: 0, superseded: 0, conflicts: ['pee', 'que'],
+    };
+
+    it('a dry run plans every pass and writes nothing', async () => {
+      const rows = await snapshot();
+      const report = await backfillRecordIdentity({ userIds: ids });
+      assert.equal(report.mode, 'dry-run');
+      assert.deepEqual(counts(report), expected);
+      assert.match(report.conflicts[0].reason, /block each other/);
+      assert.deepEqual(await snapshot(), rows);
+    });
+
+    it('one --apply repairs the chain in three passes and leaves the rows that block each other', async () => {
+      const report = await backfillRecordIdentity({ userIds: ids, apply: true, batch: 1 });
+      assert.deepEqual(counts(report), expected);
+      const by = Object.fromEntries((await snapshot()).map((row) => [short(row.id), row]));
+      assert.equal(by.zed.sourceId, `title:temu.com:zed ${r}:`);
+      assert.equal(by.why.sourceId, keys.zed);
+      assert.equal(by.dub.sourceId, keys.why);
+      assert.equal(by.zed.contentHash, generateContentHash(zed));
+      assert.equal(by.why.contentHash, generateContentHash(why));
+      assert.equal(by.dub.contentHash, generateContentHash(dub));
+      assert.equal(by.pee.sourceId, keys.pee);
+      assert.equal(by.que.sourceId, keys.que);
+    });
+
+    it('a second --apply writes nothing', async () => {
+      const rows = await snapshot();
+      const report = await backfillRecordIdentity({ userIds: ids, apply: true });
+      assert.deepEqual(counts(report), { ...expected, linkKeyRows: 2, records: 2, passes: 1, restored: 0, restoredByKind: { order: 0, title: 0, content: 0 } });
+      assert.deepEqual(await snapshot(), rows);
+    });
+
+    it('the current upload finds each repaired record as stored', async () => {
+      const item = (payload) => ({ source: 'temu', type: 'order', timestamp: '2026-10-12T00:00:00Z', metadata: temuMeta, payload });
+      for (const payload of [zed, why, dub]) {
+        const result = await upload('kim', [item(payload)]);
+        assert.deepEqual([result.uploadedCount, result.duplicatesCount, result.pointsEarned], [0, 1, 0]);
+      }
+    });
+  });
+
+  // Facebook rows as the App uploads them: from 2.0.6 the post link (src/crawler/connect/postUrl.ts),
+  // before that the profile page, keyed by title.
+  describe('Facebook posts keyed by their permalink', () => {
+    const NAMES = ['fbn', 'fbm', 'fba', 'fbo', 'fbr', 'fbd', 'fbu', 'fbw', 'fbv', 'fbx'];
+    const ids = NAMES.map(id);
+    const post = (name) => `https://facebook.com/jane.doe/posts/pfbid0${RUN}${name}`;
+    const profile = (name) => `https://www.facebook.com/profile.php?id=${RUN}${name}`;
+    const caption = (text) => `${text} ${RUN}`;
+    const MARKET = caption('Saturday market in Sham Shui Po, film and a quiet stall.');
+    const MORNING = caption('Good morning from Hong Kong, coffee first today.');
+    const fb = (name, href, text, at = '2026-10-14T01:00:00.000Z') => ({
+      source: 'facebook',
+      type: 'custom',
+      timestamp: at,
+      metadata: { sourceUrl: profile(name), host: 'facebook.com', cleaned: true, extract: 'generic' },
+      payload: { title: text, productTitle: text, date: '', href, caption: text, text },
+    });
+    const counts = (r) => [r.uploadedCount, r.duplicatesCount, r.pointsEarned];
+    const titleKey = (text) => `title:facebook.com:${text.toLowerCase()}:`;
+    const fbPoints = calculateDataPoints('facebook', 1);
+    const fbPointsFor = (n) => calculateDataPoints('facebook', n);
+
+    before(async () => {
+      for (const name of NAMES) await user(name);
+    });
+
+    after(async () => {
+      await prisma.point.deleteMany({ where: { userId: { in: ids } } });
+      await prisma.crawlerData.deleteMany({ where: { userId: { in: ids } } });
+      await prisma.crawlerTask.deleteMany({ where: { userId: { in: ids } } });
+      await prisma.user.deleteMany({ where: { id: { in: ids } } });
+    });
+
+    it('n1: two posts with the same caption are both stored; the same page again stores nothing', async () => {
+      const page = [fb('fbn', post('market'), MARKET), fb('fbn', post('morning1'), MORNING), fb('fbn', post('morning2'), MORNING)];
+      assert.deepEqual(counts(await upload('fbn', page)), [3, 0, fbPointsFor(3)]);
+      assert.deepEqual(counts(await upload('fbn', page)), [0, 3, 0]);
+      const rows = await rowsOf('fbn', { source: 'facebook' });
+      assert.deepEqual(rows.map((r) => r.sourceId).sort(), ['market', 'morning1', 'morning2'].map((n) => `title:post:${post(n)}`).sort());
+      assert.equal(await crawlerPoints('fbn'), fbPointsFor(3));
+    });
+
+    it('n3: a caption edit of the same post is a duplicate and pays nothing', async () => {
+      const edited = caption('Saturday market in Sham Shui Po: film and a quiet stall.');
+      assert.deepEqual(counts(await upload('fbn', [fb('fbn', post('market'), edited)])), [0, 1, 0]);
+      assert.equal(await crawlerPoints('fbn'), fbPointsFor(3));
+    });
+
+    it('n4: a second user who sees the same post keeps a copy of their own', async () => {
+      assert.deepEqual(counts(await upload('fbm', [fb('fbm', post('market'), MARKET)])), [1, 0, fbPoints]);
+      const [mine] = await rowsOf('fbm', { source: 'facebook' });
+      const [theirs] = await rowsOf('fbn', { source: 'facebook', sourceId: `title:post:${post('market')}` });
+      assert.equal(mine.sourceId, theirs.sourceId);
+      assert.notEqual(mine.contentHash, theirs.contentHash);
+    });
+
+    it('c3: a row from an earlier App version, then the post link with the same title, is a duplicate', async () => {
+      // the earlier version: the profile page as href, two posts with one caption as one row
+      const earlier = [fb('fba', profile('fba'), MARKET), fb('fba', profile('fba'), MORNING)];
+      assert.deepEqual(counts(await upload('fba', earlier)), [2, 0, fbPointsFor(2)]);
+      const page = [fb('fba', post('market'), MARKET), fb('fba', post('morning1'), MORNING), fb('fba', post('morning2'), MORNING)];
+      assert.deepEqual(counts(await upload('fba', page)), [0, 3, 0]);
+      assert.deepEqual(counts(await upload('fba', page)), [0, 3, 0]);
+      const rows = await rowsOf('fba', { source: 'facebook' });
+      assert.deepEqual(rows.map((r) => r.sourceId).sort(), [titleKey(MARKET), titleKey(MORNING)].sort());
+      assert.equal(await crawlerPoints('fba'), fbPointsFor(2));
+    });
+
+    it('a row from an earlier App version under another title: the post is stored once (accepted)', async () => {
+      // The earlier version read a long comment as the title (or the caption changed since): that
+      // title key does not match, so the post is stored once under its permalink, then is a duplicate.
+      const comment = caption('Wow, that view from the top is amazing, we should all go together next weekend!');
+      const trail = caption('Trail run up Lion Rock before sunrise.');
+      assert.deepEqual(counts(await upload('fbo', [fb('fbo', profile('fbo'), comment)])), [1, 0, fbPoints]);
+      assert.deepEqual(counts(await upload('fbo', [fb('fbo', post('trail'), trail)])), [1, 0, fbPoints]);
+      assert.deepEqual(counts(await upload('fbo', [fb('fbo', post('trail'), trail)])), [0, 1, 0]);
+      assert.equal((await rowsOf('fbo', { source: 'facebook' })).length, 2);
+    });
+
+    it('the post link first, then an earlier App version (a second device) with the same title: a duplicate', async () => {
+      const page = [fb('fbd', post('market'), MARKET), fb('fbd', post('ferry'), caption('Evening ferry')), fb('fbd', post('morning1'), MORNING), fb('fbd', post('morning2'), MORNING)];
+      assert.deepEqual(counts(await upload('fbd', page)), [4, 0, fbPointsFor(4)]);
+      const earlier = [fb('fbd', profile('fbd'), MARKET), fb('fbd', profile('fbd'), caption('Evening ferry')), fb('fbd', profile('fbd'), MORNING)];
+      assert.deepEqual(counts(await upload('fbd', earlier)), [0, 3, 0]);
+      assert.deepEqual(counts(await upload('fbd', earlier)), [0, 3, 0]);
+      // a post the 2.0.6 device never sent is new
+      assert.deepEqual(counts(await upload('fbd', [fb('fbd', profile('fbd'), caption('Dim sum with the team'))])), [1, 0, fbPoints]);
+      const rows = await rowsOf('fbd', { source: 'facebook' });
+      assert.deepEqual(rows.map((r) => r.sourceId).sort(), [
+        ...['market', 'ferry', 'morning1', 'morning2'].map((n) => `title:post:${post(n)}`),
+        titleKey(caption('Dim sum with the team')),
+      ].sort());
+      assert.equal(await crawlerPoints('fbd'), fbPointsFor(4) + fbPoints);
+    });
+
+    it('a Facebook link the rule does not read as a post is never one key for all users', async () => {
+      // an older video link: every video of the page shows it; 2.0.6 sends it as the order id too
+      const VIDEOS = `https://www.facebook.com/jane.doe/videos/vb.${RUN}/7777777777/`;
+      const sent = (name, text) => {
+        const row = fb(name, VIDEOS, text);
+        return { ...row, payload: { ...row.payload, orderId: VIDEOS, orderid: VIDEOS, id: VIDEOS } };
+      };
+      const SUNSET = caption('Sunset timelapse from the Peak');
+      const RACE = caption('Dragon boat race highlights from Stanley');
+      assert.deepEqual(counts(await upload('fbv', [sent('fbv', SUNSET), sent('fbv', RACE)])), [2, 0, fbPointsFor(2)]);
+      assert.deepEqual(counts(await upload('fbv', [sent('fbv', SUNSET), sent('fbv', RACE)])), [0, 2, 0]);
+      assert.deepEqual((await rowsOf('fbv')).map((r) => r.sourceId).sort(), [titleKey(SUNSET), titleKey(RACE)].sort());
+      assert.deepEqual(counts(await upload('fbx', [sent('fbx', caption('Lantern festival lights'))])), [1, 0, fbPoints]);
+      assert.equal(await prisma.crawlerData.count({ where: { source: 'facebook', sourceId: VIDEOS } }), 0);
+    });
+
+    it('o1-o3: an earlier App version only, as before', async () => {
+      const COMMENT = caption('Wow, that view from the top is amazing, we should all go together next weekend!');
+      const o1 = [fb('fbu', profile('fbu'), MARKET), fb('fbu', profile('fbu'), caption('Evening ferry')), fb('fbu', profile('fbu'), MORNING), fb('fbu', profile('fbu'), COMMENT)];
+      assert.deepEqual(counts(await upload('fbu', o1)), [4, 0, fbPointsFor(4)]);
+      const edited = caption('Saturday market in Sham Shui Po: film and a quiet stall.');
+      assert.deepEqual(counts(await upload('fbu', [fb('fbu', profile('fbu'), edited), fb('fbu', profile('fbu'), caption('Evening ferry'))])), [1, 1, fbPoints]);
+      assert.deepEqual(counts(await upload('fbw', [fb('fbw', profile('fbw'), MARKET), fb('fbw', profile('fbw'), caption('Dim sum with the team'))])), [2, 0, fbPointsFor(2)]);
+      assert.deepEqual([(await rowsOf('fbu')).length, (await rowsOf('fbw')).length], [5, 2]);
+    });
+
+    describe('backfill of rows that already hold the post link', () => {
+      // Rows the App (2.0.6) stored against a server without the Facebook rule: the post link as
+      // href, a title key, and the hash of the whole payload. Two of them are one post whose caption
+      // changed; one row is from an earlier App version (profile page).
+      const FIRST = caption('Harbour walk');
+      const LATER = caption('Harbour walk at dusk');
+      const rows = [
+        ['fbr-1', fb('fbr', post('harbour'), FIRST).payload, titleKey(FIRST), '2026-10-13T00:00:01Z'],
+        ['fbr-2', fb('fbr', post('harbour'), LATER).payload, titleKey(LATER), '2026-10-13T00:00:02Z'],
+        ['fbr-3', fb('fbr', post('noodles'), caption('Noodles')).payload, titleKey(caption('Noodles')), '2026-10-13T00:00:03Z'],
+        ['fbr-4', fb('fbr', profile('fbr'), caption('Old')).payload, titleKey(caption('Old')), '2026-10-13T00:00:04Z'],
+      ];
+      const snapshot = () =>
+        prisma.crawlerData.findMany({ where: { userId: id('fbr') }, orderBy: { id: 'asc' }, select: { id: true, sourceId: true, contentHash: true } });
+      const pointsOf = async () => ({
+        points: await prisma.point.findMany({ where: { userId: id('fbr') }, orderBy: { id: 'asc' }, select: { id: true, amount: true } }),
+        total: (await prisma.user.findUnique({ where: { id: id('fbr') }, select: { totalPoints: true } })).totalPoints,
+      });
+
+      before(async () => {
+        const task = await prisma.crawlerTask.create({
+          data: { id: id('task-fbr'), title: 'Facebook Activity', source: 'facebook', taskId: 'facebook_activity', userId: id('fbr') },
+        });
+        for (const [rowId, payload, sourceId, createdAt] of rows) {
+          await prisma.crawlerData.create({
+            data: {
+              id: id(rowId), source: 'facebook', type: 'custom', timestamp: new Date('2026-10-13T00:00:00Z'),
+              metadata: { host: 'facebook.com' }, payload, taskId: task.id, userId: id('fbr'),
+              contentHash: generateContentHash(payload), sourceId, createdAt: new Date(createdAt),
+            },
+          });
+          await prisma.point.create({ data: { userId: id('fbr'), amount: fbPoints, source: 'crawler', sourceId: 'data_upload', createdAt: new Date(createdAt) } });
+        }
+        await prisma.user.update({ where: { id: id('fbr') }, data: { totalPoints: 4 * fbPoints } });
+      });
+
+      it('a dry run reports the rows with a post link and writes nothing', async () => {
+        const before = [await snapshot(), await pointsOf()];
+        const report = await backfillSocialPostIdentity({ userIds: [id('fbr')] });
+        assert.deepEqual([report.scanned, report.updated, report.current, report.noPermalink], [4, 2, 0, 1]);
+        assert.deepEqual(report.conflicts.map((c) => c.id), [id('fbr-2')]);
+        assert.deepEqual([await snapshot(), await pointsOf()], before);
+      });
+
+      it('--apply gives them the permalink key, deletes nothing and changes no points', async () => {
+        const points = await pointsOf();
+        // pages of one row: fbr-2's page finds fbr-1 already written
+        const report = await backfillSocialPostIdentity({ apply: true, userIds: [id('fbr')], batch: 1 });
+        assert.deepEqual([report.scanned, report.updated, report.current, report.noPermalink], [4, 2, 0, 1]);
+        assert.deepEqual(report.conflicts.map((c) => [c.id, c.keptBy]), [[id('fbr-2'), id('fbr-1')]]);
+        const by = Object.fromEntries((await snapshot()).map((r) => [r.id, r]));
+        assert.equal(Object.keys(by).length, 4);
+        assert.equal(by[id('fbr-1')].sourceId, `title:post:${post('harbour')}`);
+        assert.equal(by[id('fbr-1')].contentHash, generateContentHash(rows[0][1], { source: 'facebook', userId: id('fbr') }));
+        assert.equal(by[id('fbr-2')].sourceId, titleKey(LATER));
+        assert.equal(by[id('fbr-3')].sourceId, `title:post:${post('noodles')}`);
+        assert.equal(by[id('fbr-4')].sourceId, titleKey(caption('Old')));
+        assert.deepEqual(await pointsOf(), points);
+      });
+
+      it('a second --apply writes nothing', async () => {
+        const before = await snapshot();
+        const report = await backfillSocialPostIdentity({ apply: true, userIds: [id('fbr')] });
+        assert.deepEqual([report.updated, report.current, report.noPermalink, report.conflicts.length], [0, 2, 1, 1]);
+        assert.deepEqual(await snapshot(), before);
+      });
+
+      it('after the backfill the post with another caption is a duplicate and pays nothing', async () => {
+        const points = await crawlerPoints('fbr');
+        const again = await upload('fbr', [fb('fbr', 'https://www.facebook.com/jane.doe/posts/pfbid0' + RUN + 'harbour?__tn__=R', caption('Harbour walk, the long way'))]);
+        assert.deepEqual(counts(again), [0, 1, 0]);
+        assert.deepEqual(counts(await upload('fbr', [fb('fbr', post('noodles'), caption('Noodles, again'))])), [0, 1, 0]);
+        assert.equal(await crawlerPoints('fbr'), points);
+      });
+
+      it('after the backfill an earlier App version re-syncing the same posts stores nothing and pays nothing', async () => {
+        const before = [await snapshot(), await pointsOf()];
+        // the profile page as href, so the rows are keyed by title: fbr-1 and fbr-3 now hold the permalink key
+        const earlier = [FIRST, LATER, caption('Noodles'), caption('Old')].map((text) => fb('fbr', profile('fbr'), text));
+        assert.deepEqual(counts(await upload('fbr', earlier)), [0, 4, 0]);
+        assert.deepEqual([await snapshot(), await pointsOf()], before);
+      });
     });
   });
 });

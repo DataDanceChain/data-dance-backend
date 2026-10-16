@@ -29,6 +29,7 @@ function languageHint(locale) {
   const code = String(locale || 'en').toLowerCase();
   if (code.startsWith('zh')) return 'Traditional Chinese';
   if (code.startsWith('ja')) return 'Japanese';
+  if (code.startsWith('ko')) return 'Korean';
   return 'English';
 }
 

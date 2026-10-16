@@ -92,17 +92,53 @@
 #      (REHEARSAL_G8=scrub|keep); the dump, disk (/ and pgdata) and memory checks, the memory and disk floor before every
 #      one-off container; a failed or stopped restore or scrub leaves no partial copy; a whole rehearsal (preflight,
 #      restore with the scrub, migrate, report, apply-switch, summary, cleanup) with its timings; the users after
-#      --apply and after --rollback against their state before; the window estimate (18 parts of runbook section 6,
-#      NOT MEASURED parts block the PASS, every part measured gives PASS, too long gives WARN); cleanup removing the
+#      --apply and after --rollback against their state before; the record repair inside apply-switch (two runs of
+#      the backfill's --apply between --apply and --rollback, the second must change nothing; counts only printed; a
+#      copy already repaired keeps the first time; an image without the script refused before anything runs, a backfill
+#      without the record part refused before a time is recorded); the window estimate (19
+#      parts of runbook section 6, NOT MEASURED parts block the PASS and are named once, every part measured gives
+#      PASS, too long gives WARN, the total with two decimals compared as printed); record <key> <seconds> for a part
+#      measured by hand (the key allowlisted, a whole number of seconds); cleanup removing the
 #      records with ids; the cases that stop it; psql only ever on postgres and the copy; no secret, user id or e-mail
 #      address in the output or the logs. Then the script's SQL on a REAL postgres:17 (test/helpers/rehearsal-pg.sh:
 #      its sessions forwarded to a throwaway container): the mark, the restore and counts, the G8 scrub and keep,
 #      read-only for the report, --apply and --rollback emulated with the real script's SQL (updatedAt as Prisma sets
-#      it) against the users' check, which also catches a rollback that changes a column outside the four, the gate
+#      it) against the users' check, which also catches a rollback that changes a column outside the four, the record
+#      repair as a real UPDATE on the copy only (the second run finds nothing; one that also changes a user is caught
+#      by the users' check after --rollback), the gate
 #      refusing a session that lands on the live database, the mark check refusing DROP DATABASE of an unmarked copy,
 #      and the synthetic live database exactly as before.
 #   10d. remote.sh: 60-rehearsal.sh preflight and summary need no approval, every other subcommand does; REHEARSAL_G8
-#      passes as scrub or keep and is refused otherwise, before connecting.
+#      passes as scrub or keep and is refused otherwise, before connecting; record takes only an allowlisted key and a
+#      whole number of seconds, checked before connecting.
+# Web3Auth Mainnet login names and the partner fields (10-14):
+#   3. the three Web3Auth lists carry the Mainnet built-in login names (no -mainnet suffix), X never e-mail-trusted; a
+#      W3A_* override reaches all three; SSO_TGE_STATUS_FIELDS includes points and points_history. 3a. the backend's
+#      boot line reports that list.
+# The partner's live settings and the full partner access (10-14 evening):
+#   3. SSO_TGE_STATUS_FIELDS = the whole catalog (11 fields), SSO_TGE_REFERRAL_BIND=true, SSO_DEVELOPER_REGISTRATION=
+#      allowlist with SSO_DEVELOPER_ALLOWED_EMAILS (REHEARSAL_DEVELOPER_ALLOWED_EMAILS or --developer-emails-stdin; never
+#      printed; an entry that is not an address stops). On a stack with a previous env (.env.api as 40-up.sh writes it,
+#      .env.rehearsal) a re-run without overrides keeps the redirect and start-login URIs, the allow-list and the client
+#      id (also with no record), and stops when .env.api and .env.rehearsal disagree, when the kept redirect URI is a
+#      .invalid placeholder (an explicit one only warns), when the client id or the issuer would change without
+#      REHEARSAL_CLIENT_ID= / API_HOST= on the call (also with no record: the default host never replaces it); no
+#      REHEARSAL_REDIRECT_URIS and no previous env stops. The backend named in .env must know every listed field and
+#      allowlist (its source as 10-build.sh unpacks it), else 20-env.sh stops before it writes. 3a. this checkout boots
+#      on the env with the allow-list (developerRegistration=allowlist:<n> on the money-path line).
+# The invoice seller (10-15), synthetic ids only:
+#   3. INVOICE_SELLER_USER_ID (20-env.sh): 'not set' without an override, a previous or an old env value; given on the
+#      call (written once), kept on a re-run (the file byte-identical), taken from the old env when neither has one,
+#      replaced by one given on the call; with the old env's INVOICE_SELLER_USER_ID, _EMAIL, _TAX_ID and _ADDRESS every
+#      name is classified (values not printed); refused before anything is written unless a lower-case canonical UUID
+#      (from the call, the previous env or the old env) and when .env.api and .env.rehearsal disagree; 40-up.sh's
+#      writer and check carry it into .env.api unchanged; when the backend source has src/constants/invoiceSeller.js,
+#      a WARN (not a failure) while the id is not set and an INFO when the old env gives INVOICE_SELLER_EMAIL (its
+#      value not printed); neither without that file.
+#   10d. remote.sh: INVOICE_SELLER_USER_ID allowlisted; only a lower-case canonical UUID passes, anything else (case,
+#      shape, empty, injection characters) is refused before connecting.
+# The consent page for web sign-ins (10-15):
+#   3. SSO_TGE_AUTO_APPROVE=app (written once; on 20-env.sh's partner PASS line and in compose's parse of the new file).
 # Every SSH test uses scratch COPIES of the scripts with a test local.env (loopback only): the package's own local.env,
 # if one exists, is never used to connect, and the real 1Password CLI is never called.
 # Containers and images: every docker run and docker build of this run carries the label ddcnew-localtest=<run id>
@@ -160,6 +196,8 @@ DEFAULTS_SEEN=$( (unset API_HOST APP_HOST API_PORT WEB_PORT DB_PORT; . "$PKG/com
 # The rehearsal client id this suite gives 20-env.sh (REHEARSAL_CLIENT_ID: required, no default; the api refuses tge and
 # tge-rehearsal at boot since backend fd2d4e9).
 CID=lt-partner-client
+# Two SYNTHETIC invoice seller ids (INVOICE_SELLER_USER_ID: a User id, a lower-case canonical UUID); no real account's.
+SID1=11111111-2222-4333-8444-555555555555; SID2=aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee; SID2_UPPER=AAAAAAAA-BBBB-4CCC-8DDD-EEEEEEEEEEEE
 # From here on a failing command never ends the run: every check reports PASS or FAIL itself, so a broken state (a
 # mutation, a slip in a refactoring) shows up as named FAIL lines, the summary is always printed, and the cleanup of
 # this run's containers always runs (EXIT trap).
@@ -319,8 +357,11 @@ printf '%s\n' '# synthetic .env.tge for the local test' 'VITE_MODE=tge' 'VITE_WE
 echo "synthetic old file: $(grep -c . "$OLD") non-empty lines, $(grep -c DUMMYSECRET "$OLD") lines with DUMMYSECRET markers"
 
 run20() { DDC_LOCAL_TEST=1 NEW_DIR="$T/ddcnew" OLD_ENV="$OLD" FE_ENV_TGE="$T/env.tge" bash "$PKG/20-env.sh"; }
-# Run 1 names the client (REHEARSAL_CLIENT_ID is required, no default); run 2 has no override and reuses the record.
-REHEARSAL_CLIENT_ID="$CID" run20 > "$T/run1.out" 2>&1 || { cat "$T/run1.out"; bad "20-env.sh run 1 failed"; }
+# The partner's callback in this suite: a reserved .example name (never resolves; not a .invalid placeholder).
+RR_T=https://partner.example/oauth/callback
+# Run 1 names the client and the partner's callback (both required on a first run, no default); run 2 has no override
+# and keeps them (the record and the previous env).
+REHEARSAL_CLIENT_ID="$CID" REHEARSAL_REDIRECT_URIS="$RR_T" run20 > "$T/run1.out" 2>&1 || { cat "$T/run1.out"; bad "20-env.sh run 1 failed"; }
 run20 > "$T/run2.out" 2>&1 || { cat "$T/run2.out"; bad "20-env.sh run 2 failed"; }
 echo "--- 20-env.sh output (run 1) ---"; cat "$T/run1.out"; echo "--- end ---"
 h1=$(grep -o 'env_file_sha256=[0-9a-f]*' "$T/run1.out" || true); h2=$(grep -o 'env_file_sha256=[0-9a-f]*' "$T/run2.out" || true)
@@ -360,6 +401,43 @@ grep -qF "settings: API_HOST=$D_API_HOST APP_HOST=$D_APP_HOST API_PORT=$D_API_PO
 grep -qx "rehearsal client id: $CID (override)" "$T/run1.out" && grep -qx "rehearsal client id: $CID (recorded in $T/ddcnew/settings.env)" "$T/run2.out" \
   && grep -qx "SSO_TGE_CLIENT_ID=\"$CID\"" "$T/ddcnew/.env.rehearsal" && grep -q "^PASS SSO_TGE_CLIENT_ID=$CID: matches" "$T/run1.out" \
   && ok "SSO_TGE_CLIENT_ID=$CID from REHEARSAL_CLIENT_ID on run 1, from the record on run 2 (no override)" || bad "client id from the override and the record"
+# The Sapphire Mainnet built-in login names (no -mainnet suffix) in the three Web3Auth lists, X never e-mail-trusted,
+# and the partner fields the rehearsal serves (docs/TGE_SSO.md section 14: points and points_history included).
+ev() { sed -n "s/^$1=\"\(.*\)\"$/\1/p" "$2" | tail -1; }
+W3A_G=web3auth-google-sapphire; W3A_E=web3auth-auth0-email-passwordless-sapphire; W3A_A=web3auth-auth0-apple-sapphire; W3A_T=web3auth-auth0-twitter-sapphire
+SF_WANT=registered_at,wallet_bound,data_licence_granted,email_masked,avatar,email,wallet_address,points,referral,referral_network,points_history
+REH_ENV="$T/ddcnew/.env.rehearsal"
+[ "$(ev WEB3AUTH_ALLOWED_VERIFIERS "$REH_ENV")" = "$W3A_G,$W3A_E,$W3A_A,$W3A_T,external-wallet" ] \
+  && [ "$(ev WEB3AUTH_REBIND_VERIFIERS "$REH_ENV")" = "$W3A_G,$W3A_E,$W3A_A,$W3A_T" ] \
+  && [ "$(ev WEB3AUTH_EMAIL_TRUSTED_VERIFIERS "$REH_ENV")" = "$W3A_G,$W3A_E,$W3A_A" ] \
+  && [ "$(grep -cE '^WEB3AUTH_[A-Z_]*VERIFIERS=.*sapphire-mainnet' "$REH_ENV" || true)" = 0 ] \
+  && ok "Web3Auth lists carry the Mainnet built-in login names (no -mainnet suffix): allowed = the four + external-wallet, re-bind = the four, e-mail-trusted = Google, e-mail, Apple (never X)" \
+  || bad "Web3Auth login names in .env.rehearsal: allowed=$(ev WEB3AUTH_ALLOWED_VERIFIERS "$REH_ENV") rebind=$(ev WEB3AUTH_REBIND_VERIFIERS "$REH_ENV") trusted=$(ev WEB3AUTH_EMAIL_TRUSTED_VERIFIERS "$REH_ENV")"
+[ "$(ev SSO_TGE_STATUS_FIELDS "$REH_ENV")" = "$SF_WANT" ] && [ "$(grep -c '^SSO_TGE_STATUS_FIELDS=' "$REH_ENV")" = 1 ] \
+  && ok "SSO_TGE_STATUS_FIELDS=$SF_WANT (once; the old env's list is replaced): every field of the catalog, the points balance and history among them" \
+  || bad "SSO_TGE_STATUS_FIELDS in .env.rehearsal: $(grep '^SSO_TGE_STATUS_FIELDS=' "$REH_ENV" | tr '\n' ' ')"
+[ "$(ev SSO_TGE_AUTO_APPROVE "$REH_ENV")" = app ] && [ "$(grep -c '^SSO_TGE_AUTO_APPROVE=' "$REH_ENV")" = 1 ] \
+  && ok "SSO_TGE_AUTO_APPROVE=app (once): the App hand-off may Allow without a tap, a web sign-in always shows the consent page" \
+  || bad "SSO_TGE_AUTO_APPROVE in .env.rehearsal: $(grep '^SSO_TGE_AUTO_APPROVE=' "$REH_ENV" | tr '\n' ' ')"
+[ "$(ev SSO_TGE_REFERRAL_BIND "$REH_ENV")" = true ] && [ "$(ev SSO_DEVELOPER_REGISTRATION "$REH_ENV")" = allowlist ] && grep -qx 'SSO_DEVELOPER_ALLOWED_EMAILS=""' "$REH_ENV" \
+  && [ "$(ev SSO_TGE_REDIRECT_URIS "$REH_ENV")" = "$RR_T" ] && [ "$(ev SSO_TGE_INITIATE_LOGIN_URI "$REH_ENV")" = "" ] \
+  && grep -qF 'partner settings: SSO_TGE_REDIRECT_URIS override REHEARSAL_REDIRECT_URIS (1 URI); SSO_TGE_INITIATE_LOGIN_URI default (empty); SSO_DEVELOPER_ALLOWED_EMAILS default (0 address(es), not printed); previous env: none' "$T/run1.out" \
+  && grep -qF 'partner settings: SSO_TGE_REDIRECT_URIS kept from the previous env (1 URI); SSO_TGE_INITIATE_LOGIN_URI kept from the previous env (empty); SSO_DEVELOPER_ALLOWED_EMAILS kept from the previous env (0 address(es), not printed); previous env: .env.rehearsal' "$T/run2.out" \
+  && grep -qF "PASS partner settings kept from the previous env: 8; given on this call: none; no previous value: none. SSO_TGE_STATUS_FIELDS: all 11 fields, SSO_TGE_REFERRAL_BIND=true, SSO_TGE_AUTO_APPROVE=app, SSO_DEVELOPER_REGISTRATION=allowlist (0 listed)" "$T/run2.out" \
+  && grep -qF "WARN no API_IMAGE in $T/ddcnew/.env (10-build.sh writes it): not checked here" "$T/run2.out" \
+  && ok "SSO_TGE_REFERRAL_BIND=true, SSO_DEVELOPER_REGISTRATION=allowlist with an empty list (nobody); run 1 took the callback from REHEARSAL_REDIRECT_URIS, run 2 kept it and the rest (8 of 8); no .env yet: the backend check says so" \
+  || bad "partner access or kept settings in run 1 / run 2: $(grep -E '^(partner settings|PASS partner|WARN)' "$T/run1.out" "$T/run2.out" | tr '\n' ' ')"
+# The remaining first runs of section 3 name the partner's callback explicitly (no previous env, no default).
+export REHEARSAL_REDIRECT_URIS="$RR_T"
+# The override mechanism: a W3A_* override reaches all three lists in its place, and X stays out of the e-mail-trusted list.
+d="$T/w3a-override"; mkdir -p "$d"; rc=0
+DDC_LOCAL_TEST=1 NEW_DIR="$d" OLD_ENV="$OLD" FE_ENV_TGE="$T/env.tge" REHEARSAL_CLIENT_ID="$CID" W3A_EMAIL=lt-email-login W3A_X=lt-x-login \
+  bash "$PKG/20-env.sh" > "$d.out" 2>&1 || rc=$?
+[ "$rc" = 0 ] && [ "$(ev WEB3AUTH_ALLOWED_VERIFIERS "$d/.env.rehearsal")" = "$W3A_G,lt-email-login,$W3A_A,lt-x-login,external-wallet" ] \
+  && [ "$(ev WEB3AUTH_REBIND_VERIFIERS "$d/.env.rehearsal")" = "$W3A_G,lt-email-login,$W3A_A,lt-x-login" ] \
+  && [ "$(ev WEB3AUTH_EMAIL_TRUSTED_VERIFIERS "$d/.env.rehearsal")" = "$W3A_G,lt-email-login,$W3A_A" ] \
+  && ok "W3A_EMAIL / W3A_X overrides replace the defaults in the allowed, re-bind and e-mail-trusted lists (the X override never e-mail-trusted)" \
+  || { tail -3 "$d.out"; bad "W3A_* overrides (rc=$rc)"; }
 cid20() { # <label> <NEW_DIR> [REHEARSAL_CLIENT_ID]: one 20-env.sh run, output in <NEW_DIR>.out, status in RC
   RC=0
   if [ $# -ge 3 ]; then DDC_LOCAL_TEST=1 NEW_DIR="$2" OLD_ENV="$OLD" FE_ENV_TGE="$T/env.tge" REHEARSAL_CLIENT_ID="$3" bash "$PKG/20-env.sh" > "$2.out" 2>&1 || RC=$?
@@ -414,6 +492,210 @@ d="$T/rec-good"; mkdir -p "$d"; printf '%s\n' "$GOODREC" > "$d/settings.env"
 ( DDC_LOCAL_TEST=1; NEW_DIR="$d"; . "$PKG/common.sh"; require_server; echo REQ-OK ) > "$d.out" 2>&1
 grep -qx REQ-OK "$d.out" && ok "the settings record: an empty or partial record, a repeated or unknown name, a repeated client id and an empty value each stop require_server; a complete record passes" || bad "complete record refused: $(tail -1 "$d.out")"
 
+# The partner's live settings (10-14 evening). mklive: a stack as 40-up.sh leaves it, the partner's callback, client id
+# and an empty start-login URI in .env.rehearsal AND .env.api (40-up.sh's own writer, common.sh env_api_write).
+LIVE_RR=https://203.0.113.10/pages/oauth/callback   # RFC 5737 documentation address
+lv20() { # <dir> [NAME=value ...]: 20-env.sh on <dir> without the suite's REHEARSAL_REDIRECT_URIS; arguments from LV_ARGS,
+         # stdin from LV_IN (default /dev/null); output in <dir>.out, status in RC
+  local d="$1"; shift; RC=0
+  # shellcheck disable=SC2086  # LV_ARGS: one fixed word or none
+  env -u REHEARSAL_REDIRECT_URIS DDC_LOCAL_TEST=1 NEW_DIR="$d" OLD_ENV="$OLD" FE_ENV_TGE="$T/env.tge" "$@" bash "$PKG/20-env.sh" ${LV_ARGS:-} < "${LV_IN:-/dev/null}" > "$d.out" 2>&1 || RC=$?
+}
+mklive() { # <dir>
+  rm -rf "$1" "$1.out"; mkdir -p "$1"
+  lv20 "$1" REHEARSAL_CLIENT_ID=lt-live-client REHEARSAL_REDIRECT_URIS="$LIVE_RR"
+  [ "$RC" = 0 ] || { tail -3 "$1.out"; return 1; }
+  ( DDC_LOCAL_TEST=1; . "$PKG/common.sh"; env_api_write "$1/.env.rehearsal" "$1/.env.api" "ddcnew/backend:localtest" "$(printf 'A%.0s' $(seq 1 43))" ) && chmod 600 "$1/.env.api"
+}
+setv2() { # <file> <NAME> <value>: the assignment replaced in place (mode kept), as a hand edit would leave it
+  awk -v n="$2" -v v="$3" 'index($0, n "=") == 1 { print n "=\"" v "\""; next } { print }' "$1" > "$1.t" && cat "$1.t" > "$1" && rm -f "$1.t"
+}
+setboth() { setv2 "$1/.env.rehearsal" "$2" "$3"; setv2 "$1/.env.api" "$2" "$3"; }
+up40() { ( DDC_LOCAL_TEST=1; . "$PKG/common.sh"; env_api_write "$1/.env.rehearsal" "$1/.env.api" "ddcnew/backend:localtest" "$(printf 'A%.0s' $(seq 1 43))" ); }   # .env.api as 40-up.sh would rewrite it
+L="$T/live"; mklive "$L" || bad "setup: the live stack"
+cp -p "$L/.env.rehearsal" "$L.reh0"; lv20 "$L"
+[ "$RC" = 0 ] && cmp -s "$L/.env.rehearsal" "$L.reh0" && [ "$(ev SSO_TGE_REDIRECT_URIS "$L/.env.rehearsal")" = "$LIVE_RR" ] \
+  && grep -qF 'partner settings: SSO_TGE_REDIRECT_URIS kept from the previous env (1 URI); SSO_TGE_INITIATE_LOGIN_URI kept from the previous env (empty); SSO_DEVELOPER_ALLOWED_EMAILS kept from the previous env (0 address(es), not printed); previous env: .env.api .env.rehearsal' "$L.out" \
+  && grep -qF 'PASS partner settings kept from the previous env: 8; given on this call: none; no previous value: none.' "$L.out" \
+  && ( DDC_LOCAL_TEST=1; . "$PKG/common.sh"; env_api_matches_rehearsal "$L/.env.api" "$L/.env.rehearsal" ) \
+  && ok "live stack, re-run without overrides: the partner's callback, start-login URI, allow-list, client id, issuer and consent origin are kept from .env.api and .env.rehearsal (file byte-identical; .env.api still matches it)" \
+  || { tail -3 "$L.out"; bad "live stack re-run without overrides (rc=$RC)"; }
+lv20 "$L" REHEARSAL_REDIRECT_URIS="$LIVE_RR" REHEARSAL_INITIATE_LOGIN_URI=
+[ "$RC" = 0 ] && cmp -s "$L/.env.rehearsal" "$L.reh0" && grep -qF 'given on this call: SSO_TGE_REDIRECT_URIS SSO_TGE_INITIATE_LOGIN_URI;' "$L.out" \
+  && ok "the same values given explicitly (the earlier W6 call) write the same file" || { tail -3 "$L.out"; bad "live stack with the same explicit values (rc=$RC)"; }
+grep -v '^REHEARSAL_CLIENT_ID=' "$L/settings.env" > "$L/settings.t"; cat "$L/settings.t" > "$L/settings.env"; rm -f "$L/settings.t"
+lv20 "$L"
+[ "$RC" = 0 ] && grep -qx 'rehearsal client id: lt-live-client (kept from the previous env)' "$L.out" && grep -qx 'REHEARSAL_CLIENT_ID=lt-live-client' "$L/settings.env" \
+  && cmp -s "$L/.env.rehearsal" "$L.reh0" && ok "no client id on the call and none recorded: the previous env's (lt-live-client) is kept and recorded again" \
+  || { tail -3 "$L.out"; bad "client id kept from the previous env (rc=$RC)"; }
+# Stops, each before anything is written: the installed .env.rehearsal stays as it was.
+stopcase() { # <label> <dir> <FAIL text> [NAME=value ...]
+  local lbl="$1" d="$2" want="$3"; shift 3
+  cp -p "$d/.env.rehearsal" "$d.before"; lv20 "$d" "$@"
+  if [ "$RC" != 0 ] && grep -qF -- "FAIL $want" "$d.out" && cmp -s "$d/.env.rehearsal" "$d.before"; then ok "$lbl: stops before it writes ($(grep -m1 '^FAIL' "$d.out" | cut -c6-110)...)"
+  else tail -3 "$d.out"; bad "$lbl (rc=$RC)"; fi
+}
+P="$T/live-ph"; mklive "$P" && setboth "$P" SSO_TGE_REDIRECT_URIS https://tge-rehearsal.invalid/oauth/callback
+stopcase "a kept .invalid placeholder callback" "$P" 'SSO_TGE_REDIRECT_URIS in the previous env names a .invalid host (a placeholder: no partner can sign in with it): pass the partner'
+lv20 "$P" REHEARSAL_REDIRECT_URIS=https://tge-rehearsal.invalid/oauth/callback
+[ "$RC" = 0 ] && grep -qx 'WARN SSO_TGE_REDIRECT_URIS names a .invalid host (explicit override): no partner can complete a sign-in with it' "$P.out" \
+  && ok "an explicit .invalid callback is written, with a WARN" || { tail -3 "$P.out"; bad "explicit .invalid callback (rc=$RC)"; }
+X="$T/live-split"; mklive "$X" && setv2 "$X/.env.api" SSO_TGE_REDIRECT_URIS https://203.0.113.11/pages/oauth/callback
+stopcase ".env.api and .env.rehearsal disagree on the callback" "$X" 'SSO_TGE_REDIRECT_URIS differs between .env.api .env.rehearsal (the previous env; values not printed)'
+lv20 "$X" REHEARSAL_REDIRECT_URIS="$LIVE_RR"
+[ "$RC" = 0 ] && grep -qF 'given on this call: SSO_TGE_REDIRECT_URIS;' "$X.out" && ok "the same disagreement with REHEARSAL_REDIRECT_URIS on the call: the explicit value is written" || { tail -3 "$X.out"; bad "explicit callback over a disagreement (rc=$RC)"; }
+C="$T/live-cid"; mklive "$C" && setboth "$C" SSO_TGE_CLIENT_ID lt-other-client
+stopcase "the recorded client id differs from the previous env's" "$C" "SSO_TGE_CLIENT_ID=lt-live-client (recorded in $C/settings.env) differs from the previous env's SSO_TGE_CLIENT_ID, which the partner signs in with"
+lv20 "$C" REHEARSAL_CLIENT_ID=lt-live-client
+[ "$RC" = 0 ] && grep -qF 'given on this call: SSO_TGE_CLIENT_ID;' "$C.out" && ok "REHEARSAL_CLIENT_ID on the call changes it on purpose" || { tail -3 "$C.out"; bad "explicit client id (rc=$RC)"; }
+I="$T/live-iss"; mklive "$I" && setboth "$I" PUBLIC_BASE_URL https://api-other.datadance.ai
+stopcase "the issuer would change (recorded host)" "$I" "PUBLIC_BASE_URL would change from the previous env's https://api-other.datadance.ai to https://$D_API_HOST (API_HOST: recorded in $I/settings.env)"
+rm -f "$I/settings.env"
+stopcase "the issuer would change (no record: the default host)" "$I" "PUBLIC_BASE_URL would change from the previous env's https://api-other.datadance.ai to https://$D_API_HOST (API_HOST: defaults)"
+lv20 "$I" API_HOST="$D_API_HOST"
+[ "$RC" = 0 ] && grep -qF 'given on this call: PUBLIC_BASE_URL API_BASE_URL;' "$I.out" && [ "$(ev PUBLIC_BASE_URL "$I/.env.rehearsal")" = "https://$D_API_HOST" ] \
+  && ok "API_HOST on the call changes the issuer on purpose" || { tail -3 "$I.out"; bad "explicit API_HOST (rc=$RC)"; }
+# The developer allow-list: from stdin (remote.sh cannot pass an '@'), kept on a re-run, cleared only explicitly.
+E="$T/live-dev"; mklive "$E"; printf 'dev@example.org, Lead@Example.org\n' > "$T/dev-emails"
+LV_ARGS=--developer-emails-stdin LV_IN="$T/dev-emails" lv20 "$E"; cp -p "$E/.env.rehearsal" "$T/dev2.env.rehearsal"; up40 "$E"
+[ "$RC" = 0 ] && grep -qx 'SSO_DEVELOPER_ALLOWED_EMAILS="dev@example.org,Lead@Example.org"' "$E/.env.rehearsal" \
+  && grep -qF 'SSO_DEVELOPER_ALLOWED_EMAILS override --developer-emails-stdin (2 address(es), not printed)' "$E.out" && grep -qF 'SSO_DEVELOPER_REGISTRATION=allowlist (2 listed)' "$E.out" \
+  && [ "$(cat "$E.out" "$E"/logs/*.log | grep -ciF 'example.org' || true)" = 0 ] \
+  && ok "--developer-emails-stdin: the list from stdin, trimmed, in the file only (count in the output, no address in the output or the logs)" || { tail -3 "$E.out"; bad "developer allow-list from stdin (rc=$RC)"; }
+lv20 "$E"
+[ "$RC" = 0 ] && cmp -s "$E/.env.rehearsal" "$T/dev2.env.rehearsal" && grep -qF 'SSO_DEVELOPER_ALLOWED_EMAILS kept from the previous env (2 address(es), not printed)' "$E.out" \
+  && ok "a re-run without the list keeps it" || { tail -3 "$E.out"; bad "allow-list kept (rc=$RC)"; }
+lv20 "$E" REHEARSAL_DEVELOPER_ALLOWED_EMAILS=
+[ "$RC" = 0 ] && grep -qx 'SSO_DEVELOPER_ALLOWED_EMAILS=""' "$E/.env.rehearsal" && grep -qF 'given on this call: SSO_DEVELOPER_ALLOWED_EMAILS;' "$E.out" \
+  && ok "REHEARSAL_DEVELOPER_ALLOWED_EMAILS= (empty, explicit) closes it again" || { tail -3 "$E.out"; bad "allow-list cleared (rc=$RC)"; }
+up40 "$E"
+stopcase "an allow-list entry that is not an e-mail address" "$E" 'SSO_DEVELOPER_ALLOWED_EMAILS entry #2 (override REHEARSAL_DEVELOPER_ALLOWED_EMAILS) is not an e-mail address' REHEARSAL_DEVELOPER_ALLOWED_EMAILS='dev@example.org,lt-not-an-address'
+! grep -qF lt-not-an-address "$E.out" && ok "the refused entry is not printed" || bad "the refused entry was printed"
+LV_ARGS=--developer-emails-stdin stopcase "--developer-emails-stdin with nothing on stdin" "$E" '--developer-emails-stdin: no line on stdin within 30 s'
+LV_ARGS=--developer-emails-stdin LV_IN="$T/dev-emails" stopcase "the list both on stdin and in REHEARSAL_DEVELOPER_ALLOWED_EMAILS" "$E" '--developer-emails-stdin and REHEARSAL_DEVELOPER_ALLOWED_EMAILS both given: give the list once' REHEARSAL_DEVELOPER_ALLOWED_EMAILS=dev@example.org
+LV_ARGS=--lt-unknown stopcase "an unknown argument" "$E" "unknown argument '--lt-unknown' (the only one is --developer-emails-stdin)"
+N="$T/live-none"; rm -rf "$N"; mkdir -p "$N"; lv20 "$N" REHEARSAL_CLIENT_ID=lt-live-client
+[ "$RC" != 0 ] && grep -qF 'FAIL REHEARSAL_REDIRECT_URIS=<value> is required: the previous env (none) has no SSO_TGE_REDIRECT_URIS, and no placeholder is filled in' "$N.out" && [ ! -e "$N/.env.rehearsal" ] && [ ! -e "$N/settings.env" ] \
+  && ok "no REHEARSAL_REDIRECT_URIS and no previous env: 20-env.sh stops before it writes anything (no placeholder default)" || { tail -3 "$N.out"; bad "callback required on a first run (rc=$RC)"; }
+# The backend 40-up.sh will start (API_IMAGE in .env, its source as 10-build.sh unpacks it) must know the values.
+B="$T/live-be"; mklive "$B"; BREPO="$(cd "$PKG/../.." && pwd)"; BE12=0123456789ab; BC="$B/src/backend-$BE12/src/constants"
+mkbe() { rm -rf "$B/src"; mkdir -p "$BC"; cp "$1" "$BC/partnerClient.js"; cp "$2" "$BC/developerRegistration.js"; }
+printf 'API_IMAGE=ddcnew/backend:%s\nWEB_IMAGE=ddcnew/web:tge-localtest\n' "$BE12" > "$B/.env"
+mkbe "$BREPO/src/constants/partnerClient.js" "$BREPO/src/constants/developerRegistration.js"
+lv20 "$B"
+[ "$RC" = 0 ] && grep -qF "PASS ddcnew/backend:$BE12 (source $B/src/backend-$BE12) knows every SSO_TGE_STATUS_FIELDS name (11 of 11 in its catalog) and SSO_DEVELOPER_REGISTRATION=allowlist" "$B.out" \
+  && ok "this checkout's backend source knows all 11 fields and allowlist" || { grep -E '^(PASS|FAIL|WARN).*backend' "$B.out"; bad "backend source check on this checkout (rc=$RC)"; }
+grep -v '^  points_history: {' "$BREPO/src/constants/partnerClient.js" > "$T/pc-no-ph.js"
+sed "s/\['off', 'on', 'allowlist'\]/['off', 'on']/" "$BREPO/src/constants/developerRegistration.js" > "$T/dr-no-allowlist.js"
+mkbe "$T/pc-no-ph.js" "$BREPO/src/constants/developerRegistration.js"
+stopcase "a backend without points_history in its catalog" "$B" "ddcnew/backend:$BE12 does not know SSO_TGE_STATUS_FIELDS: points_history"
+mkbe "$BREPO/src/constants/partnerClient.js" "$T/dr-no-allowlist.js"
+stopcase "a backend before PR #64" "$B" "ddcnew/backend:$BE12 predates backend PR #64 (main 66bf00f): it refuses to boot on SSO_DEVELOPER_REGISTRATION=allowlist"
+rm -rf "$B/src"
+stopcase "API_IMAGE whose source is not there" "$B" "the source of ddcnew/backend:$BE12 is not in $B/src/backend-$BE12"
+printf 'API_IMAGE=ddc-backend:latest\n' > "$B/.env"
+stopcase "API_IMAGE that is not a ddcnew/backend:<sha12> tag" "$B" "API_IMAGE=ddc-backend:latest in $B/.env is not ddcnew/backend:<12 hex>[-infra]"
+printf 'API_IMAGE=ddcnew/backend:%s-infra\n' "$BE12" > "$B/.env"; mkbe "$BREPO/src/constants/partnerClient.js" "$BREPO/src/constants/developerRegistration.js"; lv20 "$B"
+[ "$RC" = 0 ] && grep -qF "PASS ddcnew/backend:$BE12-infra (source $B/src/backend-$BE12) knows every" "$B.out" && ok "an -infra image is checked against the same source" || { tail -3 "$B.out"; bad "-infra image (rc=$RC)"; }
+
+# The invoice seller (INVOICE_SELLER_USER_ID, 10-15): given on the call, kept on a re-run, taken from the old env when
+# neither has one; refused unless a lower-case canonical UUID; through 40-up.sh's writer unchanged; with a backend
+# source that has src/constants/invoiceSeller.js, a WARN while it is not set and an INFO when the old env gives
+# INVOICE_SELLER_EMAIL. Synthetic ids only (SID1, SID2).
+S="$T/live-seller"; mklive "$S" || bad "setup: the live stack (invoice seller)"
+grep -qx 'invoice seller: INVOICE_SELLER_USER_ID not set' "$S.out" && ! grep -q '^INVOICE_SELLER_USER_ID=' "$S/.env.rehearsal" \
+  && grep -qx 'PASS INVOICE_SELLER_USER_ID in the new file: none (not set)' "$S.out" \
+  && ok "invoice seller neither given nor in the previous or the old env: 'not set', no line written" || { tail -3 "$S.out"; bad "invoice seller not set on a first run"; }
+lv20 "$S" INVOICE_SELLER_USER_ID="$SID1"; cp -p "$S/.env.rehearsal" "$T/seller1.env.rehearsal"
+[ "$RC" = 0 ] && [ "$(grep -c '^INVOICE_SELLER_USER_ID=' "$S/.env.rehearsal")" = 1 ] && grep -qx "INVOICE_SELLER_USER_ID=\"$SID1\"" "$S/.env.rehearsal" \
+  && grep -qx "invoice seller: INVOICE_SELLER_USER_ID given on this call ($SID1)" "$S.out" && grep -qx "PASS INVOICE_SELLER_USER_ID in the new file: $SID1 (given on this call)" "$S.out" \
+  && grep -qF 'PASS partner settings kept from the previous env: 8; given on this call: none;' "$S.out" \
+  && ok "INVOICE_SELLER_USER_ID=<uuid> on the call: written once, reported as 'given on this call'; the partner settings stay kept" || { tail -3 "$S.out"; bad "invoice seller given on the call (rc=$RC)"; }
+up40 "$S"
+grep -qx "INVOICE_SELLER_USER_ID=\"$SID1\"" "$S/.env.api" && ( DDC_LOCAL_TEST=1; . "$PKG/common.sh"; env_api_matches_rehearsal "$S/.env.api" "$S/.env.rehearsal" ) \
+  && ok "40-up.sh step 1b: its writer carries INVOICE_SELLER_USER_ID into .env.api unchanged and its check (.env.api = .env.rehearsal but the pins) accepts it" \
+  || bad "INVOICE_SELLER_USER_ID through 40-up.sh's writer and check"
+lv20 "$S"
+[ "$RC" = 0 ] && cmp -s "$S/.env.rehearsal" "$T/seller1.env.rehearsal" && grep -qx "invoice seller: INVOICE_SELLER_USER_ID kept from the previous env ($SID1)" "$S.out" \
+  && grep -qx "PASS INVOICE_SELLER_USER_ID in the new file: $SID1 (kept from the previous env)" "$S.out" \
+  && ok "a re-run without it keeps the previous env's id ('kept from the previous env'; the file byte-identical)" || { tail -3 "$S.out"; bad "invoice seller kept on a re-run (rc=$RC)"; }
+n=0
+for v in "$SID2_UPPER" 11111111222243338444555555555555 "{$SID1}" "urn:uuid:$SID1" "$SID1-0" "${SID1%?}" lt-not-a-uuid "$SID1;id" "$SID1 " ''; do
+  n=$((n + 1)); cp -p "$S/.env.rehearsal" "$S.before"; lv20 "$S" INVOICE_SELLER_USER_ID="$v"
+  if [ "$RC" != 0 ] && grep -qF 'FAIL INVOICE_SELLER_USER_ID (given on this call) must be a lower-case canonical UUID' "$S.out" && cmp -s "$S/.env.rehearsal" "$S.before"; then :
+  else tail -3 "$S.out"; bad "INVOICE_SELLER_USER_ID='$v' was not refused before anything was written (rc=$RC)"; fi
+done
+ok "20-env.sh refuses $n INVOICE_SELLER_USER_ID values before it writes (upper case, no hyphens, braces, a URN, an extra group, one digit short, a word, a semicolon, a trailing blank, empty)"
+setv2 "$S/.env.api" INVOICE_SELLER_USER_ID "$SID2"
+stopcase ".env.api and .env.rehearsal disagree on the invoice seller" "$S" 'INVOICE_SELLER_USER_ID differs between .env.api .env.rehearsal (the previous env; values not printed)'
+lv20 "$S" INVOICE_SELLER_USER_ID="$SID2"
+[ "$RC" = 0 ] && grep -qx "INVOICE_SELLER_USER_ID=\"$SID2\"" "$S/.env.rehearsal" && grep -qx "invoice seller: INVOICE_SELLER_USER_ID given on this call ($SID2)" "$S.out" \
+  && ok "the same disagreement with INVOICE_SELLER_USER_ID on the call: the id given is written" || { tail -3 "$S.out"; bad "invoice seller given over a disagreement (rc=$RC)"; }
+up40 "$S"; setboth "$S" INVOICE_SELLER_USER_ID "$SID2_UPPER"
+stopcase "an invoice seller in the previous env that is not a lower-case canonical UUID" "$S" 'INVOICE_SELLER_USER_ID (kept from the previous env) must be a lower-case canonical UUID'
+# The WARN and the INFO: a backend whose source has src/constants/invoiceSeller.js (this checkout's own file when it has
+# one, else a stand-in), and the same backend without it. $OLD has no INVOICE_SELLER_EMAIL: no INFO here.
+SB="$T/live-seller-be"; mklive "$SB" || bad "setup: the live stack (invoice seller, backend source)"
+sellerbe() { # <dir> <1: the source has src/constants/invoiceSeller.js | 0: it has not>
+  local c="$1/src/backend-$BE12/src/constants"
+  rm -rf "$1/src"; mkdir -p "$c"; cp "$BREPO/src/constants/partnerClient.js" "$BREPO/src/constants/developerRegistration.js" "$c/"
+  if [ "$2" = 1 ] && [ -f "$BREPO/src/constants/invoiceSeller.js" ]; then cp "$BREPO/src/constants/invoiceSeller.js" "$c/"
+  elif [ "$2" = 1 ]; then printf '%s\n' '// local test stand-in for src/constants/invoiceSeller.js' > "$c/invoiceSeller.js"; fi
+  printf 'API_IMAGE=ddcnew/backend:%s\nWEB_IMAGE=ddcnew/web:tge-localtest\n' "$BE12" > "$1/.env"
+}
+SWARN="WARN INVOICE_SELLER_USER_ID is not set: set it to the account that receives payments for orders without a merchant and for wallet top-ups; until it is set those requests are refused. Give INVOICE_SELLER_USER_ID=<uuid> on a 20-env.sh call, then run 40-up.sh"
+SINFO="INFO INVOICE_SELLER_EMAIL (old env) is ignored: copied unchanged; INVOICE_SELLER_USER_ID sets the account"
+sellerbe "$SB" 1; lv20 "$SB"
+[ "$RC" = 0 ] && [ "$(grep -cxF "$SWARN" "$SB.out")" = 1 ] && [ "$(grep -c '^WARN INVOICE_SELLER' "$SB.out")" = 1 ] && ! grep -q '^INFO ' "$SB.out" && [ -f "$SB/.env.rehearsal" ] \
+  && ok "a backend with src/constants/invoiceSeller.js and no INVOICE_SELLER_USER_ID: exactly one WARN, this text (set it to the account that receives these payments; until then those requests are refused); no INFO without INVOICE_SELLER_EMAIL; the run still passes" \
+  || { grep -E '^(WARN|FAIL|INFO)' "$SB.out"; bad "the invoice seller WARN with invoiceSeller.js (rc=$RC)"; }
+sellerbe "$SB" 0; lv20 "$SB"
+[ "$RC" = 0 ] && ! grep -q '^WARN INVOICE_SELLER_USER_ID' "$SB.out" && grep -qx "ddcnew/backend:$BE12 has no src/constants/invoiceSeller.js: no invoice seller check" "$SB.out" \
+  && ok "a backend without src/constants/invoiceSeller.js: no WARN" || { grep -E '^(WARN|FAIL)' "$SB.out"; bad "the invoice seller WARN without invoiceSeller.js (rc=$RC)"; }
+sellerbe "$SB" 1; lv20 "$SB" INVOICE_SELLER_USER_ID="$SID1"
+[ "$RC" = 0 ] && ! grep -q '^WARN INVOICE_SELLER_USER_ID' "$SB.out" \
+  && grep -qx "PASS INVOICE_SELLER_USER_ID for ddcnew/backend:$BE12: $SID1 (given on this call)" "$SB.out" \
+  && ok "a backend with src/constants/invoiceSeller.js and the id given: PASS with the id, no WARN" || { grep -E '^(WARN|FAIL|PASS INVOICE)' "$SB.out"; bad "the invoice seller with invoiceSeller.js and the id (rc=$RC)"; }
+# An old env with all four INVOICE_SELLER_* names: every name classified; the id taken from it (first run), kept (re-run),
+# replaced by one given on the call; an old env whose id is not a lower-case UUID stops the run before it writes.
+SO="$T/seller-old"; rm -rf "$SO"; mkdir -p "$SO/ddcnew"; cp "$OLD" "$SO/old.env"
+printf '%s\n' "INVOICE_SELLER_USER_ID=$SID2" 'INVOICE_SELLER_EMAIL=billing@example.org' 'INVOICE_SELLER_TAX_ID=LT-TAX-0001' >> "$SO/old.env"
+so20() { # <old env> [NAME=value ...]: a first or later 20-env.sh run on $SO/ddcnew; output in $SO/out, status in RC
+  local o="$1"; shift; RC=0
+  env DDC_LOCAL_TEST=1 NEW_DIR="$SO/ddcnew" OLD_ENV="$o" FE_ENV_TGE="$T/env.tge" REHEARSAL_CLIENT_ID="$CID" REHEARSAL_REDIRECT_URIS="$RR_T" "$@" bash "$PKG/20-env.sh" > "$SO/out" 2>&1 || RC=$?
+}
+so20 "$SO/old.env"; SOE="$SO/ddcnew/.env.rehearsal"
+[ "$RC" = 0 ] && grep -q '^PASS every name with a value is classified' "$SO/out" && grep -qx "invoice seller: INVOICE_SELLER_USER_ID copied from the old env ($SID2)" "$SO/out" \
+  && [ "$(grep -c '^INVOICE_SELLER_USER_ID=' "$SOE")" = 1 ] && grep -qx "INVOICE_SELLER_USER_ID=\"$SID2\"" "$SOE" \
+  && grep -qx 'INVOICE_SELLER_EMAIL=billing@example.org' "$SOE" && grep -qx 'INVOICE_SELLER_TAX_ID=LT-TAX-0001' "$SOE" && [ "$(grep -c '^INVOICE_SELLER_ADDRESS=' "$SOE")" = 1 ] \
+  && ! grep -qF -e billing@example.org -e LT-TAX-0001 "$SO/out" \
+  && ok "an old env with INVOICE_SELLER_USER_ID, _EMAIL, _TAX_ID and _ADDRESS: every name classified; the id taken from it ('copied from the old env', written once); e-mail, tax id and address copied unchanged and not printed" \
+  || { grep -E '^(FAIL|invoice seller)' "$SO/out"; bad "an old env with the four INVOICE_SELLER_* names (rc=$RC)"; }
+cp -p "$SOE" "$SO/reh1"; so20 "$SO/old.env"
+[ "$RC" = 0 ] && cmp -s "$SOE" "$SO/reh1" && grep -qx "invoice seller: INVOICE_SELLER_USER_ID kept from the previous env ($SID2)" "$SO/out" \
+  && ok "its re-run: 'kept from the previous env', the same file" || { grep -E '^(FAIL|invoice seller)' "$SO/out"; bad "re-run with the old env's invoice seller (rc=$RC)"; }
+# INVOICE_SELLER_EMAIL in the old env, with a backend source that has src/constants/invoiceSeller.js: one INFO (it is
+# ignored), the value neither printed nor changed; without that file no INFO. Then back to no backend source.
+sellerbe "$SO/ddcnew" 1; so20 "$SO/old.env"
+[ "$RC" = 0 ] && [ "$(grep -cxF "$SINFO" "$SO/out")" = 1 ] && ! grep -q '^WARN INVOICE_SELLER_USER_ID' "$SO/out" && ! grep -qF billing@example.org "$SO/out" \
+  && grep -qx 'INVOICE_SELLER_EMAIL=billing@example.org' "$SOE" && grep -q '^PASS every name with a value is classified' "$SO/out" \
+  && ok "INVOICE_SELLER_EMAIL in the old env and a backend with src/constants/invoiceSeller.js: one INFO that it is ignored; copied unchanged, not printed; the run passes" \
+  || { grep -E '^(FAIL|WARN|INFO)' "$SO/out"; bad "the INVOICE_SELLER_EMAIL INFO (rc=$RC)"; }
+sellerbe "$SO/ddcnew" 0; so20 "$SO/old.env"
+[ "$RC" = 0 ] && ! grep -q '^INFO INVOICE_SELLER_EMAIL' "$SO/out" && grep -qx 'INVOICE_SELLER_EMAIL=billing@example.org' "$SOE" \
+  && ok "the same old env and a backend without src/constants/invoiceSeller.js: no INFO" || { grep -E '^(FAIL|WARN|INFO)' "$SO/out"; bad "the INVOICE_SELLER_EMAIL INFO without invoiceSeller.js (rc=$RC)"; }
+rm -rf "$SO/ddcnew/src" "$SO/ddcnew/.env"
+so20 "$SO/old.env" INVOICE_SELLER_USER_ID="$SID1"
+[ "$RC" = 0 ] && [ "$(grep -c '^INVOICE_SELLER_USER_ID=' "$SOE")" = 1 ] && grep -qx "INVOICE_SELLER_USER_ID=\"$SID1\"" "$SOE" && grep -qx "invoice seller: INVOICE_SELLER_USER_ID given on this call ($SID1)" "$SO/out" \
+  && ok "an id given on the call replaces the old env's (the old line dropped, the id written once)" || { grep -E '^(FAIL|invoice seller)' "$SO/out"; bad "invoice seller given over the old env's (rc=$RC)"; }
+rm -rf "$SO/ddcnew"; mkdir -p "$SO/ddcnew"; cp "$OLD" "$SO/old-bad.env"; printf '%s\n' "INVOICE_SELLER_USER_ID=$SID2_UPPER" >> "$SO/old-bad.env"
+so20 "$SO/old-bad.env"
+[ "$RC" != 0 ] && grep -qF 'FAIL INVOICE_SELLER_USER_ID (copied from the old env) must be a lower-case canonical UUID' "$SO/out" && [ ! -e "$SOE" ] \
+  && ok "an old env whose INVOICE_SELLER_USER_ID is not a lower-case canonical UUID stops 20-env.sh before it writes" || { grep -E '^FAIL' "$SO/out"; bad "an invalid invoice seller in the old env (rc=$RC)"; }
+so20 "$SO/old-bad.env" INVOICE_SELLER_USER_ID="$SID1"
+[ "$RC" = 0 ] && grep -qx "INVOICE_SELLER_USER_ID=\"$SID1\"" "$SOE" && ! grep -qF "$SID2_UPPER" "$SOE" \
+  && ok "the same old env with INVOICE_SELLER_USER_ID=<uuid> on the call: the id given is written, the old value is not" || { grep -E '^FAIL' "$SO/out"; bad "an invalid old-env invoice seller overridden (rc=$RC)"; }
+
 echo; echo "== 3a. the backend's own boot code (src/server.js of this checkout) on the env 20-env.sh writes"
 # test/helpers/backend-boot.js runs src/server.js with every boot check, src/app.js stubbed (nothing listens or
 # connects), on .env.api exactly as 40-up.sh writes it: .env.rehearsal with the JWKS pins of the day (two well-formed
@@ -440,11 +722,19 @@ if [ -f "$REPO/src/server.js" ] && [ -d "$REPO/node_modules/dotenv" ] && command
   grep -E '^(Partner SSO|Old App|BOOT CHECKS)' "$BB/out" | sed 's/^/  /'
   mp=$(grep 'Partner SSO money-path assertions OK' "$BB/out" | tail -1)
   req=0; git -C "$REPO" merge-base --is-ancestor "$( . "$PKG/common.sh"; echo "$OLD_APP_COMMIT")" HEAD 2>/dev/null && req=1
-  if [ "$rc" = 0 ] && grep -qx 'BOOT CHECKS OK' "$BB/out" && grep -q "^Partner SSO enabled \[prod\] client=$CID " "$BB/out" \
+  if [ "$rc" = 0 ] && grep -qx 'BOOT CHECKS OK' "$BB/out" && grep -q "^Partner SSO enabled \[prod\] client=$CID redirectUris=[0-9]* statusFields=$SF_WANT verifiedSession=" "$BB/out" \
      && ( DDC_LOCAL_TEST=1; . "$PKG/common.sh"; money_path_fields_check "$mp" 2 ) > "$BB/mp.out" 2>&1 \
      && ( DDC_LOCAL_TEST=1; . "$PKG/common.sh"; old_app_line_check "$(cat "$BB/out")" "$(sed -n 's/^WEB3AUTH_CLIENT_ID=//p' "$OLD" | tail -1 | cut -c1-8)" "$req" ) > "$BB/oa.out" 2>&1; then
-    ok "this checkout's src/server.js boots through every check on the env 20-env.sh wrote (client=$CID); its money-path line passes money_path_fields_check and its old-App line old_app_line_check (required: $req), as in 40-up.sh"
+    ok "this checkout's src/server.js boots through every check on the env 20-env.sh wrote (client=$CID, statusFields=$SF_WANT); its money-path line passes money_path_fields_check and its old-App line old_app_line_check (required: $req), as in 40-up.sh"
   else sed 's/^/    /' "$BB/out" "$BB/mp.out" "$BB/oa.out" 2>/dev/null | grep -v '^    {' | tail -12; bad "the backend's boot code on the env 20-env.sh wrote (rc=$rc)"; fi
+  grep -q '^Partner SSO money-path assertions OK: .* developerRegistration=allowlist:0$' "$BB/out" \
+    && ok "money-path line: developerRegistration=allowlist:0 (SSO_DEVELOPER_REGISTRATION=allowlist, empty list: nobody may register)" \
+    || bad "developerRegistration on the money-path line: $(grep -o 'developerRegistration=[^ ]*' "$BB/out")"
+  mkapi "$T/dev2.env.rehearsal" "$BB/env.api.dev2"; rc=0; boot "$BB/env.api.dev2" "$BB/out.dev2" || rc=$?
+  [ "$rc" = 0 ] && grep -qx 'BOOT CHECKS OK' "$BB/out.dev2" && grep -q '^Partner SSO money-path assertions OK: .* developerRegistration=allowlist:2$' "$BB/out.dev2" \
+    && grep -q "^Partner SSO enabled \[prod\] client=lt-live-client redirectUris=1 statusFields=$SF_WANT " "$BB/out.dev2" && ! grep -qiF example.org "$BB/out.dev2" \
+    && ok "the live-stack env with two listed developer accounts boots: client=lt-live-client, the IP callback, all 11 fields, developerRegistration=allowlist:2 (no address printed)" \
+    || { grep -E '^(Partner SSO|BOOT)' "$BB/out.dev2" | cut -c1-200; bad "boot with the developer allow-list (rc=$rc)"; }
   sed 's/^SSO_TGE_CLIENT_ID=.*/SSO_TGE_CLIENT_ID="tge-rehearsal"/' "$BB/env.api" > "$BB/env.retired"
   rc=0; boot "$BB/env.retired" "$BB/out.retired" || rc=$?
   [ "$rc" = 1 ] && grep -q '^BOOT CHECKS FAIL: .*SSO_TGE_CLIENT_ID cannot be tge or tge-rehearsal' "$BB/out.retired" \
@@ -470,7 +760,7 @@ WEB3AUTH_LEGACY_VERIFIERS WEB3AUTH_EXTERNAL_AUDIENCE WEB3AUTH_VERIFY_MODE WEB3AU
 WEB3AUTH_JWKS_PIN_MODE WEB3AUTH_NETWORK_REBIND WEB3AUTH_REBIND_VERIFIERS WEB3AUTH_EMAIL_TRUSTED_VERIFIERS SSO_TGE_ENABLED SSO_ENVIRONMENT
 SSO_TGE_CLIENT_ID SSO_TGE_CLIENT_NAME SSO_TGE_CLIENT_SECRET_SHA256 SSO_TGE_REDIRECT_URIS SSO_TGE_INITIATE_LOGIN_URI SSO_SESSION_SECRET
 SSO_TGE_AUTO_APPROVE SSO_TGE_REFERRAL_BIND SSO_TGE_APP_PRESENTATION SSO_TGE_STATUS_FIELDS SSO_REQUIRE_VERIFIED_SESSION
-OAUTH_PUBLIC_REGISTRATION_ENABLED DISBURSEMENT_PAUSED SMTP_HOST SMTP_PASS""".split()
+SSO_DEVELOPER_REGISTRATION SSO_DEVELOPER_ALLOWED_EMAILS OAUTH_PUBLIC_REGISTRATION_ENABLED DISBURSEMENT_PAUSED SMTP_HOST SMTP_PASS""".split()
 kept = [k for k in n if k not in sets]
 same = [k for k in kept if o.get(k) == n.get(k)]
 print("compose parsed: old=%d names, new=%d names, kept=%d, kept identical=%d" % (len(o), len(n), len(kept), len(same)))
@@ -483,7 +773,8 @@ print("removed names absent from new: %s" % (not gone))
 exp = {"DISBURSEMENT_PAUSED": "true", "SMTP_HOST": "", "SMTP_PASS": "", "WEB3AUTH_NETWORK_REBIND": "on", "WEB3AUTH_VERIFY_MODE": "enforce",
        "WEB3AUTH_ALLOW_LEGACY_FALLBACK": "false", "WEB3AUTH_JWKS_PIN_MODE": "enforce", "SSO_TGE_ENABLED": "true", "SSO_TGE_CLIENT_ID": CID,
        "PUBLIC_BASE_URL": "https://" + API_HOST, "APP_PUBLIC_URL": "https://" + APP_HOST, "FRONTEND_URL": "https://" + APP_HOST,
-       "API_BASE_URL": "https://" + API_HOST, "SSO_TGE_CLIENT_NAME": "DDC TGE",
+       "API_BASE_URL": "https://" + API_HOST, "SSO_TGE_CLIENT_NAME": "DDC TGE", "SSO_TGE_REFERRAL_BIND": "true", "SSO_TGE_AUTO_APPROVE": "app",
+       "SSO_DEVELOPER_REGISTRATION": "allowlist", "SSO_DEVELOPER_ALLOWED_EMAILS": "",
        "WEB3AUTH_RETIRED_CLIENT_IDS": o.get("WEB3AUTH_CLIENT_ID"), "LOGIN_MISSING_IDTOKEN_MEANS_OLD_APP": "on",
        "WEB3AUTH_JWKS_PINNED_THUMBPRINTS": o.get("WEB3AUTH_JWKS_PINNED_THUMBPRINTS"),
        "X_CLIENT_ID": "", "X_CLIENT_SECRET": "", "X_BEARER_TOKEN": "", "GEMINI_API_KEY": "", "GOOGLE_WALLET_ISSUER_ID": "",
@@ -572,6 +863,7 @@ d="$T/neg-prev"; mkdir -p "$d"; cp -R "$T/ddcnew" "$d/ddcnew"; cp "$OLD" "$d/old
 if DDC_LOCAL_TEST=1 NEW_DIR="$d/ddcnew" OLD_ENV="$d/old.env" FE_ENV_TGE="$T/env.tge" bash "$PKG/20-env.sh" > "$d/out" 2>&1; then bad "previous-file case passed"
 else [ ! -e "$d/ddcnew/.env.rehearsal" ] && grep -q 'FAIL removed .*\.env\.rehearsal' "$d/out" && ok "a failing run removes the previous .env.rehearsal too (40-up.sh then refuses to start)" || bad "previous .env.rehearsal kept after a failing run"; fi
 
+unset REHEARSAL_REDIRECT_URIS   # exported for the first runs of section 3 (above)
 echo; echo "== 3c. 20-env.sh on Ubuntu 22.04 (ubuntu:jammy: mawk, GNU coreutils/grep/sed): output identical to the macOS run"
 # Same inputs and the same generated secrets as macOS run 2 (a copy of its NEW_DIR), every path mounted at the same
 # place, a stub docker that lists no container (like the Mac, which has no ddc-* container). Only the run/lock lines
@@ -1397,6 +1689,39 @@ done
 rc=0; out=$(DDC_APPROVED=yes bash "$R/remote.sh" run 60-rehearsal.sh restore REHEARSAL_G8=maybe 2>&1 < /dev/null) || rc=$?
 [ "$rc" = 2 ] && printf '%s\n' "$out" | grep -q '^refusing before connecting: FAIL REHEARSAL_G8 must be scrub or keep' && ! printf '%s\n' "$out" | grep -q STUB \
   && ok "60-rehearsal.sh restore REHEARSAL_G8=scrub or keep: allowlisted and passed through; REHEARSAL_G8=maybe refused before connecting" || bad "REHEARSAL_G8=maybe: rc=$rc $out"
+# INVOICE_SELLER_USER_ID (20-env.sh, 10-15): allowlisted; only a lower-case canonical UUID passes, everything else is
+# refused before connecting (by common.sh invoice_seller_id_check, or as an unsafe argument).
+out=$(DDC_APPROVED=yes bash "$R/remote.sh" run 20-env.sh "INVOICE_SELLER_USER_ID=$SID1" 2>&1 < /dev/null || true)
+printf '%s\n' "$out" | grep -q STUB && ok "INVOICE_SELLER_USER_ID=<lower-case canonical UUID> (20-env.sh) is allowlisted and passes through to the (stubbed) connection" || bad "INVOICE_SELLER_USER_ID=$SID1 refused: $out"
+out=$(DDC_APPROVED=yes bash "$R/remote.sh" run 20-env.sh REHEARSAL_CLIENT_ID=lt-partner-client "INVOICE_SELLER_USER_ID=$SID2" 2>&1 < /dev/null || true)
+printf '%s\n' "$out" | grep -q STUB || bad "INVOICE_SELLER_USER_ID with REHEARSAL_CLIENT_ID refused: $out"
+sel_bad=0; n=0
+for v in "$SID2_UPPER" "AAAAAAAA-bbbb-4ccc-8ddd-eeeeeeeeeeee" 11111111222243338444555555555555 "$SID1-0" "${SID1%?}" "urn:uuid:$SID1" "$SID1,$SID2" lt-not-a-uuid ''; do
+  n=$((n + 1)); rc=0; out=$(DDC_APPROVED=yes bash "$R/remote.sh" run 20-env.sh "INVOICE_SELLER_USER_ID=$v" 2>&1 < /dev/null) || rc=$?
+  [ "$rc" = 2 ] && printf '%s\n' "$out" | grep -q '^refusing before connecting: FAIL INVOICE_SELLER_USER_ID (given on this call) must be a lower-case canonical UUID' && ! printf '%s\n' "$out" | grep -q STUB \
+    || { sel_bad=1; bad "remote.sh run 20-env.sh INVOICE_SELLER_USER_ID='$v': rc=$rc $out"; }
+done
+for v in "$SID1;id" "$SID1\$(id)" "$SID1\`id\`" "$SID1${NL}id" "$SID1${CR}" "$SID1 x" "{$SID1}"; do
+  n=$((n + 1)); rc=0; out=$(DDC_APPROVED=yes bash "$R/remote.sh" run 20-env.sh "INVOICE_SELLER_USER_ID=$v" 2>&1 < /dev/null) || rc=$?
+  [ "$rc" = 2 ] && [ "$out" = "unsafe argument" ] || { sel_bad=1; bad "remote.sh run 20-env.sh INVOICE_SELLER_USER_ID=$(printf '%q' "$v"): rc=$rc $out"; }
+done
+[ "$sel_bad" = 0 ] && ok "remote.sh run refuses $n INVOICE_SELLER_USER_ID values before connecting: upper or mixed case, no hyphens, an extra group, one digit short, a URN, two ids, a word, empty (common.sh's rule), and ;, \$(), backticks, a newline, a carriage return, a blank, braces (unsafe argument)"
+# 60-rehearsal.sh record <key> <seconds> (a window part measured by hand): an approved write; the key from the allowlist
+# (common.sh REHEARSAL_HAND_KEYS) and a whole number of seconds, checked before connecting.
+out=$(bash "$R/remote.sh" run 60-rehearsal.sh record offsite_copy 600 2>&1 < /dev/null || true)
+printf '%s\n' "$out" | grep -q 'refusing: this call changes the server' && ! printf '%s\n' "$out" | grep -q STUB || bad "60-rehearsal.sh record without DDC_APPROVED=yes: $out"
+out=$(DDC_APPROVED=yes bash "$R/remote.sh" run 60-rehearsal.sh record offsite_copy 600 2>&1 < /dev/null || true)
+printf '%s\n' "$out" | grep -q STUB || bad "60-rehearsal.sh record offsite_copy 600 with DDC_APPROVED=yes did not reach the (stubbed) connection: $out"
+rec_bad=0
+for a in "restore 600|is not a part measured by hand" "points_repair 600|is not a part measured by hand" "offsite_copy 0|must be a whole number from 1 to 86400" \
+         "offsite_copy 86401|must be a whole number from 1 to 86400" "offsite_copy 10m|must be a whole number from 1 to 86400" "offsite_copy|takes <key> <seconds> and nothing else" \
+         "offsite_copy 600 7|takes <key> <seconds> and nothing else" "offsite_copy 600 REHEARSAL_G8=scrub|takes <key> <seconds> and nothing else"; do
+  rc=0
+  # shellcheck disable=SC2086  # the key and seconds are split on purpose
+  out=$(DDC_APPROVED=yes bash "$R/remote.sh" run 60-rehearsal.sh record ${a%%|*} 2>&1 < /dev/null) || rc=$?
+  [ "$rc" = 2 ] && printf '%s\n' "$out" | grep -q "^refusing before connecting: .*${a#*|}" && ! printf '%s\n' "$out" | grep -q STUB || { rec_bad=1; bad "60-rehearsal.sh record ${a%%|*}: rc=$rc $out"; }
+done
+[ "$rec_bad" = 0 ] && ok "60-rehearsal.sh record: needs DDC_APPROVED=yes; offsite_copy 600 passes; another key, 0, 86401, 10m, a missing or extra argument and an override are refused before connecting"
 for a in PARTNER_CRYPT_IMAGE=node:22-alpine SRV_DIR=/tmp/x DDC_TEST_RUN_ID=lt1 NGINX_LOCAL_URL=http://x MAINNET_DIR=/tmp/x NGINX_CONFD=/tmp/x; do
   rc=0; out=$(DDC_APPROVED=yes bash "$R/remote.sh" run 50-partner-page.sh apply "$a" 2>&1 < /dev/null) || rc=$?
   [ "$rc" = 2 ] && printf '%s\n' "$out" | grep -q "override ${a%%=*} is not allowed" && ! printf '%s\n' "$out" | grep -q STUB || bad "override ${a%%=*} (50-partner-page.sh): rc=$rc $out"
@@ -2095,15 +2420,15 @@ rh_results() { # <label> <helper output file> <helper exit status> <minimum numb
   else grep -vE '^(PASS|FAIL) ' "$2" | tail -n 20 | sed 's/^/    /'; bad "$1: rehearsal-cases.sh exit $3, $n results (at least $4 expected)"; fi
 }
 rc=0; timeout 600 bash "$PKG/test/helpers/rehearsal-cases.sh" "$PKG" "$T/rehearsal-mac" > "$T/rehearsal-mac.out" 2>&1 || rc=$?
-rh_results "60-rehearsal.sh on macOS (bash 3.2, the real node and docker compose)" "$T/rehearsal-mac.out" "$rc" 86
+rh_results "60-rehearsal.sh on macOS (bash 3.2, the real node and docker compose)" "$T/rehearsal-mac.out" "$rc" 106
 if docker info >/dev/null 2>&1 && [ -n "${SIG_IMG:-}" ] && docker image inspect "$SIG_IMG" >/dev/null 2>&1; then
   rc=0; timeout 600 docker run --rm "${LT[@]}" --name "rehearsal-$RANDOM-$RUN_ID" --user 1000:1000 -v "$PKG:/pkg:ro" "$SIG_IMG" \
     bash /pkg/test/helpers/rehearsal-cases.sh /pkg /tmp/rehearsal > "$T/rehearsal-jammy.out" 2>&1 || rc=$?
-  rh_results "60-rehearsal.sh on ubuntu:jammy (bash 5.1, GNU tools, flock)" "$T/rehearsal-jammy.out" "$rc" 82
+  rh_results "60-rehearsal.sh on ubuntu:jammy (bash 5.1, GNU tools, flock)" "$T/rehearsal-jammy.out" "$rc" 102
 else bad "section 12d (ubuntu:jammy) needs Docker Desktop and the image of section 12c (${SIG_IMG:-not built})"; fi
 if docker info >/dev/null 2>&1; then
   rc=0; timeout 600 bash "$PKG/test/helpers/rehearsal-pg.sh" "$PKG" "$T/rehearsal-pg" "$RUN_ID" > "$T/rehearsal-pg.out" 2>&1 || rc=$?
-  rh_results "60-rehearsal.sh's SQL on a real postgres:17" "$T/rehearsal-pg.out" "$rc" 16
+  rh_results "60-rehearsal.sh's SQL on a real postgres:17" "$T/rehearsal-pg.out" "$rc" 18
 else bad "section 12d (real Postgres) needs Docker Desktop"; fi
 
 # ---------------------------------------------------------------------------
@@ -2282,8 +2607,11 @@ refuse "no PARTNER_ALLOWED_IP" "PARTNER_ALLOWED_IP=<the partner server's address
 for ip in 203.0.113.256 203.0.113 203.0.113.07 a.b.c.d '203.0.113.7;x' '203.0.113.7,,203.0.113.8'; do
   refuse "PARTNER_ALLOWED_IP=$ip" "is not an IPv4 or IPv6 address" apply "$PP/pw.nl" "PARTNER_ALLOWED_IP=$ip"
 done
+# 20-env.sh fills in no placeholder any more (10-14): only an explicit override can still write a .invalid callback.
 mkdir -p "$PP/placeholder"; cp -Rp "$T/ddcnew" "$PP/placeholder/ddcnew"; rm -rf "$PP/placeholder/ddcnew/logs"
-refuse "SSO_TGE_REDIRECT_URIS still the .invalid placeholder of 20-env.sh" ".invalid placeholder" apply "$PP/pw.nl" PARTNER_ALLOWED_IP=203.0.113.7 \
+DDC_LOCAL_TEST=1 NEW_DIR="$PP/placeholder/ddcnew" OLD_ENV="$OLD" FE_ENV_TGE="$T/env.tge" REHEARSAL_REDIRECT_URIS=https://tge-rehearsal.invalid/oauth/callback \
+  bash "$PKG/20-env.sh" > "$PP/placeholder.out" 2>&1 || { tail -3 "$PP/placeholder.out"; bad "20-env.sh with an explicit .invalid callback"; }
+refuse "SSO_TGE_REDIRECT_URIS a .invalid placeholder (an explicit 20-env.sh override)" ".invalid placeholder" apply "$PP/pw.nl" PARTNER_ALLOWED_IP=203.0.113.7 \
   NEW_DIR="$PP/placeholder/ddcnew" SRV_DIR="$PP/placeholder/srv"
 mkdir -p "$PP/mismatch"; cp -Rp "$PP/ddcnew" "$PP/mismatch/ddcnew"; rm -rf "$PP/mismatch/ddcnew/logs"
 ( umask 077; openssl rand -hex 32 | tr -d '\n' > "$PP/mismatch/ddcnew/secrets/tge_rehearsal_client_secret" )
