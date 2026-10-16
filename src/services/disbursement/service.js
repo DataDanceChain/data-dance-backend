@@ -205,8 +205,11 @@ const RECONCILE_CLAIM_STALE_MS = 15 * 60 * 1000;
 /**
  * The reconcile step of a confirmed payout (attest it, mark its redemption paid) runs for one
  * caller at a time: the claim sets `reconcileClaimedAt` with a conditional update on the payout as
- * it was read (confirmed, same hash, no live claim), so of two calls at once exactly one wins and
- * the other changes and sends nothing. Answers the claim time, or null when the call lost.
+ * it was read (confirmed, same hash, same attestation tx hash, no live claim), so of two calls at
+ * once exactly one wins and the other changes and sends nothing. A call whose read is older than
+ * another call's attestation loses too, because the attestation tx hash no longer matches; a
+ * failed attestation stores none, so the next call still retries it. Answers the claim time, or
+ * null when the call lost.
  */
 async function claimReconcile(existing) {
   const claimedAt = new Date();
@@ -216,6 +219,7 @@ async function claimReconcile(existing) {
       id: existing.id,
       status: 'confirmed',
       txHash: existing.txHash,
+      attestationTxHash: existing.attestationTxHash ?? null,
       OR: [{ reconcileClaimedAt: null }, { reconcileClaimedAt: { lt: staleBefore } }],
     },
     data: { reconcileClaimedAt: claimedAt },

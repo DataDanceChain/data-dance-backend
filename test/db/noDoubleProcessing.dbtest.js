@@ -11,8 +11,9 @@
  *   - payouts: two re-checks of a submitted payout reach the sender once; a failed re-check leaves
  *     it submitted for the next one; a payout claimed for its re-check still counts toward the
  *     month's cap; two reconciles of a confirmed payout attest it once, also while the call that
- *     sent it is still attesting; a reconcile claim newer than 15 minutes blocks, an older one is
- *     taken over.
+ *     sent it is still attesting, and also when the second call read the payout before the first
+ *     attested it but reaches its claim only after the first is done; a reconcile claim newer than
+ *     15 minutes blocks, an older one is taken over.
  *   - raffle: draws of one campaign run one at a time and hand out exactly the prize seats.
  *   - points: two deductions at once never take a balance below zero.
  *
@@ -71,8 +72,10 @@ async function slowChain(ms, fn) {
   }
 }
 
-// The payout sender: records each transfer it is asked for and answers a confirmed hash. A test
-// can make it slow (`sender.delayMs`, so two calls overlap) or fail once (`sender.failNext`).
+// The payout sender: records each transfer it is asked for and answers a confirmed transfer: a
+// re-check finds its stored transfer paid, a first send pays a new one (and reports its hash through
+// `onSubmitted` when the caller passes one). A test can make it slow (`sender.delayMs`, so two calls
+// overlap) or fail once (`sender.failNext`).
 const transfers = [];
 const sender = { delayMs: 0, failNext: null };
 const realPayout = require('../../src/services/disbursement/bscPayout');
@@ -86,7 +89,10 @@ replaceModule(path.join(__dirname, '../../src/services/disbursement/bscPayout.js
       sender.failNext = null;
       throw error;
     }
-    return { txHash: ethers.hexlify(ethers.randomBytes(32)), replayed: false };
+    if (args.existingTxHash) return { txHash: args.existingTxHash, state: 'confirmed', replayed: true };
+    const txHash = ethers.hexlify(ethers.randomBytes(32));
+    if (typeof args.onSubmitted === 'function') await args.onSubmitted({ txHash });
+    return { txHash, state: 'confirmed', replayed: false };
   },
 });
 
@@ -101,6 +107,30 @@ async function slowSender(ms, fn) {
 }
 
 const prisma = require('../../src/utils/prisma');
+
+// A test can hold the next reconcile claim (the payout update that sets reconcileClaimedAt) until it
+// lets it go: `holdNextReconcileClaim()` answers { reached, release }.
+let claimGate = null;
+prisma.$use(async (params, next) => {
+  if (claimGate && params.model === 'DisbursementItem' && params.action === 'updateMany'
+    && params.args?.data?.reconcileClaimedAt instanceof Date) {
+    const gate = claimGate;
+    claimGate = null;
+    gate.arrived();
+    await gate.released;
+  }
+  return next(params);
+});
+
+function holdNextReconcileClaim() {
+  let arrived;
+  let release;
+  const reached = new Promise((resolve) => { arrived = resolve; });
+  const released = new Promise((resolve) => { release = resolve; });
+  claimGate = { arrived, released };
+  return { reached, release };
+}
+
 // Modules that build their own client at load get the shared one, so after() closes it.
 const clientFile = require.resolve('@prisma/client');
 require.cache[clientFile].exports = {
@@ -428,6 +458,57 @@ describe('payouts', () => {
     const saved = await prisma.disbursementItem.findUnique({ where: { id: item.id } });
     assert.ok(saved.attestationTxHash);
     assert.equal(saved.reconcileClaimedAt, null, 'the claim is released');
+  });
+
+  it('a call that read the payout before another call attested it, and claims only after that call is done, attests nothing', async () => {
+    const item = await confirmedPayout('reconcile-stale-read');
+    const sent = chain.sent.length;
+    const before = transfers.length;
+    await slowChain(300, async () => {
+      const first = post(`/disbursements/items/${item.id}/process`).then((res) => res);
+      // The first call holds the claim and is inside its slow chain call.
+      await waitFor(async () => (await prisma.disbursementItem.findUnique({ where: { id: item.id } })).reconcileClaimedAt !== null);
+      // The second call reads the payout (confirmed, unattested) and is held at its claim.
+      const gate = holdNextReconcileClaim();
+      const second = post(`/disbursements/items/${item.id}/process`).then((res) => res);
+      await gate.reached;
+      assert.equal((await first).status, 200);
+      const done = await prisma.disbursementItem.findUnique({ where: { id: item.id } });
+      assert.ok(done.attestationTxHash, 'the first call attested the payout');
+      assert.equal(done.reconcileClaimedAt, null, 'and released its claim');
+      gate.release();
+      const late = await second;
+      assert.equal(late.status, 200, JSON.stringify(late.body));
+      assert.equal(late.body.data.attestationTxHash, done.attestationTxHash, 'the late call answers the stored attestation');
+    });
+    assert.equal(chain.sent.length, sent + 1, 'one attestation');
+    assert.equal(transfers.length, before, 'a confirmed payout is never sent again');
+    const saved = await prisma.disbursementItem.findUnique({ where: { id: item.id } });
+    assert.equal(saved.reconcileClaimedAt, null);
+  });
+
+  it('a call that read the payout while the sending call attested it, and claims only after that call is done, attests nothing', async () => {
+    const item = await payout('send-then-stale-read');
+    const sent = chain.sent.length;
+    const before = transfers.length;
+    await slowChain(300, async () => {
+      const sending = post(`/disbursements/items/${item.id}/process`).then((res) => res);
+      // The transfer is confirmed and the slow attestation has started.
+      await waitFor(async () => (await prisma.disbursementItem.findUnique({ where: { id: item.id } })).status === 'confirmed');
+      const gate = holdNextReconcileClaim();
+      const second = post(`/disbursements/items/${item.id}/process`).then((res) => res);
+      await gate.reached;
+      assert.equal((await sending).status, 200);
+      const done = await prisma.disbursementItem.findUnique({ where: { id: item.id } });
+      assert.ok(done.attestationTxHash, 'the sending call attested the payout');
+      assert.equal(done.reconcileClaimedAt, null, 'and released its claim');
+      gate.release();
+      const late = await second;
+      assert.equal(late.status, 200, JSON.stringify(late.body));
+      assert.equal(late.body.data.attestationTxHash, done.attestationTxHash);
+    });
+    assert.equal(transfers.length, before + 1, 'one transfer');
+    assert.equal(chain.sent.length, sent + 1, 'one attestation');
   });
 
   it('a live reconcile claim (1 or 14 minutes old) leaves the payout alone; one older than 15 minutes is taken over', async () => {

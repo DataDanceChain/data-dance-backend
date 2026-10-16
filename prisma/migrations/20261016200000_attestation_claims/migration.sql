@@ -8,6 +8,9 @@
 --   DisbursementItem.reconcileClaimedAt  set while one caller runs a confirmed payout's reconcile
 --                                        step (attest, mark the redemption paid)
 --
+-- IF NOT EXISTS: when another migration has already added these two columns, this one changes
+-- nothing instead of failing.
+--
 -- Live database: adding a column needs a short lock on each table. lock_timeout makes the
 -- migration fail at once (and change nothing: it is one transaction) instead of queueing behind a
 -- long reader while every later query on the table queues behind it. If it fails with "canceling
@@ -17,10 +20,10 @@
 SET lock_timeout = '3s';
 
 -- AlterTable
-ALTER TABLE "PurchaseOrder" ADD COLUMN "attestationClaimedAt" TIMESTAMP(3);
+ALTER TABLE "PurchaseOrder" ADD COLUMN IF NOT EXISTS "attestationClaimedAt" TIMESTAMP(3);
 
 -- AlterTable
-ALTER TABLE "DisbursementItem" ADD COLUMN "reconcileClaimedAt" TIMESTAMP(3);
+ALTER TABLE "DisbursementItem" ADD COLUMN IF NOT EXISTS "reconcileClaimedAt" TIMESTAMP(3);
 
 -- Later migrations in the same deploy run keep the server default.
 RESET lock_timeout;

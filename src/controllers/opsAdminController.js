@@ -268,17 +268,22 @@ exports.adjustPoints = async (req, res) => {
     const sourceId = `ops-manual-${Date.now()}-${slug}__${admin}`;
 
     const result = await prisma.$transaction(async (tx) => {
-      // The balance is checked in the change itself: a deduction only applies while the account
-      // still holds at least that much, so two deductions at once can never go below zero.
+      // The member's row is locked first (FOR NO KEY UPDATE: it orders adjustments of this member
+      // without blocking rows that reference it), so the balance read next is the one this change
+      // starts from, and a concurrent adjustment waits until this one commits.
+      await tx.$executeRaw`SELECT 1 FROM "User" WHERE id = ${userId} FOR NO KEY UPDATE`;
+      const current = await tx.user.findUnique({ where: { id: userId }, select: { totalPoints: true } });
+      if (!current) throw Object.assign(new Error('User not found'), { statusCode: 404 });
+      const balanceBefore = current.totalPoints;
+      // The balance is also checked in the change itself: a deduction only applies while the
+      // account still holds at least that much, so two deductions at once never go below zero.
       const moved = await tx.user.updateMany({
         where: { id: userId, ...(delta < 0 ? { totalPoints: { gte: -delta } } : {}) },
         data: { totalPoints: { increment: delta } },
       });
       if (moved.count !== 1) {
-        const current = await tx.user.findUnique({ where: { id: userId }, select: { totalPoints: true } });
-        if (!current) throw Object.assign(new Error('User not found'), { statusCode: 404 });
         throw Object.assign(
-          new Error(`Insufficient balance: ${current.totalPoints}, cannot deduct ${Math.abs(delta)}`),
+          new Error(`Insufficient balance: ${balanceBefore}, cannot deduct ${Math.abs(delta)}`),
           { statusCode: 400 },
         );
       }
@@ -294,7 +299,7 @@ exports.adjustPoints = async (req, res) => {
           sourceId,
         },
       });
-      return { point, user: updated, balanceBefore: updated.totalPoints - delta };
+      return { point, user: updated, balanceBefore };
     });
 
     return res.json({

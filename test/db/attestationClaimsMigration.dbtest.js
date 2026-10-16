@@ -5,7 +5,8 @@
  * The migration adds a column to "PurchaseOrder" and to "DisbursementItem", which needs a short
  * lock on each table. While another session holds a lock on one of them, it must fail fast
  * (lock_timeout) and leave nothing, instead of queueing every later reader of the table behind it;
- * once the lock is gone it applies.
+ * once the lock is gone it applies, and a second run (the same columns added by another
+ * migration) changes nothing.
  *
  * It runs the migration file with `prisma db execute`, the same schema engine and one-script
  * transaction `prisma migrate deploy` uses, against a per-run scratch schema that has its own
@@ -121,6 +122,13 @@ describe('the attestation claims migration and a busy table', () => {
       ['DisbursementItem', 'YES', null],
       ['PurchaseOrder', 'YES', null],
     ]);
+  });
+
+  it('running it a second time (the same columns added by another migration) changes nothing and succeeds', async () => {
+    const result = await applyMigration();
+    assert.equal(result.code, 0, result.output);
+    assert.deepEqual(await scratchColumns('PurchaseOrder'), ['attestationClaimedAt', 'id']);
+    assert.deepEqual(await scratchColumns('DisbursementItem'), ['id', 'reconcileClaimedAt']);
   });
 
   it('the file sets lock_timeout before its first statement and resets it at the end', () => {

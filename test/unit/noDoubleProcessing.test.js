@@ -3,11 +3,13 @@
  * stand-in (the races themselves run on real Postgres in test/db/noDoubleProcessing.dbtest.js):
  *   - an order's chain attestation is claimed first: a live claim refuses the call (409) and sends
  *     nothing, a stale one is taken over, and the claim is released when the chain call returns
- *     or throws;
+ *     or throws; a stored value that is not a tx hash is attested again and replaced;
  *   - a payout claimed for its re-check ('processing' with its hash kept) is not sent again: a
  *     fresh claim answers 409, a stale one is held for reconciliation;
+ *   - a confirmed payout another call attested after this call read it is not attested again;
  *   - a raffle draw locks the campaign row inside its transaction before it reads wins and holders;
- *   - a points deduction checks the balance in the update itself.
+ *   - a points adjustment locks the member's row, reads the balance it starts from, and a deduction
+ *     checks the balance in the update itself.
  */
 const { describe, it, beforeEach } = require('node:test');
 const assert = require('node:assert/strict');
@@ -163,6 +165,46 @@ describe('order attestation claim', () => {
     assert.equal(stored('purchaseOrder', order.id).attestationClaimedAt, null);
   });
 
+  it('an order holding a stored value that is not a tx hash is attested again, and the value replaced', async () => {
+    const chain = useChain(new FakeChain());
+    const order = seedOrder({ attestationTxHash: 'a1b2c3d4' });
+    const result = await commerceAttest.attestPaidOrder(order.id);
+    assert.equal(chain.sent.length, 1);
+    assert.equal(result.chainPending, false);
+    const row = stored('purchaseOrder', order.id);
+    assert.match(row.attestationTxHash, /^0x[0-9a-f]{64}$/);
+    assert.equal(row.attestationTxHash, result.attestationTxHash);
+    assert.equal(row.attestationClaimedAt, null);
+  });
+
+  it('a failed chain call on such an order clears the value (pending, as before), and the next call sends', async () => {
+    const order = seedOrder({ attestationTxHash: 'a1b2c3d4' });
+    chainOverride = async () => ({ ok: false, reason: 'rpc unavailable' });
+    const failed = await commerceAttest.attestPaidOrder(order.id);
+    assert.equal(failed.chainPending, true);
+    assert.equal(failed.chainReason, 'rpc unavailable');
+    assert.equal(stored('purchaseOrder', order.id).attestationTxHash, null);
+    assert.equal(stored('purchaseOrder', order.id).attestationClaimedAt, null);
+    chainOverride = null;
+    const chain = useChain(new FakeChain());
+    const retried = await commerceAttest.attestPaidOrder(order.id);
+    assert.equal(chain.sent.length, 1);
+    assert.equal(retried.chainPending, false);
+  });
+
+  it('a tx hash another path stores during the chain call is kept, and the claim released', async () => {
+    const order = seedOrder();
+    const theirs = `0x${'34'.repeat(32)}`;
+    chainOverride = async () => {
+      stored('purchaseOrder', order.id).attestationTxHash = theirs;
+      return { ok: true, txHash: `0x${'56'.repeat(32)}` };
+    };
+    const result = await commerceAttest.attestPaidOrder(order.id);
+    assert.equal(result.attestationTxHash, theirs);
+    assert.equal(stored('purchaseOrder', order.id).attestationTxHash, theirs);
+    assert.equal(stored('purchaseOrder', order.id).attestationClaimedAt, null);
+  });
+
   it('an order with a stored attestation tx hash is not claimed and not sent', async () => {
     const chain = useChain(new FakeChain());
     const order = seedOrder({ attestationTxHash: `0x${'ef'.repeat(32)}`, attestationClaimedAt: minutesAgo(1) });
@@ -230,6 +272,64 @@ describe('payout re-check claim', () => {
     const again = await disbursement.processItem(item.id);
     assert.equal(again.status, 'held');
     assert.equal(transfers.length, 0, 'a held re-check is never sent again');
+  });
+});
+
+describe('payout reconcile claim', () => {
+  beforeEach(() => {
+    prisma.reset();
+    transfers.length = 0;
+    chainOverride = null;
+  });
+
+  it('a confirmed payout another call attested between this call\'s read and its claim is not attested again', async () => {
+    const chain = useChain(new FakeChain());
+    const theirs = `0x${'78'.repeat(32)}`;
+    const item = {
+      id: `item-${Math.random().toString(36).slice(2)}`,
+      payoutId: `payout-${Math.random().toString(36).slice(2)}`,
+      batchId: null,
+      partnerId: null,
+      origin: 'internal_reward',
+      recordClass: 'internal_reward',
+      countsAsDataUpload: false,
+      walletAddress: randomAddress(),
+      amount: 1,
+      asset: 'USDT',
+      chainId: 56,
+      tokenAddress: randomAddress(),
+      status: 'confirmed',
+      txHash: `0x${'9a'.repeat(32)}`,
+      submittedAt: minutesAgo(5),
+      confirmedAt: minutesAgo(5),
+      attestationTxHash: null,
+      failureReason: null,
+      redemptionId: null,
+      reconcileClaimedAt: null,
+      createdAt: minutesAgo(5),
+      updatedAt: minutesAgo(5),
+    };
+    prisma.disbursementItem.rows.push(item);
+    const realUpdateMany = prisma.disbursementItem.updateMany;
+    let first = true;
+    prisma.disbursementItem.updateMany = async (args) => {
+      if (first) {
+        // The other call attests the payout (and releases its claim) just before this call's claim.
+        first = false;
+        stored('disbursementItem', item.id).attestationTxHash = theirs;
+      }
+      return realUpdateMany(args);
+    };
+    let result;
+    try {
+      result = await disbursement.processItem(item.id);
+    } finally {
+      prisma.disbursementItem.updateMany = realUpdateMany;
+    }
+    assert.equal(chain.sent.length, 0, 'no second attestation');
+    assert.equal(transfers.length, 0);
+    assert.equal(result.attestationTxHash, theirs);
+    assert.equal(stored('disbursementItem', item.id).reconcileClaimedAt, null);
   });
 });
 
@@ -306,7 +406,7 @@ describe('points adjust balance check', () => {
     assert.equal(prisma.store.point.length, 0);
   });
 
-  it('a deduction within the balance applies once, with the balance before and after from the update', async () => {
+  it('a deduction within the balance applies once, with the balance before and after it', async () => {
     const member = await prisma.user.create({ data: { email: 'member@example.test', totalPoints: 10 } });
     const res = await call(member.id, { amount: -4, note: 'duplicate grant' });
     assert.equal(res.statusCode, 200, JSON.stringify(res.body));
@@ -314,6 +414,16 @@ describe('points adjust balance check', () => {
     assert.equal(res.body.data.balanceAfter, 6);
     assert.equal(stored('user', member.id).totalPoints, 6);
     assert.equal(prisma.store.point.length, 1);
+  });
+
+  it('locks the member\'s row before it reads the balance, and reports that balance as before', async () => {
+    const member = await prisma.user.create({ data: { email: 'member@example.test', totalPoints: 0.3 } });
+    const res = await call(member.id, { amount: 0.1, note: 'goodwill credit' });
+    assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+    assert.equal(res.body.data.balanceBefore, 0.3, 'read, not worked out from the balance after');
+    assert.deepEqual(prisma.rawStatements.map((row) => [row.sql.trim(), row.values]), [
+      ['SELECT 1 FROM "User" WHERE id = ? FOR NO KEY UPDATE', [member.id]],
+    ]);
   });
 
   it('a credit needs no balance', async () => {
