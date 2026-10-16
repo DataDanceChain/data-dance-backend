@@ -339,4 +339,11 @@ module.exports = {
   verifySubmittedTxHash,
   attestPaidOrder,
   attestPaidOrderSafe,
+  // The same claim, and the same tx hash rule, guard the procurement order attestation
+  // (procurementService.attestOrder).
+  looksLikeTxHash,
+  attestationInFlight,
+  claimAttestation,
+  releaseAttestationClaim,
+  sendClaimedAttestation,
 };

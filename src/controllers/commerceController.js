@@ -250,11 +250,12 @@ exports.createPayment = async (req, res) => {
   }
 };
 
+/** Only the call that confirmed the payment attests its order; a repeat confirm attests nothing. */
 exports.confirmPayment = async (req, res) => {
   try {
-    const data = await commerceService.confirmPayment(req.user, req.params.id);
+    const { payment: data, changed } = await commerceService.confirmPayment(req.user, req.params.id);
     const orderId = data?.orderId || data?.order?.id;
-    if (orderId) {
+    if (changed && orderId) {
       const commerceAttest = require('../services/commerceAttest');
       await commerceAttest.attestPaidOrderSafe(orderId);
     }

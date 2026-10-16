@@ -277,23 +277,46 @@ async function attestOrder(user, orderId, { txHash } = {}) {
     orderId: order.id,
     submittedBy: `user:${user.id}`,
   });
-  let attestationTxHash = proof
+  const attestationTxHash = proof
     ? proof.txHash
-    : (full.attestationTxHash && /^0x[0-9a-fA-F]{64}$/.test(full.attestationTxHash) ? full.attestationTxHash : null);
-  if (!attestationTxHash) {
-    const { attestHashOnChain } = require('../utils/commerceAttestChain');
-    const chain = await attestHashOnChain(attestationHash);
-    if (chain.ok && chain.txHash) attestationTxHash = chain.txHash;
+    : (commerceAttest.looksLikeTxHash(full.attestationTxHash) ? full.attestationTxHash : null);
+  let updated;
+  if (attestationTxHash) {
+    updated = await prisma.purchaseOrder.update({
+      where: { id: order.id },
+      data: {
+        attestationPayload: payload,
+        attestationHash,
+        attestationTxHash,
+        attestedAt: new Date(),
+      },
+    });
+  } else {
+    // A chain send, under the same claim as a licence order (commerceAttest): of two calls at once
+    // one sends and the other gets 409 ATTESTATION_IN_FLIGHT and writes nothing; a claim older than
+    // 15 minutes is taken over. The result is stored only while this call still holds its claim and
+    // the order still holds the tx hash this call read, and the chain answer is stored as the tx
+    // hash only when it is one (looksLikeTxHash, as for a licence order); then the claim is
+    // released. A chain call that throws releases it; a store that fails after the chain call
+    // keeps it (the attestation may be on chain), so no call sends again until it is stale.
+    const readTxHash = full.attestationTxHash ?? null;
+    const claimedAt = new Date();
+    if (!(await commerceAttest.claimAttestation(order.id, readTxHash, claimedAt))) {
+      throw commerceAttest.attestationInFlight();
+    }
+    const chain = await commerceAttest.sendClaimedAttestation(order.id, claimedAt, attestationHash);
+    await prisma.purchaseOrder.updateMany({
+      where: { id: order.id, attestationClaimedAt: claimedAt, attestationTxHash: readTxHash },
+      data: {
+        attestationPayload: payload,
+        attestationHash,
+        attestationTxHash: chain.ok && commerceAttest.looksLikeTxHash(chain.txHash) ? chain.txHash : null,
+        attestedAt: new Date(),
+      },
+    });
+    await commerceAttest.releaseAttestationClaim(order.id, claimedAt);
+    updated = await prisma.purchaseOrder.findUnique({ where: { id: order.id } });
   }
-  const updated = await prisma.purchaseOrder.update({
-    where: { id: order.id },
-    data: {
-      attestationPayload: payload,
-      attestationHash,
-      attestationTxHash,
-      attestedAt: new Date(),
-    },
-  });
   return {
     id: updated.id,
     orderNumber: updated.orderNumber,
