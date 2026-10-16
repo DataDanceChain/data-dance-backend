@@ -1,7 +1,8 @@
 /**
  * protectOps (admin issue #2): personal ops sessions are checked against the account and its roles
- * on every request; the shared login is an emergency fallback behind OPS_SHARED_LOGIN; the demo
- * login stays read-only. Through the REAL application on the in-memory Prisma stand-in.
+ * on every request; the shared login stays on for the move to personal sign-in unless
+ * OPS_SHARED_LOGIN=off; the demo login stays read-only. Through the REAL application on the
+ * in-memory Prisma stand-in.
  */
 const { describe, it, before, beforeEach, after } = require('node:test');
 const assert = require('node:assert/strict');
@@ -21,6 +22,7 @@ const { prisma, app } = installOpsApp({
   },
 });
 const { clearRateLimitStore } = require('../../src/middlewares/rateLimitMiddleware');
+const { sharedLoginOn } = require('../../src/services/opsSignIn');
 
 let server;
 before(async () => { server = await listenLoopback(app); });
@@ -35,7 +37,10 @@ const me = (authorization) => {
 beforeEach(() => {
   prisma.reset();
   clearRateLimitStore();
+  // Unset: the default, which is on.
   delete process.env.OPS_SHARED_LOGIN;
+  process.env.OPS_ADMIN_USERNAME = SHARED.username;
+  process.env.OPS_ADMIN_PASSWORD = SHARED.password;
 });
 
 describe('personal ops session (kind: user)', () => {
@@ -161,44 +166,30 @@ describe('the two token families never cross', () => {
   });
 });
 
-describe('the shared login is off unless OPS_SHARED_LOGIN=on', () => {
+describe('the shared login stays on unless OPS_SHARED_LOGIN=off', () => {
   const login = (body) => request(server).post('/api/ops/auth/login').send(body);
+  const OFF_VALUES = ['off', 'OFF', ' off ', 'Off\n'];
 
-  it('a legacy shared token (role admin) is 401 while off, and the shared role while on', async () => {
-    const legacy = bearer(tokens.legacyShared());
-    const off = await me(legacy);
-    assert.equal(off.status, 401);
-    assert.equal(off.body.code, 'OPS_SESSION_INVALID');
-
-    process.env.OPS_SHARED_LOGIN = 'yes';
-    assert.equal((await me(legacy)).status, 401, 'anything but "on" is off');
-
-    process.env.OPS_SHARED_LOGIN = 'on';
-    const on = await me(legacy);
-    assert.equal(on.status, 200);
-    assert.deepEqual(
-      { kind: on.body.data.kind, role: on.body.data.role, username: on.body.data.username, userId: on.body.data.userId },
-      { kind: 'shared', role: 'shared', username: 'shared', userId: null },
-    );
-    assert.deepEqual(on.body.data.permissions, ['ops.read', 'ops.write']);
-    const current = await me(bearer(tokens.shared()));
-    assert.equal(current.body.data.role, 'shared');
+  it('the switch: only "off" (trimmed, any case) turns it off', () => {
+    assert.equal(sharedLoginOn({}), true, 'unset');
+    for (const value of ['', 'on', 'ON', ' on ', 'yes', 'no', 'false', '0', 'of', 'offf', 'off-']) {
+      assert.equal(sharedLoginOn({ OPS_SHARED_LOGIN: value }), true, JSON.stringify(value));
+    }
+    for (const value of OFF_VALUES) {
+      assert.equal(sharedLoginOn({ OPS_SHARED_LOGIN: value }), false, JSON.stringify(value));
+    }
   });
 
-  it('the shared credentials answer like a wrong password while off; on, they sign in and are audited', async () => {
-    const wrong = await login({ username: SHARED.username, password: 'nope' });
-    const off = await login(SHARED);
-    assert.equal(off.status, 401);
-    assert.deepEqual(off.body, wrong.body);
-    assert.equal(prisma.store.opsAuditLog.length, 0);
-
-    process.env.OPS_SHARED_LOGIN = 'on';
+  it('unset: on. The shared credentials sign in and are audited as "shared"', async () => {
+    assert.equal(process.env.OPS_SHARED_LOGIN, undefined);
     process.env.OPS_USER_TOKEN_TTL_SEC = '600';
     try {
       const on = await login(SHARED);
       assert.equal(on.status, 200, JSON.stringify(on.body));
       assert.equal(on.body.data.role, 'shared');
       assert.equal(on.body.data.kind, 'shared');
+      assert.equal(on.body.data.username, 'shared');
+      assert.deepEqual(on.body.data.permissions, ['ops.read', 'ops.write']);
       assert.equal(on.body.data.expiresIn, 600);
       const claims = jwt.verify(on.body.data.token, JWT_SECRET);
       assert.equal(claims.type, 'ops_admin');
@@ -212,15 +203,129 @@ describe('the shared login is off unless OPS_SHARED_LOGIN=on', () => {
       assert.equal(rows[0].action, 'auth.shared_sign_in');
       assert.equal(rows[0].actorKind, 'shared');
       assert.equal(rows[0].actorLabel, 'shared');
+      assert.equal(rows[0].actorUserId, null);
       assert.equal(rows[0].surface, 'ops');
       assert.ok(!JSON.stringify(rows).includes(SHARED.password), 'the password is never recorded');
+
+      const session = await me(bearer(on.body.data.token));
+      assert.equal(session.status, 200);
+      assert.equal(session.body.data.role, 'shared');
     } finally {
       delete process.env.OPS_USER_TOKEN_TTL_SEC;
     }
   });
 
-  it('the shared sign-in does not happen when it cannot be recorded', async () => {
+  it('unset: a legacy shared token (role admin) is accepted as the shared role', async () => {
+    const res = await me(bearer(tokens.legacyShared()));
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+    assert.deepEqual(
+      { kind: res.body.data.kind, role: res.body.data.role, username: res.body.data.username, userId: res.body.data.userId },
+      { kind: 'shared', role: 'shared', username: 'shared', userId: null },
+    );
+    assert.deepEqual(res.body.data.permissions, ['ops.read', 'ops.write']);
+  });
+
+  it('"on", and any value other than "off", is on', async () => {
+    for (const value of ['on', 'ON', ' on ', 'yes', 'false']) {
+      process.env.OPS_SHARED_LOGIN = value;
+      assert.equal((await me(bearer(tokens.legacyShared()))).status, 200, JSON.stringify(value));
+      assert.equal((await me(bearer(tokens.shared()))).status, 200, JSON.stringify(value));
+    }
     process.env.OPS_SHARED_LOGIN = 'on';
+    const on = await login(SHARED);
+    assert.equal(on.status, 200, JSON.stringify(on.body));
+    assert.equal(on.body.data.role, 'shared');
+    assert.equal(prisma.store.opsAuditLog.length, 1);
+  });
+
+  it('"off" (also "OFF" and " off "): the shared credentials answer exactly like a wrong password, and nothing is recorded', async () => {
+    const wrong = await login({ username: SHARED.username, password: 'nope' });
+    assert.equal(wrong.status, 401);
+    for (const value of ['off', 'OFF', ' off ']) {
+      process.env.OPS_SHARED_LOGIN = value;
+      const off = await login(SHARED);
+      assert.equal(off.status, 401, JSON.stringify(value));
+      assert.deepEqual(off.body, wrong.body, JSON.stringify(value));
+      assert.equal(off.body.data, undefined);
+    }
+    assert.equal(prisma.store.opsAuditLog.length, 0);
+  });
+
+  it('off: a legacy shared token (role admin) and a current shared token are refused: 401 OPS_SESSION_INVALID', async () => {
+    const legacy = bearer(tokens.legacyShared());
+    const current = bearer(tokens.shared());
+    assert.equal((await me(legacy)).status, 200, 'on before the switch');
+    for (const value of OFF_VALUES) {
+      process.env.OPS_SHARED_LOGIN = value;
+      for (const [name, authorization] of [['legacy', legacy], ['current', current]]) {
+        const res = await me(authorization);
+        assert.equal(res.status, 401, `${name} ${JSON.stringify(value)}`);
+        assert.equal(res.body.code, 'OPS_SESSION_INVALID', `${name} ${JSON.stringify(value)}`);
+      }
+    }
+    // Off stops writes too, not only /auth/me.
+    process.env.OPS_SHARED_LOGIN = 'off';
+    const user = await seedUser(prisma);
+    const write = await request(server).post(`/api/ops/users/${user.id}/points`).set('Authorization', legacy).send({ amount: 5, note: 'after the switch' });
+    assert.equal(write.status, 401);
+    assert.equal(prisma.store.point.length, 0);
+  });
+
+  it('an unset or empty OPS_ADMIN_PASSWORD (or username) never signs anyone in, while the switch is on', async () => {
+    const tries = [
+      { username: SHARED.username, password: '' },
+      { username: SHARED.username },
+      { username: SHARED.username, password: SHARED.password },
+    ];
+    for (const value of [undefined, 'on']) {
+      if (value === undefined) delete process.env.OPS_SHARED_LOGIN;
+      else process.env.OPS_SHARED_LOGIN = value;
+      for (const password of [undefined, '']) {
+        clearRateLimitStore();
+        if (password === undefined) delete process.env.OPS_ADMIN_PASSWORD;
+        else process.env.OPS_ADMIN_PASSWORD = password;
+        for (const body of tries) {
+          const res = await login(body);
+          assert.equal(res.status, 401, `${value} ${JSON.stringify(password)} ${JSON.stringify(body)}`);
+          assert.equal(res.body.data, undefined);
+        }
+      }
+      clearRateLimitStore();
+      process.env.OPS_ADMIN_PASSWORD = SHARED.password;
+      for (const username of [undefined, '']) {
+        if (username === undefined) delete process.env.OPS_ADMIN_USERNAME;
+        else process.env.OPS_ADMIN_USERNAME = username;
+        for (const body of [{ username: '', password: SHARED.password }, { password: SHARED.password }]) {
+          const res = await login(body);
+          assert.equal(res.status, 401, `${value} username ${JSON.stringify(username)} ${JSON.stringify(body)}`);
+          assert.equal(res.body.data, undefined);
+        }
+      }
+      process.env.OPS_ADMIN_USERNAME = SHARED.username;
+    }
+    assert.equal(prisma.store.opsAuditLog.length, 0);
+  });
+
+  it('with no shared password and no demo login, the login answers 503 not configured and issues nothing', async () => {
+    const saved = { user: process.env.OPS_DEMO_USERNAME, pass: process.env.OPS_DEMO_PASSWORD, file: process.env.OPS_DEMO_FILE };
+    delete process.env.OPS_ADMIN_PASSWORD;
+    delete process.env.OPS_DEMO_USERNAME;
+    delete process.env.OPS_DEMO_PASSWORD;
+    process.env.OPS_DEMO_FILE = '/nonexistent/ops-demo-for-tests.json';
+    try {
+      const res = await login({ username: SHARED.username, password: '' });
+      assert.equal(res.status, 503);
+      assert.equal(res.body.data, undefined);
+      assert.equal(prisma.store.opsAuditLog.length, 0);
+    } finally {
+      process.env.OPS_DEMO_USERNAME = saved.user;
+      process.env.OPS_DEMO_PASSWORD = saved.pass;
+      if (saved.file === undefined) delete process.env.OPS_DEMO_FILE;
+      else process.env.OPS_DEMO_FILE = saved.file;
+    }
+  });
+
+  it('the shared sign-in does not happen when it cannot be recorded', async () => {
     const original = prisma.opsAuditLog.create;
     prisma.opsAuditLog.create = async () => { throw new Error('audit store down'); };
     try {

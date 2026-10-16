@@ -29,7 +29,8 @@ function sessionInvalid(res, status = 401) {
  *     ddc_admin nor operator: 403 NOT_STAFF. So a role revoked mid-session stops the next call,
  *     and a re-enabled account signs in again.
  *   - role 'demo': unchanged (read-only, see restrictDemo).
- *   - kind 'shared', or a legacy token with role 'admin': only while OPS_SHARED_LOGIN=on.
+ *   - kind 'shared', or a legacy token with role 'admin' (issued by the shared login before
+ *     personal sign-in): accepted unless OPS_SHARED_LOGIN=off.
  *
  * req.opsAdmin = { kind, userId, username, role, roles }. `username` fills the existing "by"
  * fields (a point's source id, resolvedBy, kycReviewedBy, ledger metadata, campaign createdBy /

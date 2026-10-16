@@ -19,7 +19,8 @@ const { listenLoopback } = require('../helpers/loopbackServer');
 
 const prisma = installMockPrisma();
 const JWT_SECRET = 'tracked-link-unit-test-secret';
-// The ops tokens below are the shared login's (role 'admin'), accepted only while it is on.
+// The ops tokens below are the shared login's (role 'admin'), accepted unless OPS_SHARED_LOGIN=off.
+// Set to on here so a value in the shell cannot change the test.
 Object.assign(process.env, { LOG_LEVEL: 'error', JWT_SECRET, OPS_SHARED_LOGIN: 'on' });
 delete process.env.TRACKED_LINK_ORIGIN;
 

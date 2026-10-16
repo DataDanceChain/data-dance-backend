@@ -37,6 +37,8 @@ function installOpsApp({ env = {}, unset = [] } = {}) {
     },
   };
   Object.assign(process.env, BASE_ENV, env);
+  // Unset unless the file passes a value, so a value in the shell cannot change a test. Unset
+  // OPS_SHARED_LOGIN is the default: the shared login is on.
   for (const name of ['OPS_SHARED_LOGIN', 'OPS_USER_TOKEN_TTL_SEC', 'SSO_DEVELOPER_REGISTRATION', ...unset]) {
     if (!(name in env)) delete process.env[name];
   }

@@ -79,10 +79,11 @@ function signOpsToken(username, role) {
 
 /**
  * POST /api/ops/auth/login. The demo credentials are always accepted when configured (read-only,
- * 7-day token, unchanged). The shared credentials are the emergency fallback: accepted only while
- * OPS_SHARED_LOGIN=on (otherwise the same 401 as a wrong password), with a session as long as a
- * personal one, and each use is audited as `auth.shared_sign_in`. Operators normally sign in with
- * their own DataDance account (POST /auth/code + /auth/exchange).
+ * 7-day token, unchanged). The shared credentials (OPS_ADMIN_USERNAME / OPS_ADMIN_PASSWORD, both
+ * non-empty) keep working during the move to personal sign-in: accepted unless OPS_SHARED_LOGIN=off
+ * (then the same 401 as a wrong password), with a session as long as a personal one, and each use
+ * is audited as `auth.shared_sign_in`. Operators normally sign in with their own DataDance account
+ * (POST /auth/code + /auth/exchange).
  */
 exports.login = async (req, res) => {
   try {

@@ -21,9 +21,16 @@ console's staff endpoints or `scripts/opsRoles.js` is written to an append-only 
   `SESSION_REVOKED`, 403 `ACCOUNT_DISABLED`, 403 `NOT_STAFF`. The console answers the first three
   by signing the visitor out and asking for a new sign-in, then minting again.
 - **Demo.** `POST /api/ops/auth/login` with the demo credentials: read-only, unchanged.
-- **Shared emergency login.** `POST /api/ops/auth/login` with `OPS_ADMIN_USERNAME` /
-  `OPS_ADMIN_PASSWORD`, accepted only while `OPS_SHARED_LOGIN=on` (default off). Audited as actor
-  `shared`; it can read and do day-to-day writes, but not manage roles, accounts or payouts.
+- **Shared login (for the move to personal sign-in).** `POST /api/ops/auth/login` with
+  `OPS_ADMIN_USERNAME` / `OPS_ADMIN_PASSWORD`. It stays on unless `OPS_SHARED_LOGIN=off` (trimmed,
+  any case; unset, `on` or any other value keeps it on), so deploying personal sign-in does not
+  change how the ops site signs in today (see "Rollout"). Both values must be set: an empty
+  username or password signs nobody in. Each sign-in is audited as actor `shared`. A shared
+  session lasts as long as a personal one (`OPS_USER_TOKEN_TTL_SEC`). It holds `ops.read` and
+  `ops.write` only (table below), so the user view withholds the same fields as for the demo login.
+  Tokens the shared login issued before personal sign-in (role `admin`) keep working until they
+  expire. With `OPS_SHARED_LOGIN=off` the shared credentials get the same 401 as a wrong password,
+  and every shared token, old or new, is refused (401 `OPS_SESSION_INVALID`).
 
 ## Roles and permissions
 
@@ -81,8 +88,8 @@ answers the label as `username` and the account's own e-mail as `email`.
 ## Environment
 
 ```bash
-OPS_SHARED_LOGIN=off                    # on enables the shared emergency login
-OPS_ADMIN_USERNAME=ops                  # the shared login (only while OPS_SHARED_LOGIN=on)
+OPS_SHARED_LOGIN=on                     # default on; only "off" turns the shared login off
+OPS_ADMIN_USERNAME=ops                  # the shared login (unless OPS_SHARED_LOGIN=off); both must be set
 OPS_ADMIN_PASSWORD=<strong-password>
 # optional external demo. Read-only: every GET under /api/ops, no writes.
 # Or put the same two fields in /app/config/ops-demo.json
@@ -100,7 +107,7 @@ JWT_SECRET=<existing-jwt-secret>
 
 | Method | Path | Auth |
 |--------|------|------|
-| POST | `/api/ops/auth/login` | Body: `{ username, password }` (demo, or the shared login while it is on) |
+| POST | `/api/ops/auth/login` | Body: `{ username, password }` (demo, or the shared login unless `OPS_SHARED_LOGIN=off`) |
 | POST | `/api/ops/auth/code` | Wallet JWT (verified session), staff only. Body `{ code_challenge }` |
 | POST | `/api/ops/auth/exchange` | Body `{ code, code_verifier }` |
 | GET | `/api/ops/auth/me` | The session: kind, account, role, roles, permissions |
@@ -193,6 +200,25 @@ serving while the migration runs.
   ```
 
 - Any other failure: keep the old image running, stop and read the error; do not retry blindly.
+
+## Rollout
+
+1. Run the two migrations, then start the new image (see "Migration").
+2. Grant the first `ddc_admin` accounts, inside the API container:
+
+   ```bash
+   node scripts/opsRoles.js grant --email <admin> --role ddc_admin --reason "<why>" --apply
+   ```
+
+   Without `--apply` the script only shows what it would do.
+3. The shared login keeps working meanwhile, with the same username and password. Sessions from
+   before the deploy keep working until they expire, as long as `JWT_SECRET` stays the same. A new
+   shared session lasts as long as a personal one (12 h by default), and each shared sign-in is
+   audited.
+4. Once the people who use the shared login today (Sloan and Race) sign in with their own
+   accounts, set `OPS_SHARED_LOGIN=off` and restart the API. The shared credentials then get the
+   same 401 as a wrong password, and open shared sessions end on their next request. To undo,
+   remove the setting (or set it to `on`) and restart.
 
 ## Frontend
 

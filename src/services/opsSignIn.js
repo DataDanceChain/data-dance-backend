@@ -39,9 +39,13 @@ const CHALLENGE_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 const VERIFIER_PATTERN = /^[A-Za-z0-9\-._~]{43,128}$/;
 const CODE_PATTERN = /^osc_[A-Za-z0-9_-]{43}$/;
 
-/** OPS_SHARED_LOGIN: 'on' enables the shared emergency login; anything else (default) is off. */
+/**
+ * OPS_SHARED_LOGIN: the shared login stays on unless this is 'off' (trimmed, any case). Unset, 'on'
+ * or any other value keeps it on, so deploying personal sign-in does not change how the ops site
+ * signs in today. It still needs OPS_ADMIN_USERNAME and OPS_ADMIN_PASSWORD (opsAdminController).
+ */
 function sharedLoginOn(env = process.env) {
-  return String(env.OPS_SHARED_LOGIN || '').trim().toLowerCase() === 'on';
+  return String(env.OPS_SHARED_LOGIN ?? '').trim().toLowerCase() !== 'off';
 }
 
 /** OPS_USER_TOKEN_TTL_SEC, default 43200, clamped to 300..43200. */

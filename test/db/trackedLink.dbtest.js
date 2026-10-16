@@ -24,7 +24,8 @@ process.env.DATABASE_URL = url;
 process.env.LOG_LEVEL = 'error';
 const JWT_SECRET = `tracked-link-db-${crypto.randomBytes(8).toString('hex')}`;
 process.env.JWT_SECRET = JWT_SECRET;
-// The ops tokens below are the shared login's (role 'admin'), accepted only while it is on.
+// The ops tokens below are the shared login's (role 'admin'), accepted unless OPS_SHARED_LOGIN=off.
+// Set to on here so a value in the shell cannot change the test.
 process.env.OPS_SHARED_LOGIN = 'on';
 delete process.env.TRACKED_LINK_ORIGIN;
 

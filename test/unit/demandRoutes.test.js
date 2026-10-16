@@ -29,7 +29,8 @@ Object.assign(process.env, {
   APP_PUBLIC_URL: 'https://app.test.local',
   JWT_SECRET,
   SSO_SESSION_SECRET: 'ddc-demand-routes-sso-secret',
-  // The ops tokens below are the shared login's (role 'admin'), accepted only while it is on.
+  // The ops tokens below are the shared login's (role 'admin'), accepted unless OPS_SHARED_LOGIN=off.
+  // Set to on here so a value in the shell cannot change the test.
   OPS_SHARED_LOGIN: 'on',
 });
 

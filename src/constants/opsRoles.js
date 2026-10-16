@@ -8,7 +8,8 @@
  *              closed. It gives no ops access.
  *
  * Two session kinds are not roles a user can hold:
- *   shared  the emergency shared login (OPS_SHARED_LOGIN=on): ops.read, ops.write
+ *   shared  the shared login, kept for the move to personal sign-in (on unless
+ *           OPS_SHARED_LOGIN=off): ops.read, ops.write
  *   demo    the read-only demo login: ops.read
  *
  * Staff = ddc_admin or operator. A user who has both acts as ddc_admin.
