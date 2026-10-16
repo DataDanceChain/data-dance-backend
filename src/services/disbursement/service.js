@@ -238,9 +238,12 @@ const RECONCILE_CLAIM_STALE_MS = 15 * 60 * 1000;
 /**
  * The reconcile step of a confirmed payout (attest it, mark its redemption paid) runs for one
  * caller at a time: the claim sets `reconcileClaimedAt` with a conditional update on the payout as
- * it was read (confirmed, same hash, no live claim), so of two calls at once exactly one wins and
- * the other changes and sends nothing. With an audit, the claim and its row commit together, before
- * the attestation is sent. Answers the claim time, or null when the call lost.
+ * it was read (confirmed, same hash, same attestation tx hash, no live claim), so of two calls at
+ * once exactly one wins and the other changes and sends nothing. A call whose read is older than
+ * another call's attestation loses too, because the attestation tx hash no longer matches; a
+ * failed attestation stores none, so the next call still retries it. With an audit, the claim and
+ * its row commit together, before the attestation is sent. Answers the claim time, or null when
+ * the call lost.
  */
 async function claimReconcile(audit, existing) {
   const claimedAt = new Date();
@@ -253,6 +256,7 @@ async function claimReconcile(audit, existing) {
         id: existing.id,
         status: 'confirmed',
         txHash: existing.txHash,
+        attestationTxHash: existing.attestationTxHash ?? null,
         OR: [{ reconcileClaimedAt: null }, { reconcileClaimedAt: { lt: staleBefore } }],
       },
       data: { reconcileClaimedAt: claimedAt },
@@ -271,6 +275,28 @@ async function releaseReconcile(id, claimedAt) {
 
 function reloadItem(id) {
   return prisma.disbursementItem.findUnique({ where: { id }, include: { partner: true } });
+}
+
+/**
+ * A transfer confirmed: mark the payout confirmed and take its reconcile claim in the same update,
+ * then attest it and mark its redemption paid. A call that reads the payout as confirmed meanwhile
+ * finds the claim live and attests nothing, so the payout is attested once. The claim is released
+ * afterwards, also when the attestation throws.
+ */
+async function confirmAndAttest(id, data) {
+  const claimedAt = new Date();
+  const confirmed = await prisma.disbursementItem.update({
+    where: { id },
+    data: { ...data, status: 'confirmed', reconcileClaimedAt: claimedAt },
+    include: { partner: true },
+  });
+  try {
+    const attested = await attestConfirmedItem(confirmed, confirmed.partner?.slug || null);
+    await markRewardPaid(attested);
+  } finally {
+    await releaseReconcile(id, claimedAt);
+  }
+  return reloadItem(id);
 }
 
 /**
@@ -336,19 +362,11 @@ async function processItem(itemId, { audit } = {}) {
       });
       throw error;
     }
-    const confirmed = await prisma.disbursementItem.update({
-      where: { id: existing.id },
-      data: {
-        status: 'confirmed',
-        txHash: sent.txHash,
-        confirmedAt: new Date(),
-        failureReason: null,
-      },
-      include: { partner: true },
+    return confirmAndAttest(existing.id, {
+      txHash: sent.txHash,
+      confirmedAt: new Date(),
+      failureReason: null,
     });
-    const attested = await attestConfirmedItem(confirmed, confirmed.partner?.slug || null);
-    await markRewardPaid(attested);
-    return attested;
   }
 
   if (existing.failureReason === RECONCILE_REASON) {
@@ -422,22 +440,14 @@ async function processItem(itemId, { audit } = {}) {
       to: decision.walletAddress,
       amount: decision.amount,
     });
-    const confirmed = await prisma.disbursementItem.update({
-      where: { id: existing.id },
-      data: {
-        status: 'confirmed',
-        txHash: sent.txHash,
-        walletAddress: decision.walletAddress,
-        amount: decision.amount,
-        submittedAt: new Date(),
-        confirmedAt: new Date(),
-        failureReason: null,
-      },
-      include: { partner: true },
+    return await confirmAndAttest(existing.id, {
+      txHash: sent.txHash,
+      walletAddress: decision.walletAddress,
+      amount: decision.amount,
+      submittedAt: new Date(),
+      confirmedAt: new Date(),
+      failureReason: null,
     });
-    const attested = await attestConfirmedItem(confirmed, confirmed.partner?.slug || null);
-    await markRewardPaid(attested);
-    return attested;
   } catch (error) {
     const unconfigured = error.code === 'payout_signer_unconfigured';
     return prisma.disbursementItem.update({

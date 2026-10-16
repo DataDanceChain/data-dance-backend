@@ -53,6 +53,88 @@ async function withProducts(orders) {
   });
 }
 
+const IDEMPOTENCY_KEY = /^[A-Za-z0-9._:-]{8,128}$/;
+
+/**
+ * The optional Idempotency-Key header of a merchant credit: null when absent or empty; a 400
+ * (INVALID_IDEMPOTENCY_KEY) when, trimmed, it is not 8 to 128 letters, digits, dots, colons,
+ * dashes or underscores (a value of blanks only included).
+ */
+function idempotencyKeyOf(req) {
+  const raw = req.get('Idempotency-Key');
+  if (raw === undefined || raw === '') return null;
+  const key = String(raw).trim();
+  if (!IDEMPOTENCY_KEY.test(key)) {
+    throw Object.assign(new Error('Idempotency-Key must be 8 to 128 letters, digits, dots, colons, dashes or underscores.'), {
+      statusCode: 400,
+      code: 'INVALID_IDEMPOTENCY_KEY',
+    });
+  }
+  return key;
+}
+
+/**
+ * The answer to a credit whose key a merchant's earlier credit already holds: that credit
+ * (`replayed`), when the amount and the note are the same; otherwise 409 IDEMPOTENCY_KEY_REUSED.
+ */
+function replayCredit(earlier, amount, note) {
+  if (Number(earlier.amount) !== amount || String(earlier.description || '') !== note) {
+    throw Object.assign(new Error('This Idempotency-Key was already used for a different credit.'), {
+      statusCode: 409,
+      code: 'IDEMPOTENCY_KEY_REUSED',
+    });
+  }
+  return { transaction: earlier, replayed: true };
+}
+
+function keyedCredit(userId, idempotencyKey) {
+  return prisma.organizationTransaction.findUnique({
+    where: { userId_idempotencyKey: { userId, idempotencyKey } },
+  });
+}
+
+/**
+ * Writes the merchant's DEPOSIT row, once per Idempotency-Key. The database holds one row per
+ * merchant and key (a unique index): a credit whose key is taken, also by a request running at
+ * the same moment, writes nothing and answers the row that holds it (replayCredit).
+ *
+ * `audit(tx, row)` (the ops route) writes the audit row in the transaction of the create: if it
+ * cannot be written, the merchant is not credited. A unique violation rolls that transaction
+ * back, audit row included, so a replay writes no audit row.
+ */
+async function creditOnce({ userId, amount, note, operator, idempotencyKey, audit }) {
+  if (idempotencyKey) {
+    const earlier = await keyedCredit(userId, idempotencyKey);
+    if (earlier) return replayCredit(earlier, amount, note);
+  }
+  try {
+    return await prisma.$transaction(async (tx) => {
+      const transaction = await tx.organizationTransaction.create({
+        data: {
+          userId,
+          amount,
+          type: 'DEPOSIT',
+          status: 'COMPLETED',
+          description: note,
+          idempotencyKey,
+          metadata: {
+            source: 'ops_credit',
+            operator,
+          },
+        },
+      });
+      if (audit) await audit(tx, transaction);
+      return { transaction, replayed: false };
+    });
+  } catch (error) {
+    if (idempotencyKey && error && error.code === 'P2002') {
+      const earlier = await keyedCredit(userId, idempotencyKey);
+      if (earlier) return replayCredit(earlier, amount, note);
+    }
+    throw error;
+  }
+}
+
 function asInt(value, fallback) {
   const n = Number(value);
   return Number.isFinite(n) && n > 0 ? n : fallback;
@@ -79,25 +161,6 @@ function opsBy(req) {
 function opsSubmitter(req) {
   const by = opsBy(req);
   return by.startsWith('ops:') ? by : `ops:${by}`;
-}
-
-const IDEMPOTENCY_KEY = /^[A-Za-z0-9._:-]{8,128}$/;
-
-/**
- * The optional Idempotency-Key header of a merchant credit: null when absent; a 400 when it is not
- * 8..128 characters of letters, digits and . _ : -.
- */
-function idempotencyKeyOf(req) {
-  const raw = req.get('Idempotency-Key');
-  if (raw === undefined || raw === '') return null;
-  const key = String(raw).trim();
-  if (!IDEMPOTENCY_KEY.test(key)) {
-    throw Object.assign(new Error('Idempotency-Key must be 8 to 128 letters, digits, dots, colons, dashes or underscores.'), {
-      statusCode: 400,
-      code: 'INVALID_IDEMPOTENCY_KEY',
-    });
-  }
-  return key;
 }
 
 function maskEmail(value) {
@@ -263,6 +326,16 @@ exports.listPayments = async (req, res) => {
   }
 };
 
+/** A refused ops payment decision: its status, and its code when it has one (409s carry one). */
+function sendPaymentDecisionError(res, error) {
+  const code = error.statusCode || 500;
+  return res.status(code).json({
+    status: code >= 500 ? 'error' : 'fail',
+    ...(error.code && code < 500 ? { code: error.code } : {}),
+    message: error.message,
+  });
+}
+
 /**
  * Only the call that confirmed the payment attests its order, and that attestation writes its own
  * order.attest row (same actor) in the transaction that stores it. A repeat confirm changes
@@ -285,8 +358,7 @@ exports.confirmPayment = async (req, res) => {
     }
     return res.json({ status: 'success', data: payment });
   } catch (error) {
-    const code = error.statusCode || 500;
-    return res.status(code).json({ status: code >= 500 ? 'error' : 'fail', message: error.message });
+    return sendPaymentDecisionError(res, error);
   }
 };
 
@@ -300,12 +372,7 @@ exports.rejectPayment = async (req, res) => {
     );
     return res.json({ status: 'success', data: payment });
   } catch (error) {
-    const code = error.statusCode || 500;
-    return res.status(code).json({
-      status: code >= 500 ? 'error' : 'fail',
-      ...(error.code && code < 500 ? { code: error.code } : {}),
-      message: error.message,
-    });
+    return sendPaymentDecisionError(res, error);
   }
 };
 
@@ -425,10 +492,10 @@ exports.getMerchant = async (req, res) => {
 
 /**
  * Credit a merchant's USD balance. An optional Idempotency-Key header makes a repeat of the same
- * credit (a double submit, a retry after a lost answer) return the first one instead of crediting
- * again: under a per-merchant-and-key lock, a DEPOSIT already made with that key is answered as it
- * is (200, `replayed: true`, no new row, no audit row). The same key with another amount or note
- * is refused: 409 IDEMPOTENCY_KEY_REUSED.
+ * credit (a double submit, a retry after a lost answer) answer the first one instead of crediting
+ * again (creditOnce): 200 with that credit and `replayed: true`, no new row and no audit row. The
+ * same key with another amount or note is refused: 409 IDEMPOTENCY_KEY_REUSED. Without the header
+ * every call credits. The audit row is written in the transaction of the credit.
  */
 exports.creditMerchant = async (req, res) => {
   try {
@@ -448,47 +515,18 @@ exports.creditMerchant = async (req, res) => {
     if (!user || !user.isOrganization) {
       return res.status(404).json({ status: 'fail', message: 'Merchant not found' });
     }
-    // Same transaction: if the audit row cannot be written, the merchant is not credited.
-    const { transaction, replayed } = await prisma.$transaction(async (tx) => {
-      if (idempotencyKey) {
-        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('ddc:ops-credit'), hashtext(${`${user.id}:${idempotencyKey}`}))`;
-        const earlier = await tx.organizationTransaction.findFirst({
-          where: {
-            userId: user.id,
-            type: 'DEPOSIT',
-            metadata: { path: ['idempotencyKey'], equals: idempotencyKey },
-          },
-        });
-        if (earlier) {
-          if (Number(earlier.amount) !== amount || String(earlier.description || '') !== note) {
-            throw Object.assign(new Error('This Idempotency-Key was already used for a different credit.'), {
-              statusCode: 409,
-              code: 'IDEMPOTENCY_KEY_REUSED',
-            });
-          }
-          return { transaction: earlier, replayed: true };
-        }
-      }
-      const row = await tx.organizationTransaction.create({
-        data: {
-          userId: user.id,
-          amount,
-          type: 'DEPOSIT',
-          status: 'COMPLETED',
-          description: note,
-          metadata: {
-            source: 'ops_credit',
-            operator: opsBy(req),
-            ...(idempotencyKey ? { idempotencyKey } : {}),
-          },
-        },
-      });
-      await req.auditChange(tx, {
+    const { transaction, replayed } = await creditOnce({
+      userId: user.id,
+      amount,
+      note,
+      operator: opsBy(req),
+      idempotencyKey,
+      // Same transaction: if the audit row cannot be written, the merchant is not credited.
+      audit: (tx, row) => req.auditChange(tx, {
         target: { type: 'user', id: user.id },
         reason: note,
         detail: { organizationTransactionId: row.id, type: 'DEPOSIT', amount, currency: 'USD' },
-      });
-      return { transaction: row, replayed: false };
+      }),
     });
     return res.json({
       status: 'success',

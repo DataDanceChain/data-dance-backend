@@ -152,10 +152,10 @@ per change and none for a call that changes nothing:
 
 | Route | Action |
 |---|---|
-| `POST /payments/:id/confirm` | `payment.confirm`; the call that confirms an order's payment also attests the order and writes its `order.attest` row (same actor). A repeat confirm changes nothing and attests nothing |
-| `POST /payments/:id/reject` | `payment.reject`. A confirmed payment is refused: 409 `PAYMENT_ALREADY_CONFIRMED` (a reversal will be its own action). Rejecting a rejected payment changes nothing: same notes, no row |
-| `POST /merchants/:userId/credit` | `merchant.credit`. An optional `Idempotency-Key` header (8 to 128 of `A-Z a-z 0-9 . _ : -`): a repeat with the same key answers the first credit (`replayed: true`, no new row); the same key with another amount or note is 409 `IDEMPOTENCY_KEY_REUSED` |
-| `POST /orders/:id/attest` | `order.attest` (written with the stored hash and the claim, before the chain call; the tx hash it returns is stored on the order). One chain send per order at a time: a second attest, or a payment confirm's attestation, while one is being sent is 409 `ATTESTATION_IN_FLIGHT` and sends nothing |
+| `POST /payments/:id/confirm` | `payment.confirm` (only a `pending` payment is confirmed; a rejected one is 409 `payment_not_pending`); the call that confirms an order's payment also attests the order and writes its `order.attest` row (same actor). A repeat confirm changes nothing and attests nothing |
+| `POST /payments/:id/reject` | `payment.reject`. A confirmed payment is refused: 409 `PAYMENT_ALREADY_CONFIRMED` (a reversal will be its own action). Rejecting a rejected payment changes nothing: same notes, no row. Both decisions lock the payment's invoice and change the payment only while it is `pending`, in the transaction that writes the row |
+| `POST /merchants/:userId/credit` | `merchant.credit` (in the transaction of the credit). An optional `Idempotency-Key` header (8 to 128 of `A-Z a-z 0-9 . _ : -`, else 400 `INVALID_IDEMPOTENCY_KEY`), kept in `OrganizationTransaction.idempotencyKey` (unique per merchant): a repeat with the same key answers the first credit (`replayed: true`, no new row), also when two arrive at once; the same key with another amount or note is 409 `IDEMPOTENCY_KEY_REUSED` |
+| `POST /orders/:id/attest` | `order.attest` (written with the claim, before the chain call; the attestation and the tx hash the call returns are stored on the order afterwards. An attest that sends nothing is written with the stored attestation). One chain send per order at a time: a second attest, or a payment confirm's attestation, while one is being sent is 409 `ATTESTATION_IN_FLIGHT` and sends nothing |
 | `POST /disbursements/items/:id/process` | `disbursement.process` (written with the claim, before any transfer; one caller at a time claims a payout, also a submitted one being re-checked and a confirmed one being reconciled) |
 | `POST /disbursements/redemptions/:id/disburse` | `disbursement.disburse` (written with the new payout, before any transfer) |
 | `POST /demands/:id/fulfill` | `demand.fulfill` (purchase, request status and row in one transaction; the buyer's balance is checked inside it, one purchase per buyer at a time) |
@@ -172,17 +172,17 @@ client: no row, no client; `detail.registration` is `closed` or `allowlist`).
 
 ## Migration
 
-Two migrations come with the ops roles; both only add, and both start with `SET lock_timeout =
-'3s'`:
+One migration comes with the ops roles. It only adds, and it starts with `SET lock_timeout = '3s'`:
 
 - `20261017100000_ops_roles_audit` adds three nullable columns to `"User"` and four tables with
   foreign keys to it.
-- `20261017100100_attestation_claims` adds one nullable column to `"PurchaseOrder"` and one to
-  `"DisbursementItem"` (the attestation and reconcile claims).
 
-Each needs short table locks. Behind a long-running reader they would queue, and every sign-in
-would queue behind them; with the lock timeout, a migration on a busy table fails within seconds
-and changes nothing (each runs as one transaction).
+The claim columns (`20261016200000_attestation_claims`) and the merchant credit key
+(`20261016210000_merchant_credit_idempotency`) come from `main`, which this migration sorts after.
+
+It needs short table locks. Behind a long-running reader it would queue, and every sign-in would
+queue behind it; with the lock timeout, it fails within seconds on a busy table and changes nothing
+(it runs as one transaction).
 
 **Order: migrate first, then start the new image.** The new image reads the new columns on every
 signed-in request, so it needs them before it serves. The old image ignores them, so it keeps
@@ -203,7 +203,7 @@ serving while the migration runs.
 
 ## Rollout
 
-1. Run the two migrations, then start the new image (see "Migration").
+1. Run the migrations, then start the new image (see "Migration").
 2. Grant the first `ddc_admin` accounts, inside the API container:
 
    ```bash

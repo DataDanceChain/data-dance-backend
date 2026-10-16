@@ -1,5 +1,5 @@
 /**
- * 20261017100000_ops_roles_audit and 20261017100100_attestation_claims on a live database (`npm run test:db`; needs TEST_DATABASE_URL
+ * 20261017100000_ops_roles_audit on a live database (`npm run test:db`; needs TEST_DATABASE_URL
  * pointing at a throwaway database whose name contains "test").
  *
  * The migration alters "User" and adds foreign keys to it, which needs short table locks. While
@@ -27,7 +27,6 @@ const prisma = require('../../src/utils/prisma');
 
 const SCHEMA = `mig${crypto.randomBytes(3).toString('hex')}`;
 const MIGRATION = path.join(__dirname, '../../prisma/migrations/20261017100000_ops_roles_audit/migration.sql');
-const CLAIMS_MIGRATION = path.join(__dirname, '../../prisma/migrations/20261017100100_attestation_claims/migration.sql');
 const PRISMA_CLI = require.resolve('prisma/build/index.js');
 
 function scratchUrl() {
@@ -77,19 +76,7 @@ async function scratchUserColumns() {
 before(async () => {
   await prisma.$executeRawUnsafe(`CREATE SCHEMA "${SCHEMA}"`);
   await prisma.$executeRawUnsafe(`CREATE TABLE "${SCHEMA}"."User" ("id" TEXT PRIMARY KEY)`);
-  await prisma.$executeRawUnsafe(`CREATE TABLE "${SCHEMA}"."PurchaseOrder" ("id" TEXT PRIMARY KEY)`);
-  await prisma.$executeRawUnsafe(`CREATE TABLE "${SCHEMA}"."DisbursementItem" ("id" TEXT PRIMARY KEY)`);
 });
-
-async function scratchColumns(table) {
-  const rows = await prisma.$queryRawUnsafe(
-    `SELECT column_name FROM information_schema.columns
-     WHERE table_schema = $1 AND table_name = $2 ORDER BY column_name`,
-    SCHEMA,
-    table,
-  );
-  return rows.map((row) => row.column_name);
-}
 
 after(async () => {
   await prisma.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${SCHEMA}" CASCADE`);
@@ -133,47 +120,6 @@ describe('the ops roles migration and a busy "User" table', () => {
 
   it('the file sets lock_timeout before its first statement and resets it at the end', () => {
     const sql = require('fs').readFileSync(MIGRATION, 'utf8');
-    const statements = sql.split('\n').filter((line) => line.trim() && !line.trim().startsWith('--'));
-    assert.match(statements[0], /^SET lock_timeout = '\d+s';$/);
-    assert.equal(statements[statements.length - 1], 'RESET lock_timeout;');
-  });
-});
-
-describe('the attestation claims migration and a busy "PurchaseOrder" table', () => {
-  it('fails within its lock_timeout while a reader holds "PurchaseOrder", and changes nothing', async () => {
-    let release;
-    const released = new Promise((resolve) => { release = resolve; });
-    let locked;
-    const holding = new Promise((resolve) => { locked = resolve; });
-    const reader = prisma.$transaction(async (tx) => {
-      await tx.$executeRawUnsafe(`LOCK TABLE "${SCHEMA}"."PurchaseOrder" IN ACCESS SHARE MODE`);
-      locked();
-      await released;
-    }, { maxWait: 10000, timeout: 60000 });
-    try {
-      await holding;
-      const result = await applyMigration({ file: CLAIMS_MIGRATION, killAfterMs: 20000 });
-      assert.notEqual(result.code, 0, 'the migration did not apply while "PurchaseOrder" was locked');
-      assert.notEqual(result.code, null, 'it failed by itself instead of waiting for the reader');
-      assert.match(result.output, /55P03|lock timeout/i);
-      assert.ok(result.ms < 15000, `failed fast (${result.ms} ms)`);
-    } finally {
-      release();
-      await reader;
-    }
-    assert.deepEqual(await scratchColumns('PurchaseOrder'), ['id']);
-    assert.deepEqual(await scratchColumns('DisbursementItem'), ['id'], 'one transaction: nothing applied');
-  });
-
-  it('applies once the lock is gone: one claim column on each table', async () => {
-    const result = await applyMigration({ file: CLAIMS_MIGRATION });
-    assert.equal(result.code, 0, result.output);
-    assert.deepEqual(await scratchColumns('PurchaseOrder'), ['attestationClaimedAt', 'id']);
-    assert.deepEqual(await scratchColumns('DisbursementItem'), ['id', 'reconcileClaimedAt']);
-  });
-
-  it('the file sets lock_timeout before its first statement and resets it at the end', () => {
-    const sql = require('fs').readFileSync(CLAIMS_MIGRATION, 'utf8');
     const statements = sql.split('\n').filter((line) => line.trim() && !line.trim().startsWith('--'));
     assert.match(statements[0], /^SET lock_timeout = '\d+s';$/);
     assert.equal(statements[statements.length - 1], 'RESET lock_timeout;');

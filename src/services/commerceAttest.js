@@ -182,21 +182,15 @@ async function buildReceiptForOrder(order) {
   });
 }
 
-function attestationData({ payload, attestationHash, attestationTxHash }) {
-  return {
-    attestationPayload: payload,
-    attestationHash,
-    attestationTxHash: attestationTxHash || null,
-    attestedAt: new Date(),
-  };
-}
-
 /**
  * Only one caller at a time may send an order's attestation on chain: the claim sets
- * `attestationClaimedAt` on an order that has no attestation tx hash and no live claim, with a
- * conditional update, so of two calls at once (two attests, or a payment confirm and a manual
- * attest) exactly one wins and the other sends nothing (409 ATTESTATION_IN_FLIGHT). The claim is
- * released when the chain call returns. One left behind by a crash is taken over after
+ * `attestationClaimedAt` on an order whose attestation tx hash is still the value this call read
+ * (none, or a stored value that is not a tx hash) and that has no live claim, with a conditional
+ * update, so of two calls at once (two attests, or a payment confirm and a manual attest) exactly
+ * one wins and the other sends nothing (409 ATTESTATION_IN_FLIGHT). The claim is released once the
+ * result is stored, or when the chain call throws. If storing the result fails after the chain
+ * call, the claim is kept on purpose: the attestation may already be on chain, so no call sends
+ * again until the claim goes stale. One left behind by a crash is taken over after
  * ATTEST_CLAIM_STALE_MS (the chain call itself gives up within about a minute).
  */
 const ATTEST_CLAIM_STALE_MS = 15 * 60 * 1000;
@@ -208,13 +202,17 @@ function attestationInFlight() {
   });
 }
 
-/** Claim the order's chain send with `db` (a transaction client or prisma). True when this call won. */
-async function claimAttestation(db, orderId, claimedAt) {
+/**
+ * Claim the order's chain send with `db` (prisma, or the transaction that also writes the ops
+ * audit row). `readTxHash` is the attestation tx hash this call read: a tx hash stored since then
+ * (by another call) makes the claim fail. True when this call won.
+ */
+async function claimAttestationWith(db, orderId, readTxHash, claimedAt) {
   const staleBefore = new Date(claimedAt.getTime() - ATTEST_CLAIM_STALE_MS);
   const claimed = await db.purchaseOrder.updateMany({
     where: {
       id: orderId,
-      attestationTxHash: null,
+      attestationTxHash: readTxHash ?? null,
       OR: [{ attestationClaimedAt: null }, { attestationClaimedAt: { lt: staleBefore } }],
     },
     data: { attestationClaimedAt: claimedAt },
@@ -222,19 +220,9 @@ async function claimAttestation(db, orderId, claimedAt) {
   return claimed.count === 1;
 }
 
-/**
- * After the chain call: store the tx hash it returned (unless one is stored meanwhile) and release
- * this call's claim. Returns the order as it now is.
- */
-async function finishClaimedAttestation(orderId, claimedAt, chain) {
-  if (chain && chain.ok && looksLikeTxHash(chain.txHash)) {
-    await prisma.purchaseOrder.updateMany({
-      where: { id: orderId, attestationTxHash: null },
-      data: { attestationTxHash: chain.txHash, attestedAt: new Date() },
-    });
-  }
-  await releaseAttestationClaim(orderId, claimedAt);
-  return prisma.purchaseOrder.findUnique({ where: { id: orderId } });
+/** claimAttestationWith on prisma. */
+async function claimAttestation(orderId, readTxHash, claimedAt) {
+  return claimAttestationWith(prisma, orderId, readTxHash, claimedAt);
 }
 
 async function releaseAttestationClaim(orderId, claimedAt) {
@@ -254,6 +242,15 @@ async function sendClaimedAttestation(orderId, claimedAt, attestationHash) {
   }
 }
 
+function attestationData({ payload, attestationHash, attestationTxHash }) {
+  return {
+    attestationPayload: payload,
+    attestationHash,
+    attestationTxHash: attestationTxHash || null,
+    attestedAt: new Date(),
+  };
+}
+
 /** Store the attestation (no audit: the caller is not an ops route). */
 async function persistAttestation(orderId, attestation) {
   const updated = await prisma.purchaseOrder.update({
@@ -263,32 +260,51 @@ async function persistAttestation(orderId, attestation) {
   return publicAttestation(updated);
 }
 
+/** The order.attest audit row of an ops attestation, written with `tx`. */
+function auditAttestation(tx, audit, order, { attestationHash, attestationTxHash, submitted, chainSend }) {
+  return audit(tx, {
+    target: { type: 'order', id: order.id, label: order.orderNumber || null },
+    detail: {
+      attestationHash,
+      attestationTxHash: attestationTxHash || null,
+      attestationTxHashBefore: order.attestationTxHash || null,
+      txHashSubmitted: submitted,
+      chainSend,
+    },
+  });
+}
+
 /**
- * An ops attestation: the receipt, its hash, any proven or stored tx hash and the audit row commit
- * in one transaction BEFORE the chain call, as payouts do. A failed audit write therefore changes
- * nothing and sends nothing; the row records whether a chain submission follows. The tx hash that
- * submission returns is stored on the order afterwards (the row stays as written: append-only).
+ * An ops attestation that sends nothing (a proven or already stored tx hash): the attestation and
+ * its audit row commit in one transaction, so a failed audit write stores nothing.
  */
-async function persistAuditedAttestation(order, attestation, { audit, submitted, chainSend, claimedAt }) {
+async function persistAuditedAttestation(order, attestation, { audit, submitted }) {
   return prisma.$transaction(async (tx) => {
-    // A chain send first claims the order, in the same transaction as its audit row: a lost claim
-    // writes nothing and sends nothing; a refused row releases the claim with everything else.
-    if (chainSend && !(await claimAttestation(tx, order.id, claimedAt))) throw attestationInFlight();
     const updated = await tx.purchaseOrder.update({
       where: { id: order.id },
       data: attestationData(attestation),
     });
-    await audit(tx, {
-      target: { type: 'order', id: order.id, label: order.orderNumber || null },
-      detail: {
-        attestationHash: attestation.attestationHash,
-        attestationTxHash: attestation.attestationTxHash || null,
-        attestationTxHashBefore: order.attestationTxHash || null,
-        txHashSubmitted: submitted,
-        chainSend,
-      },
+    await auditAttestation(tx, audit, order, {
+      ...attestation, submitted, chainSend: false,
     });
-    return updated;
+    return publicAttestation(updated);
+  });
+}
+
+/**
+ * An ops attestation that sends: the claim (claimAttestationWith, the same conditional update as
+ * every other caller) and the audit row commit in one transaction BEFORE the chain call, as
+ * payouts do. A lost claim writes no row and sends nothing (409 ATTESTATION_IN_FLIGHT); a refused
+ * row leaves the claim unset and sends nothing. The row records that a chain submission follows;
+ * the result is stored after the chain call exactly as for the other callers (the row stays as
+ * written: append-only).
+ */
+async function claimAuditedAttestation(order, readTxHash, claimedAt, { audit, attestationHash, submitted }) {
+  await prisma.$transaction(async (tx) => {
+    if (!(await claimAttestationWith(tx, order.id, readTxHash, claimedAt))) throw attestationInFlight();
+    await auditAttestation(tx, audit, order, {
+      attestationHash, attestationTxHash: null, submitted, chainSend: true,
+    });
   });
 }
 
@@ -303,6 +319,10 @@ function attestResult(order, saved, { chain, proof }) {
   };
 }
 
+/**
+ * Attest a paid order. With `audit` (an ops route's req.auditChange), the call writes one
+ * order.attest row: with the claim before a chain send, or with the stored attestation otherwise.
+ */
 async function attestPaidOrder(orderId, { txHash, submittedBy, audit } = {}) {
   const order = await loadOrderForAttest(orderId);
   if (!order) {
@@ -318,47 +338,38 @@ async function attestPaidOrder(orderId, { txHash, submittedBy, audit } = {}) {
   const attestationTxHash = proof
     ? proof.txHash
     : (looksLikeTxHash(order.attestationTxHash) ? order.attestationTxHash : null);
-  let chain = null;
-
-  if (audit) {
-    const chainSend = !attestationTxHash;
-    const claimedAt = new Date();
-    let row = await persistAuditedAttestation(order, { payload, attestationHash, attestationTxHash }, {
-      audit,
-      submitted: Boolean(proof),
-      chainSend,
-      claimedAt,
-    });
-    if (chainSend) {
-      chain = await sendClaimedAttestation(order.id, claimedAt, attestationHash);
-      row = await finishClaimedAttestation(order.id, claimedAt, chain);
-    }
-    return attestResult(order, publicAttestation(row), { chain, proof });
-  }
 
   if (!attestationTxHash) {
+    // A chain send: claimed first, so a concurrent caller sends nothing. The attestation is stored
+    // only while this call still holds its claim and no tx hash was stored by another path since
+    // the read; it replaces a stored value that is not a tx hash. Then the claim is released.
+    const readTxHash = order.attestationTxHash ?? null;
     const claimedAt = new Date();
-    if (!(await claimAttestation(prisma, order.id, claimedAt))) throw attestationInFlight();
-    chain = await sendClaimedAttestation(order.id, claimedAt, attestationHash);
+    if (audit) {
+      await claimAuditedAttestation(order, readTxHash, claimedAt, { audit, attestationHash, submitted: false });
+    } else if (!(await claimAttestation(order.id, readTxHash, claimedAt))) {
+      throw attestationInFlight();
+    }
+    const chain = await sendClaimedAttestation(order.id, claimedAt, attestationHash);
     await prisma.purchaseOrder.updateMany({
-      where: { id: order.id, attestationClaimedAt: claimedAt },
+      where: { id: order.id, attestationClaimedAt: claimedAt, attestationTxHash: readTxHash },
       data: {
         attestationPayload: payload,
         attestationHash,
         attestedAt: new Date(),
-        ...(chain.ok && looksLikeTxHash(chain.txHash) ? { attestationTxHash: chain.txHash } : {}),
+        attestationTxHash: chain.ok && looksLikeTxHash(chain.txHash) ? chain.txHash : null,
       },
     });
-    const row = await finishClaimedAttestation(order.id, claimedAt, null);
+    await releaseAttestationClaim(order.id, claimedAt);
+    const row = await prisma.purchaseOrder.findUnique({ where: { id: order.id } });
     return attestResult(order, publicAttestation(row), { chain, proof });
   }
 
-  const saved = await persistAttestation(order.id, {
-    payload,
-    attestationHash,
-    attestationTxHash,
-  });
-  return attestResult(order, saved, { chain, proof });
+  const attestation = { payload, attestationHash, attestationTxHash };
+  const saved = audit
+    ? await persistAuditedAttestation(order, attestation, { audit, submitted: Boolean(proof) })
+    : await persistAttestation(order.id, attestation);
+  return attestResult(order, saved, { chain: null, proof });
 }
 
 async function attestPaidOrderSafe(orderId, options) {
@@ -390,4 +401,11 @@ module.exports = {
   verifySubmittedTxHash,
   attestPaidOrder,
   attestPaidOrderSafe,
+  // The same claim, and the same tx hash rule, guard the procurement order attestation
+  // (procurementService.attestOrder).
+  looksLikeTxHash,
+  attestationInFlight,
+  claimAttestation,
+  releaseAttestationClaim,
+  sendClaimedAttestation,
 };

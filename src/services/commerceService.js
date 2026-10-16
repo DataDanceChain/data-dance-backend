@@ -706,71 +706,59 @@ async function recordPayment(user, {
   return payment;
 }
 
-async function confirmPayment(user, paymentId) {
-  const payment = await prisma.payment.findUnique({
-    where: { id: paymentId },
-    include: { invoice: true },
+/*
+ * Payment decisions (confirm, reject) by the payee and by ops.
+ *
+ * A payment is decided once: only a 'pending' payment moves, to 'confirmed' or to 'rejected', with
+ * a conditional update in one transaction that also moves its balance entry (only from PENDING)
+ * and settles its invoice. Of two decisions at once exactly one applies; the other changes
+ * nothing. A decision that finds the payment already decided answers:
+ *   - the same decision (a repeat): the payment as it is, nothing changed (`changed: false`);
+ *   - a reject of a confirmed payment: 409 PAYMENT_ALREADY_CONFIRMED;
+ *   - anything else (a confirm of a rejected payment): 409 payment_not_pending.
+ * Only the call that changed the payment reports `changed: true`, so what follows a confirmation
+ * (the order's attestation, in the controllers) runs for that call alone.
+ */
+const PAYMENT_DECISIONS = {
+  confirm: { status: 'confirmed', ledgerStatus: 'COMPLETED', verb: 'confirmed' },
+  reject: { status: 'rejected', ledgerStatus: 'FAILED', verb: 'rejected' },
+};
+
+function paymentNotPending(verb) {
+  return Object.assign(new Error(`Only a pending payment can be ${verb}.`), {
+    statusCode: 409,
+    code: 'payment_not_pending',
   });
-  if (!payment) {
-    throw Object.assign(new Error('Payment not found'), { statusCode: 404 });
-  }
-  if (payment.status === 'confirmed') {
-    return getPaymentById(paymentId, user);
-  }
-
-  const isTopUp = payment.method === 'top_up';
-  if (isTopUp) {
-    throw Object.assign(new Error('Top-ups are confirmed by DataDance ops'), { statusCode: 403 });
-  }
-  const canConfirm = payment.payeeId === user.id;
-  if (!canConfirm) {
-    throw Object.assign(new Error('Only the receiving party can confirm this payment'), { statusCode: 403 });
-  }
-
-  if (payment.invoiceId) {
-    const confirmedPaid = await confirmedPaidForInvoice(prisma, payment.invoiceId, payment.id);
-    payment.matchStatus = computeMatchStatus(payment.invoice.total, confirmedPaid, payment.amount);
-  } else if (isTopUp) {
-    payment.matchStatus = 'matched';
-  }
-
-  const updated = await prisma.payment.update({
-    where: { id: paymentId },
-    data: {
-      status: 'confirmed',
-      matchStatus: payment.matchStatus,
-      paidAt: payment.paidAt || new Date(),
-    },
-  });
-
-  if (payment.organizationTransactionId) {
-    await prisma.organizationTransaction.update({
-      where: { id: payment.organizationTransactionId },
-      data: { status: 'COMPLETED' },
-    });
-  }
-
-  if (payment.invoiceId) {
-    await refreshInvoiceSettlement(prisma, payment.invoiceId);
-  }
-
-  return getPaymentById(updated.id, user);
 }
 
-async function loadOpsPayment(paymentId) {
-  const payment = await prisma.payment.findUnique({
-    where: { id: paymentId },
-    include: PAYMENT_INCLUDE,
+function paymentAlreadyConfirmed() {
+  return Object.assign(new Error('This payment is already confirmed and cannot be rejected.'), {
+    statusCode: 409,
+    code: 'PAYMENT_ALREADY_CONFIRMED',
   });
-  if (!payment) {
-    throw Object.assign(new Error('Payment not found'), { statusCode: 404 });
-  }
-  return payment;
 }
 
-function mergeLedgerMeta(existing, extra) {
-  const base = existing && typeof existing === 'object' && !Array.isArray(existing) ? existing : {};
-  return { ...base, ...extra };
+/** A decision on a payment that is no longer pending: false (a repeat, nothing changed) or a 409. */
+function decidedAlready(status, decision) {
+  if (status === PAYMENT_DECISIONS[decision].status) return false;
+  if (decision === 'reject' && status === 'confirmed') throw paymentAlreadyConfirmed();
+  throw paymentNotPending(PAYMENT_DECISIONS[decision].verb);
+}
+
+/**
+ * Locks the invoice row until the transaction ends. Every decision on a payment of the invoice
+ * takes it before it reads the payment, so decisions on one invoice run one after another and each
+ * settlement (refreshInvoiceSettlement) counts every decision committed before it.
+ */
+async function lockInvoice(tx, invoiceId) {
+  await tx.$executeRaw`SELECT 1 FROM "Invoice" WHERE id = ${invoiceId} FOR UPDATE`;
+}
+
+/** The match status of a payment confirmed now, against what is already confirmed on its invoice. */
+async function matchStatusOnConfirm(tx, payment) {
+  if (!payment.invoiceId) return payment.method === 'top_up' ? 'matched' : payment.matchStatus;
+  const confirmedPaid = await confirmedPaidForInvoice(tx, payment.invoiceId, payment.id);
+  return computeMatchStatus(payment.invoice.total, confirmedPaid, payment.amount);
 }
 
 /** The audit detail of an ops payment decision (no free text, no party details). */
@@ -793,127 +781,145 @@ function paymentAuditEntry(payment, statusAfter, reason = null) {
 }
 
 /**
- * Ops confirms a payment: the payment, its top-up ledger row, the invoice settlement and (when
- * `audit` is given) the audit row commit together. An already confirmed payment is left as it is
- * and writes no row; of two confirmations at once, only one changes it.
- * Answers { payment, changed }: `changed` is true only for the call that confirmed it, so what
- * follows a confirmation (the order's attestation) runs once, for that call.
+ * Applies `decision` ('confirm' | 'reject') to a payment for exactly one caller, in one
+ * transaction: the payment's invoice is locked first, the payment is read after the lock, it moves
+ * only from 'pending' (a conditional update), its balance entry only from PENDING (with
+ * `ledgerMeta` merged into the entry's metadata when given), and the invoice is settled from the
+ * result. A confirm sets `paidAt` to `at` when the payment has none; `notes` replaces the
+ * payment's notes on a reject. Answers true when this call changed the payment, false for a repeat
+ * of the decision already made; other outcomes throw (409).
+ *
+ * `audit` (the ops routes' req.auditChange) writes the ops audit row in the same transaction, only
+ * when this call changed the payment: a failed audit write changes nothing, and a repeat or a
+ * refused decision writes no row.
  */
-async function confirmPaymentByOps(paymentId, operator = 'ops', { audit } = {}) {
-  const confirmedAt = new Date();
-  const changed = await prisma.$transaction(async (tx) => {
-    const payment = await tx.payment.findUnique({
-      where: { id: paymentId },
-      include: { invoice: true },
-    });
-    if (!payment) {
-      throw Object.assign(new Error('Payment not found'), { statusCode: 404 });
-    }
-    if (payment.status === 'confirmed') return false;
+async function decidePayment(paymentId, decision, {
+  notes, ledgerMeta, at = new Date(), audit,
+} = {}) {
+  const { status, ledgerStatus } = PAYMENT_DECISIONS[decision];
+  return prisma.$transaction(async (tx) => {
+    const notFound = () => Object.assign(new Error('Payment not found'), { statusCode: 404 });
+    const ref = await tx.payment.findUnique({ where: { id: paymentId }, select: { invoiceId: true } });
+    if (!ref) throw notFound();
+    if (ref.invoiceId) await lockInvoice(tx, ref.invoiceId);
+    const payment = await tx.payment.findUnique({ where: { id: paymentId }, include: { invoice: true } });
+    if (!payment) throw notFound();
+    if (payment.status !== 'pending') return decidedAlready(payment.status, decision);
 
-    let { matchStatus } = payment;
-    if (payment.invoiceId) {
-      const confirmedPaid = await confirmedPaidForInvoice(tx, payment.invoiceId, payment.id);
-      matchStatus = computeMatchStatus(payment.invoice.total, confirmedPaid, payment.amount);
-    } else if (payment.method === 'top_up') {
-      matchStatus = 'matched';
-    }
-
-    const claimed = await tx.payment.updateMany({
-      where: { id: paymentId, status: { not: 'confirmed' } },
-      data: {
-        status: 'confirmed',
-        matchStatus,
-        paidAt: payment.paidAt || confirmedAt,
-      },
+    const fields = decision === 'confirm'
+      ? {
+        status,
+        matchStatus: await matchStatusOnConfirm(tx, payment),
+        paidAt: payment.paidAt || at,
+      }
+      : { status, matchStatus: 'unmatched', notes: notes || payment.notes };
+    const moved = await tx.payment.updateMany({
+      where: { id: paymentId, status: 'pending' },
+      data: fields,
     });
-    if (claimed.count !== 1) return false;
+    if (moved.count !== 1) {
+      const now = await tx.payment.findUnique({ where: { id: paymentId }, select: { status: true } });
+      return decidedAlready(now ? now.status : null, decision);
+    }
 
     if (payment.organizationTransactionId) {
-      const row = await tx.organizationTransaction.findUnique({
-        where: { id: payment.organizationTransactionId },
-      });
-      await tx.organizationTransaction.update({
-        where: { id: payment.organizationTransactionId },
-        data: {
-          status: 'COMPLETED',
-          metadata: mergeLedgerMeta(row?.metadata, {
-            confirmedBy: operator,
-            confirmedAt: confirmedAt.toISOString(),
-          }),
-        },
+      let metadata;
+      if (ledgerMeta) {
+        const row = await tx.organizationTransaction.findUnique({
+          where: { id: payment.organizationTransactionId },
+        });
+        metadata = mergeLedgerMeta(row?.metadata, ledgerMeta);
+      }
+      await tx.organizationTransaction.updateMany({
+        where: { id: payment.organizationTransactionId, status: 'PENDING' },
+        data: { status: ledgerStatus, ...(metadata ? { metadata } : {}) },
       });
     }
     if (payment.invoiceId) {
       await refreshInvoiceSettlement(tx, payment.invoiceId);
     }
-    if (audit) await audit(tx, paymentAuditEntry(payment, 'confirmed'));
+    if (audit) {
+      const reason = decision === 'reject' && typeof notes === 'string' && notes.trim() ? notes.trim() : null;
+      await audit(tx, paymentAuditEntry(payment, status, reason));
+    }
     return true;
+  });
+}
+
+/**
+ * The payee confirms a payment (decidePayment). Answers { payment, changed }: `changed` is true only
+ * for the call that confirmed it. A payment that is already confirmed is answered as it is.
+ */
+async function confirmPayment(user, paymentId) {
+  const payment = await prisma.payment.findUnique({
+    where: { id: paymentId },
+  });
+  if (!payment) {
+    throw Object.assign(new Error('Payment not found'), { statusCode: 404 });
+  }
+  if (payment.status === 'confirmed') {
+    return { payment: await getPaymentById(paymentId, user), changed: false };
+  }
+
+  if (payment.method === 'top_up') {
+    throw Object.assign(new Error('Top-ups are confirmed by DataDance ops'), { statusCode: 403 });
+  }
+  const canConfirm = payment.payeeId === user.id;
+  if (!canConfirm) {
+    throw Object.assign(new Error('Only the receiving party can confirm this payment'), { statusCode: 403 });
+  }
+
+  const changed = await decidePayment(paymentId, 'confirm');
+  return { payment: await getPaymentById(paymentId, user), changed };
+}
+
+async function loadOpsPayment(paymentId) {
+  const payment = await prisma.payment.findUnique({
+    where: { id: paymentId },
+    include: PAYMENT_INCLUDE,
+  });
+  if (!payment) {
+    throw Object.assign(new Error('Payment not found'), { statusCode: 404 });
+  }
+  return payment;
+}
+
+function mergeLedgerMeta(existing, extra) {
+  const base = existing && typeof existing === 'object' && !Array.isArray(existing) ? existing : {};
+  return { ...base, ...extra };
+}
+
+/**
+ * Ops confirms a payment (decidePayment); the balance entry records who confirmed it and when, and
+ * `audit` writes the audit row in the same transaction. Answers { payment, changed }: `changed` is
+ * true only for the call that confirmed it.
+ */
+async function confirmPaymentByOps(paymentId, operator = 'ops', { audit } = {}) {
+  const confirmedAt = new Date();
+  const changed = await decidePayment(paymentId, 'confirm', {
+    at: confirmedAt,
+    ledgerMeta: { confirmedBy: operator, confirmedAt: confirmedAt.toISOString() },
+    audit,
   });
   return { payment: await loadOpsPayment(paymentId), changed };
 }
 
-function alreadyConfirmed() {
-  return Object.assign(
-    new Error('This payment is already confirmed and cannot be rejected.'),
-    { statusCode: 409, code: 'PAYMENT_ALREADY_CONFIRMED' },
-  );
-}
-
 /**
- * Ops rejects a payment: the payment, its ledger row (FAILED), the invoice settlement and (when
- * `audit` is given) the audit row commit together. A confirmed payment is refused (409
- * PAYMENT_ALREADY_CONFIRMED), also when a confirmation lands while this call runs: its completed
- * ledger row is never turned to FAILED here (a reversal is a separate action). Rejecting a payment
- * that is already rejected changes nothing: its notes stay, and no ledger change or audit row is
- * written (also when two rejects run at once).
+ * Ops rejects a payment (decidePayment); the balance entry records who rejected it and when, and
+ * `audit` writes the audit row in the same transaction. A confirmed payment is refused (409
+ * PAYMENT_ALREADY_CONFIRMED), also when a confirmation lands while this call runs; rejecting a
+ * rejected payment changes nothing (its notes stay, no audit row).
  */
 async function rejectPaymentByOps(paymentId, notes, operator = 'ops', { audit } = {}) {
-  await prisma.$transaction(async (tx) => {
-    const payment = await tx.payment.findUnique({ where: { id: paymentId } });
-    if (!payment) {
-      throw Object.assign(new Error('Payment not found'), { statusCode: 404 });
-    }
-    if (payment.status === 'confirmed') throw alreadyConfirmed();
-    if (payment.status === 'rejected') return;
-    const claimed = await tx.payment.updateMany({
-      where: { id: paymentId, status: { notIn: ['confirmed', 'rejected'] } },
-      data: {
-        status: 'rejected',
-        matchStatus: 'unmatched',
-        notes: notes || payment.notes,
-      },
-    });
-    if (claimed.count !== 1) {
-      // Another call moved it meanwhile: a confirmation is refused, a rejection is this one's no-op.
-      const now = await tx.payment.findUnique({ where: { id: paymentId }, select: { status: true } });
-      if (now && now.status === 'rejected') return;
-      throw alreadyConfirmed();
-    }
-    if (payment.organizationTransactionId) {
-      const row = await tx.organizationTransaction.findUnique({
-        where: { id: payment.organizationTransactionId },
-      });
-      await tx.organizationTransaction.update({
-        where: { id: payment.organizationTransactionId },
-        data: {
-          status: 'FAILED',
-          metadata: mergeLedgerMeta(row?.metadata, {
-            rejectedBy: operator,
-            rejectedAt: new Date().toISOString(),
-          }),
-        },
-      });
-    }
-    if (payment.invoiceId) {
-      await refreshInvoiceSettlement(tx, payment.invoiceId);
-    }
-    const reason = typeof notes === 'string' && notes.trim() ? notes.trim() : null;
-    if (audit) await audit(tx, paymentAuditEntry(payment, 'rejected', reason));
+  await decidePayment(paymentId, 'reject', {
+    notes,
+    ledgerMeta: { rejectedBy: operator, rejectedAt: new Date().toISOString() },
+    audit,
   });
   return loadOpsPayment(paymentId);
 }
 
+/** The payee rejects a payment (decidePayment), with the same outcomes as an ops reject. */
 async function rejectPayment(user, paymentId, notes) {
   const payment = await prisma.payment.findUnique({ where: { id: paymentId } });
   if (!payment) {
@@ -922,23 +928,7 @@ async function rejectPayment(user, paymentId, notes) {
   if (payment.payeeId !== user.id) {
     throw Object.assign(new Error('Only the receiving party can reject this payment'), { statusCode: 403 });
   }
-  await prisma.payment.update({
-    where: { id: paymentId },
-    data: {
-      status: 'rejected',
-      matchStatus: 'unmatched',
-      notes: notes || payment.notes,
-    },
-  });
-  if (payment.organizationTransactionId) {
-    await prisma.organizationTransaction.update({
-      where: { id: payment.organizationTransactionId },
-      data: { status: 'FAILED' },
-    });
-  }
-  if (payment.invoiceId) {
-    await refreshInvoiceSettlement(prisma, payment.invoiceId);
-  }
+  await decidePayment(paymentId, 'reject', { notes });
   return getPaymentById(paymentId, user);
 }
 
