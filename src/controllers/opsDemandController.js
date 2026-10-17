@@ -61,6 +61,7 @@ exports.fulfill = async (req, res) => {
   try {
     const data = await demandService.fulfillDemand(req.params.id, actorId(req), {
       dataNFTId: req.body?.dataNFTId,
+      audit: req.auditChange,
     });
     return res.json({ status: 'success', data });
   } catch (error) {

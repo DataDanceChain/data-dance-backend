@@ -360,6 +360,28 @@ const rateLimiters = {
     keyGenerator: keyGenerators.ip
   }),
 
+  // POST /api/ops/auth/exchange — 10 failures per 15 minutes per IP; successes are free. Its own
+  // bucket: a stale or double-submitted sign-in code never locks the password login out, nor the
+  // other way round. Codes are single-use, short-lived and bound to a PKCE verifier.
+  opsSignInExchange: createRateLimiter({
+    name: 'opsSignInExchange',
+    windowMs: 15 * 60 * 1000,
+    max: 10,
+    message: 'Too many failed sign-in attempts, please try again later.',
+    skipSuccessfulRequests: true,
+    keyGenerator: keyGenerators.ip
+  }),
+
+  // POST /api/ops/auth/code — ops sign-in codes, per signed-in account (after protect)
+  opsSignInCode: createRateLimiter({
+    name: 'opsSignInCode',
+    windowMs: 60 * 1000,
+    max: 5,
+    message: 'Too many sign-in attempts. Please wait a minute.',
+    keyGenerator: keyGenerators.userOrIp,
+    code: 'RATE_LIMITED'
+  }),
+
   // POST /api/life-context/refined — saving a portrait extract, per signed-in user (after protect).
   // The App saves after a distillation or when it reopens the page; ten a minute covers that.
   lifeContextSave: createRateLimiter({

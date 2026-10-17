@@ -156,7 +156,8 @@ before(async () => { server = await listenLoopback(app); });
 
 const RUN = `ndc${crypto.randomBytes(3).toString('hex')}`;
 const id = (name) => `${RUN}-${name}`;
-const OPS_AUTH = `Bearer ${jwt.sign({ type: 'ops_admin', sub: `${RUN}-admin` }, process.env.JWT_SECRET, { expiresIn: '10m' })}`;
+// A personal ops session of a ddc_admin account (seeded in before()).
+const OPS_AUTH = `Bearer ${jwt.sign({ type: 'ops_admin', kind: 'user', sub: `${RUN}-admin` }, process.env.JWT_SECRET, { expiresIn: '10m' })}`;
 const userAuth = (userId) => `Bearer ${jwt.sign({ id: userId }, process.env.JWT_SECRET, { expiresIn: '10m' })}`;
 
 const ops = (route, body = {}) => request(server).post(`/api/ops${route}`).set('Authorization', OPS_AUTH).send(body);
@@ -191,6 +192,11 @@ async function cleanup() {
   await prisma.organizationTransaction.deleteMany({ where: { userId: { in: users } } });
   await prisma.user.deleteMany({ where: { id: { in: users } } });
 }
+
+before(async () => {
+  const admin = await user('admin', { organization: false });
+  await prisma.userRoleGrant.create({ data: { userId: admin.id, role: 'ddc_admin', grantedBy: 'script', reason: 'seed for test' } });
+});
 
 after(async () => {
   await new Promise((resolve) => server.close(resolve));
@@ -311,6 +317,13 @@ describe('payment decisions: one decision per payment', () => {
       }
       const decidedBy = ['confirmedBy', 'rejectedBy'].filter((key) => key in (entry.metadata || {}));
       assert.equal(decidedBy.length, 1, `round ${round}: one decision recorded on the entry (${decidedBy})`);
+      // #55: the audit row is written in the decision's transaction, by the call that changed it.
+      const audits = await prisma.opsAuditLog.findMany({ where: { targetType: 'payment', targetId: payment.id } });
+      assert.deepEqual(
+        audits.map((a) => [a.action, a.detail.statusBefore, a.detail.statusAfter]),
+        [[row.status === 'confirmed' ? 'payment.confirm' : 'payment.reject', 'pending', row.status]],
+        `round ${round}: one audit row, from the call that applied`,
+      );
     }
   });
 
@@ -510,6 +523,9 @@ describe('merchant credit with an Idempotency-Key', () => {
     assert.deepEqual(results.map((r) => Boolean(r.body.data.replayed)).sort(), [false, true]);
     assert.deepEqual(results.map((r) => r.body.data.balance), [25, 25]);
     assert.equal(gate.arrived(), 2, 'both calls reached their write: the database refused the second');
+    // #55: the refused write rolled its audit row back with it; the credit has one row.
+    const audits = await prisma.opsAuditLog.findMany({ where: { action: 'merchant.credit', targetId: merchant.id } });
+    assert.deepEqual(audits.map((a) => a.detail.organizationTransactionId), [results[0].body.data.transaction.id]);
   });
 
   it('a repeat with the same key answers the first credit (replayed: true) and writes nothing', async () => {

@@ -284,11 +284,17 @@ describe('merchant credit Idempotency-Key', () => {
     delete prisma.organizationTransaction;
   });
 
+  // The audit rows the credit writes in its transaction (#55's req.auditChange, mounted by the
+  // ops router on this route).
+  let audits;
+  beforeEach(() => { audits = []; });
+
   function creditReq(body, key) {
     return {
       params: { userId: merchant.id },
       body,
-      opsAdmin: { username: 'ops-1' },
+      opsAdmin: { kind: 'shared', username: 'shared', role: 'shared' },
+      auditChange: async (tx, entry) => { audits.push(entry); return { id: `audit-${audits.length}` }; },
       get: (name) => (name.toLowerCase() === 'idempotency-key' ? key : undefined),
     };
   }
@@ -311,6 +317,11 @@ describe('merchant credit Idempotency-Key', () => {
       assert.equal(res.body.code, 'INVALID_IDEMPOTENCY_KEY');
     }
     assert.equal(prisma.organizationTransaction.rows.length, 4);
+    assert.deepEqual(
+      audits.map((entry) => entry.detail.organizationTransactionId),
+      prisma.organizationTransaction.rows.map((row) => row.id),
+      'one audit row per credit, none for a refused key',
+    );
   });
 
   it('no key (absent or empty) writes a row without one, every time', async () => {
@@ -343,6 +354,7 @@ describe('merchant credit Idempotency-Key', () => {
     assert.equal(res.body.data.transaction.id, 'theirs');
     assert.equal(lookups, 2, 'looked up again after the database refused the row');
     assert.equal(prisma.organizationTransaction.rows.length, 1);
+    assert.equal(audits.length, 0, 'a replay writes no audit row');
   });
 
   it('the same race with another amount answers 409 IDEMPOTENCY_KEY_REUSED', async () => {

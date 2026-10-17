@@ -761,6 +761,25 @@ async function matchStatusOnConfirm(tx, payment) {
   return computeMatchStatus(payment.invoice.total, confirmedPaid, payment.amount);
 }
 
+/** The audit detail of an ops payment decision (no free text, no party details). */
+function paymentAuditEntry(payment, statusAfter, reason = null) {
+  return {
+    target: { type: 'payment', id: payment.id, label: payment.paymentNumber || null },
+    reason,
+    detail: {
+      statusBefore: payment.status,
+      statusAfter,
+      amount: payment.amount,
+      currency: payment.currency || 'USD',
+      method: payment.method,
+      payerId: payment.payerId || null,
+      orderId: payment.orderId || null,
+      invoiceId: payment.invoiceId || null,
+      organizationTransactionId: payment.organizationTransactionId || null,
+    },
+  };
+}
+
 /**
  * Applies `decision` ('confirm' | 'reject') to a payment for exactly one caller, in one
  * transaction: the payment's invoice is locked first, the payment is read after the lock, it moves
@@ -769,8 +788,14 @@ async function matchStatusOnConfirm(tx, payment) {
  * result. A confirm sets `paidAt` to `at` when the payment has none; `notes` replaces the
  * payment's notes on a reject. Answers true when this call changed the payment, false for a repeat
  * of the decision already made; other outcomes throw (409).
+ *
+ * `audit` (the ops routes' req.auditChange) writes the ops audit row in the same transaction, only
+ * when this call changed the payment: a failed audit write changes nothing, and a repeat or a
+ * refused decision writes no row.
  */
-async function decidePayment(paymentId, decision, { notes, ledgerMeta, at = new Date() } = {}) {
+async function decidePayment(paymentId, decision, {
+  notes, ledgerMeta, at = new Date(), audit,
+} = {}) {
   const { status, ledgerStatus } = PAYMENT_DECISIONS[decision];
   return prisma.$transaction(async (tx) => {
     const notFound = () => Object.assign(new Error('Payment not found'), { statusCode: 404 });
@@ -812,6 +837,10 @@ async function decidePayment(paymentId, decision, { notes, ledgerMeta, at = new 
     }
     if (payment.invoiceId) {
       await refreshInvoiceSettlement(tx, payment.invoiceId);
+    }
+    if (audit) {
+      const reason = decision === 'reject' && typeof notes === 'string' && notes.trim() ? notes.trim() : null;
+      await audit(tx, paymentAuditEntry(payment, status, reason));
     }
     return true;
   });
@@ -861,27 +890,31 @@ function mergeLedgerMeta(existing, extra) {
 }
 
 /**
- * Ops confirms a payment (decidePayment); the balance entry records who confirmed it and when.
- * Answers { payment, changed }: `changed` is true only for the call that confirmed it.
+ * Ops confirms a payment (decidePayment); the balance entry records who confirmed it and when, and
+ * `audit` writes the audit row in the same transaction. Answers { payment, changed }: `changed` is
+ * true only for the call that confirmed it.
  */
-async function confirmPaymentByOps(paymentId, operator = 'ops') {
+async function confirmPaymentByOps(paymentId, operator = 'ops', { audit } = {}) {
   const confirmedAt = new Date();
   const changed = await decidePayment(paymentId, 'confirm', {
     at: confirmedAt,
     ledgerMeta: { confirmedBy: operator, confirmedAt: confirmedAt.toISOString() },
+    audit,
   });
   return { payment: await loadOpsPayment(paymentId), changed };
 }
 
 /**
- * Ops rejects a payment (decidePayment); the balance entry records who rejected it and when. A
- * confirmed payment is refused (409 PAYMENT_ALREADY_CONFIRMED), also when a confirmation lands
- * while this call runs; rejecting a rejected payment changes nothing (its notes stay).
+ * Ops rejects a payment (decidePayment); the balance entry records who rejected it and when, and
+ * `audit` writes the audit row in the same transaction. A confirmed payment is refused (409
+ * PAYMENT_ALREADY_CONFIRMED), also when a confirmation lands while this call runs; rejecting a
+ * rejected payment changes nothing (its notes stay, no audit row).
  */
-async function rejectPaymentByOps(paymentId, notes, operator = 'ops') {
+async function rejectPaymentByOps(paymentId, notes, operator = 'ops', { audit } = {}) {
   await decidePayment(paymentId, 'reject', {
     notes,
     ledgerMeta: { rejectedBy: operator, rejectedAt: new Date().toISOString() },
+    audit,
   });
   return loadOpsPayment(paymentId);
 }

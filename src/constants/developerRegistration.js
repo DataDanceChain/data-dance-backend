@@ -1,17 +1,20 @@
 /**
  * Self-serve SSO client registration switch: SSO_DEVELOPER_REGISTRATION = off | on | allowlist.
  *
- *   off        the default, also when unset or blank. POST /api/developer/sso/clients answers every
- *              caller, signed in or not, 403 registration_closed before any database access, so it
- *              writes nothing. Clients that already exist keep working: sign-in, the token exchange
- *              and the partner API never consult this switch.
+ *   off        the default, also when unset or blank. POST /api/developer/sso/clients answers a
+ *              caller without a token 403 registration_closed before any database access, so it
+ *              writes nothing. A caller with a token goes through the login check: an account with
+ *              the developer or ddc_admin role (src/services/userRoles.js) may still register; any
+ *              other account gets the same 403. Clients that already exist keep working: sign-in,
+ *              the token exchange and the partner API never consult this switch.
  *   on         a signed-in DataDance account may register a client: the route requires a user JWT
  *              (anonymous: 401) and is rate-limited per IP. A self-serve console must send the
  *              user's token.
  *   allowlist  as on (anonymous: 401), but only the accounts named in SSO_DEVELOPER_ALLOWED_EMAILS
- *              may register, and only from a verified login e-mail (below). Every other signed-in
+ *              may register, and only from a verified login e-mail (below). An account with the
+ *              developer or ddc_admin role may also register, as in off. Every other signed-in
  *              account gets the same 403 registration_closed body as off, so the answer never tells
- *              whether an address is on the list. An empty list admits nobody.
+ *              whether an address is on the list. An empty list admits nobody but those roles.
  *
  * SSO_DEVELOPER_ALLOWED_EMAILS: comma-separated DataDance account e-mails, compared trimmed and
  * case-insensitively with the e-mail of the account `protect` loaded (never with anything in the
@@ -187,6 +190,8 @@ function developerRegistrationOpen() {
  * `user` is the account row and `claims` the verified JWT. Never reads the request body.
  *   { allowed: true } | { allowed: false, reason: closed | not_listed | session_not_verified |
  *                                                   connection_not_trusted | email_not_login_identity }
+ * The route adds one allowlist rule on top (src/routes/developerSsoRoutes.js modeDecision): a
+ * session issued before the account's last disable / enable does not count (session_revoked).
  */
 function registrationDecision(user, claims, state = current()) {
   if (state.mode === 'on') return { allowed: true };
