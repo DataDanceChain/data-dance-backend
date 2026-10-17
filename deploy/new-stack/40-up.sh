@@ -33,7 +33,7 @@
 # HOST-HEADER CHECKS (step 7): only when this package's vhosts serve API_HOST and APP_HOST. Before 30-nginx.sh apply has
 #   written them (outcome A runs 40-up.sh first, then the take-over), step 7 says it is deferred, and 30-nginx.sh apply
 #   runs the same checks (common.sh host_checks) right after its reload.
-# MONEY PATH: every field of the "Partner SSO money-path assertions OK" line (nodeEnv, allowedVerifiers=5,
+# MONEY PATH: every field of the "Partner SSO money-path assertions OK" line (nodeEnv, allowedVerifiers=10,
 #   issuer=https://<API_HOST>, consentOrigin=https://<APP_HOST>, web3authVerify, legacyFallback, jwksPinMode,
 #   jwksPins=<served>, sessionSecretSeparate=true) must match
 #   exactly, or the script STOPS (common.sh money_path_fields_check); publicClientRegistration=open is a warning while

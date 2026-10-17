@@ -8,6 +8,7 @@ const {
   publicBatch,
 } = require('../services/disbursement/service');
 const { partnerKeyMatches, partnerKeyFor } = require('../services/disbursement/policy');
+const { describeFunding } = require('../services/disbursement/bscPayout');
 
 function sendError(res, error) {
   const status = error.statusCode || 500;
@@ -53,6 +54,15 @@ async function submitBatch(req, res) {
         batch: publicBatch(result.batch),
       },
     });
+  } catch (error) {
+    sendError(res, error);
+  }
+}
+
+async function showFunding(req, res) {
+  try {
+    const funding = await describeFunding();
+    res.json({ status: 'success', data: funding });
   } catch (error) {
     sendError(res, error);
   }
@@ -136,6 +146,7 @@ async function opsDisburse(req, res) {
 module.exports = {
   requirePartnerKey,
   submitBatch,
+  showFunding,
   showItem,
   retryItem,
   opsList,

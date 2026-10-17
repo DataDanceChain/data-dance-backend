@@ -68,7 +68,7 @@ if [ "$RC" = 1 ] && grep -q '^FAIL no money-path assertion line in the api log' 
 else cat "$W/out"; bad "api_boot_check without a money-path line (rc=$RC)"; fi
 
 # 4. A good boot: both lines printed, API_MONEY_PATH_LINE set, and its fields pass.
-MP="Partner SSO money-path assertions OK: nodeEnv=production web3authVerify=enforce legacyFallback=false allowedVerifiers=5 jwksPinMode=enforce jwksPins=2 sessionSecretSeparate=true issuer=https://$API consentOrigin=https://$APP publicClientRegistration=closed developerRegistration=closed"
+MP="Partner SSO money-path assertions OK: nodeEnv=production web3authVerify=enforce legacyFallback=false allowedVerifiers=10 jwksPinMode=enforce jwksPins=2 sessionSecretSeparate=true issuer=https://$API consentOrigin=https://$APP publicClientRegistration=closed developerRegistration=closed"
 run api_boot_check "api-1  | Partner SSO enabled [tge] client=lt-partner-client
 api-1  | $MP"
 if [ "$RC" = 0 ] && grep -qxF "RETURNED API_MONEY_PATH_LINE=$MP" "$W/out" && grep -q "^PASS startup log has 'Partner SSO money-path assertions OK'" "$W/out"; then

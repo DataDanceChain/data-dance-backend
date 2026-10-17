@@ -1077,7 +1077,7 @@ api_boot_check() {
 money_path_fields_check() {
   local tokens want missing=""
   tokens=$(printf '%s\n' "$1" | tr ' ' '\n')
-  for want in "nodeEnv=production" "allowedVerifiers=5" "issuer=https://$API_HOST" "consentOrigin=https://$APP_HOST" \
+  for want in "nodeEnv=production" "allowedVerifiers=10" "issuer=https://$API_HOST" "consentOrigin=https://$APP_HOST" \
               "web3authVerify=enforce" "legacyFallback=false" "jwksPinMode=enforce" "jwksPins=$2" "sessionSecretSeparate=true"; do
     if grep -qxF -- "$want" <<< "$tokens"; then pass "log: $want"; else missing="$missing $want"; fi
   done

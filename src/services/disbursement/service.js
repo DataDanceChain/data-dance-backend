@@ -380,11 +380,13 @@ async function processItem(itemId) {
       failureReason: null,
     });
   } catch (error) {
-    const unconfigured = error.code === 'payout_signer_unconfigured';
+    const unconfigured = error.code === 'payout_signer_unconfigured'
+      || error.code === 'payout_signer_not_dedicated';
+    const needsTopUp = error.code === 'insufficient_usdt' || error.code === 'insufficient_gas';
     return prisma.disbursementItem.update({
       where: { id: existing.id },
       data: {
-        status: unconfigured ? 'accepted' : 'failed',
+        status: unconfigured ? 'accepted' : needsTopUp ? 'held' : 'failed',
         failureReason: error.message || 'BSC payout failed',
       },
       include: { partner: true },

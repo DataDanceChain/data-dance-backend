@@ -407,7 +407,7 @@ setv API_BASE_URL "https://$API_HOST"
 setv JWT_SECRET "$(cat "$SEC/jwt_secret_rehearsal")"
 # 5.1 Web3Auth
 setv WEB3AUTH_CLIENT_ID "$W3A_ID"
-setv WEB3AUTH_ALLOWED_VERIFIERS "$W3A_GOOGLE,$W3A_EMAIL,$W3A_APPLE,$W3A_X,external-wallet"
+setv WEB3AUTH_ALLOWED_VERIFIERS "$W3A_GOOGLE,$W3A_EMAIL,$W3A_APPLE,$W3A_X,web3auth-google-sapphire,web3auth-auth0-email-passwordless-sapphire,web3auth-auth0-apple-sapphire,web3auth-auth0-twitter-sapphire,web3auth,external-wallet"
 setv WEB3AUTH_LEGACY_VERIFIERS ""
 setv WEB3AUTH_EXTERNAL_AUDIENCE ""
 setv WEB3AUTH_VERIFY_MODE enforce

@@ -12,6 +12,8 @@ const { readPartnerConfig, isRetiredPartnerClientId } = require('../constants/pa
 
 const TEMPLATES = new Set([
   'HOME_CARD',
+  // Items inside the Activities page. They use the same card fields as a home tile
+  // and are omitted from the home list, so the directory can change without a new App build.
   'DIRECTORY_ITEM',
   'CONNECT_BOOST',
   'REFERRAL_BOOST',

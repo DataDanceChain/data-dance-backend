@@ -6,6 +6,7 @@ const {
   recordClassForOrigin,
   assertSeparateFromDataUploads,
 } = require('./classify');
+const { networkProfile } = require('./networks');
 
 const BSC_CHAIN_ID = 56;
 const BSC_USDT = '0x55d398326f99059fF775485246999027B3197955';
@@ -49,13 +50,14 @@ function normalizeWallet(address) {
 }
 
 function tokenAddress() {
-  const configured = String(process.env.BSC_USDT_ADDRESS || BSC_USDT).trim();
+  const configured = String(process.env.BSC_USDT_ADDRESS || networkProfile().usdt || BSC_USDT).trim();
   return ethers.isAddress(configured) ? ethers.getAddress(configured) : '';
 }
 
 function chainId() {
   const parsed = Number(process.env.BSC_CHAIN_ID);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : BSC_CHAIN_ID;
+  if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  return networkProfile().chainId || BSC_CHAIN_ID;
 }
 
 function evaluateSend({ amount, walletAddress, monthToDate = 0, token, chain } = {}) {

@@ -15,9 +15,17 @@ const {
   samePayload,
   partnerKeyMatches,
   planWalletBind,
+  chainId,
+  tokenAddress,
 } = require('../src/services/disbursement/policy');
+const { networkName } = require('../src/services/disbursement/networks');
 const { buildDisbursementReceipt, hashDisbursementReceipt } = require('../src/services/disbursement/receipt');
-const { amountToUnits } = require('../src/services/disbursement/bscPayout');
+const {
+  amountToUnits,
+  assessFloat,
+  getPayoutWallet,
+  payoutSignerProblem,
+} = require('../src/services/disbursement/bscPayout');
 
 const wallet = ethers.Wallet.createRandom().address;
 const validated = validatePartnerItems([
@@ -117,5 +125,66 @@ assert.strictEqual(planWalletBind({ existingWallet: '', walletOwnerId: 'other', 
 
 assert.strictEqual(partnerKeyMatches('seesaw', 'test-partner-key'), true);
 assert.strictEqual(partnerKeyMatches('seesaw', 'other'), false);
+
+const fullUnits = amountToUnits(50, 18);
+assert.strictEqual(assessFloat({
+  usdtUnits: fullUnits,
+  bnbWei: 10n ** 16n,
+  neededUnits: fullUnits,
+  gasWei: 10n ** 15n,
+}).ok, true);
+assert.strictEqual(assessFloat({
+  usdtUnits: fullUnits - 1n,
+  bnbWei: 10n ** 18n,
+  neededUnits: fullUnits,
+  gasWei: 1n,
+}).code, 'insufficient_usdt');
+assert.strictEqual(assessFloat({
+  usdtUnits: fullUnits,
+  bnbWei: 1n,
+  neededUnits: fullUnits,
+  gasWei: 2n,
+}).code, 'insufficient_gas');
+
+const previousNetwork = process.env.DISBURSEMENT_NETWORK;
+const previousChain = process.env.BSC_CHAIN_ID;
+const previousToken = process.env.BSC_USDT_ADDRESS;
+delete process.env.BSC_CHAIN_ID;
+delete process.env.BSC_USDT_ADDRESS;
+process.env.DISBURSEMENT_NETWORK = 'testnet';
+assert.strictEqual(networkName(), 'testnet');
+assert.strictEqual(chainId(), 97);
+assert.strictEqual(tokenAddress(), '0x337610d27c682E347C9cD60BD4b3b107C9d34dDd');
+delete process.env.DISBURSEMENT_NETWORK;
+assert.strictEqual(networkName(), 'mainnet');
+assert.strictEqual(chainId(), 56);
+assert.strictEqual(tokenAddress(), '0x55d398326f99059fF775485246999027B3197955');
+if (previousNetwork === undefined) delete process.env.DISBURSEMENT_NETWORK;
+else process.env.DISBURSEMENT_NETWORK = previousNetwork;
+if (previousChain === undefined) delete process.env.BSC_CHAIN_ID;
+else process.env.BSC_CHAIN_ID = previousChain;
+if (previousToken === undefined) delete process.env.BSC_USDT_ADDRESS;
+else process.env.BSC_USDT_ADDRESS = previousToken;
+
+const previousPayoutKey = process.env.BSC_PAYOUT_PRIVATE_KEY;
+const previousBackendKey = process.env.BACKEND_WALLET_PRIVATE_KEY;
+try {
+  const dedicated = ethers.Wallet.createRandom();
+  const attestation = ethers.Wallet.createRandom();
+  process.env.BSC_PAYOUT_PRIVATE_KEY = dedicated.privateKey;
+  process.env.BACKEND_WALLET_PRIVATE_KEY = attestation.privateKey;
+  assert.strictEqual(payoutSignerProblem(), '');
+  assert.strictEqual(getPayoutWallet().address, dedicated.address);
+  process.env.BSC_PAYOUT_PRIVATE_KEY = attestation.privateKey;
+  assert.strictEqual(payoutSignerProblem(), 'shared');
+  assert.strictEqual(getPayoutWallet(), null);
+  delete process.env.BSC_PAYOUT_PRIVATE_KEY;
+  assert.strictEqual(payoutSignerProblem(), 'missing');
+} finally {
+  if (previousPayoutKey === undefined) delete process.env.BSC_PAYOUT_PRIVATE_KEY;
+  else process.env.BSC_PAYOUT_PRIVATE_KEY = previousPayoutKey;
+  if (previousBackendKey === undefined) delete process.env.BACKEND_WALLET_PRIVATE_KEY;
+  else process.env.BACKEND_WALLET_PRIVATE_KEY = previousBackendKey;
+}
 
 console.log('disbursement tests passed');

@@ -158,7 +158,7 @@ new stack**.
   configured in `.env.rehearsal` (copied from production) is served now. A served key that was never pinned is not
   trusted automatically: the operator checks it from a second network and re-runs with
   `JWKS_NEW_PINS_VERIFIED=<thumbprint,...>`. After start, the running api must carry exactly the written pins, and the
-  money-path log line must contain, as exact fields, `nodeEnv=production`, `allowedVerifiers=5`,
+  money-path log line must contain, as exact fields, `nodeEnv=production`, `allowedVerifiers=10`,
   `issuer=https://<API_HOST>`, `consentOrigin=https://<APP_HOST>`, `web3authVerify=enforce`,
   `legacyFallback=false`, `jwksPinMode=enforce`, `jwksPins=<served count>` and `sessionSecretSeparate=true`. The line is
   read from the api log since the container's last start. **Any missing or different field stops `40-up.sh`**
