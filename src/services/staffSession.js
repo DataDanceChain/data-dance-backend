@@ -7,8 +7,9 @@
  *     (the token's `iat`), so a long-lived wallet session cannot open an ops session on its own.
  *   - Not older than the last disable / enable: `User.sessionsResetAt` is set by both. An ops
  *     session or a wallet JWT issued before it is refused on these routes, so re-enabling an
- *     account does not bring its old sessions back. JWT `iat` has whole seconds; a token from the
- *     same second as the reset is accepted (no fresh sign-in is ever refused).
+ *     account does not bring its old sessions back. New tokens also carry a signed `iatMs`, so
+ *     staff can sign in again within the reset's second. Legacy whole-second tokens fail closed
+ *     for that second, because their actual order relative to the reset cannot be established.
  */
 const { OpsError } = require('./opsAudit');
 
@@ -21,12 +22,21 @@ function issuedAtSec(claims) {
 
 /** Whether a token with `claims` was issued before `resetAt` (a Date, or null for never). */
 function issuedBeforeReset(claims, resetAt) {
+  const iat = issuedAtSec(claims);
+  const precise = claims && claims.iatMs;
+  // Only a correctly formed, signed issue time may distinguish tokens in the same second.
+  // Reject a malformed or future new-format claim even on accounts that have never reset.
+  if (precise !== undefined && (
+    !Number.isSafeInteger(precise) || Math.floor(precise / 1000) !== iat || precise > Date.now()
+  )) return true;
   if (!resetAt) return false;
   const at = new Date(resetAt).getTime();
   if (Number.isNaN(at)) return false;
-  const iat = issuedAtSec(claims);
   if (iat === null) return true;
-  return iat < Math.floor(at / 1000);
+  if (precise !== undefined) {
+    return precise <= at;
+  }
+  return iat * 1000 <= at;
 }
 
 /** Whether the token was issued in the last RECENT_SIGN_IN_SEC seconds. */
@@ -34,7 +44,7 @@ function recentSignIn(claims, now = Date.now()) {
   const iat = issuedAtSec(claims);
   if (iat === null) return false;
   const age = now / 1000 - iat;
-  return age <= RECENT_SIGN_IN_SEC;
+  return age >= 0 && age <= RECENT_SIGN_IN_SEC;
 }
 
 function verifiedSession(claims) {

@@ -171,6 +171,26 @@ describe('deleting a user', () => {
 });
 
 describe('the services on Postgres', () => {
+  it('a sign-in code exchanged concurrently creates exactly one session and audit row', async () => {
+    const staff = await user('code-race');
+    await grantRole({ userId: staff.id, role: 'operator', reason: 'db test operator', actor: actorOf(staff) });
+    const { mintSignInCode, exchangeSignInCode } = require('../../src/services/opsSignIn');
+    const verifier = crypto.randomBytes(32).toString('base64url');
+    const minted = await mintSignInCode({
+      user: staff,
+      authClaims: { ver: 2, iat: Math.floor(Date.now() / 1000) },
+      body: { code_challenge: crypto.createHash('sha256').update(verifier).digest('base64url') },
+    });
+    const results = await Promise.allSettled([1, 2].map(() => exchangeSignInCode({
+      body: { code: minted.code, code_verifier: verifier },
+    })));
+    assert.equal(results.filter((r) => r.status === 'fulfilled').length, 1);
+    const rejected = results.filter((r) => r.status === 'rejected');
+    assert.equal(rejected.length, 1);
+    assert.equal(rejected[0].reason.code, 'INVALID_GRANT');
+    assert.equal(await prisma.opsAuditLog.count({ where: { action: 'auth.sign_in', targetId: staff.id } }), 1);
+  });
+
   it('a failed audit write inside the transaction leaves no grant', async () => {
     const admin = await user('tx-admin');
     const target = await user('tx-target');
@@ -244,11 +264,14 @@ describe('through the real ops router', () => {
   const app = express();
   app.use(express.json());
   app.use('/api/ops', opsRouter);
-  const opsToken = (row, ageSec = 0) => `Bearer ${jwt.sign(
-    { type: 'ops_admin', kind: 'user', sub: row.id, iat: Math.floor(Date.now() / 1000) - ageSec },
-    process.env.JWT_SECRET,
-    { expiresIn: '10m' },
-  )}`;
+  const opsToken = (row, ageSec = 0) => {
+    const iatMs = Date.now() - ageSec * 1000;
+    return `Bearer ${jwt.sign(
+      { type: 'ops_admin', kind: 'user', sub: row.id, iat: Math.floor(iatMs / 1000), iatMs },
+      process.env.JWT_SECRET,
+      { expiresIn: '10m' },
+    )}`;
+  };
   const me = (authorization) => request(app).get('/api/ops/auth/me').set('Authorization', authorization);
 
   it('disable and re-enable each set sessionsResetAt; an ops session from before stays refused, a new one works', async () => {

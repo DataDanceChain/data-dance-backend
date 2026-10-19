@@ -82,7 +82,12 @@ function jwtSecret() {
 
 function signUserOpsToken(userId) {
   const expiresIn = opsUserTokenTtlSec();
-  const token = jwt.sign({ type: OPS_TOKEN_TYPE, kind: 'user', sub: userId }, jwtSecret(), { expiresIn });
+  const iatMs = Date.now();
+  const token = jwt.sign(
+    { type: OPS_TOKEN_TYPE, kind: 'user', sub: userId, iat: Math.floor(iatMs / 1000), iatMs },
+    jwtSecret(),
+    { expiresIn },
+  );
   return { token, expiresIn };
 }
 

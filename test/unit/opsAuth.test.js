@@ -119,7 +119,7 @@ describe('personal ops session (kind: user)', () => {
     const refused = await me(older);
     assert.equal(refused.status, 401);
     assert.equal(refused.body.code, 'OPS_SESSION_INVALID');
-    // Issued after the reset (or in its second): accepted.
+    // Issued after the reset: accepted.
     assert.equal((await me(bearer(tokens.ops(operator, { ageSec: 30 })))).status, 200);
     assert.equal((await me(bearer(tokens.ops(operator)))).status, 200);
   });
@@ -146,6 +146,60 @@ describe('personal ops session (kind: user)', () => {
     const res = await me(bearer(expired));
     assert.equal(res.status, 401);
     assert.equal(res.body.code, 'OPS_SESSION_EXPIRED');
+  });
+
+  it('a token issued before a reset within the same second cannot regain staff access', async () => {
+    const operator = await seedUser(prisma);
+    await grant(prisma, operator.id, 'operator');
+    const iat = Math.floor(Date.now() / 1000) - 1;
+    const oldOps = jwt.sign({ type: 'ops_admin', kind: 'user', sub: operator.id, iat }, JWT_SECRET, { expiresIn: '5m' });
+    const oldWallet = jwt.sign({ id: operator.id, ver: 2, iat }, JWT_SECRET, { expiresIn: '5m' });
+    prisma.store.user.find((u) => u.id === operator.id).sessionsResetAt = new Date(iat * 1000 + 500);
+
+    const refused = await me(bearer(oldOps));
+    assert.equal(refused.status, 401, 'the legacy ops token predates the reset by 500 ms');
+    assert.equal(refused.body.code, 'OPS_SESSION_INVALID');
+    const code = await request(server).post('/api/ops/auth/code').set('Authorization', bearer(oldWallet))
+      .send({ code_challenge: 'a'.repeat(43) });
+    assert.equal(code.status, 401, 'the legacy wallet token must not mint a new ops session');
+    assert.equal(code.body.code, 'SESSION_REVOKED');
+
+    // A new-format token retains the ordering within the second for both token families.
+    const sign = (claims, iatMs) => jwt.sign({ ...claims, iat, iatMs }, JWT_SECRET, { expiresIn: '5m' });
+    assert.equal((await me(bearer(sign({ type: 'ops_admin', kind: 'user', sub: operator.id }, iat * 1000 + 100)))).status, 401);
+    assert.equal((await me(bearer(sign({ type: 'ops_admin', kind: 'user', sub: operator.id }, iat * 1000 + 750)))).status, 200);
+    const staleWallet = sign({ id: operator.id, ver: 2 }, iat * 1000 + 100);
+    const staleCode = await request(server).post('/api/ops/auth/code').set('Authorization', bearer(staleWallet))
+      .send({ code_challenge: 'a'.repeat(43) });
+    assert.equal(staleCode.status, 401, 'a precise wallet token from before the reset stays revoked');
+    const freshWallet = sign({ id: operator.id, ver: 2 }, iat * 1000 + 750);
+    const freshCode = await request(server).post('/api/ops/auth/code').set('Authorization', bearer(freshWallet))
+      .send({ code_challenge: 'a'.repeat(43) });
+    assert.equal(freshCode.status, 200, JSON.stringify(freshCode.body));
+
+    for (const iatMs of ['invalid', iat * 1000 + 1500, null]) {
+      const malformed = sign({ type: 'ops_admin', kind: 'user', sub: operator.id }, iatMs);
+      assert.equal((await me(bearer(malformed))).status, 401, `malformed iatMs: ${iatMs}`);
+    }
+    const futureMs = Date.now() + 60000;
+    const future = jwt.sign({ type: 'ops_admin', kind: 'user', sub: operator.id, iat: Math.floor(futureMs / 1000), iatMs: futureMs }, JWT_SECRET, { expiresIn: '5m' });
+    assert.equal((await me(bearer(future))).status, 401, 'a future issue time cannot bypass reset');
+
+    // Actual production issuers, rather than test helpers, preserve millisecond ordering.
+    const { signUserOpsToken } = require('../../src/services/opsSignIn');
+    const { generateToken } = require('../../src/utils/jwtUtils');
+    const expires = process.env.JWT_EXPIRES_IN;
+    try {
+      process.env.JWT_EXPIRES_IN = '1h';
+      for (const token of [signUserOpsToken(operator.id).token, generateToken(operator.id, { ver: 2 })]) {
+        const claims = jwt.verify(token, JWT_SECRET);
+        assert.ok(Number.isSafeInteger(claims.iatMs));
+        assert.equal(Math.floor(claims.iatMs / 1000), claims.iat);
+      }
+    } finally {
+      if (expires === undefined) delete process.env.JWT_EXPIRES_IN;
+      else process.env.JWT_EXPIRES_IN = expires;
+    }
   });
 });
 
