@@ -71,10 +71,16 @@ answers the label as `username` and the account's own e-mail as `email`.
 ### Sessions
 
 - **Disable and re-enable end staff sessions.** Both set `User.sessionsResetAt`. An ops session,
-  or a wallet JWT on `POST /auth/code` and on the console's staff endpoints, issued before it is
+  or a wallet JWT on `POST /auth/code` and on the console's staff endpoints, issued at or before it is
   refused (ops: 401 `OPS_SESSION_INVALID`; wallet JWT: 401 `SESSION_REVOKED` /
   `session_revoked`), and a sign-in code minted before it is not exchanged. The person signs in
   again. In the wallet itself an unexpired wallet JWT works again after a re-enable, as before.
+- **Reset-time precision.** Newly issued Wallet and personal operations JWTs contain server-signed
+  `iatMs`, consistent with `iat`. Staff checks compare its millisecond issue time with
+  `sessionsResetAt`; a newly signed-in session can work later in the same second. Legacy JWTs
+  without `iatMs` fail closed throughout the reset second. Malformed, inconsistent or future
+  precise issue times cannot restore access. This boundary applies to staff operations, not to
+  the ordinary Wallet session policy.
 - **The developer console's staff endpoints** (`GET /api/developer/sso/admin/clients`,
   `GET /api/developer/sso/admin/staff-unlock`, and `POST /api/developer/sso/clients` registered
   with a role while self-serve registration is closed) apply the same rule as `POST /auth/code` without the
@@ -161,9 +167,21 @@ per change and none for a call that changes nothing:
 | `POST /demands/:id/fulfill` | `demand.fulfill` (purchase, request status and row in one transaction; the buyer's balance is checked inside it, one purchase per buyer at a time) |
 | `POST /campaigns/:id/raffle/draw` | `raffle.draw` (draws run one at a time per campaign) |
 
-Every other successful ops write gets one generic `ops.write` row with the method, route, params
-and status, never the request body. Its target is the record the route names, or for a create
-(`POST /links`, `POST /campaigns`, `POST /campaigns/cover`) the record it made.
+Every mounted operations write declares its audit boundary; a write with no boundary, or more
+than one, prevents the router from loading. Other database writes commit their business changes,
+associated events and one generic `ops.write` row in the same transaction. This covers tracked
+links; campaign creation, edits, transitions, application decisions and raffle fulfillment;
+data-request quotes, decline and assembly; merchant KYC; and privacy-request resolution. An audit
+failure rolls back those changes and events. The generic row contains method, route, params and
+status, never the request body. Its target is the named record or the newly created record.
+
+Translation and cover uploads wait for the durable generic audit before returning success. A
+translation provider call cannot be rolled back; an audit failure returns an error without the
+translated result. A cover audit failure removes the uploaded file on ordinary failure and does
+not return its URL. File creation and audit are not crash-atomic: a process crash between them may
+leave an orphan file. This does not introduce a file-publication registry or change asset serving.
+`auditOpsWrites` remains a compatibility fallback outside these annotated router boundaries;
+it is not the durability mechanism for the operations mutations above.
 
 The developer console writes `console.staff_unlock` for each staff unlock it hands out and
 `console.client_register` for each client a developer or ddc_admin registers while self-serve
@@ -225,4 +243,18 @@ serving while the migration runs.
 
 ## Frontend
 
-Route: `/ops/login`, `/ops/dashboard` (see `data-dance-app`).
+The private `data-dance-admin` repository owns the management site: `/login`, `/auth/callback`,
+`/members`, `/access`, `/audit` and `/sign-in-issues`, alongside the existing operations pages.
+`data-dance-frontend` owns the Wallet developer console and its `/developers/#ops-signin` handoff.
+The operations site receives only the one-time code and its own operations session, never the
+Wallet JWT. The complete upgrade plan and cross-repository acceptance contract live in
+[`data-dance-admin/README.md`](https://github.com/DataDanceChain/data-dance-admin/blob/feat/ops-admin-completion/README.md).
+
+The admin build consumes `VITE_API_BASE` and `VITE_WALLET_URL`; its Dockerfile exports both build
+arguments before `yarn build`. The actual release builder must supply the matching origins for
+each environment. The backend's incorporated `deploy/new-stack/20-env.sh` preserves and validates
+`OPS_SHARED_LOGIN`, `OPS_USER_TOKEN_TTL_SEC`, `OPS_ADMIN_URL` and `PLANET_MANAGER_API_HOSTS`;
+that source check does not prove deployed values. Before a consuming merge/release, record the
+required development/staging/production environment coverage and actual build wiring. No live
+environment check, migration, initial administrator grant or production publication is implied
+by local tests.
