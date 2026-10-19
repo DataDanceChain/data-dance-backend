@@ -209,7 +209,7 @@ async function getOps(id) {
   return presentDemand(demand);
 }
 
-async function quoteDemand(id, actorId, body = {}) {
+async function quoteDemand(id, actorId, body = {}, { audit } = {}) {
   const demand = await prisma.dataDemand.findUnique({ where: { id } });
   if (!demand) throw httpError(404, 'demand_not_found', 'Request not found.');
   if (!['submitted', 'quoted'].includes(demand.status)) {
@@ -251,12 +251,13 @@ async function quoteDemand(id, actorId, body = {}) {
       toStatus: 'quoted',
       note: next.quoteNote,
     });
+    if (audit) await audit(tx);
     return next;
   });
   return presentDemand(updated);
 }
 
-async function declineDemand(id, actorId, reason) {
+async function declineDemand(id, actorId, reason, { audit } = {}) {
   const demand = await prisma.dataDemand.findUnique({ where: { id } });
   if (!demand) throw httpError(404, 'demand_not_found', 'Request not found.');
   if (!OPEN_STATUSES.includes(demand.status)) {
@@ -281,12 +282,13 @@ async function declineDemand(id, actorId, reason) {
       toStatus: 'declined',
       note,
     });
+    if (audit) await audit(tx);
     return next;
   });
   return presentDemand(updated);
 }
 
-async function markAssembling(id, actorId, note) {
+async function markAssembling(id, actorId, note, { audit } = {}) {
   const demand = await prisma.dataDemand.findUnique({ where: { id } });
   if (!demand) throw httpError(404, 'demand_not_found', 'Request not found.');
   if (!['accepted', 'submitted', 'quoted', 'assembling'].includes(demand.status)) {
@@ -307,6 +309,7 @@ async function markAssembling(id, actorId, note) {
       toStatus: 'assembling',
       note: String(note || '').trim() || null,
     });
+    if (audit) await audit(tx);
     return next;
   });
   return presentDemand(updated);

@@ -711,14 +711,18 @@ exports.reviewMerchantKyc = async (req, res) => {
     if (nextStatus === 'approved' && !kycComplete(user.legalEntity)) {
       return res.status(400).json({ status: 'fail', message: 'Required KYC fields are still missing' });
     }
-    const legalEntity = await prisma.legalEntity.update({
-      where: { userId: user.id },
-      data: {
-        kycStatus: nextStatus,
-        kycReviewedAt: new Date(),
-        kycReviewedBy: opsBy(req),
-        kycNote: note || null,
-      },
+    const legalEntity = await prisma.$transaction(async (tx) => {
+      const updated = await tx.legalEntity.update({
+        where: { userId: user.id },
+        data: {
+          kycStatus: nextStatus,
+          kycReviewedAt: new Date(),
+          kycReviewedBy: opsBy(req),
+          kycNote: note || null,
+        },
+      });
+      if (req.auditGeneric) await req.auditGeneric(tx);
+      return updated;
     });
     return res.json({
       status: 'success',

@@ -1,4 +1,5 @@
 const prisma = require('../utils/prisma');
+const fs = require('node:fs/promises');
 const {
   campaignSsoClientIds,
   parseDraft,
@@ -21,8 +22,8 @@ function fail(res, status, message) {
   return res.status(status).json({ status: 'fail', message });
 }
 
-async function writeEvent(campaignId, actor, action, fromStatus, toStatus, note) {
-  await prisma.campaignEvent.create({
+async function writeEvent(campaignId, actor, action, fromStatus, toStatus, note, db = prisma) {
+  await db.campaignEvent.create({
     data: { campaignId, actor, action, fromStatus, toStatus, note: note || null },
   });
 }
@@ -42,6 +43,7 @@ function serialize(row) {
 exports.translate = async (req, res) => {
   try {
     const data = await translateCampaignCopy(req.body || {});
+    if (req.auditGeneric) await req.auditGeneric(prisma);
     return res.json({ status: 'success', data });
   } catch (error) {
     if (error.code === 'NO_GEMINI') return fail(res, 503, error.message);
@@ -92,15 +94,19 @@ exports.create = async (req, res) => {
     const parsed = parseDraft(req.body, await draftOptions());
     if (parsed.error) return fail(res, 400, parsed.error);
     const actor = actorOf(req);
-    const row = await prisma.campaign.create({
-      data: {
-        ...parsed.data,
-        status: 'DRAFT',
-        createdBy: actor,
-        updatedBy: actor,
-      },
+    const row = await prisma.$transaction(async (tx) => {
+      const saved = await tx.campaign.create({
+        data: {
+          ...parsed.data,
+          status: 'DRAFT',
+          createdBy: actor,
+          updatedBy: actor,
+        },
+      });
+      await writeEvent(saved.id, actor, 'create', null, 'DRAFT', null, tx);
+      if (req.auditGeneric) await req.auditGeneric(tx, saved.id);
+      return saved;
     });
-    await writeEvent(row.id, actor, 'create', null, 'DRAFT');
     noteCreated(req, row.id);
     return res.json({ status: 'success', data: serialize(row) });
   } catch (error) {
@@ -118,11 +124,15 @@ exports.update = async (req, res) => {
       const patched = applyCopyFields(existing, req.body || {});
       if (patched.error) return fail(res, 400, patched.error);
       const actor = actorOf(req);
-      const row = await prisma.campaign.update({
-        where: { id: existing.id },
-        data: { ...patched.data, updatedBy: actor },
+      const row = await prisma.$transaction(async (tx) => {
+        const saved = await tx.campaign.update({
+          where: { id: existing.id },
+          data: { ...patched.data, updatedBy: actor },
+        });
+        await writeEvent(saved.id, actor, 'update-copy', existing.status, existing.status, null, tx);
+        if (req.auditGeneric) await req.auditGeneric(tx);
+        return saved;
       });
-      await writeEvent(row.id, actor, 'update-copy', existing.status, existing.status);
       return res.json({ status: 'success', data: serialize(row) });
     }
     const parsed = parseDraft(
@@ -148,15 +158,19 @@ exports.update = async (req, res) => {
     if (existing.publishedAt && parsed.data.legalText !== existing.legalText) {
       legalVersion += 1;
     }
-    const row = await prisma.campaign.update({
-      where: { id: existing.id },
-      data: {
-        ...parsed.data,
-        legalVersion,
-        updatedBy: actor,
-      },
+    const row = await prisma.$transaction(async (tx) => {
+      const saved = await tx.campaign.update({
+        where: { id: existing.id },
+        data: {
+          ...parsed.data,
+          legalVersion,
+          updatedBy: actor,
+        },
+      });
+      await writeEvent(saved.id, actor, 'update', existing.status, existing.status, null, tx);
+      if (req.auditGeneric) await req.auditGeneric(tx);
+      return saved;
     });
-    await writeEvent(row.id, actor, 'update', existing.status, existing.status);
     return res.json({ status: 'success', data: serialize(row) });
   } catch (error) {
     if (error.code === 'P2002') return fail(res, 409, 'Slug already exists');
@@ -233,11 +247,15 @@ exports.transition = async (req, res) => {
       return fail(res, 400, 'Unknown action');
     }
 
-    const row = await prisma.campaign.update({
-      where: { id: existing.id },
-      data: { ...extra, status: nextStatus },
+    const row = await prisma.$transaction(async (tx) => {
+      const saved = await tx.campaign.update({
+        where: { id: existing.id },
+        data: { ...extra, status: nextStatus },
+      });
+      await writeEvent(saved.id, actor, action, existing.status, nextStatus, null, tx);
+      if (req.auditGeneric) await req.auditGeneric(tx);
+      return saved;
     });
-    await writeEvent(row.id, actor, action, existing.status, nextStatus);
     return res.json({ status: 'success', data: serialize(row) });
   } catch (error) {
     console.error('Ops campaign transition error:', error);
@@ -290,12 +308,16 @@ exports.resolveApplication = async (req, res) => {
         return fail(res, 409, 'Seat cap already reached');
       }
     }
-    const row = await prisma.campaignApplication.update({
-      where: { id: application.id },
-      data: { status, opsNote: stripNote(req.body?.note) },
-      include: { user: { select: { id: true, email: true, name: true } } },
+    const row = await prisma.$transaction(async (tx) => {
+      const saved = await tx.campaignApplication.update({
+        where: { id: application.id },
+        data: { status, opsNote: stripNote(req.body?.note) },
+        include: { user: { select: { id: true, email: true, name: true } } },
+      });
+      await writeEvent(campaign.id, actorOf(req), `apply_${status}`, campaign.status, campaign.status, saved.user.email, tx);
+      if (req.auditGeneric) await req.auditGeneric(tx);
+      return saved;
     });
-    await writeEvent(campaign.id, actorOf(req), `apply_${status}`, campaign.status, campaign.status, row.user.email);
     return res.json({ status: 'success', data: row });
   } catch (error) {
     console.error('Ops application resolve error:', error);
@@ -364,6 +386,7 @@ exports.uploadCover = async (req, res) => {
     const origin = String(process.env.PUBLIC_BASE_URL || 'https://api.datadance.ai').replace(/\/$/, '');
     const pathName = `/assets/campaigns/${req.file.filename}`;
     noteCreated(req, pathName, 'campaign_cover');
+    if (req.auditGeneric) await req.auditGeneric(prisma);
     return res.json({
       status: 'success',
       data: {
@@ -372,6 +395,15 @@ exports.uploadCover = async (req, res) => {
       },
     });
   } catch (error) {
+    // The upload middleware has already written the file. A failed audit must not hand out its
+    // URL; remove it on ordinary failure. A crash between file creation and audit is not atomic.
+    if (req.file && req.file.path) {
+      try {
+        await fs.unlink(req.file.path);
+      } catch (cleanupError) {
+        if (cleanupError.code !== 'ENOENT') console.error('Ops cover cleanup failed', { code: cleanupError.code });
+      }
+    }
     console.error('Ops campaign cover upload error:', error);
     return res.status(500).json({ status: 'error', message: 'Server error' });
   }
@@ -385,12 +417,16 @@ exports.fulfillRaffleWin = async (req, res) => {
       where: { id: req.params.winId, campaignId: campaign.id },
     });
     if (!win) return fail(res, 404, 'Win not found');
-    const row = await prisma.campaignRaffleWin.update({
-      where: { id: win.id },
-      data: { fulfilled: true },
-      include: { user: { select: { id: true, email: true, name: true } } },
+    const row = await prisma.$transaction(async (tx) => {
+      const saved = await tx.campaignRaffleWin.update({
+        where: { id: win.id },
+        data: { fulfilled: true },
+        include: { user: { select: { id: true, email: true, name: true } } },
+      });
+      await writeEvent(campaign.id, actorOf(req), 'raffle_fulfill', campaign.status, campaign.status, saved.user.email, tx);
+      if (req.auditGeneric) await req.auditGeneric(tx);
+      return saved;
     });
-    await writeEvent(campaign.id, actorOf(req), 'raffle_fulfill', campaign.status, campaign.status, row.user.email);
     return res.json({ status: 'success', data: row });
   } catch (error) {
     console.error('Ops raffle fulfill error:', error);

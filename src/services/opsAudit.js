@@ -9,7 +9,9 @@
  *   data-request fulfilment, raffle draw) is mounted with `auditInChange(action)`: its handler
  *   writes the row with `req.auditChange(tx, ...)` inside the transaction of the change, one row
  *   per change, and a call that changes nothing writes none.
- * - Every other successful ops write gets one generic `ops.write` row from `auditOpsWrites`.
+ * - Other ops writes declare a generic audit boundary. Their database mutation and `ops.write`
+ *   row commit together; external results await their row before a successful response.
+ * - `auditOpsWrites` remains a compatibility fallback for callers outside the annotated router.
  * - `detail` never holds a token, a secret, a code or a request body.
  * - Rows are append-only: nothing here updates or deletes one.
  */
@@ -306,9 +308,32 @@ function auditInChange(action) {
   };
 }
 
+/**
+ * Generic ops writes use the same redacted row as the response middleware, but the handler
+ * explicitly awaits it inside its mutation's transaction (or before returning external output).
+ * A create may override only the target id; route metadata and status come from the router.
+ */
+function auditGenericWrite(mode, statusCode = 200) {
+  if (!['transaction', 'external'].includes(mode)) throw new Error(`Unknown generic audit mode: ${mode}`);
+  return function markGenericAudit(req, res, next) {
+    req.auditGenericMode = mode;
+    req.auditGeneric = async (tx, createdId) => {
+      const row = genericWriteRow(req, { statusCode });
+      if (createdId !== undefined) {
+        if (typeof createdId !== 'string' || !createdId) throw new Error('A created audit target needs an id');
+        row.target = { ...row.target, id: createdId };
+      }
+      const saved = await writeAudit(tx, row);
+      req.auditWritten = true;
+      return saved;
+    };
+    return next();
+  };
+}
+
 /** Start the generic row for a finished write, unless it needs none. */
 function recordGenericWrite(req, res) {
-  if (req.auditWritten || req.auditInChange) return;
+  if (req.auditWritten || req.auditInChange || req.auditGenericMode) return;
   if (res.statusCode < 200 || res.statusCode >= 300) return;
   const kind = req.opsAdmin && req.opsAdmin.kind;
   if (kind !== 'user' && kind !== 'shared') return;
@@ -365,6 +390,7 @@ module.exports = {
   auditForUser,
   auditOpsWrites,
   auditInChange,
+  auditGenericWrite,
   noteCreated,
   auditLog,
   parsePaging,

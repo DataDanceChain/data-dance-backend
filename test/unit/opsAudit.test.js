@@ -345,24 +345,18 @@ describe('the generic ops.write row', () => {
     assert.equal(prisma.store.point.length, 0);
   });
 
-  it('a failed generic write is logged as an error only; the answer stands', async () => {
+  it('a refused generic audit fails the request and rolls the business write back', async () => {
     const original = prisma.opsAuditLog.create;
-    const originalLog = auditLog.error;
-    const logged = [];
     prisma.opsAuditLog.create = async () => { throw Object.assign(new Error('relation does not exist: SECRET'), { name: 'PrismaClientKnownRequestError' }); };
-    auditLog.error = (event, entry) => logged.push([event, entry]);
     try {
       const res = await request(server).post('/api/ops/links').set('Authorization', auth.operator).send(LINK);
-      assert.equal(res.status, 201);
-      await settle();
+      assert.equal(res.status, 500);
+      assert.ok(!JSON.stringify(res.body).includes('SECRET'));
     } finally {
       prisma.opsAuditLog.create = original;
-      auditLog.error = originalLog;
     }
-    assert.equal(logged.length, 1);
-    assert.equal(logged[0][0], 'ops_audit_write_failed');
-    assert.equal(logged[0][1].errorName, 'PrismaClientKnownRequestError');
-    assert.ok(!JSON.stringify(logged).includes('SECRET'), 'never the error message');
+    assert.equal(prisma.store.trackedLink.length, 0);
+    assert.equal(prisma.store.opsAuditLog.length, 0);
   });
 
   it('a userId param names a user target; an id param names the path\'s first segment', () => {
@@ -409,6 +403,14 @@ describe('the generic ops.write row', () => {
 });
 
 describe('money routes write their row inside the change', () => {
+  it('every mounted mutation declares exactly one explicit audit boundary', () => {
+    for (const route of opsRoutes) {
+      if (['get', 'head', 'options'].includes(route.method)) continue;
+      assert.equal([route.audit, route.genericAudit, route.selfAudit].filter(Boolean).length, 1, `${route.method} ${route.path}`);
+    }
+    assert.equal(opsRoutes.filter((route) => route.genericAudit === 'transaction').length, 12);
+    assert.deepEqual(opsRoutes.filter((route) => route.genericAudit === 'external').map((r) => r.path).sort(), ['/campaigns/cover', '/campaigns/translate']);
+  });
   it('the route table marks exactly the routes that move money or balances, each with its action', () => {
     const marked = opsRoutes.filter((route) => route.audit).map((route) => `${route.method} ${route.path} ${route.audit}`).sort();
     assert.deepEqual(marked, [
