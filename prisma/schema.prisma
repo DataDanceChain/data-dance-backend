@@ -1041,6 +1041,8 @@ model OAuthAuthorization {
   clientId            String
   redirectUri         String
   state               String    @default("")
+  /// Explicit partner account choice; persisted so removing URL parameters cannot restore auto consent.
+  prompt              String?
   codeChallenge       String
   codeChallengeMethod String
   resource            String

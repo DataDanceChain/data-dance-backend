@@ -206,11 +206,13 @@ const DEFAULT_STATUS_FIELDS = Object.freeze([]);
 /**
  * SSO_TGE_AUTO_APPROVE — which consent entries may skip the Allow tap for the TGE client.
  *   off (default; also unset and any value not listed here) → every consent is a manual tap.
- *   app      → a consent carried by the App hand-off session (`ddc_sso_…`) may auto-approve.
- *   app,web  → so may a consent from an ordinary DataDance web login (user JWT).
+ *   app      → a consent carried by an authenticated App / DataDance website launch's
+ *              scoped app-ticket session (`ddc_sso_…`) may auto-approve.
+ *   app,web  → legacy syntax, parsed and reported as before; effective web auto is always denied.
+ * Ordinary standalone browser JWTs require manual consent, including under legacy app,web.
  * "Auto" only means the Wallet posts the Allow on the user's behalf: the server still runs the
  * full manual-allow path (initiator cookie, single-use consume, PKCE, verified session,
- * redirect_uri). Never applies to any other client.
+ * redirect_uri). Explicit login/select_account prompts never auto-approve.
  */
 const AUTO_APPROVE_OFF = Object.freeze({ app: false, web: false });
 
@@ -294,7 +296,9 @@ function autoApproveFor(clientId, env = process.env) {
   if (clientId === undefined || clientId === null || !samePartnerClientId(cfg.clientId, clientId)) {
     return { ...AUTO_APPROVE_OFF };
   }
-  return { ...cfg.autoApprove };
+  // Legacy app,web remains valid configuration syntax, but ordinary browser JWTs never grant
+  // automatic partner consent. App and DataDance website launches use the scoped app-ticket.
+  return { app: cfg.autoApprove.app, web: false };
 }
 
 /** `tge:identity` and `sso:identity` are the same permission. New grants use the `sso:` name. */

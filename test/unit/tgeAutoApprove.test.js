@@ -3,11 +3,11 @@
  *
  * Contract under test:
  *   - the switch reads off (default, unset, unknown) | app | app,web, per call;
- *   - GET /api/oauth/requests/:id carries autoApprove { app, web }, true only for the configured
- *     TGE client and only for an entry type the switch allows — never decided inside GET;
+ *   - GET /api/oauth/requests/:id carries autoApprove { app, web:false }; explicit account
+ *     prompts suppress both hints — never decided inside GET;
  *   - POST /api/oauth/consent { auto: true } requires allow=true, takes its entry type from the
  *     credential (App hand-off SSO session → app, DataDance JWT → web), is 403
- *     AUTO_APPROVE_NOT_ALLOWED unless the switch allows it, and otherwise runs the manual-Allow
+ *     AUTO_APPROVE_NOT_ALLOWED unless an app-ticket entry and the app switch allow it, and otherwise runs the manual-Allow
  *     path unchanged (initiator cookie, single use, verified session, PKCE at /oauth/token);
  *   - one info line `oauth.consent_auto_approved` per auto-approval, without any token;
  *   - manual allow / deny answer exactly as before.
@@ -108,7 +108,7 @@ function pkce() {
 }
 
 /** Browser step: start an authorization; returns the request id, its cookie and PKCE verifier. */
-async function authorize({ clientId = 'tge-test', redirectUri = REDIRECT, scope } = {}) {
+async function authorize({ clientId = 'tge-test', redirectUri = REDIRECT, scope, prompt } = {}) {
   const { verifier, challenge } = pkce();
   const query = {
     response_type: 'code',
@@ -119,15 +119,18 @@ async function authorize({ clientId = 'tge-test', redirectUri = REDIRECT, scope 
     code_challenge_method: 'S256',
   };
   if (scope) query.scope = scope;
+  if (prompt !== undefined) query.prompt = prompt;
   const res = await request(server).get('/oauth/authorize').query(query);
   assert.equal(res.status, 302, res.text);
   const cookie = ((res.headers['set-cookie'] || [])[0] || '').split(';')[0];
-  return { requestId: new URL(res.headers.location).searchParams.get('request'), cookie, verifier };
+  const requestId = new URL(res.headers.location).searchParams.get('request');
+  assert.ok(requestId, `an accepted authorization must create a request: ${res.headers.location}`);
+  return { requestId, cookie, verifier, consentUrl: res.headers.location };
 }
 
 /** App hand-off: a consent-only SSO session (`ddc_sso_…`) for the TGE client. */
-async function appSession() {
-  const minted = await request(server).post('/api/sso/app-ticket').set('Authorization', `Bearer ${userJwt()}`).send({ client_id: 'tge-test' });
+async function appSession(clientId = 'tge-test') {
+  const minted = await request(server).post('/api/sso/app-ticket').set('Authorization', `Bearer ${userJwt()}`).send({ client_id: clientId });
   assert.equal(minted.status, 200, minted.text);
   const redeemed = await request(server).post('/api/sso/ticket/exchange').send({ ticket: minted.body.data.ticket });
   assert.equal(redeemed.status, 200, redeemed.text);
@@ -181,6 +184,73 @@ afterEach(() => {
   });
 });
 
+describe('Planet entry policy', () => {
+  it('a standalone JWT cannot auto-approve under legacy app,web; manual consent remains available', async () => {
+    setSwitch('app,web');
+    const { requestId, cookie } = await authorize();
+    const denied = await consent(userJwt(), cookie, { requestId, allow: true, auto: true });
+    assert.equal(denied.status, 403, denied.text);
+    assert.deepEqual((await requestSummary(requestId)).body.data.autoApprove, { app: true, web: false });
+    assert.equal(denied.body.code, 'AUTO_APPROVE_NOT_ALLOWED');
+    assert.equal(authzRow(requestId).codeHash ?? null, null);
+    assert.equal(authzRow(requestId).consumedAt ?? null, null);
+    assert.equal((await consent(userJwt(), cookie, { requestId, allow: true })).status, 200);
+  });
+
+  it('an authenticated one-time app-ticket launch still auto-approves', async () => {
+    setSwitch('app,web');
+    const { requestId, cookie } = await authorize();
+    const res = await consent(await appSession(), cookie, { requestId, allow: true, auto: true });
+    assert.equal(res.status, 200, res.text);
+    assert.ok(new URL(res.body.data.redirectTo).searchParams.get('code'));
+  });
+
+  it('registry partners also expose web:false and reject standalone auto-approval', async () => {
+    setSwitch('app,web');
+    await prisma.ssoDeveloperClient.create({ data: {
+      clientId: 'planet-registry', clientName: 'Planet registry', kind: 'partner', enabled: true,
+      redirectUris: [REDIRECT], secretHash: SECRET_HASH, initiateLoginUri: 'https://tge.example.com/login/ddc',
+    } });
+    const { requestId, cookie } = await authorize({ clientId: 'planet-registry' });
+    assert.deepEqual((await requestSummary(requestId)).body.data.autoApprove, { app: true, web: false });
+    assert.equal((await consent(userJwt(), cookie, { requestId, allow: true, auto: true })).status, 403);
+    assert.equal((await consent(await appSession('planet-registry'), cookie, { requestId, allow: true, auto: true })).status, 200);
+  });
+
+  for (const prompt of ['login', 'select_account']) {
+    it(`${prompt} persists independently of the URL and blocks every automatic decision`, async () => {
+      setSwitch('app,web');
+      const { requestId, cookie, consentUrl } = await authorize({ prompt });
+      assert.equal(authzRow(requestId).prompt, prompt);
+      const stripped = new URL(consentUrl);
+      stripped.searchParams.delete('prompt');
+      const summary = await requestSummary(stripped.searchParams.get('request'));
+      assert.equal(summary.body.data.prompt, prompt);
+      assert.deepEqual(summary.body.data.autoApprove, { app: false, web: false });
+      const handoff = await appSession();
+      for (const token of [handoff, userJwt()]) {
+        const denied = await consent(token, cookie, { requestId, allow: true, auto: true });
+        assert.equal(denied.status, 403, denied.text);
+        assert.equal(denied.body.code, 'AUTO_APPROVE_NOT_ALLOWED');
+        assert.equal(authzRow(requestId).codeHash ?? null, null);
+        assert.equal(authzRow(requestId).consumedAt ?? null, null);
+      }
+      if (prompt === 'select_account') {
+        const stale = await consent(handoff, cookie, { requestId, allow: true });
+        assert.equal(stale.status, 403, stale.text);
+        assert.equal(stale.body.error, 'access_denied');
+        assert.equal(authzRow(requestId).codeHash ?? null, null);
+        assert.equal(authzRow(requestId).consumedAt ?? null, null);
+      }
+      const chosen = await prisma.user.create({ data: { ...cUser, id: 'chosen-other-account', email: 'chosen@example.test' } });
+      const chosenJwt = jwt.sign({ id: chosen.id, ver: 2 }, JWT_SECRET, { expiresIn: '1h' });
+      const allowed = await consent(chosenJwt, cookie, { requestId, allow: true });
+      assert.equal(allowed.status, 200, allowed.text);
+      assert.equal(authzRow(requestId).userId, chosen.id);
+    });
+  }
+});
+
 describe('SSO_TGE_AUTO_APPROVE parsing', () => {
   const OFF = { app: false, web: false };
   for (const [value, expected] of [
@@ -206,7 +276,7 @@ describe('SSO_TGE_AUTO_APPROVE parsing', () => {
 
   it('is read per call and applies only to the configured TGE client', () => {
     setSwitch('app,web');
-    assert.deepEqual(autoApproveFor('tge-test'), { app: true, web: true });
+    assert.deepEqual(autoApproveFor('tge-test'), { app: true, web: false });
     assert.deepEqual(autoApproveFor('ddc_oauth_mcp1'), { app: false, web: false });
     assert.deepEqual(autoApproveFor(null), { app: false, web: false });
     setSwitch('app');
@@ -229,7 +299,7 @@ describe('GET /api/oauth/requests/:id autoApprove flags', () => {
     ['off', { app: false, web: false }],
     ['bogus', { app: false, web: false }],
     ['app', { app: true, web: false }],
-    ['app,web', { app: true, web: true }],
+    ['app,web', { app: true, web: false }],
   ]) {
     it(`TGE client, switch ${JSON.stringify(value)} → ${JSON.stringify(expected)}`, async () => {
       setSwitch(value);
@@ -262,7 +332,7 @@ describe('GET /api/oauth/requests/:id autoApprove flags', () => {
 });
 
 describe('POST /api/oauth/consent { auto: true } — switch × entry type', () => {
-  const allowed = { off: [], app: ['app'], 'app,web': ['app', 'web'] };
+  const allowed = { off: [], app: ['app'], 'app,web': ['app'] };
   for (const value of [undefined, 'off', 'bogus', 'app', 'app,web']) {
     for (const entry of ['app', 'web']) {
       const expectAllowed = (allowed[value] || []).includes(entry);
@@ -314,7 +384,7 @@ describe('POST /api/oauth/consent { auto: true } — switch × entry type', () =
     const { requestId, cookie } = await authorize();
     const res = await request(server)
       .post('/api/oauth/consent')
-      .set('Authorization', `Bearer ${userJwt()}`)
+      .set('Authorization', `Bearer ${await appSession()}`)
       .set('Cookie', cookie)
       .type('form')
       .send({ requestId, allow: 'true', auto: 'true' });
@@ -369,7 +439,7 @@ describe('auto-approval runs the manual Allow path unchanged', () => {
     it(`${entry} entry: a missing initiator cookie is still 409 AUTHZ_INITIATOR_MISMATCH`, async () => {
       setSwitch('app,web');
       const { requestId } = await authorize();
-      const res = await consent(await credential(entry), null, { requestId, allow: true, auto: true });
+      const res = await consent(await credential(entry), null, { requestId, allow: true, auto: entry === 'app' });
       assert.equal(res.status, 409, res.text);
       assert.equal(res.body.code, 'AUTHZ_INITIATOR_MISMATCH');
       assert.equal(res.body.data.reason, 'missing');
@@ -380,7 +450,7 @@ describe('auto-approval runs the manual Allow path unchanged', () => {
       setSwitch('app,web');
       const { requestId } = await authorize();
       const other = `__Host-ddc_authz=${crypto.randomBytes(32).toString('base64url')}`;
-      const res = await consent(await credential(entry), other, { requestId, allow: true, auto: true });
+      const res = await consent(await credential(entry), other, { requestId, allow: true, auto: entry === 'app' });
       assert.equal(res.status, 409, res.text);
       assert.equal(res.body.data.reason, 'mismatch');
       assert.equal(authzRow(requestId).codeHash ?? null, null);
@@ -390,9 +460,10 @@ describe('auto-approval runs the manual Allow path unchanged', () => {
   it('is single use: a second auto (or manual) Allow on the same request mints nothing', async () => {
     setSwitch('app,web');
     const { requestId, cookie } = await authorize();
-    const first = await consent(userJwt(), cookie, { requestId, allow: true, auto: true });
+    const token = await appSession();
+    const first = await consent(token, cookie, { requestId, allow: true, auto: true });
     assert.equal(first.status, 200, first.text);
-    const again = await consent(userJwt(), cookie, { requestId, allow: true, auto: true });
+    const again = await consent(token, cookie, { requestId, allow: true, auto: true });
     const manual = await consent(userJwt(), cookie, { requestId, allow: true });
     for (const res of [again, manual]) {
       assert.equal(res.status, 400);
@@ -400,13 +471,16 @@ describe('auto-approval runs the manual Allow path unchanged', () => {
     }
   });
 
-  it('still requires a verified login when SSO_REQUIRE_VERIFIED_SESSION=true', async () => {
+  it('standalone auto is refused and manual JWT consent still needs a verified login when configured', async () => {
     setSwitch('app,web');
     process.env.SSO_REQUIRE_VERIFIED_SESSION = 'true';
     const { requestId, cookie } = await authorize();
     const res = await consent(userJwt({}), cookie, { requestId, allow: true, auto: true });
-    assert.equal(res.status, 200, res.text);
-    const redirect = new URL(res.body.data.redirectTo);
+    assert.equal(res.status, 403, res.text);
+    assert.equal(authzRow(requestId).consumedAt ?? null, null);
+    const manual = await consent(userJwt({}), cookie, { requestId, allow: true });
+    assert.equal(manual.status, 200, manual.text);
+    const redirect = new URL(manual.body.data.redirectTo);
     assert.equal(redirect.searchParams.get('error'), 'login_required');
     assert.equal(redirect.searchParams.get('code'), null);
   });
@@ -453,14 +527,19 @@ describe('auto-approval runs the manual Allow path unchanged', () => {
 
 describe('audit line oauth.consent_auto_approved', () => {
   for (const entry of ['app', 'web']) {
-    it(`${entry} entry: one info line with client, entry, scopes, request and user — no token`, async () => {
+    it(`${entry} entry: ${entry === 'app' ? 'one redacted automatic approval log line' : 'no automatic approval or audit line'}`, async () => {
       setSwitch('app,web');
       const { requestId, cookie } = await authorize({ scope: 'tge:identity tge:email' });
       const token = await credential(entry);
       captured.length = 0;
       const res = await consent(token, cookie, { requestId, allow: true, auto: true });
-      assert.equal(res.status, 200, res.text);
       const lines = captured.filter((line) => line.message === 'oauth.consent_auto_approved');
+      if (entry === 'web') {
+        assert.equal(res.status, 403, res.text);
+        assert.equal(lines.length, 0, 'a standalone JWT never records automatic approval');
+        return;
+      }
+      assert.equal(res.status, 200, res.text);
       assert.equal(lines.length, 1);
       assert.equal(lines[0].level, 'info');
       assert.deepEqual(lines[0].meta, {
@@ -487,7 +566,8 @@ describe('audit line oauth.consent_auto_approved', () => {
     setSwitch('app,web');
     process.env.SSO_REQUIRE_VERIFIED_SESSION = 'true';
     const unverified = await authorize();
-    assert.equal((await consent(userJwt({}), unverified.cookie, { requestId: unverified.requestId, allow: true, auto: true })).status, 200);
+    assert.equal((await consent(userJwt({}), unverified.cookie, { requestId: unverified.requestId, allow: true, auto: true })).status, 403);
+    assert.equal((await consent(userJwt({}), unverified.cookie, { requestId: unverified.requestId, allow: true })).status, 200);
     assert.equal(captured.filter((line) => line.message === 'oauth.consent_auto_approved').length, 0);
   });
 });

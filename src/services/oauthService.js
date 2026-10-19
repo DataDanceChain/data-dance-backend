@@ -536,8 +536,8 @@ async function startAuthorization(req, query, res) {
     if (partner && !PKCE_UNRESERVED.test(String(query.code_challenge))) {
       throw new OAuthError(400, 'invalid_request', 'code_challenge must be 43-128 unreserved characters.');
     }
-    if (partner && query.prompt !== undefined && !['none', 'login'].includes(String(query.prompt))) {
-      throw new OAuthError(400, 'invalid_request', 'prompt must be none or login.');
+    if (partner && query.prompt !== undefined && !['none', 'login', 'select_account'].includes(String(query.prompt))) {
+      throw new OAuthError(400, 'invalid_request', 'prompt must be none, login or select_account.');
     }
     if (partner && String(query.prompt) === 'none') {
       // The authorization server holds no browser session of its own (the DataDance login
@@ -592,6 +592,7 @@ async function startAuthorization(req, query, res) {
         clientId: client.clientId,
         redirectUri,
         state,
+        prompt: partner && query.prompt !== undefined ? String(query.prompt) : null,
         codeChallenge: String(query.code_challenge),
         codeChallengeMethod: 'S256',
         resource: expected,
@@ -610,6 +611,7 @@ async function startAuthorization(req, query, res) {
   }
   const consent = new URL(`${appPublicUrl()}/oauth/consent`);
   consent.searchParams.set('request', row.id);
+  if (row.prompt) consent.searchParams.set('prompt', row.prompt);
   const loginHint = partner ? plausibleLoginHint(query.login_hint) : '';
   if (loginHint) consent.searchParams.set('login_hint', loginHint);
   if (hideReferralPrompt) consent.searchParams.set('referral_prompt', 'hide');
@@ -649,7 +651,13 @@ async function getConsentRequest(id) {
     expiresAt: row.expiresAt,
     // Only a hint for the Wallet (post the Allow without a tap). Never a decision: the code is
     // minted by the credentialed POST /api/oauth/consent, which re-checks the switch itself.
-    autoApprove: partner && partner.autoApprove ? partner.autoApprove : autoApproveFor(partner ? row.clientId : null),
+    autoApprove: {
+      app: !['login', 'select_account'].includes(row.prompt) && Boolean(
+        (partner && partner.autoApprove ? partner.autoApprove : autoApproveFor(partner ? row.clientId : null)).app,
+      ),
+      web: false,
+    },
+    prompt: row.prompt || null,
     // This API also takes the decision as a top-level form submission (POST /oauth/consent,
     // src/routes/oauthRoutes.js). The Wallet falls back to it only when this flag is true, so a
     // Wallet build never posts that form to an API that predates it.
@@ -689,13 +697,16 @@ async function decideConsent(user, requestId, allow, ctx = {}) {
   if (principal === 'sso_ticket' && ctx.clientId && ctx.clientId !== row.clientId) {
     throw new OAuthError(403, 'access_denied', 'This session is bound to a different client.');
   }
-  // Auto-approval gate: a partner client only (the configured TGE client, or a first-party row of
-  // the database), and only for an entry type the switch allows. Checked before anything is
-  // consumed, so a refusal leaves the request decidable by hand.
+  // Auto-approval is only for an authenticated app-ticket launch, with the app switch enabled.
+  // Stored explicit account prompts survive URL changes and always require a manual decision.
+  // Check before any consume, so a refusal leaves the request available to the selected account.
   const entry = consentEntry(ctx);
   const autoFlags = client && client.autoApprove ? client.autoApprove : autoApproveFor(row.clientId);
-  if (auto && !(partner && autoFlags[entry])) {
+  if (auto && !(partner && principal === 'sso_ticket' && autoFlags.app && !['login', 'select_account'].includes(row.prompt))) {
     throw new AutoApproveNotAllowedError(entry);
+  }
+  if (allow && principal === 'sso_ticket' && row.prompt === 'select_account') {
+    throw new OAuthError(403, 'access_denied', 'Choose a DataDance account to continue; an existing hand-off session cannot select the account.');
   }
 
   // Every terminal answer consumes the request atomically: one authorization request is ONE
