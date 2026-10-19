@@ -632,9 +632,10 @@ unconditionally — the issuer is never derived from a request header), `APP_PUB
   "金融级加固：合作方 SSO".
 - **Self-serve client registration** (`POST /api/developer/sso/clients`) is closed unless
   `SSO_DEVELOPER_REGISTRATION=on` or `allowlist`. The default, `off`, also applies when the variable is unset or
-  blank. Closed, the endpoint answers every caller, signed in or not, `403` with
+  blank. Closed, the endpoint answers a caller without a token `403` with
   `{"error":"registration_closed", "error_description":"Self-serve client registration is closed.
   Contact DataDance to register a client."}`, before any database access, so nothing is written.
+  A signed-in caller gets the same answer unless the account holds a role that may register (below).
   Clients registered earlier keep working: sign-in, the token exchange and the partner API do not
   consult the switch.
 - **Turning it on still requires a signed-in DataDance account.** The route itself checks the
@@ -663,11 +664,17 @@ unconditionally — the issuer is never derived from a request header), `APP_PUB
        keeps an e-mail that a request body once supplied, so it does not count. An Apple account whose
        verifier id is not its e-mail does not count either.
 
+  The session must also be newer than the account's last disable / enable (`User.sessionsResetAt`),
+  the rule the staff routes apply: a wallet JWT issued before it does not count as listed, so
+  re-enabling an account does not bring an older session back to this path. `on` does not apply
+  this rule.
+
   Every other signed-in account gets the same `403 registration_closed` body as `off`, so the
   answer never tells whether an address is listed. The refusal happens before the per-IP rate
   limiter, so refused calls do not use up a listed developer's quota. Each refusal writes one
   `developer_registration.refused` log line with the account id and a reason code (`not_listed`,
-  `session_not_verified`, `connection_not_trusted`, `email_not_login_identity`), never the e-mail.
+  `session_not_verified`, `connection_not_trusted`, `email_not_login_identity`, `session_revoked`),
+  never the e-mail.
   A client registered this way is a `developer` client (login scopes only), never a `partner` row,
   and is owned by the registering account. To give a developer access, add their DataDance account
   e-mail and restart. They then sign in to the developer console with Google or the e-mail code.
@@ -678,6 +685,15 @@ unconditionally — the issuer is never derived from a request header), `APP_PUB
   `WEB3AUTH_EMAIL_TRUSTED_VERIFIERS` must name the connections of the network the deployment runs
   on. While `WEB3AUTH_NETWORK_REBIND=off`, nothing else reads that variable, so setting it there
   for this check changes no login.
+- **The `developer` and `ddc_admin` roles may register in `off` and `allowlist` too**
+  (`src/services/userRoles.js`, granted with `scripts/opsRoles.js`; see `docs/OPS_ADMIN.md`). When
+  the mode refuses a signed-in account, the route checks its roles; with one of them it needs a
+  verified session (`ver 2`, else `403 verified_session_required`) not issued before the account's
+  last disable / enable (else `401 session_revoked`), and the client is written together with a
+  `console.client_register` audit row (`detail.registration` is `closed` or `allowlist`). An
+  account without those roles gets `registration_closed` and one `developer_registration.refused`
+  log line (reason `closed` in `off` mode). `GET /api/developer/sso/me` answers `can_register`
+  accordingly.
 - The values are read once at boot, so a change needs a restart. Any mode other than `off`, `on` or
   `allowlist` refuses to start in production. In `allowlist` mode, so does a list entry that is not
   an e-mail address. The error names the entry positions and never an address. Outside production,

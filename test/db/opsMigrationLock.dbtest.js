@@ -1,0 +1,127 @@
+/**
+ * 20261017100000_ops_roles_audit on a live database (`npm run test:db`; needs TEST_DATABASE_URL
+ * pointing at a throwaway database whose name contains "test").
+ *
+ * The migration alters "User" and adds foreign keys to it, which needs short table locks. While
+ * another session holds a lock on "User", it must fail fast (lock_timeout) and leave nothing,
+ * instead of queueing every later reader of "User" behind it; once the lock is gone it applies.
+ *
+ * It runs the migration file with `prisma db execute`, the same schema engine and one-script
+ * transaction `prisma migrate deploy` uses, against a per-run scratch schema that has its own
+ * minimal "User" table; the scratch schema is dropped afterwards. The migrated tables of the test
+ * database itself are not touched.
+ */
+const { describe, it, before, after } = require('node:test');
+const assert = require('node:assert/strict');
+const crypto = require('crypto');
+const path = require('path');
+const { spawn } = require('child_process');
+
+const url = process.env.TEST_DATABASE_URL;
+if (!url) throw new Error('TEST_DATABASE_URL is required for test:db (a throwaway, migrated database)');
+if (!/\/[^/?]*test[^/?]*(\?|$)/.test(url)) throw new Error('TEST_DATABASE_URL must name a database containing "test" — refusing to write fixtures anywhere else');
+process.env.DATABASE_URL = url;
+process.env.LOG_LEVEL = 'error';
+
+const prisma = require('../../src/utils/prisma');
+
+const SCHEMA = `mig${crypto.randomBytes(3).toString('hex')}`;
+const MIGRATION = path.join(__dirname, '../../prisma/migrations/20261017100000_ops_roles_audit/migration.sql');
+const PRISMA_CLI = require.resolve('prisma/build/index.js');
+
+function scratchUrl() {
+  const parsed = new URL(url);
+  parsed.searchParams.set('schema', SCHEMA);
+  return parsed.toString();
+}
+
+/** `prisma db execute --file <migration>` on the scratch schema: { code, output, ms }. */
+function applyMigration({ killAfterMs = 60000, file = MIGRATION } = {}) {
+  return new Promise((resolve) => {
+    const started = Date.now();
+    const child = spawn(process.execPath, [PRISMA_CLI, 'db', 'execute', '--url', scratchUrl(), '--file', file], {
+      env: { ...process.env, PRISMA_HIDE_UPDATE_MESSAGE: '1', CHECKPOINT_DISABLE: '1' },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let output = '';
+    child.stdout.on('data', (chunk) => { output += chunk; });
+    child.stderr.on('data', (chunk) => { output += chunk; });
+    const timer = setTimeout(() => child.kill('SIGKILL'), killAfterMs);
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      resolve({ code, output, ms: Date.now() - started });
+    });
+  });
+}
+
+async function scratchTables() {
+  const rows = await prisma.$queryRawUnsafe(
+    `SELECT table_name FROM information_schema.tables
+     WHERE table_schema = $1 AND table_name IN ('UserRoleGrant','OpsAuditLog','OpsSignInCode','IdentityConflict')
+     ORDER BY table_name`,
+    SCHEMA,
+  );
+  return rows.map((row) => row.table_name);
+}
+
+async function scratchUserColumns() {
+  const rows = await prisma.$queryRawUnsafe(
+    `SELECT column_name FROM information_schema.columns
+     WHERE table_schema = $1 AND table_name = 'User' ORDER BY column_name`,
+    SCHEMA,
+  );
+  return rows.map((row) => row.column_name);
+}
+
+before(async () => {
+  await prisma.$executeRawUnsafe(`CREATE SCHEMA "${SCHEMA}"`);
+  await prisma.$executeRawUnsafe(`CREATE TABLE "${SCHEMA}"."User" ("id" TEXT PRIMARY KEY)`);
+});
+
+after(async () => {
+  await prisma.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${SCHEMA}" CASCADE`);
+  await prisma.$disconnect();
+});
+
+describe('the ops roles migration and a busy "User" table', () => {
+  it('fails within its lock_timeout while a reader holds "User", and changes nothing', async () => {
+    let release;
+    const released = new Promise((resolve) => { release = resolve; });
+    let locked;
+    const holding = new Promise((resolve) => { locked = resolve; });
+    // A long reader: an open transaction holding ACCESS SHARE on "User" until released.
+    const reader = prisma.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe(`LOCK TABLE "${SCHEMA}"."User" IN ACCESS SHARE MODE`);
+      locked();
+      await released;
+    }, { maxWait: 10000, timeout: 60000 });
+    try {
+      await holding;
+      // Without a lock_timeout the migration would wait for the reader; give up on it after 20 s.
+      const result = await applyMigration({ killAfterMs: 20000 });
+      assert.notEqual(result.code, 0, 'the migration did not apply while "User" was locked');
+      assert.notEqual(result.code, null, 'it failed by itself instead of waiting for the reader');
+      assert.match(result.output, /55P03|lock timeout/i);
+      assert.ok(result.ms < 15000, `failed fast (${result.ms} ms)`);
+    } finally {
+      release();
+      await reader;
+    }
+    assert.deepEqual(await scratchTables(), [], 'no table was created');
+    assert.deepEqual(await scratchUserColumns(), ['id'], '"User" is unchanged');
+  });
+
+  it('applies once the lock is gone: the four tables and the three User columns', async () => {
+    const result = await applyMigration();
+    assert.equal(result.code, 0, result.output);
+    assert.deepEqual(await scratchTables(), ['IdentityConflict', 'OpsAuditLog', 'OpsSignInCode', 'UserRoleGrant']);
+    assert.deepEqual(await scratchUserColumns(), ['disabledBy', 'disabledReason', 'id', 'sessionsResetAt']);
+  });
+
+  it('the file sets lock_timeout before its first statement and resets it at the end', () => {
+    const sql = require('fs').readFileSync(MIGRATION, 'utf8');
+    const statements = sql.split('\n').filter((line) => line.trim() && !line.trim().startsWith('--'));
+    assert.match(statements[0], /^SET lock_timeout = '\d+s';$/);
+    assert.equal(statements[statements.length - 1], 'RESET lock_timeout;');
+  });
+});

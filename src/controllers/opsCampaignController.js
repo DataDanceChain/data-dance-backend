@@ -9,6 +9,7 @@ const {
   toPublicCard,
 } = require('../utils/campaignRules');
 const { drawRaffle } = require('../services/campaignEffects');
+const { noteCreated } = require('../services/opsAudit');
 const { listFirstPartyClientIds } = require('../services/ssoDeveloperClient');
 const { translateCampaignCopy } = require('../services/campaignTranslate');
 
@@ -100,6 +101,7 @@ exports.create = async (req, res) => {
       },
     });
     await writeEvent(row.id, actor, 'create', null, 'DRAFT');
+    noteCreated(req, row.id);
     return res.json({ status: 'success', data: serialize(row) });
   } catch (error) {
     if (error.code === 'P2002') return fail(res, 409, 'Slug already exists');
@@ -345,7 +347,7 @@ exports.drawRaffle = async (req, res) => {
     const campaign = await prisma.campaign.findUnique({ where: { id: req.params.id } });
     if (!campaign) return fail(res, 404, 'Campaign not found');
     if (campaign.template !== 'RAFFLE') return fail(res, 400, 'Not a raffle');
-    const result = await drawRaffle(campaign, actorOf(req));
+    const result = await drawRaffle(campaign, actorOf(req), { audit: req.auditChange });
     if (result.error) return fail(res, 400, result.error);
     return res.json({ status: 'success', data: { created: result.created } });
   } catch (error) {
@@ -361,6 +363,7 @@ exports.uploadCover = async (req, res) => {
     }
     const origin = String(process.env.PUBLIC_BASE_URL || 'https://api.datadance.ai').replace(/\/$/, '');
     const pathName = `/assets/campaigns/${req.file.filename}`;
+    noteCreated(req, pathName, 'campaign_cover');
     return res.json({
       status: 'success',
       data: {

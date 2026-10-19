@@ -312,10 +312,17 @@ async function markAssembling(id, actorId, note) {
   return presentDemand(updated);
 }
 
-async function fulfillDemand(id, actorId, { dataNFTId }) {
+const FULFILLABLE_STATUSES = ['submitted', 'quoted', 'accepted', 'assembling'];
+
+/**
+ * Ops fulfils a request by buying the pack from the buyer's balance. The purchase, the request's
+ * move to fulfilled, its event and (with `audit`, the ops route) the audit row commit in one
+ * transaction, so a request is bought at most once and never without its row.
+ */
+async function fulfillDemand(id, actorId, { dataNFTId, audit } = {}) {
   const demand = await prisma.dataDemand.findUnique({ where: { id } });
   if (!demand) throw httpError(404, 'demand_not_found', 'Request not found.');
-  if (!['submitted', 'quoted', 'accepted', 'assembling'].includes(demand.status)) {
+  if (!FULFILLABLE_STATUSES.includes(demand.status)) {
     throw httpError(400, 'not_fulfillable', 'This request cannot be fulfilled.');
   }
   const packId = String(dataNFTId || demand.similarPackId || '').trim();
@@ -339,30 +346,48 @@ async function fulfillDemand(id, actorId, { dataNFTId }) {
     dataNFTId: packId,
     quantity: 1,
     metadata: { demandId: demand.id },
+    inTransaction: async (tx, bought) => {
+      const orderId = bought.commerce?.order?.id || null;
+      const moved = await tx.dataDemand.updateMany({
+        where: { id, status: { in: FULFILLABLE_STATUSES } },
+        data: {
+          status: 'fulfilled',
+          dataNFTId: packId,
+          purchaseId: bought.purchase.id,
+          orderId,
+        },
+      });
+      if (moved.count !== 1) {
+        throw httpError(400, 'not_fulfillable', 'This request cannot be fulfilled.');
+      }
+      await addEvent(tx, {
+        demandId: id,
+        actor: 'ops',
+        actorId,
+        action: 'fulfill',
+        fromStatus: demand.status,
+        toStatus: 'fulfilled',
+        note: packId,
+      });
+      if (audit) {
+        await audit(tx, {
+          target: { type: 'demand', id },
+          detail: {
+            statusBefore: demand.status,
+            statusAfter: 'fulfilled',
+            buyerId: demand.buyerId,
+            dataNFTId: packId,
+            purchaseId: bought.purchase.id,
+            orderId,
+            amount: bought.totalAmount,
+            currency: 'USD',
+          },
+        });
+      }
+      return tx.dataDemand.findUnique({ where: { id }, include: DEMAND_INCLUDE });
+    },
   });
-
-  const updated = await prisma.$transaction(async (tx) => {
-    const next = await tx.dataDemand.update({
-      where: { id },
-      data: {
-        status: 'fulfilled',
-        dataNFTId: packId,
-        purchaseId: purchase.purchase.id,
-        orderId: purchase.order?.id || null,
-      },
-      include: DEMAND_INCLUDE,
-    });
-    await addEvent(tx, {
-      demandId: id,
-      actor: 'ops',
-      actorId,
-      action: 'fulfill',
-      fromStatus: demand.status,
-      toStatus: 'fulfilled',
-      note: packId,
-    });
-    return next;
-  });
+  const updated = purchase.inTransactionResult;
 
   return {
     demand: presentDemand(updated),

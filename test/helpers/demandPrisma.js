@@ -170,6 +170,11 @@ function installDemandModels(prisma) {
         Object.assign(row, data, { updatedAt: nextDate() });
         return shape(name, row, args);
       },
+      updateMany: async ({ where = {}, data }) => {
+        const hit = rows.filter((row) => whereMatches(name, row, where));
+        for (const row of hit) Object.assign(row, data, { updatedAt: nextDate() });
+        return { count: hit.length };
+      },
       delete: async ({ where }) => {
         const index = rows.findIndex((row) => whereMatches(name, row, where));
         if (index < 0) throw Object.assign(new Error(`demandPrisma: ${name} record not found`), { code: 'P2025' });
