@@ -91,7 +91,7 @@ Validation order and what the browser sees:
    registered URI → **HTTP 400 HTML page**, no redirect (T08). Exact means scheme, host, port,
    path and query byte-for-byte; a trailing slash or an extra query parameter is a mismatch.
 2. Otherwise, a missing/invalid `response_type`, `state`, `code_challenge`,
-   `code_challenge_method != S256`, unknown `scope`, `prompt` other than `none|login`, or a
+   `code_challenge_method != S256`, unknown `scope`, `prompt` other than `none|login|select_account`, or a
    `resource` that is not the partner API → **302 to `redirect_uri`** with `error`,
    `error_description`, `state` (when supplied) and `iss` (T09).
 3. Otherwise the request is stored (TTL **10 min**) and the browser is sent to the DataDance
@@ -474,6 +474,56 @@ Errors (RFC 6750, `WWW-Authenticate: Bearer realm="ddc-sso", error=…, resource
 `POST {issuer}/oauth/revoke` with client authentication (as in §6) and `token=ddc_tge_…`
 (`token_type_hint=access_token` optional). Always `200` for unknown tokens (RFC 7009 §2.2).
 Takes effect on the next `/partner/tge/*` call. `401 invalid_client` without credentials.
+
+## 8a. DataDance launch, standalone login and account choice
+
+Automatic consent requires the existing client-bound `ddc_sso_` handoff session AND the configured
+app auto-approval flag. Both the native App and signed-in DataDance website launch through
+`POST /api/sso/app-ticket` and `/sso/continue`; the primary Wallet JWT never leaves DataDance.
+A plain user JWT always gets manual partner confirmation. Legacy `SSO_TGE_AUTO_APPROVE=app,web`
+remains valid syntax, but effective `web` flags are always false; no environment change is needed
+for this policy. `off`, disabled clients, verified-session, browser-binding and PKCE checks remain.
+Do not infer entry trust from Referer, User-Agent, `source=ddc` or an arbitrary query flag.
+
+The temporary October 20 confirmation-first rollout uses the existing runtime setting
+`SSO_TGE_AUTO_APPROVE=off`; the configuration generator now also writes off to avoid undoing it
+on regeneration. Later restoring `app` needs the operator's runtime configuration update and API
+container recreation, not a new frontend/native build solely for the toggle. The setting is
+shared across the configured TGE and first-party registry clients. Under this updated interface,
+partners can request `prompt=login` to insist on confirmation but cannot independently enable
+seamless consent. Existing partner sessions are not forcibly reauthorized. Full mode ownership,
+production evidence and the separate interface-release sequence live in
+`ddc-sso-kit/docs/entry-policy.md`; changing this switch does not deploy these PRs.
+
+A partner account area's **Switch account** starts a fresh state/PKCE transaction with
+`prompt=select_account`, without the old `login_hint`. Explicit standalone re-login can use
+`prompt=login`. The issuer persists either prompt on the authorization row and returns it in the
+consent summary. Both suppress automatic consent even if the visible URL is edited. Automatic
+refusal is 403 `AUTO_APPROVE_NOT_ALLOWED` and leaves the request undecided. A manual Allow from an
+old scoped handoff is also refused for `select_account` (403 `access_denied`); a chosen account's
+ordinary JWT can approve manually. Deny still ends the request normally. This adopts the account
+choice vocabulary of [OIDC Core](https://openid.net/specs/openid-connect-core-1_0.html#AuthRequest);
+it does not add an OIDC ID token or change the partner's OAuth token exchange.
+
+The Wallet presents Switch account instead of approving the old scoped account. Its explicit
+switch action clears only this browser/tab's Wallet and handoff context, preserves the pending
+consent return, and enters normal login. In an embedded context where Google login is unavailable,
+the partner must open the new account-choice transaction in a supported system browser. Do not
+silently log out the primary native DataDance App. Never auto-bind referrals or move balances as
+part of account selection.
+
+Partner reference implementation and the current acceptance/ownership record are in
+`ddc-sso-kit/docs/entry-policy.md`. The reference client's `POST /account/switch` is a **partner
+backend example**, not a new DataDance API endpoint. The partner clears its old local identity,
+account caches and unfinished login transaction before establishing the selected identity; tokens
+and PKCE verifiers remain server-side. A CSRF token and explicit click are required.
+
+Migration `20261019160000_oauth_authorization_prompt` adds one nullable text column with a
+transactional three-second lock timeout. Apply it and generate the matching Prisma client before
+starting the new backend image. Existing requests read `prompt:null`; the old image ignores the
+column. On migration failure keep the old image serving; image rollback leaves the additive
+column. There are no new build-time/runtime environment variables. Source validation is local;
+no deployment, real switch or production configuration check is implied.
 
 ## 9. Freshness, kill switch, account stop
 

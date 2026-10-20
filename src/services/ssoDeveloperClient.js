@@ -225,7 +225,7 @@ function shapeDeveloperClient(row, req) {
     accessTtlSec: PARTNER_ACCESS_TTL_SEC,
     statusFields: firstParty ? firstPartyStatusFields(cfg) : [...DEVELOPER_STATUS_FIELDS],
     requireVerifiedSession: firstParty ? cfg.requireVerifiedSession : false,
-    autoApprove: firstParty ? { ...cfg.autoApprove } : { app: false, web: false },
+    autoApprove: firstParty ? { app: cfg.autoApprove.app, web: false } : { app: false, web: false },
     secretHash: row.secretHash,
     developer: !firstParty,
     firstParty,

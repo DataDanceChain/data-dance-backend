@@ -290,9 +290,14 @@ describe('auto-approved like the read scopes (item 35; SSO_TGE_AUTO_APPROVE, bac
   beforeEach(() => { process.env.SSO_TGE_AUTO_APPROVE = 'app,web'; });
   after(() => { delete process.env.SSO_TGE_AUTO_APPROVE; });
 
-  it('an automatic Allow of a consent carrying tge:referral_bind mints a code, from the App and from the web', async () => {
+  it('a scoped App consent carrying tge:referral_bind may auto-approve; standalone web stays manual', async () => {
     for (const ctx of [APP, WEB]) {
       const requestId = await authorize(FULL);
+      if (ctx.kind === 'user_jwt') {
+        await assert.rejects(decideConsent(meUser(), requestId, true, { ...ctx, auto: true }), (error) => error.code === 'AUTO_APPROVE_NOT_ALLOWED');
+        assert.ok(liveRequest(requestId), 'a refused auto is still available for manual consent');
+        continue;
+      }
       const redirectTo = await decideConsent(meUser(), requestId, true, { ...ctx, auto: true });
       assert.ok(new URL(redirectTo).searchParams.get('code'), ctx.kind);
       assert.equal(liveRequest(requestId), undefined);
@@ -306,13 +311,13 @@ describe('auto-approved like the read scopes (item 35; SSO_TGE_AUTO_APPROVE, bac
     assert.equal(res.status, 200, res.text);
     assert.deepEqual(res.body.data.scopeItems, ['identity', 'referral_bind']);
     // Present only once PR #8 is merged.
-    if (res.body.data.autoApprove) assert.deepEqual(res.body.data.autoApprove, { app: true, web: true });
+    if (res.body.data.autoApprove) assert.deepEqual(res.body.data.autoApprove, { app: true, web: false });
   });
 
   it('switch turned off after authorize: an automatic Allow also ends as invalid_scope, no code', async () => {
     const requestId = await authorize(FULL);
     process.env.SSO_TGE_REFERRAL_BIND = 'false';
-    const redirectTo = await decideConsent(meUser(), requestId, true, { ...WEB, auto: true });
+    const redirectTo = await decideConsent(meUser(), requestId, true, { ...APP, auto: true });
     assert.equal(new URL(redirectTo).searchParams.get('error'), 'invalid_scope');
     assert.equal(new URL(redirectTo).searchParams.get('code'), null);
   });

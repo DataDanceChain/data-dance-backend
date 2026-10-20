@@ -47,8 +47,13 @@ refuses `tge` and `tge-rehearsal` at boot, and anything outside `[A-Za-z0-9._-]{
   under the user's grant, and `SSO_TGE_REFERRAL_BIND=true`. The points history goes with a web build whose consent line
   for points reads "balance and history" (data-dance-frontend a077c74 or later); build the web image from such a commit
   first.
-- `SSO_TGE_AUTO_APPROVE=app`: a consent opened inside the DataDance App is still allowed without a tap; a consent opened
-  from a web sign-in always shows the consent page, so the user can see and switch the account.
+- `SSO_TGE_AUTO_APPROVE=off` (Sloan, 2026-10-20): show authorization confirmation for App and web
+  entries during partner adaptation. The operator can later restore the existing `app` runtime
+  mode; a config-only toggle needs an API container recreation, not a frontend/native rebuild.
+  Preserve the chosen value in both `.env.rehearsal` and `.env.api`; an old deployed `20-env.sh`
+  may overwrite it, so do not rerun that generator without this updated default or an explicit
+  mode review. Mode ownership and the coordinated interface release are documented in
+  `docs/TGE_SSO.md` and `ddc-sso-kit/docs/entry-policy.md`.
 - `SSO_DEVELOPER_REGISTRATION=allowlist`, with `SSO_DEVELOPER_ALLOWED_EMAILS` from `REHEARSAL_DEVELOPER_ALLOWED_EMAILS` or
   `--developer-emails-stdin` (empty = nobody). It needs a backend with PR #64 (main `66bf00f`); `20-env.sh` checks the
   built image's source first when `/root/ddcnew/.env` names one.
