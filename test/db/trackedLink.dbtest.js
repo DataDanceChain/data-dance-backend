@@ -7,7 +7,8 @@
  * events, and the ops list and detail count them. What only the database can prove: the unique slug
  * (409), Postgres' groupBy behind opens / people / continues, the 30-minute dedupe query, the hit
  * table's columns (no IP, no user agent) and the cascade. Fixture links use a per-run slug prefix
- * and are deleted afterwards (their hits go with them); the seeded links are only read.
+ * and are deleted afterwards (their hits go with them), and so are the generic `ops.write` audit
+ * rows their creates and edits left (by the links' ids); the seeded links are only read.
  */
 const { describe, it, before, after } = require('node:test');
 const assert = require('node:assert/strict');
@@ -23,6 +24,9 @@ process.env.DATABASE_URL = url;
 process.env.LOG_LEVEL = 'error';
 const JWT_SECRET = `tracked-link-db-${crypto.randomBytes(8).toString('hex')}`;
 process.env.JWT_SECRET = JWT_SECRET;
+// The ops tokens below are the shared login's (role 'admin'), accepted unless OPS_SHARED_LOGIN=off.
+// Set to on here so a value in the shell cannot change the test.
+process.env.OPS_SHARED_LOGIN = 'on';
 delete process.env.TRACKED_LINK_ORIGIN;
 
 const prisma = require('../../src/utils/prisma');
@@ -56,6 +60,19 @@ describe('tracked links on Postgres', () => {
   });
 
   after(async () => {
+    // The generic audit rows start after each answer; let the last ones land, then remove this
+    // run's (they name the run's links as their target).
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    const links = await prisma.trackedLink.findMany({ where: { slug: { startsWith: `${RUN}-` } }, select: { id: true } });
+    const linkIds = links.map((link) => link.id);
+    if (linkIds.length) {
+      await prisma.opsAuditLog.deleteMany({ where: { action: 'ops.write', targetType: 'links', targetId: { in: linkIds } } });
+    }
+    assert.equal(
+      await prisma.opsAuditLog.count({ where: { action: 'ops.write', targetId: { in: linkIds } } }),
+      0,
+      'no audit row of this run is left behind',
+    );
     await prisma.$executeRawUnsafe('DELETE FROM "TrackedLink" WHERE slug LIKE $1', `${RUN}-%`);
     const [{ remaining }] = await prisma.$queryRawUnsafe(
       'SELECT COUNT(*)::int AS remaining FROM "TrackedLinkHit" WHERE "visitorId" LIKE $1',
@@ -185,5 +202,11 @@ describe('tracked links on Postgres', () => {
     assert.equal((await request(server).get(`/api/go/${slug}`)).status, 404);
     assert.equal((await postEvent(slug, { visitorId: visitorOf('c'), event: 'open' })).status, 404);
     assert.equal(await prisma.trackedLinkHit.count({ where: { linkId: id } }), 3);
+
+    // The create and the edit each left one generic ops.write row naming this link; the
+    // duplicate (409) and the demo's refused write left none.
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const rows = await prisma.opsAuditLog.findMany({ where: { action: 'ops.write', targetId: id }, orderBy: { createdAt: 'asc' } });
+    assert.deepEqual(rows.map((row) => [row.targetType, row.detail.method, row.detail.status]), [['links', 'POST', 201], ['links', 'PATCH', 200]]);
   });
 });

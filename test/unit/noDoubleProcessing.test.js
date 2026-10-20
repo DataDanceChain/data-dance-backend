@@ -396,7 +396,9 @@ describe('points adjust balance check', () => {
       status(code) { this.statusCode = code; return this; },
       json(payload) { this.body = payload; return this; },
     };
-    return adjustPoints({ params: { userId }, body, opsAdmin: { username: 'ops-test' } }, res).then(() => res);
+    // A shared ops session, as the ops router hands it over (#55): the audit row needs an actor.
+    const opsAdmin = { kind: 'shared', username: 'shared', role: 'shared' };
+    return adjustPoints({ params: { userId }, body, opsAdmin }, res).then(() => res);
   }
 
   it('a deduction larger than the balance is refused (400) and moves nothing', async () => {
@@ -406,6 +408,7 @@ describe('points adjust balance check', () => {
     assert.match(res.body.message, /Insufficient balance: 3, cannot deduct 4/);
     assert.equal(stored('user', member.id).totalPoints, 3);
     assert.equal(prisma.store.point.length, 0);
+    assert.equal(prisma.store.opsAuditLog.length, 0);
   });
 
   it('a deduction within the balance applies once, with the balance before and after it', async () => {
@@ -416,6 +419,11 @@ describe('points adjust balance check', () => {
     assert.equal(res.body.data.balanceAfter, 6);
     assert.equal(stored('user', member.id).totalPoints, 6);
     assert.equal(prisma.store.point.length, 1);
+    const [row] = prisma.store.opsAuditLog;
+    assert.equal(prisma.store.opsAuditLog.length, 1);
+    assert.equal(row.action, 'points.adjust');
+    assert.equal(row.detail.balanceBefore, 10, 'the audit row holds the balance read under the lock');
+    assert.equal(row.detail.balanceAfter, 6);
   });
 
   it('locks the member\'s row before it reads the balance, and reports that balance as before', async () => {

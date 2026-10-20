@@ -2,6 +2,9 @@
 
 一个基于Node.js的Web3数字身份和数据资产管理平台后端服务。
 
+Current contracts: [operations roles/audit](docs/OPS_ADMIN.md), [partner SSO](docs/TGE_SSO.md),
+and [developer qualification and per-application confirmation](docs/DEVELOPER_CONSENT.md).
+
 ## 🚀 快速开始
 
 ### 环境要求
@@ -320,6 +323,8 @@ node scripts/web3authJwksThumbprints.js
   | `auth` | `POST /api/auth/login`、`/register` | 15 分钟 5 次失败 | IP（不再按提交的 email） |
   | `web3authLogin` | `POST /api/auth/web3auth-login` | 每分钟 10 次 | IP |
   | `opsLogin` | `POST /api/ops/auth/login` | 15 分钟 5 次失败 | IP |
+  | `opsSignInExchange` | `POST /api/ops/auth/exchange` | 15 分钟 10 次失败 | IP |
+  | `opsSignInCode` | `POST /api/ops/auth/code` | 每分钟 5 次 | 用户 id |
   | `oauthRegister` / `oauthAuthorize` / `oauthToken` / `oauthRevoke` | `/oauth/*`（由 OAuth 路由挂载） | 5 / 30 / 20 / 20 每分钟 | IP |
   | `consent` | `POST /api/oauth/consent` | 每分钟 10 次 | 用户 id，未登录按 IP |
   | `partner` | `/partner/tge/*` | 每分钟 120 次 | bearer token 的 sha256 |

@@ -153,8 +153,8 @@ function validateCta(kind, value) {
 
 /**
  * The SSO client ids a card may name: the partner client this deployment is configured with
- * (SSO_TGE_CLIENT_ID in `env`), then `firstPartyIds`, the enabled first-party partner clients stored
- * in the database, which the caller loads (ssoDeveloperClient.listFirstPartyClientIds). The retired
+ * (SSO_TGE_CLIENT_ID in `env`), then `firstPartyIds`, the enabled first-party partner clients and
+ * qualified ordinary handoff clients (ssoDeveloperClient.listHandoffClientIds). The retired
  * ids "tge" and "tge-rehearsal" are never client ids. Blanks and repeats are dropped, order is kept.
  */
 function campaignSsoClientIds(firstPartyIds = [], env = process.env) {

@@ -167,7 +167,9 @@ app.use('/api/ops', opsRouter);
 
 const RUN = `nd${crypto.randomBytes(3).toString('hex')}`;
 const id = (name) => `${RUN}-${name}`;
-const AUTH = `Bearer ${jwt.sign({ type: 'ops_admin', sub: `${RUN}-admin` }, process.env.JWT_SECRET, { expiresIn: '10m' })}`;
+// A personal ops session of a ddc_admin account (seeded in before()): the payout routes need
+// ops.payouts, which only ddc_admin holds.
+const AUTH = `Bearer ${jwt.sign({ type: 'ops_admin', kind: 'user', sub: `${RUN}-admin` }, process.env.JWT_SECRET, { expiresIn: '10m' })}`;
 
 const post = (route, body = {}) => request(app).post(`/api/ops${route}`).set('Authorization', AUTH).send(body);
 const minutesAgo = (minutes) => new Date(Date.now() - minutes * 60 * 1000);
@@ -212,6 +214,11 @@ async function cleanup() {
     await prisma.user.deleteMany({ where: { id: { in: users } } });
   }
 }
+
+before(async () => {
+  const admin = await user('admin');
+  await prisma.userRoleGrant.create({ data: { userId: admin.id, role: 'ddc_admin', grantedBy: 'script', reason: 'seed for test' } });
+});
 
 after(async () => {
   await cleanup();

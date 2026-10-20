@@ -383,23 +383,28 @@ describe('registration closed (the default)', () => {
     assert.equal(written, false, 'nothing written');
   });
 
-  it('off + signed-in: 403 registration_closed as well, no database call, nothing written', async () => {
-    const { res, dbCalls, written } = await observe(() => register(registration(), signedIn()));
+  // A signed-in caller is looked up (`protect`, then its roles): the developer and ddc_admin roles
+  // may register while registration is closed (test/unit/developerConsoleAdmin.test.js). An account
+  // with neither gets the same 403 and nothing is written.
+  it('off + signed-in without a role: 403 registration_closed as well, nothing written', async () => {
+    const { res, written } = await observe(() => register(registration(), signedIn()));
     assert.equal(res.status, 403);
     assert.deepEqual(res.body, CLOSED);
-    assert.equal(dbCalls, 0, 'the switch answers before the login check looks the account up');
     assert.equal(written, false, 'nothing written');
   });
 
-  it('answers every request the same way, before validation, the login check and the rate limiter', async () => {
+  it('answers every request the same way, before validation and the rate limiter', async () => {
     const bodies = [registration(), {}, registration({ redirect_uris: ['http://example.com/cb'] }), registration({ contact_email: 'x' })];
-    const auths = [undefined, signedIn(), 'Bearer not-a-jwt'];
+    const auths = [undefined, signedIn()];
     // Seven in a row: the per-IP limit is 5 an hour, so a 429 here would mean the limiter ran first.
     for (let i = 0; i < 7; i += 1) {
       const res = await register(bodies[i % bodies.length], auths[i % auths.length]);
       assert.equal(res.status, 403, `request ${i + 1}`);
       assert.deepEqual(res.body, CLOSED);
     }
+    // A token that does not verify is the login check's 401, as on every other signed-in route.
+    const bad = await register(registration(), 'Bearer not-a-jwt');
+    assert.equal(bad.status, 401);
     assert.equal(prisma.store.ssoDeveloperClient.length, 0);
   });
 
@@ -679,11 +684,23 @@ describe('registration by allowlist (SSO_DEVELOPER_REGISTRATION=allowlist): list
     assert.deepEqual(refusals, []);
   });
 
-  it('off is unchanged: a listed account with a verified login e-mail gets 403 before any database call', async () => {
+  // A signed-in caller is looked up while off (`protect`, then its roles): the developer and
+  // ddc_admin roles may register (test/unit/developerConsoleAdmin.test.js). The list itself admits
+  // nobody while off.
+  it('off is unchanged for the list: a listed account with a verified login e-mail and no role gets 403, nothing written', async () => {
     initDeveloperRegistration({ env: { SSO_DEVELOPER_REGISTRATION: 'off', SSO_DEVELOPER_ALLOWED_EMAILS: ALLOWED }, log: { warn: () => {} } });
-    const { res, dbCalls, written } = await observe(() => register(registration(), signedIn(LEAD.id)));
+    const { res, written } = await observe(() => register(registration(), signedIn(LEAD.id)));
+    assert.deepEqual([res.status, res.body], [403, CLOSED]);
+    assert.equal(written, false);
+    assert.deepEqual(refusals.map((r) => [r.entry.userId, r.entry.reason]), [[LEAD.id, 'closed']]);
+  });
+
+  it('off + no token: 403 before any database call, as before', async () => {
+    initDeveloperRegistration({ env: { SSO_DEVELOPER_REGISTRATION: 'off', SSO_DEVELOPER_ALLOWED_EMAILS: ALLOWED }, log: { warn: () => {} } });
+    const { res, dbCalls, written } = await observe(() => register(registration()));
     assert.deepEqual([res.status, res.body], [403, CLOSED]);
     assert.equal(dbCalls, 0);
     assert.equal(written, false);
+    assert.deepEqual(refusals, []);
   });
 });

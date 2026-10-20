@@ -99,6 +99,8 @@ function cleanRedirects(value) {
 }
 
 async function ensureTable() {
+  // Compatibility bootstrap only. New consent/admin projections REQUIRE migrate deploy first;
+  // this old bridge must not become a second schema-migration mechanism.
   await prisma.$executeRawUnsafe(`
     CREATE TABLE IF NOT EXISTS "SsoDeveloperClient" (
       "id" TEXT PRIMARY KEY,
@@ -288,63 +290,110 @@ async function rotateOwnedSecret(ownerId, clientId) {
   return { client_id: row.clientId, client_secret: clientSecret };
 }
 
-async function grantPlanetManager(email) {
-  const base = String(process.env.PUBLIC_BASE_URL || '');
-  if (!base.includes('api-rehearsal.datadance.ai')) {
-    const error = new Error('Data Planet is assigned on the mainnet API.');
-    error.status = 409;
-    error.code = 'wrong_network';
-    throw error;
+const PLANET_MANAGER_CLIENT_ID = 'sso-rehearsal';
+const DEFAULT_PLANET_MANAGER_API_HOSTS = 'api.datadance.ai,api-rehearsal.datadance.ai';
+
+function planetManagerError(status, code, message) {
+  const error = new Error(message);
+  error.status = status;
+  error.code = code;
+  return error;
+}
+
+/** The API hosts where the Data Planet manager may be assigned (PLANET_MANAGER_API_HOSTS). */
+function planetManagerApiHosts(env = process.env) {
+  const raw = String(env.PLANET_MANAGER_API_HOSTS ?? '').trim() || DEFAULT_PLANET_MANAGER_API_HOSTS;
+  return raw.split(',').map((host) => host.trim().toLowerCase()).filter(Boolean);
+}
+
+/** Whether this API (the host of PUBLIC_BASE_URL) is one of those hosts. Exact host, not a substring. */
+function planetManagerHostAllowed(env = process.env) {
+  let host;
+  try {
+    host = new URL(String(env.PUBLIC_BASE_URL || '').trim()).hostname.toLowerCase();
+  } catch {
+    return false;
+  }
+  return Boolean(host) && planetManagerApiHosts(env).includes(host);
+}
+
+/**
+ * POST /api/ops/sso/planet-manager (ops.admin): make the account with `email` the owner of the
+ * first-party Data Planet client row, which lets it manage that client in the developer console.
+ * It is not a role. The change and its audit row (sso.planet_manager.assign) are one transaction.
+ * `audit` = { actor, reason, requestId } from the ops route.
+ */
+async function grantPlanetManager(email, audit) {
+  const { writeAudit } = require('./opsAudit');
+  const { cleanReason } = require('../constants/opsRoles');
+  const reason = cleanReason(audit && audit.reason);
+  if (!reason) throw planetManagerError(400, 'REASON_REQUIRED', 'A reason of 3 to 200 characters is required.');
+  if (!planetManagerHostAllowed()) {
+    throw planetManagerError(409, 'wrong_network', 'Data Planet is assigned on the mainnet API.');
   }
   const normalized = String(email || '').trim().toLowerCase();
   if (normalized.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalized)) {
-    const error = new Error('email is required.');
-    error.status = 400;
-    error.code = 'invalid_request';
-    throw error;
+    throw planetManagerError(400, 'invalid_request', 'email is required.');
   }
-  const user = await prisma.user.findFirst({
+  // E-mail is unique only as typed: two accounts can differ in case alone. Like scripts/opsRoles.js,
+  // refuse to choose between them.
+  const matches = await prisma.user.findMany({
     where: { email: { equals: normalized, mode: 'insensitive' } },
     select: { id: true, email: true, disabledAt: true },
+    take: 2,
   });
+  if (matches.length > 1) {
+    throw planetManagerError(409, 'email_ambiguous', 'More than one account uses that email (ignoring case). Resolve it first.');
+  }
+  const user = matches[0];
   if (!user) {
-    const error = new Error('No mainnet account uses that email. Ask them to sign in on Mainnet first.');
-    error.status = 404;
-    error.code = 'not_found';
-    throw error;
+    throw planetManagerError(404, 'not_found', 'No mainnet account uses that email. Ask them to sign in on Mainnet first.');
   }
-  if (user.disabledAt) {
-    const error = new Error('That account is disabled.');
-    error.status = 403;
-    error.code = 'account_disabled';
-    throw error;
-  }
-  await ensureTable();
-  const clientId = 'sso-rehearsal';
-  const existing = await prisma.$queryRaw`
-    SELECT "clientId" FROM "SsoDeveloperClient" WHERE "clientId" = ${clientId} LIMIT 1
-  `;
-  if (!existing.length) {
-    const id = crypto.randomUUID();
-    const secretHash = sha256(crypto.randomBytes(32));
-    await prisma.$executeRawUnsafe(
-      `INSERT INTO "SsoDeveloperClient"
-        ("id","clientId","clientName","contactEmail","secretHash","redirectUris","enabled","kind","ownerUserId")
-       VALUES ($1,$2,'Data Planet',$3,$4,'{}'::text[],false,'partner',$5)`,
-      id,
-      clientId,
-      user.email,
-      secretHash,
-      user.id,
-    );
-  } else {
-    await prisma.$executeRaw`
-      UPDATE "SsoDeveloperClient"
-      SET "ownerUserId" = ${user.id}, kind = 'partner', "contactEmail" = ${user.email}
-      WHERE "clientId" = ${clientId}
-    `;
-  }
-  return { client_id: clientId, email: user.email, user_id: user.id, network: 'mainnet' };
+  if (user.disabledAt) throw planetManagerError(403, 'account_disabled', 'That account is disabled.');
+  const clientId = PLANET_MANAGER_CLIENT_ID;
+  const previousOwnerUserId = await prisma.$transaction(async (tx) => {
+    const { lockConsentPolicy } = require('./developerConsentPolicy');
+    await lockConsentPolicy(tx);
+    const existing = await tx.ssoDeveloperClient.findUnique({ where: { clientId } });
+    const previous = existing ? existing.ownerUserId || null : null;
+    if (!existing) {
+      await tx.ssoDeveloperClient.create({
+        data: {
+          clientId,
+          clientName: 'Data Planet',
+          contactEmail: user.email,
+          secretHash: sha256(crypto.randomBytes(32)),
+          redirectUris: [],
+          enabled: false,
+          kind: 'partner',
+          ownerUserId: user.id,
+        },
+      });
+    } else {
+      await tx.ssoDeveloperClient.update({
+        where: { clientId },
+        data: { ownerUserId: user.id, kind: 'partner', contactEmail: user.email,
+          ...(previous !== user.id ? { skipConfirmationEnabled: false, skipConfirmationOwnerUserId: null } : {}) },
+      });
+    }
+    await writeAudit(tx, {
+      actor: audit.actor,
+      action: 'sso.planet_manager.assign',
+      target: { type: 'sso_client', id: clientId, label: 'Data Planet' },
+      reason,
+      detail: { previousOwnerUserId: previous, newOwnerUserId: user.id },
+      surface: 'ops',
+      requestId: audit.requestId || null,
+    });
+    return previous;
+  });
+  return {
+    client_id: clientId,
+    email: user.email,
+    user_id: user.id,
+    network: 'mainnet',
+    previous_owner_user_id: previousOwnerUserId,
+  };
 }
 
 function parseScope(value, allowed, OAuthError) {
@@ -487,9 +536,10 @@ async function readPartnerMe(token) {
   if (String(row.resource || '').replace(/\/$/, '') !== expected.replace(/\/$/, '')) return null;
   const user = await prisma.user.findUnique({
     where: { id: row.userId },
-    select: { id: true, email: true, avatar: true, walletAddress: true, createdAt: true },
+    select: { id: true, email: true, avatar: true, walletAddress: true, createdAt: true, disabledAt: true },
   });
-  if (!user) return null;
+  // A disabled account reads as no account: the partner gets 401, never an "active" status.
+  if (!user || user.disabledAt) return null;
   const scopes = new Set(String(row.scope || '').split(/\s+/).filter(Boolean));
   const body = {
     sub: user.id,
@@ -515,7 +565,8 @@ async function listSsoClients() {
   await ensureTable();
   const rows = await prisma.$queryRaw`
     SELECT c."clientId", c."clientName", c."contactEmail", c."redirectUris",
-           c.enabled, c.kind, c."ownerUserId", c."createdAt",
+           c.enabled, c.kind, c."ownerUserId", c."createdAt", c."initiateLoginUri",
+           c."skipConfirmationEnabled", c."skipConfirmationOwnerUserId",
            u.email AS "ownerEmail"
     FROM "SsoDeveloperClient" c
     LEFT JOIN "User" u ON u.id = c."ownerUserId"
@@ -523,7 +574,7 @@ async function listSsoClients() {
   `;
   return {
     issuer: issuer(),
-    clients: rows.map((row) => ({
+    clients: await Promise.all(rows.map(async (row) => ({
       client_id: row.clientId,
       client_name: row.clientName,
       contact_email: row.contactEmail,
@@ -532,7 +583,8 @@ async function listSsoClients() {
       kind: row.kind === 'partner' ? 'partner' : 'developer',
       owner_email: row.ownerEmail || null,
       created_at: row.createdAt,
-    })),
+      consent: await require('./developerConsentPolicy').consentState(row, require('../constants/partnerClient').getPartnerClient(row.clientId)),
+    }))),
   };
 }
 
@@ -545,6 +597,9 @@ module.exports = {
   updateOwnedClient,
   rotateOwnedSecret,
   grantPlanetManager,
+  planetManagerApiHosts,
+  planetManagerHostAllowed,
+  PLANET_MANAGER_CLIENT_ID,
   startDeveloperAuthorization,
   exchangeDeveloperCode,
   readPartnerMe,

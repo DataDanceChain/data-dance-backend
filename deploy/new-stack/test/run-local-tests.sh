@@ -138,7 +138,7 @@
 #   10d. remote.sh: INVOICE_SELLER_USER_ID allowlisted; only a lower-case canonical UUID passes, anything else (case,
 #      shape, empty, injection characters) is refused before connecting.
 # The consent page for web sign-ins (10-15):
-#   3. SSO_TGE_AUTO_APPROVE=app (written once; on 20-env.sh's partner PASS line and in compose's parse of the new file).
+#   3. SSO_TGE_AUTO_APPROVE=off (written once; on 20-env.sh's partner PASS line and in compose's parse of the new file).
 # Backend PR #55's ops settings (10-16), synthetic values only:
 #   3b. OPS_SHARED_LOGIN, OPS_USER_TOKEN_TTL_SEC, OPS_ADMIN_URL, PLANET_MANAGER_API_HOSTS and STAFF_UNLOCK_TOKEN: never
 #      written by 20-env.sh (absent or empty in the old env: absent or empty in the new file, "unset" on its PASS line);
@@ -416,25 +416,28 @@ grep -qx "rehearsal client id: $CID (override)" "$T/run1.out" && grep -qx "rehea
 # and the partner fields the rehearsal serves (docs/TGE_SSO.md section 14: points and points_history included).
 ev() { sed -n "s/^$1=\"\(.*\)\"$/\1/p" "$2" | tail -1; }
 W3A_G=web3auth-google-sapphire; W3A_E=web3auth-auth0-email-passwordless-sapphire; W3A_A=web3auth-auth0-apple-sapphire; W3A_T=web3auth-auth0-twitter-sapphire
+# d479402 (2026-10-17): the generator deliberately retains these fixed compatibility names
+# after the configured four. Assert the exact sequence (including defaults repeated), not a wildcard.
+W3A_COMPAT="$W3A_G,$W3A_E,$W3A_A,$W3A_T,web3auth,external-wallet"
 SF_WANT=registered_at,wallet_bound,data_licence_granted,email_masked,avatar,email,wallet_address,points,referral,referral_network,points_history
 REH_ENV="$T/ddcnew/.env.rehearsal"
-[ "$(ev WEB3AUTH_ALLOWED_VERIFIERS "$REH_ENV")" = "$W3A_G,$W3A_E,$W3A_A,$W3A_T,external-wallet" ] \
+[ "$(ev WEB3AUTH_ALLOWED_VERIFIERS "$REH_ENV")" = "$W3A_G,$W3A_E,$W3A_A,$W3A_T,$W3A_COMPAT" ] \
   && [ "$(ev WEB3AUTH_REBIND_VERIFIERS "$REH_ENV")" = "$W3A_G,$W3A_E,$W3A_A,$W3A_T" ] \
   && [ "$(ev WEB3AUTH_EMAIL_TRUSTED_VERIFIERS "$REH_ENV")" = "$W3A_G,$W3A_E,$W3A_A" ] \
   && [ "$(grep -cE '^WEB3AUTH_[A-Z_]*VERIFIERS=.*sapphire-mainnet' "$REH_ENV" || true)" = 0 ] \
-  && ok "Web3Auth lists carry the Mainnet built-in login names (no -mainnet suffix): allowed = the four + external-wallet, re-bind = the four, e-mail-trusted = Google, e-mail, Apple (never X)" \
+  && ok "Web3Auth lists carry the exact configured four + fixed compatibility names; re-bind = configured four, e-mail-trusted = Google, e-mail, Apple (never X)" \
   || bad "Web3Auth login names in .env.rehearsal: allowed=$(ev WEB3AUTH_ALLOWED_VERIFIERS "$REH_ENV") rebind=$(ev WEB3AUTH_REBIND_VERIFIERS "$REH_ENV") trusted=$(ev WEB3AUTH_EMAIL_TRUSTED_VERIFIERS "$REH_ENV")"
 [ "$(ev SSO_TGE_STATUS_FIELDS "$REH_ENV")" = "$SF_WANT" ] && [ "$(grep -c '^SSO_TGE_STATUS_FIELDS=' "$REH_ENV")" = 1 ] \
   && ok "SSO_TGE_STATUS_FIELDS=$SF_WANT (once; the old env's list is replaced): every field of the catalog, the points balance and history among them" \
   || bad "SSO_TGE_STATUS_FIELDS in .env.rehearsal: $(grep '^SSO_TGE_STATUS_FIELDS=' "$REH_ENV" | tr '\n' ' ')"
-[ "$(ev SSO_TGE_AUTO_APPROVE "$REH_ENV")" = app ] && [ "$(grep -c '^SSO_TGE_AUTO_APPROVE=' "$REH_ENV")" = 1 ] \
-  && ok "SSO_TGE_AUTO_APPROVE=app (once): the App hand-off may Allow without a tap, a web sign-in always shows the consent page" \
+[ "$(ev SSO_TGE_AUTO_APPROVE "$REH_ENV")" = off ] && [ "$(grep -c '^SSO_TGE_AUTO_APPROVE=' "$REH_ENV")" = 1 ] \
+  && ok "SSO_TGE_AUTO_APPROVE=off (once): App and web entries show the authorization confirmation page" \
   || bad "SSO_TGE_AUTO_APPROVE in .env.rehearsal: $(grep '^SSO_TGE_AUTO_APPROVE=' "$REH_ENV" | tr '\n' ' ')"
 [ "$(ev SSO_TGE_REFERRAL_BIND "$REH_ENV")" = true ] && [ "$(ev SSO_DEVELOPER_REGISTRATION "$REH_ENV")" = allowlist ] && grep -qx 'SSO_DEVELOPER_ALLOWED_EMAILS=""' "$REH_ENV" \
   && [ "$(ev SSO_TGE_REDIRECT_URIS "$REH_ENV")" = "$RR_T" ] && [ "$(ev SSO_TGE_INITIATE_LOGIN_URI "$REH_ENV")" = "" ] \
   && grep -qF 'partner settings: SSO_TGE_REDIRECT_URIS override REHEARSAL_REDIRECT_URIS (1 URI); SSO_TGE_INITIATE_LOGIN_URI default (empty); SSO_DEVELOPER_ALLOWED_EMAILS default (0 address(es), not printed); previous env: none' "$T/run1.out" \
   && grep -qF 'partner settings: SSO_TGE_REDIRECT_URIS kept from the previous env (1 URI); SSO_TGE_INITIATE_LOGIN_URI kept from the previous env (empty); SSO_DEVELOPER_ALLOWED_EMAILS kept from the previous env (0 address(es), not printed); previous env: .env.rehearsal' "$T/run2.out" \
-  && grep -qF "PASS partner settings kept from the previous env: 8; given on this call: none; no previous value: none. SSO_TGE_STATUS_FIELDS: all 11 fields, SSO_TGE_REFERRAL_BIND=true, SSO_TGE_AUTO_APPROVE=app, SSO_DEVELOPER_REGISTRATION=allowlist (0 listed)" "$T/run2.out" \
+  && grep -qF "PASS partner settings kept from the previous env: 8; given on this call: none; no previous value: none. SSO_TGE_STATUS_FIELDS: all 11 fields, SSO_TGE_REFERRAL_BIND=true, SSO_TGE_AUTO_APPROVE=off, SSO_DEVELOPER_REGISTRATION=allowlist (0 listed)" "$T/run2.out" \
   && grep -qF "WARN no API_IMAGE in $T/ddcnew/.env (10-build.sh writes it): not checked here" "$T/run2.out" \
   && ok "SSO_TGE_REFERRAL_BIND=true, SSO_DEVELOPER_REGISTRATION=allowlist with an empty list (nobody); run 1 took the callback from REHEARSAL_REDIRECT_URIS, run 2 kept it and the rest (8 of 8); no .env yet: the backend check says so" \
   || bad "partner access or kept settings in run 1 / run 2: $(grep -E '^(partner settings|PASS partner|WARN)' "$T/run1.out" "$T/run2.out" | tr '\n' ' ')"
@@ -444,10 +447,10 @@ export REHEARSAL_REDIRECT_URIS="$RR_T"
 d="$T/w3a-override"; mkdir -p "$d"; rc=0
 DDC_LOCAL_TEST=1 NEW_DIR="$d" OLD_ENV="$OLD" FE_ENV_TGE="$T/env.tge" REHEARSAL_CLIENT_ID="$CID" W3A_EMAIL=lt-email-login W3A_X=lt-x-login \
   bash "$PKG/20-env.sh" > "$d.out" 2>&1 || rc=$?
-[ "$rc" = 0 ] && [ "$(ev WEB3AUTH_ALLOWED_VERIFIERS "$d/.env.rehearsal")" = "$W3A_G,lt-email-login,$W3A_A,lt-x-login,external-wallet" ] \
+[ "$rc" = 0 ] && [ "$(ev WEB3AUTH_ALLOWED_VERIFIERS "$d/.env.rehearsal")" = "$W3A_G,lt-email-login,$W3A_A,lt-x-login,$W3A_COMPAT" ] \
   && [ "$(ev WEB3AUTH_REBIND_VERIFIERS "$d/.env.rehearsal")" = "$W3A_G,lt-email-login,$W3A_A,lt-x-login" ] \
   && [ "$(ev WEB3AUTH_EMAIL_TRUSTED_VERIFIERS "$d/.env.rehearsal")" = "$W3A_G,lt-email-login,$W3A_A" ] \
-  && ok "W3A_EMAIL / W3A_X overrides replace the defaults in the allowed, re-bind and e-mail-trusted lists (the X override never e-mail-trusted)" \
+  && ok "W3A_EMAIL / W3A_X overrides replace configured entries while fixed allowed compatibility names stay exact (X never e-mail-trusted)" \
   || { tail -3 "$d.out"; bad "W3A_* overrides (rc=$rc)"; }
 cid20() { # <label> <NEW_DIR> [REHEARSAL_CLIENT_ID]: one 20-env.sh run, output in <NEW_DIR>.out, status in RC
   RC=0
@@ -784,7 +787,7 @@ print("removed names absent from new: %s" % (not gone))
 exp = {"DISBURSEMENT_PAUSED": "true", "SMTP_HOST": "", "SMTP_PASS": "", "WEB3AUTH_NETWORK_REBIND": "on", "WEB3AUTH_VERIFY_MODE": "enforce",
        "WEB3AUTH_ALLOW_LEGACY_FALLBACK": "false", "WEB3AUTH_JWKS_PIN_MODE": "enforce", "SSO_TGE_ENABLED": "true", "SSO_TGE_CLIENT_ID": CID,
        "PUBLIC_BASE_URL": "https://" + API_HOST, "APP_PUBLIC_URL": "https://" + APP_HOST, "FRONTEND_URL": "https://" + APP_HOST,
-       "API_BASE_URL": "https://" + API_HOST, "SSO_TGE_CLIENT_NAME": "DDC TGE", "SSO_TGE_REFERRAL_BIND": "true", "SSO_TGE_AUTO_APPROVE": "app",
+       "API_BASE_URL": "https://" + API_HOST, "SSO_TGE_CLIENT_NAME": "DDC TGE", "SSO_TGE_REFERRAL_BIND": "true", "SSO_TGE_AUTO_APPROVE": "off",
        "SSO_DEVELOPER_REGISTRATION": "allowlist", "SSO_DEVELOPER_ALLOWED_EMAILS": "",
        "WEB3AUTH_RETIRED_CLIENT_IDS": o.get("WEB3AUTH_CLIENT_ID"), "LOGIN_MISSING_IDTOKEN_MEANS_OLD_APP": "on",
        "WEB3AUTH_JWKS_PINNED_THUMBPRINTS": o.get("WEB3AUTH_JWKS_PINNED_THUMBPRINTS"),

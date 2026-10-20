@@ -241,6 +241,7 @@ describe('GET /api/developer/sso/clients', () => {
       scopes: DEVELOPER_SCOPES,
       managed: false,
       created_at: '2026-10-01T00:00:00.000Z',
+      consent: { eligible: false, enabled: false, effective: false, reason: 'qualification_required', platform_enabled: false, initiate_login_uri: null },
     });
     assert.equal(byId['planet-registry'].kind, 'partner');
     assert.equal(byId['planet-registry'].managed, false);
@@ -291,6 +292,7 @@ describe('POST /api/developer/sso/clients/update', () => {
         scopes: DEVELOPER_SCOPES,
         managed: false,
         created_at: '2026-10-01T00:00:00.000Z',
+        consent: { eligible: false, enabled: false, effective: false, reason: 'qualification_required', platform_enabled: false, initiate_login_uri: null },
       });
       const after = row('sso_owner_dev');
       assert.deepEqual(after.redirectUris, ['https://owner.example.com/v2/callback', 'http://localhost:3000/cb']);

@@ -598,6 +598,7 @@ describe('SSO_TGE_AUTO_APPROVE and a database partner client', () => {
   it('applies to a first-party row as to the environment\'s client, never to a developer row', async () => {
     await clientRow('planet-live', { initiateLoginUri: ROW_INITIATE });
     await clientRow('sso_dev', { kind: 'developer', initiateLoginUri: ROW_INITIATE });
+    await require('../helpers/developerConsent').enableTrustedConsent(prisma, 'planet-live');
     await withAutoApprove('app', async () => {
       assert.deepEqual((await loadPartnerClient('planet-live')).autoApprove, { app: true, web: false });
       assert.deepEqual((await loadPartnerClient('sso_dev')).autoApprove, { app: false, web: false });
@@ -609,6 +610,7 @@ describe('SSO_TGE_AUTO_APPROVE and a database partner client', () => {
 
   it('with app: an App-entry Allow posted with auto:true is accepted for that row; with off it is not', async () => {
     await clientRow('planet-live', { initiateLoginUri: ROW_INITIATE });
+    await require('../helpers/developerConsent').enableTrustedConsent(prisma, 'planet-live');
     await withAutoApprove('app', async () => {
       const minted = await appTicket('planet-live');
       const session = (await exchange(minted.body.data.ticket)).body.data.session_token;

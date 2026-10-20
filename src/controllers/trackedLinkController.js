@@ -1,5 +1,6 @@
 const service = require('../services/trackedLink');
 const { createLogger } = require('../utils/logger');
+const { noteCreated } = require('../services/opsAudit');
 
 const logger = createLogger('trackedLinkController');
 
@@ -29,7 +30,8 @@ async function list(req, res) {
 
 async function create(req, res) {
   try {
-    const data = await service.createLink(req.body || {});
+    const data = await service.createLink(req.body || {}, { audit: req.auditGeneric });
+    noteCreated(req, data && data.id);
     res.status(201).json({ status: 'success', data });
   } catch (error) {
     sendError(res, error);
@@ -38,7 +40,7 @@ async function create(req, res) {
 
 async function update(req, res) {
   try {
-    const data = await service.updateLink(req.params.id, req.body || {});
+    const data = await service.updateLink(req.params.id, req.body || {}, { audit: req.auditGeneric });
     res.json({ status: 'success', data });
   } catch (error) {
     sendError(res, error);

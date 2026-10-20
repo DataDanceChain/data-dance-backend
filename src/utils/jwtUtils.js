@@ -14,7 +14,8 @@ if (process.env.NODE_ENV === 'production' && !process.env.JWT_EXPIRES_IN) {
  * @returns {string} JWT token
  */
 exports.generateToken = (id, extra = {}) => {
-  return jwt.sign({ ...extra, id }, process.env.JWT_SECRET, {
+  const iatMs = Date.now();
+  return jwt.sign({ ...extra, id, iat: Math.floor(iatMs / 1000), iatMs }, process.env.JWT_SECRET, {
     expiresIn: process.env.JWT_EXPIRES_IN
   });
 };

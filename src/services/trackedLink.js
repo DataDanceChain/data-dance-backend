@@ -48,15 +48,15 @@ function presentPublic(link) {
   };
 }
 
-async function countMap(linkIds) {
+async function countMap(linkIds, db = prisma) {
   if (!linkIds.length) return new Map();
   const [events, visitors] = await Promise.all([
-    prisma.trackedLinkHit.groupBy({
+    db.trackedLinkHit.groupBy({
       by: ['linkId', 'event'],
       where: { linkId: { in: linkIds } },
       _count: { _all: true },
     }),
-    prisma.trackedLinkHit.groupBy({
+    db.trackedLinkHit.groupBy({
       by: ['linkId', 'visitorId'],
       where: { linkId: { in: linkIds }, event: 'open' },
     }),
@@ -103,7 +103,7 @@ async function listLinks() {
   return links.map((link) => present(link, counts.get(link.id)));
 }
 
-async function createLink(body) {
+async function createLink(body, { audit } = {}) {
   const slug = normalizeSlug(body.slug);
   if (!validSlug(slug)) {
     throw httpError(400, 'invalid_slug', 'Use a short slug: letters, numbers, and hyphens');
@@ -112,17 +112,21 @@ async function createLink(body) {
   const target = normalizeTarget(data.kind, body.targetUrl);
   if (target.error) throw httpError(400, 'invalid_target', target.error);
   try {
-    const link = await prisma.trackedLink.create({
-      data: { ...data, slug, targetUrl: target.url, body: data.body || '', buttonLabel: data.buttonLabel || '' },
-    });
-    return present(link);
+    const write = async (db) => {
+      const link = await db.trackedLink.create({
+        data: { ...data, slug, targetUrl: target.url, body: data.body || '', buttonLabel: data.buttonLabel || '' },
+      });
+      if (audit) await audit(db, link.id);
+      return present(link);
+    };
+    return audit ? await prisma.$transaction(write) : await write(prisma);
   } catch (error) {
     if (error.code === 'P2002') throw httpError(409, 'slug_taken', 'That slug is already used');
     throw error;
   }
 }
 
-async function updateLink(id, body) {
+async function updateLink(id, body, { audit } = {}) {
   const existing = await prisma.trackedLink.findUnique({ where: { id } });
   if (!existing) throw httpError(404, 'link_not_found', 'Link not found');
   const data = readInput(body, { partial: true });
@@ -132,9 +136,13 @@ async function updateLink(id, body) {
     if (target.error) throw httpError(400, 'invalid_target', target.error);
     data.targetUrl = target.url;
   }
-  const link = await prisma.trackedLink.update({ where: { id }, data });
-  const counts = await countMap([id]);
-  return present(link, counts.get(id));
+  const write = async (db) => {
+    const link = await db.trackedLink.update({ where: { id }, data });
+    const counts = await countMap([id], db);
+    if (audit) await audit(db);
+    return present(link, counts.get(id));
+  };
+  return audit ? prisma.$transaction(write) : write(prisma);
 }
 
 async function linkStats(id) {

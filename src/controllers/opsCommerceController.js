@@ -97,28 +97,35 @@ function keyedCredit(userId, idempotencyKey) {
  * Writes the merchant's DEPOSIT row, once per Idempotency-Key. The database holds one row per
  * merchant and key (a unique index): a credit whose key is taken, also by a request running at
  * the same moment, writes nothing and answers the row that holds it (replayCredit).
+ *
+ * `audit(tx, row)` (the ops route) writes the audit row in the transaction of the create: if it
+ * cannot be written, the merchant is not credited. A unique violation rolls that transaction
+ * back, audit row included, so a replay writes no audit row.
  */
-async function creditOnce({ userId, amount, note, operator, idempotencyKey }) {
+async function creditOnce({ userId, amount, note, operator, idempotencyKey, audit }) {
   if (idempotencyKey) {
     const earlier = await keyedCredit(userId, idempotencyKey);
     if (earlier) return replayCredit(earlier, amount, note);
   }
   try {
-    const transaction = await prisma.organizationTransaction.create({
-      data: {
-        userId,
-        amount,
-        type: 'DEPOSIT',
-        status: 'COMPLETED',
-        description: note,
-        idempotencyKey,
-        metadata: {
-          source: 'ops_credit',
-          operator,
+    return await prisma.$transaction(async (tx) => {
+      const transaction = await tx.organizationTransaction.create({
+        data: {
+          userId,
+          amount,
+          type: 'DEPOSIT',
+          status: 'COMPLETED',
+          description: note,
+          idempotencyKey,
+          metadata: {
+            source: 'ops_credit',
+            operator,
+          },
         },
-      },
+      });
+      if (audit) await audit(tx, transaction);
+      return { transaction, replayed: false };
     });
-    return { transaction, replayed: false };
   } catch (error) {
     if (idempotencyKey && error && error.code === 'P2002') {
       const earlier = await keyedCredit(userId, idempotencyKey);
@@ -140,6 +147,20 @@ function asMoney(value) {
 
 function isDemo(req) {
   return req.opsAdmin?.role === 'demo';
+}
+
+/**
+ * Who acted, as written into records merchants can read (ledger metadata, kycReviewedBy): the
+ * session's record label, never an e-mail (see opsAuthMiddleware and opsAudit.staffRecordLabel).
+ */
+function opsBy(req) {
+  return req.opsAdmin?.username || 'ops';
+}
+
+/** The attestation's submittedBy: `ops:` and the record label (which may already start with it). */
+function opsSubmitter(req) {
+  const by = opsBy(req);
+  return by.startsWith('ops:') ? by : `ops:${by}`;
 }
 
 function maskEmail(value) {
@@ -316,19 +337,24 @@ function sendPaymentDecisionError(res, error) {
 }
 
 /**
- * Only the call that confirmed the payment attests its order. A repeat confirm changes nothing and
- * attests nothing; a failed attestation is retried with POST /orders/:id/attest.
+ * Only the call that confirmed the payment attests its order, and that attestation writes its own
+ * order.attest row (same actor) in the transaction that stores it. A repeat confirm changes
+ * nothing: no attestation, no row. A failed attestation is retried with POST /orders/:id/attest.
  */
 exports.confirmPayment = async (req, res) => {
   try {
     const { payment, changed } = await commerceService.confirmPaymentByOps(
       req.params.id,
-      req.opsAdmin?.username || 'ops',
+      opsBy(req),
+      { audit: req.auditChange },
     );
     const orderId = payment?.orderId || payment?.order?.id;
     if (changed && orderId) {
       const commerceAttest = require('../services/commerceAttest');
-      await commerceAttest.attestPaidOrderSafe(orderId);
+      await commerceAttest.attestPaidOrderSafe(orderId, {
+        submittedBy: opsSubmitter(req),
+        audit: req.auditChangeAs ? req.auditChangeAs('order.attest') : undefined,
+      });
     }
     return res.json({ status: 'success', data: payment });
   } catch (error) {
@@ -341,7 +367,8 @@ exports.rejectPayment = async (req, res) => {
     const payment = await commerceService.rejectPaymentByOps(
       req.params.id,
       req.body?.notes,
-      req.opsAdmin?.username || 'ops',
+      opsBy(req),
+      { audit: req.auditChange },
     );
     return res.json({ status: 'success', data: payment });
   } catch (error) {
@@ -466,9 +493,9 @@ exports.getMerchant = async (req, res) => {
 /**
  * Credit a merchant's USD balance. An optional Idempotency-Key header makes a repeat of the same
  * credit (a double submit, a retry after a lost answer) answer the first one instead of crediting
- * again (creditOnce): 200 with that credit and `replayed: true`, and no new row. The same key with
- * another amount or note is refused: 409 IDEMPOTENCY_KEY_REUSED. Without the header every call
- * credits.
+ * again (creditOnce): 200 with that credit and `replayed: true`, no new row and no audit row. The
+ * same key with another amount or note is refused: 409 IDEMPOTENCY_KEY_REUSED. Without the header
+ * every call credits. The audit row is written in the transaction of the credit.
  */
 exports.creditMerchant = async (req, res) => {
   try {
@@ -492,8 +519,14 @@ exports.creditMerchant = async (req, res) => {
       userId: user.id,
       amount,
       note,
-      operator: req.opsAdmin?.username || 'ops',
+      operator: opsBy(req),
       idempotencyKey,
+      // Same transaction: if the audit row cannot be written, the merchant is not credited.
+      audit: (tx, row) => req.auditChange(tx, {
+        target: { type: 'user', id: user.id },
+        reason: note,
+        detail: { organizationTransactionId: row.id, type: 'DEPOSIT', amount, currency: 'USD' },
+      }),
     });
     return res.json({
       status: 'success',
@@ -504,7 +537,7 @@ exports.creditMerchant = async (req, res) => {
     if (status < 500) {
       return res.status(status).json({ status: 'fail', code: error.code, message: error.message });
     }
-    console.error('Ops credit error:', error);
+    console.error('Ops credit error:', error && error.name);
     return res.status(500).json({ status: 'error', message: 'Server error' });
   }
 };
@@ -641,7 +674,8 @@ exports.attestOrder = async (req, res) => {
     const commerceAttest = require('../services/commerceAttest');
     const data = await commerceAttest.attestPaidOrder(req.params.id, {
       txHash: req.body?.txHash,
-      submittedBy: `ops:${req.opsAdmin?.username || 'unknown'}`,
+      submittedBy: opsSubmitter(req),
+      audit: req.auditChange,
     });
     return res.json({ status: 'success', data });
   } catch (error) {
@@ -677,14 +711,18 @@ exports.reviewMerchantKyc = async (req, res) => {
     if (nextStatus === 'approved' && !kycComplete(user.legalEntity)) {
       return res.status(400).json({ status: 'fail', message: 'Required KYC fields are still missing' });
     }
-    const legalEntity = await prisma.legalEntity.update({
-      where: { userId: user.id },
-      data: {
-        kycStatus: nextStatus,
-        kycReviewedAt: new Date(),
-        kycReviewedBy: req.opsAdmin?.username || 'ops',
-        kycNote: note || null,
-      },
+    const legalEntity = await prisma.$transaction(async (tx) => {
+      const updated = await tx.legalEntity.update({
+        where: { userId: user.id },
+        data: {
+          kycStatus: nextStatus,
+          kycReviewedAt: new Date(),
+          kycReviewedBy: opsBy(req),
+          kycNote: note || null,
+        },
+      });
+      if (req.auditGeneric) await req.auditGeneric(tx);
+      return updated;
     });
     return res.json({
       status: 'success',

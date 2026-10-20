@@ -17,6 +17,7 @@
 const jose = require('jose');
 const { computeAddress, getAddress, isAddress } = require('ethers');
 const { createLogger } = require('../utils/logger');
+const { recordIdentityConflict } = require('./identityConflicts');
 
 const logger = createLogger('web3authIdentity');
 
@@ -920,13 +921,21 @@ function defaultName(identity, accountEmail) {
 
 const REBIND_STATUS = { PENDING: 'pending', REBOUND: 'rebound' };
 
-function rebindConflict(reason, candidate, identity, candidateBy) {
+function rebindConflict(db, reason, candidate, identity, candidateBy) {
   logger.warn('identity_conflict', {
     reason,
     candidateBy,
     candidateUserId: candidate && candidate.id,
     verifier: identity.verifier,
     route: 'network_rebind',
+  });
+  // Kept for support (GET /api/ops/identity-conflicts); not awaited, never changes the refusal.
+  recordIdentityConflict(db, {
+    reason,
+    route: 'network_rebind',
+    candidateBy,
+    candidateUserId: candidate && candidate.id,
+    verifier: identity.verifier,
   });
   return fail('IDENTITY_CONFLICT', 'This login cannot be linked to the existing account automatically', {
     reason,
@@ -999,27 +1008,27 @@ async function networkRebind(db, cfg, { candidate, candidateBy, record, identity
   if (candidateBy === 'wallet') return null; // the token proves the stored wallet: ordinary route
   if (candidate.authType !== 'web3auth' || !unlinked) return null;
   if (!cfg.rebindVerifiers.includes(identity.verifier)) return null;
-  if (ambiguousEmail) throw rebindConflict('ambiguous_email', candidate, identity, candidateBy);
+  if (ambiguousEmail) throw rebindConflict(db, 'ambiguous_email', candidate, identity, candidateBy);
   if (!isVerifierAllowed(cfg, identity.verifier)) {
-    throw rebindConflict('verifier_not_in_allowlist', candidate, identity, candidateBy);
+    throw rebindConflict(db, 'verifier_not_in_allowlist', candidate, identity, candidateBy);
   }
   // The key that found the account was its e-mail column (exactly or case-insensitively), so
   // the account is found by an e-mail-shaped key whenever that column holds an address — also
   // when the token carried the address as its verifierId and had no `email` claim.
   const emailKeyed = candidateBy === 'email' || (typeof candidate.email === 'string' && candidate.email.includes('@'));
-  if (emailKeyed && !emailTrusted) throw rebindConflict('email_not_trusted', candidate, identity, candidateBy);
+  if (emailKeyed && !emailTrusted) throw rebindConflict(db, 'email_not_trusted', candidate, identity, candidateBy);
 
   // Replace only the address the record archived (or an empty slot). A wallet bound after the
   // apply by another path (a signed bind, a partner payout bind) is not an old-network address.
   const replace =
     record.walletPolicy === 'replace' &&
     (!candidate.walletAddress || sameAddress(candidate.walletAddress, record.oldAddress));
-  if (replace && !walletAddress) throw rebindConflict('rebind_no_wallet_proof', candidate, identity, candidateBy);
+  if (replace && !walletAddress) throw rebindConflict(db, 'rebind_no_wallet_proof', candidate, identity, candidateBy);
   if (replace) {
     const holder = await db.user.findFirst({
       where: { walletAddress: { equals: walletAddress, mode: 'insensitive' }, id: { not: candidate.id } },
     });
-    if (holder) throw rebindConflict('wallet_in_use', candidate, identity, candidateBy);
+    if (holder) throw rebindConflict(db, 'wallet_in_use', candidate, identity, candidateBy);
   }
 
   const now = new Date();
@@ -1050,8 +1059,8 @@ async function networkRebind(db, cfg, { candidate, candidateBy, record, identity
       }
     });
   } catch (err) {
-    if (err && err.rebindRace) throw rebindConflict('backfill_race', candidate, identity, candidateBy);
-    if (err && err.code === 'P2002') throw rebindConflict('unique_violation', candidate, identity, candidateBy);
+    if (err && err.rebindRace) throw rebindConflict(db, 'backfill_race', candidate, identity, candidateBy);
+    if (err && err.code === 'P2002') throw rebindConflict(db, 'unique_violation', candidate, identity, candidateBy);
     throw err;
   }
   const user = await db.user.findUnique({ where: { id: candidate.id } });
@@ -1082,7 +1091,7 @@ async function refuseReplacedWallet(db, identity, walletAddress) {
     },
   });
   if (!record) return;
-  throw rebindConflict('replaced_wallet', { id: record.userId }, identity, 'replaced_wallet');
+  throw rebindConflict(db, 'replaced_wallet', { id: record.userId }, identity, 'replaced_wallet');
 }
 
 /**
@@ -1170,7 +1179,7 @@ async function resolveUser(identity, options = {}) {
       ? await db.web3AuthNetworkRebind.findUnique({ where: { userId: candidate.id } })
       : null;
     if (rebindOn && ambiguousEmail && !record) {
-      throw rebindConflict('ambiguous_email', candidate, identity, candidateBy);
+      throw rebindConflict(db, 'ambiguous_email', candidate, identity, candidateBy);
     }
     if (record) {
       const rebound = await networkRebind(db, cfg, {
@@ -1219,6 +1228,13 @@ async function resolveUser(identity, options = {}) {
         candidateAuthType: candidate.authType,
         verifier: identity.verifier,
       });
+      recordIdentityConflict(db, {
+        reason,
+        route: 'backfill',
+        candidateBy,
+        candidateUserId: candidate.id,
+        verifier: identity.verifier,
+      });
       throw fail('IDENTITY_CONFLICT', 'This login cannot be linked to the existing account automatically', {
         reason,
         candidateUserId: candidate.id,
@@ -1232,6 +1248,13 @@ async function resolveUser(identity, options = {}) {
     if (res.count !== 1) {
       logger.warn('identity_conflict', {
         reason: 'backfill_race',
+        candidateBy,
+        candidateUserId: candidate.id,
+        verifier: identity.verifier,
+      });
+      recordIdentityConflict(db, {
+        reason: 'backfill_race',
+        route: 'backfill',
         candidateBy,
         candidateUserId: candidate.id,
         verifier: identity.verifier,
@@ -1280,6 +1303,13 @@ async function resolveUser(identity, options = {}) {
       logger.warn('identity_conflict', {
         reason: 'unique_violation',
         target: err.meta && err.meta.target,
+        verifier: identity.verifier,
+      });
+      recordIdentityConflict(db, {
+        reason: 'unique_violation',
+        route: 'create',
+        candidateBy: null,
+        candidateUserId: null,
         verifier: identity.verifier,
       });
       throw fail('IDENTITY_CONFLICT', 'An account with these details already exists', {

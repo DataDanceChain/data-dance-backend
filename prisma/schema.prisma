@@ -35,6 +35,13 @@ model User {
   web3authVerifierId       String?
   web3authLinkedAt         DateTime?
   disabledAt               DateTime?
+  /// Who disabled the account (the actor's record label: ops:<hmac prefix>, 'shared' or 'script';
+  /// never an e-mail, see docs/OPS_ADMIN.md) and why.
+  disabledBy               String?
+  disabledReason           String?
+  /// Set by every disable and re-enable: ops sessions and wallet JWTs issued before it are refused
+  /// on the ops and console staff routes (src/services/staffSession.js).
+  sessionsResetAt          DateTime?
   createdActivities        Activity[]
   activityClaims           ActivityClaim[]
   transactions             AssetTransaction[]
@@ -83,6 +90,8 @@ model User {
   disbursementItems        DisbursementItem[]
   networkRebind            Web3AuthNetworkRebind?
   dataDemands              DataDemand[]
+  roleGrants               UserRoleGrant[]
+  opsSignInCodes           OpsSignInCode[]
 
   @@unique([web3authVerifier, web3authVerifierId])
   @@index([organizationId])
@@ -1014,9 +1023,12 @@ model SsoDeveloperClient {
   /// developer: self-serve login scopes. partner: first-party Data Planet scopes.
   kind         String   @default("developer")
   ownerUserId  String?
-  /// App hand-off target (`initiate_login_uri`). Read for kind "partner" only, and only when it is
-  /// an absolute https URL without a fragment; otherwise the hand-off answers CLIENT_DISABLED.
-  /// Set with scripts/setPartnerInitiateLoginUri.js.
+  /// Owner-confirmed opt-in; trusted_developer qualification and platform policy are checked live.
+  skipConfirmationEnabled Boolean @default(false)
+  /// Bind the saved choice to this owner; ownership changes require an explicit new choice.
+  skipConfirmationOwnerUserId String?
+  /// App hand-off target. Available to partner clients or an ordinary client's active trusted
+  /// owner; does not widen kind/scopes. Invalid targets answer CLIENT_DISABLED.
   initiateLoginUri String?
   createdAt    DateTime @default(now())
 
@@ -1041,6 +1053,8 @@ model OAuthAuthorization {
   clientId            String
   redirectUri         String
   state               String    @default("")
+  /// Explicit partner account choice; persisted so removing URL parameters cannot restore auto consent.
+  prompt              String?
   codeChallenge       String
   codeChallengeMethod String
   resource            String
@@ -1271,4 +1285,82 @@ model TrackedLinkHit {
 
   @@index([linkId, event, createdAt])
   @@index([linkId, visitorId, event])
+}
+
+/// Ops role grants (admin issue #2): one row per active grant; revoking deletes the row and the
+/// audit log keeps the history. role: ddc_admin | operator | developer (CHECK in the migration).
+/// The legacy Role / Permission / UserRole tables are not used for this.
+model UserRoleGrant {
+  userId          String
+  role            String
+  grantedAt       DateTime @default(now())
+  /// null when scripts/opsRoles.js granted it
+  grantedByUserId String?
+  /// the actor's record label at the time (ops:<hmac prefix>, 'shared' or 'script'; never an
+  /// e-mail, see docs/OPS_ADMIN.md)
+  grantedBy       String
+  reason          String
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([userId, role])
+  @@index([role])
+}
+
+/// Append-only record of the changes made through the ops site, the developer console's staff
+/// endpoints and scripts/opsRoles.js (src/services/opsAudit.js): who, when, what, why. Other scripts
+/// (setPartnerInitiateLoginUri, setCampaignSsoClient) do not write here yet. No route
+/// updates or deletes a row, and there are no foreign keys, so rows outlive the users they name.
+/// actorKind: user | shared | system; surface: ops | console | script (CHECKs in the migration).
+/// detail never holds a token, a secret, a code or a request body.
+model OpsAuditLog {
+  id          String   @id @default(uuid())
+  createdAt   DateTime @default(now())
+  actorKind   String
+  actorUserId String?
+  actorLabel  String
+  actorRole   String
+  action      String
+  targetType  String
+  targetId    String?
+  targetLabel String?
+  reason      String?
+  detail      Json?
+  surface     String
+  requestId   String?
+
+  @@index([createdAt])
+  @@index([targetType, targetId, createdAt])
+  @@index([actorUserId, createdAt])
+  @@index([action, createdAt])
+}
+
+/// Single-use hand-off code the developer console mints for the ops site (POST /api/ops/auth/code),
+/// PKCE-bound to `challenge`, 60 s. Only its sha256 is stored.
+model OpsSignInCode {
+  id         String    @id @default(uuid())
+  codeHash   String    @unique
+  userId     String
+  challenge  String
+  expiresAt  DateTime
+  consumedAt DateTime?
+  createdAt  DateTime  @default(now())
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([expiresAt])
+}
+
+/// A sign-in web3authIdentity.resolveUser refused with IDENTITY_CONFLICT. route: network_rebind |
+/// backfill | create (CHECK in the migration). No e-mail, verifierId or wallet address is stored.
+model IdentityConflict {
+  id              String   @id @default(uuid())
+  createdAt       DateTime @default(now())
+  reason          String
+  route           String
+  candidateBy     String?
+  candidateUserId String?
+  verifier        String
+
+  @@index([createdAt])
+  @@index([candidateUserId, createdAt])
+  @@index([reason, createdAt])
 }

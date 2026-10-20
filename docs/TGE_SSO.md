@@ -91,7 +91,7 @@ Validation order and what the browser sees:
    registered URI → **HTTP 400 HTML page**, no redirect (T08). Exact means scheme, host, port,
    path and query byte-for-byte; a trailing slash or an extra query parameter is a mismatch.
 2. Otherwise, a missing/invalid `response_type`, `state`, `code_challenge`,
-   `code_challenge_method != S256`, unknown `scope`, `prompt` other than `none|login`, or a
+   `code_challenge_method != S256`, unknown `scope`, `prompt` other than `none|login|select_account`, or a
    `resource` that is not the partner API → **302 to `redirect_uri`** with `error`,
    `error_description`, `state` (when supplied) and `iss` (T09).
 3. Otherwise the request is stored (TTL **10 min**) and the browser is sent to the DataDance
@@ -475,6 +475,60 @@ Errors (RFC 6750, `WWW-Authenticate: Bearer realm="ddc-sso", error=…, resource
 (`token_type_hint=access_token` optional). Always `200` for unknown tokens (RFC 7009 §2.2).
 Takes effect on the next `/partner/tge/*` call. `401 invalid_client` without credentials.
 
+## 8a. DataDance launch, standalone login and account choice
+
+Automatic consent requires the existing client-bound `ddc_sso_` handoff session, the configured
+app auto-approval flag, an active trusted owner and that owner's explicit per-client opt-in.
+New and legacy clients default off; a configured environment client requires an owned persisted
+consent overlay. See [developer consent controls](DEVELOPER_CONSENT.md) for eligibility/settings,
+managed restrictions, audit/reset and migration. Both App and signed-in DataDance website launch through
+`POST /api/sso/app-ticket` and `/sso/continue`; the primary Wallet JWT never leaves DataDance.
+A plain user JWT always gets manual partner confirmation. Legacy `SSO_TGE_AUTO_APPROVE=app,web`
+remains valid syntax, but effective `web` flags are always false; no environment change is needed
+for this policy. `off`, disabled clients, verified-session, browser-binding and PKCE checks remain.
+Do not infer entry trust from Referer, User-Agent, `source=ddc` or an arbitrary query flag.
+
+The temporary October 20 confirmation-first rollout uses the existing runtime setting
+`SSO_TGE_AUTO_APPROVE=off`; the configuration generator now also writes off to avoid undoing it
+on regeneration. Later restoring `app` needs the operator's runtime configuration update and API
+container recreation, not a new frontend/native build solely for the toggle. The setting is
+shared across the configured TGE and first-party registry clients. Under this updated interface,
+partners can request `prompt=login` to insist on confirmation; trusted owners may save their app
+choice, while the platform emergency deny remains authoritative. Global `app` alone never opts
+clients in after the developer-control release. Existing partner sessions are not forcibly reauthorized. Full mode ownership,
+production evidence and the separate interface-release sequence live in
+`ddc-sso-kit/docs/entry-policy.md`; changing this switch does not deploy these PRs.
+
+A partner account area's **Switch account** starts a fresh state/PKCE transaction with
+`prompt=select_account`, without the old `login_hint`. Explicit standalone re-login can use
+`prompt=login`. The issuer persists either prompt on the authorization row and returns it in the
+consent summary. Both suppress automatic consent even if the visible URL is edited. Automatic
+refusal is 403 `AUTO_APPROVE_NOT_ALLOWED` and leaves the request undecided. A manual Allow from an
+old scoped handoff is also refused for `select_account` (403 `access_denied`); a chosen account's
+ordinary JWT can approve manually. Deny still ends the request normally. This adopts the account
+choice vocabulary of [OIDC Core](https://openid.net/specs/openid-connect-core-1_0.html#AuthRequest);
+it does not add an OIDC ID token or change the partner's OAuth token exchange.
+
+The Wallet presents Switch account instead of approving the old scoped account. Its explicit
+switch action clears only this browser/tab's Wallet and handoff context, preserves the pending
+consent return, and enters normal login. In an embedded context where Google login is unavailable,
+the partner must open the new account-choice transaction in a supported system browser. Do not
+silently log out the primary native DataDance App. Never auto-bind referrals or move balances as
+part of account selection.
+
+Partner reference implementation and the current acceptance/ownership record are in
+`ddc-sso-kit/docs/entry-policy.md`. The reference client's `POST /account/switch` is a **partner
+backend example**, not a new DataDance API endpoint. The partner clears its old local identity,
+account caches and unfinished login transaction before establishing the selected identity; tokens
+and PKCE verifiers remain server-side. A CSRF token and explicit click are required.
+
+Migration `20261019160000_oauth_authorization_prompt` adds one nullable text column with a
+transactional three-second lock timeout. Apply it and generate the matching Prisma client before
+starting the new backend image. Existing requests read `prompt:null`; the old image ignores the
+column. On migration failure keep the old image serving; image rollback leaves the additive
+column. There are no new build-time/runtime environment variables. Source validation is local;
+no deployment, real switch or production configuration check is implied.
+
 ## 9. Freshness, kill switch, account stop
 
 - A partner session should not outlive DataDance's decision. Before any sensitive action,
@@ -632,9 +686,10 @@ unconditionally — the issuer is never derived from a request header), `APP_PUB
   "金融级加固：合作方 SSO".
 - **Self-serve client registration** (`POST /api/developer/sso/clients`) is closed unless
   `SSO_DEVELOPER_REGISTRATION=on` or `allowlist`. The default, `off`, also applies when the variable is unset or
-  blank. Closed, the endpoint answers every caller, signed in or not, `403` with
+  blank. Closed, the endpoint answers a caller without a token `403` with
   `{"error":"registration_closed", "error_description":"Self-serve client registration is closed.
   Contact DataDance to register a client."}`, before any database access, so nothing is written.
+  A signed-in caller gets the same answer unless the account holds a role that may register (below).
   Clients registered earlier keep working: sign-in, the token exchange and the partner API do not
   consult the switch.
 - **Turning it on still requires a signed-in DataDance account.** The route itself checks the
@@ -663,11 +718,17 @@ unconditionally — the issuer is never derived from a request header), `APP_PUB
        keeps an e-mail that a request body once supplied, so it does not count. An Apple account whose
        verifier id is not its e-mail does not count either.
 
+  The session must also be newer than the account's last disable / enable (`User.sessionsResetAt`),
+  the rule the staff routes apply: a wallet JWT issued before it does not count as listed, so
+  re-enabling an account does not bring an older session back to this path. `on` does not apply
+  this rule.
+
   Every other signed-in account gets the same `403 registration_closed` body as `off`, so the
   answer never tells whether an address is listed. The refusal happens before the per-IP rate
   limiter, so refused calls do not use up a listed developer's quota. Each refusal writes one
   `developer_registration.refused` log line with the account id and a reason code (`not_listed`,
-  `session_not_verified`, `connection_not_trusted`, `email_not_login_identity`), never the e-mail.
+  `session_not_verified`, `connection_not_trusted`, `email_not_login_identity`, `session_revoked`),
+  never the e-mail.
   A client registered this way is a `developer` client (login scopes only), never a `partner` row,
   and is owned by the registering account. To give a developer access, add their DataDance account
   e-mail and restart. They then sign in to the developer console with Google or the e-mail code.
@@ -678,6 +739,15 @@ unconditionally — the issuer is never derived from a request header), `APP_PUB
   `WEB3AUTH_EMAIL_TRUSTED_VERIFIERS` must name the connections of the network the deployment runs
   on. While `WEB3AUTH_NETWORK_REBIND=off`, nothing else reads that variable, so setting it there
   for this check changes no login.
+- **The `developer` and `ddc_admin` roles may register in `off` and `allowlist` too**
+  (`src/services/userRoles.js`, granted with `scripts/opsRoles.js`; see `docs/OPS_ADMIN.md`). When
+  the mode refuses a signed-in account, the route checks its roles; with one of them it needs a
+  verified session (`ver 2`, else `403 verified_session_required`) not issued before the account's
+  last disable / enable (else `401 session_revoked`), and the client is written together with a
+  `console.client_register` audit row (`detail.registration` is `closed` or `allowlist`). An
+  account without those roles gets `registration_closed` and one `developer_registration.refused`
+  log line (reason `closed` in `off` mode). `GET /api/developer/sso/me` answers `can_register`
+  accordingly.
 - The values are read once at boot, so a change needs a restart. Any mode other than `off`, `on` or
   `allowlist` refuses to start in production. In `allowlist` mode, so does a list entry that is not
   an e-mail address. The error names the entry positions and never an address. Outside production,
