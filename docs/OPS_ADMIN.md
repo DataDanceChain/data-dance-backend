@@ -265,3 +265,26 @@ that source check does not prove deployed values. Before a consuming merge/relea
 required development/staging/production environment coverage and actual build wiring. No live
 environment check, migration, initial administrator grant or production publication is implied
 by local tests.
+
+### Real backend/browser integration fixture
+
+The matching admin repository provides `npm run test:backend-browser`. It builds the actual
+admin UI into a private temporary directory, serves the unchanged developer-console application
+scripts with an explicit loopback network bootstrap, and starts this repository's
+`test/helpers/opsBrowserFixture.js`. Set `OPS_BACKEND_DIR` and `OPS_WALLET_DIR` to the matching
+checkouts; `OPS_BACKEND_DEPENDENCIES` may name an existing compatible backend `node_modules`.
+Playwright can be selected through `PLAYWRIGHT_MODULE_PATH` and
+`PLAYWRIGHT_CHROMIUM_EXECUTABLE`; no package/browser installation is implicit.
+
+The fixture owns a uniquely labeled PostgreSQL 17 container published only on loopback. It uses
+the recorded main schema, applies the actual roles/prompt/consent additive migrations, generates
+Prisma privately, and mounts the actual operations/developer/OAuth routers with real Prisma.
+No API answer or database operation is mocked. The private readiness file contains synthetic
+test sessions only and is never a report/archive input. Shutdown verifies the API, container,
+readiness file and generated-client overlay are removed; cleanup failure fails the run.
+
+The browser checks personal code/exchange and replay refusal, ordinary-developer denial,
+reasoned trusted-qualification grant and revoke, owner preference reset, exact audit actor/reason,
+operator restrictions and old-session refusal after disable/re-enable. The verified Wallet session
+is seeded; Web3Auth/provider sign-in, production network discovery, the complete application
+middleware stack and deployed infrastructure remain separate verification boundaries.
