@@ -106,9 +106,9 @@
 #   referral bind write on (SSO_TGE_REFERRAL_BIND=true), SSO_DEVELOPER_REGISTRATION=allowlist. A backend before PR #64
 #   (main 66bf00f; the earlier release images among them) refuses to boot on allowlist, and one without a listed field
 #   refuses that field: when $NEW_DIR/.env names the image 10-build.sh built, its source is checked for both first.
-# Fixed (2026-10-15): SSO_TGE_AUTO_APPROVE=app. A consent opened inside the DataDance App (the App hand-off session) is
-#   still allowed without a tap; a consent opened from a web sign-in always shows the consent page, so the user can see
-#   and switch the account.
+# Confirmation-first (Sloan, 2026-10-20): SSO_TGE_AUTO_APPROVE=off, including App handoff.
+#   Automatic consent remains supported; a deliberate runtime change to app can restore it later.
+#   Regeneration must not silently re-enable automatic consent during partner adaptation.
 # Local test only (DDC_LOCAL_TEST=1): OLD_ENV, NEW_DIR, FE_ENV_TGE may point at synthetic files outside /root.
 set -euo pipefail
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -430,8 +430,8 @@ setv SSO_TGE_CLIENT_SECRET_SHA256 "$TGE_SECRET_SHA"
 setv SSO_TGE_REDIRECT_URIS "$REHEARSAL_REDIRECT_URIS"
 setv SSO_TGE_INITIATE_LOGIN_URI "$REHEARSAL_INITIATE_LOGIN_URI"
 setv SSO_SESSION_SECRET "$(cat "$SEC/sso_session_secret_rehearsal")"
-# The App hand-off may Allow without a tap; a web sign-in always shows the consent page (header).
-setv SSO_TGE_AUTO_APPROVE app
+# Confirmation-first for both App handoff and web entry during partner adaptation (header).
+setv SSO_TGE_AUTO_APPROVE off
 # POST /partner/tge/referral/bind and its scope (src/constants/partnerClient.js referralBindEnabled reads this name).
 setv SSO_TGE_REFERRAL_BIND true
 setv SSO_TGE_APP_PRESENTATION webview
@@ -574,9 +574,9 @@ for n in SSO_TGE_CLIENT_ID SSO_TGE_REDIRECT_URIS SSO_TGE_INITIATE_LOGIN_URI SSO_
   else die "$n differs from the previous env without an explicit override on this call"; fi
 done
 [ "$(getv "$CHK" SSO_DEVELOPER_REGISTRATION)" = allowlist ] && [ "$(getv "$CHK" SSO_TGE_STATUS_FIELDS)" = "$STATUS_FIELDS" ] && [ "$(getv "$CHK" SSO_TGE_REFERRAL_BIND)" = true ] \
-  && [ "$(getv "$CHK" SSO_TGE_AUTO_APPROVE)" = app ] \
+  && [ "$(getv "$CHK" SSO_TGE_AUTO_APPROVE)" = off ] \
   || die "SSO_DEVELOPER_REGISTRATION, SSO_TGE_STATUS_FIELDS, SSO_TGE_REFERRAL_BIND or SSO_TGE_AUTO_APPROVE in the new file is not the value set above"
-pass "partner settings kept from the previous env: $kept_n; given on this call:${given:- none}; no previous value:${fresh:- none}. SSO_TGE_STATUS_FIELDS: all $(csv_items "$STATUS_FIELDS" | grep -c . || true) fields, SSO_TGE_REFERRAL_BIND=true, SSO_TGE_AUTO_APPROVE=app, SSO_DEVELOPER_REGISTRATION=allowlist ($DEV_EMAILS_N listed)"
+pass "partner settings kept from the previous env: $kept_n; given on this call:${given:- none}; no previous value:${fresh:- none}. SSO_TGE_STATUS_FIELDS: all $(csv_items "$STATUS_FIELDS" | grep -c . || true) fields, SSO_TGE_REFERRAL_BIND=true, SSO_TGE_AUTO_APPROVE=off, SSO_DEVELOPER_REGISTRATION=allowlist ($DEV_EMAILS_N listed)"
 # The invoice seller (header): the new file holds the value resolved above (a lower-case canonical UUID), or none.
 sv=$(getv "$CHK" INVOICE_SELLER_USER_ID)
 [ "$sv" = "$SELLER_ID" ] || die "INVOICE_SELLER_USER_ID in the new file is not the value resolved above ($SELLER_SRC)"

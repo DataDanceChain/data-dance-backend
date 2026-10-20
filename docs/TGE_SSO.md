@@ -485,6 +485,16 @@ remains valid syntax, but effective `web` flags are always false; no environment
 for this policy. `off`, disabled clients, verified-session, browser-binding and PKCE checks remain.
 Do not infer entry trust from Referer, User-Agent, `source=ddc` or an arbitrary query flag.
 
+The temporary October 20 confirmation-first rollout uses the existing runtime setting
+`SSO_TGE_AUTO_APPROVE=off`; the configuration generator now also writes off to avoid undoing it
+on regeneration. Later restoring `app` needs the operator's runtime configuration update and API
+container recreation, not a new frontend/native build solely for the toggle. The setting is
+shared across the configured TGE and first-party registry clients. Under this updated interface,
+partners can request `prompt=login` to insist on confirmation but cannot independently enable
+seamless consent. Existing partner sessions are not forcibly reauthorized. Full mode ownership,
+production evidence and the separate interface-release sequence live in
+`ddc-sso-kit/docs/entry-policy.md`; changing this switch does not deploy these PRs.
+
 A partner account area's **Switch account** starts a fresh state/PKCE transaction with
 `prompt=select_account`, without the old `login_hint`. Explicit standalone re-login can use
 `prompt=login`. The issuer persists either prompt on the authorization row and returns it in the
