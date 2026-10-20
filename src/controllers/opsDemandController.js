@@ -28,7 +28,7 @@ exports.get = async (req, res) => {
 
 exports.quote = async (req, res) => {
   try {
-    const data = await demandService.quoteDemand(req.params.id, actorId(req), req.body || {});
+    const data = await demandService.quoteDemand(req.params.id, actorId(req), req.body || {}, { audit: req.auditGeneric });
     return res.json({ status: 'success', data });
   } catch (error) {
     return demandService.failToHttp(res, error);
@@ -41,6 +41,7 @@ exports.decline = async (req, res) => {
       req.params.id,
       actorId(req),
       req.body?.reason || req.body?.note,
+      { audit: req.auditGeneric },
     );
     return res.json({ status: 'success', data });
   } catch (error) {
@@ -50,7 +51,7 @@ exports.decline = async (req, res) => {
 
 exports.assemble = async (req, res) => {
   try {
-    const data = await demandService.markAssembling(req.params.id, actorId(req), req.body?.note);
+    const data = await demandService.markAssembling(req.params.id, actorId(req), req.body?.note, { audit: req.auditGeneric });
     return res.json({ status: 'success', data });
   } catch (error) {
     return demandService.failToHttp(res, error);
@@ -61,6 +62,7 @@ exports.fulfill = async (req, res) => {
   try {
     const data = await demandService.fulfillDemand(req.params.id, actorId(req), {
       dataNFTId: req.body?.dataNFTId,
+      audit: req.auditChange,
     });
     return res.json({ status: 'success', data });
   } catch (error) {

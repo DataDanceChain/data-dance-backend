@@ -225,15 +225,15 @@ function pickWeightedWinner(entries) {
 }
 
 /**
- * Draw the raffle's open seats. The wins, the points they grant and the campaign event commit in
- * one transaction.
+ * Draw the raffle's open seats. The wins, the points they grant, the campaign event and (with
+ * `audit`, the ops route) the audit row commit in one transaction.
  *
  * The transaction first locks the campaign row (FOR NO KEY UPDATE: it excludes another draw, not
  * the ticket and win rows that reference the campaign), then reads the wins and the ticket
  * holders. Two draws at once therefore run one after the other, and the second sees the first's
  * wins: no prize ever gets more seats than its count.
  */
-async function drawRaffle(campaign, actor) {
+async function drawRaffle(campaign, actor, { audit } = {}) {
   if (!campaign || campaign.template !== 'RAFFLE') return { error: 'Not a raffle' };
   const rules = raffleRules(campaign);
   const created = [];
@@ -303,6 +303,16 @@ async function drawRaffle(campaign, actor) {
         note: `drew ${created.length} prize${created.length === 1 ? '' : 's'}`,
       },
     });
+    if (audit) {
+      await audit(tx, {
+        target: { type: 'campaign', id: campaign.id, label: campaign.slug || null },
+        detail: {
+          wins: created.length,
+          pointsAwarded: created.reduce((sum, win) => sum + (Number(win.points) || 0), 0),
+          winIds: created.map((win) => win.id),
+        },
+      });
+    }
   });
   return { created };
 }

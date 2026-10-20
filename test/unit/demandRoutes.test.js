@@ -29,6 +29,9 @@ Object.assign(process.env, {
   APP_PUBLIC_URL: 'https://app.test.local',
   JWT_SECRET,
   SSO_SESSION_SECRET: 'ddc-demand-routes-sso-secret',
+  // The ops tokens below are the shared login's (role 'admin'), accepted unless OPS_SHARED_LOGIN=off.
+  // Set to on here so a value in the shell cannot change the test.
+  OPS_SHARED_LOGIN: 'on',
 });
 
 const commerceService = require('../../src/services/commerceService');
@@ -252,7 +255,8 @@ describe('one request from submission to fulfilment, over HTTP', () => {
         'ops:fulfill:assembling->fulfilled',
       ],
     );
-    assert.deepEqual(prisma.demandEvent.rows.filter((e) => e.actor === 'ops').map((e) => e.actorId), ['ops-alice', 'ops-alice', 'ops-alice']);
+    // A shared-login session records its changes as 'shared' (a personal session records its e-mail).
+    assert.deepEqual(prisma.demandEvent.rows.filter((e) => e.actor === 'ops').map((e) => e.actorId), ['shared', 'shared', 'shared']);
 
     const again = [
       [buyerAuth, `/api/demands/${created.id}/accept`, 'not_quoted'],

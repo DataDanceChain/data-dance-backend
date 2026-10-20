@@ -124,7 +124,7 @@ function newClientId() {
  * `ownerUserId` is the signed-in DataDance account that registers the client (the route runs
  * `protect`). Callers that pass none store null, as before.
  */
-async function createDeveloperClient(body = {}, { ownerUserId = null } = {}) {
+async function createDeveloperClient(body = {}, { ownerUserId = null, audit } = {}) {
   const clientName = cleanName(body.client_name);
   const contactEmail = cleanEmail(body.contact_email);
   const redirectUris = cleanRedirects(body.redirect_uris);
@@ -143,18 +143,24 @@ async function createDeveloperClient(body = {}, { ownerUserId = null } = {}) {
   if (!clientId) {
     throw new DeveloperClientError(500, 'server_error', 'Could not allocate a client id.');
   }
-  const row = await prisma.ssoDeveloperClient.create({
-    data: {
-      clientId,
-      clientName,
-      contactEmail,
-      secretHash,
-      redirectUris,
-      enabled: true,
-      kind: 'developer',
-      ownerUserId: ownerUserId || null,
-    },
-  });
+  const data = {
+    clientId,
+    clientName,
+    contactEmail,
+    secretHash,
+    redirectUris,
+    enabled: true,
+    kind: 'developer',
+    ownerUserId: ownerUserId || null,
+  };
+  // With `audit(tx, row)`, the client and its audit row commit together: no row, no client.
+  const row = audit
+    ? await prisma.$transaction(async (tx) => {
+      const created = await tx.ssoDeveloperClient.create({ data });
+      await audit(tx, created);
+      return created;
+    })
+    : await prisma.ssoDeveloperClient.create({ data });
   return {
     clientId: row.clientId,
     clientSecret,
@@ -377,8 +383,62 @@ async function rotateOwnedSecret(ownerUserId, clientIdValue) {
   return { client, clientSecret };
 }
 
+/**
+ * The App hand-off target the admin view shows for one client (#71), or null: the environment's
+ * SSO_TGE_INITIATE_LOGIN_URI for its client (a row with that id included, as loadPartnerClient lets
+ * the environment win), a registry partner row's column when it passes the rule (rowInitiateLoginUri:
+ * an invalid value reads as none), never one for a developer row. Not narrowed by SSO_TGE_ENABLED:
+ * this is where the hand-off goes, not whether it is open now.
+ */
+function adminInitiateLoginUri(row, configured) {
+  if (configured) return configured.initiateLoginUri || null;
+  return rowInitiateLoginUri(row) || null;
+}
+
+/**
+ * The DDC admin view (GET /api/developer/sso/admin/clients): every registry row, plus the
+ * environment's partner when it has no row. Read-only; never a secret or a secret hash.
+ */
+async function listAllClients() {
+  const rows = await prisma.ssoDeveloperClient.findMany({ orderBy: { createdAt: 'asc' } });
+  const ownerIds = [...new Set(rows.map((row) => row.ownerUserId).filter(Boolean))];
+  const owners = ownerIds.length
+    ? await prisma.user.findMany({ where: { id: { in: ownerIds } }, select: { id: true, email: true } })
+    : [];
+  const ownerEmail = new Map(owners.map((owner) => [owner.id, owner.email]));
+  const clients = rows.map((row) => ({
+    ...presentOwnedClient(row),
+    initiate_login_uri: adminInitiateLoginUri(row, environmentClient(row.clientId)),
+    source: 'registry',
+    contact_email: row.contactEmail || null,
+    owner_user_id: row.ownerUserId || null,
+    owner_email: row.ownerUserId ? ownerEmail.get(row.ownerUserId) || null : null,
+  }));
+  const cfg = readPartnerConfig();
+  const configured = cfg.clientId ? getPartnerClient(cfg.clientId) : null;
+  if (configured && !rows.some((row) => row.clientId === configured.clientId)) {
+    clients.push({
+      client_id: configured.clientId,
+      client_name: configured.clientName,
+      kind: 'partner',
+      redirect_uris: [...configured.redirectUris],
+      enabled: Boolean(configured.enabled),
+      scopes: [...availablePartnerScopes()],
+      managed: true,
+      created_at: null,
+      initiate_login_uri: adminInitiateLoginUri(null, configured),
+      source: 'environment',
+      contact_email: null,
+      owner_user_id: null,
+      owner_email: null,
+    });
+  }
+  return clients;
+}
+
 module.exports = {
   DeveloperClientError,
+  listAllClients,
   DEVELOPER_SCOPES,
   DEVELOPER_STATUS_FIELDS,
   PARTNER_STATUS_FIELDS,

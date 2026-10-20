@@ -86,15 +86,19 @@ exports.resolvePrivacyRequest = async (req, res) => {
     if (!existing) {
       return res.status(404).json({ status: 'fail', message: 'Request not found' });
     }
-    const row = await prisma.privacyRequest.update({
-      where: { id: existing.id },
-      data: {
-        status: next,
-        opsNote: note || existing.opsNote,
-        resolvedAt: new Date(),
-        resolvedBy: req.opsAdmin?.username || 'ops',
-      },
-      include: INCLUDE,
+    const row = await prisma.$transaction(async (tx) => {
+      const updated = await tx.privacyRequest.update({
+        where: { id: existing.id },
+        data: {
+          status: next,
+          opsNote: note || existing.opsNote,
+          resolvedAt: new Date(),
+          resolvedBy: req.opsAdmin?.username || 'ops',
+        },
+        include: INCLUDE,
+      });
+      if (req.auditGeneric) await req.auditGeneric(tx);
+      return updated;
     });
     return res.json({ status: 'success', data: serialize(row) });
   } catch (error) {
