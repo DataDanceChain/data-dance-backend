@@ -1023,9 +1023,12 @@ model SsoDeveloperClient {
   /// developer: self-serve login scopes. partner: first-party Data Planet scopes.
   kind         String   @default("developer")
   ownerUserId  String?
-  /// App hand-off target (`initiate_login_uri`). Read for kind "partner" only, and only when it is
-  /// an absolute https URL without a fragment; otherwise the hand-off answers CLIENT_DISABLED.
-  /// Set with scripts/setPartnerInitiateLoginUri.js.
+  /// Owner-confirmed opt-in; trusted_developer qualification and platform policy are checked live.
+  skipConfirmationEnabled Boolean @default(false)
+  /// Bind the saved choice to this owner; ownership changes require an explicit new choice.
+  skipConfirmationOwnerUserId String?
+  /// App hand-off target. Available to partner clients or an ordinary client's active trusted
+  /// owner; does not widen kind/scopes. Invalid targets answer CLIENT_DISABLED.
   initiateLoginUri String?
   createdAt    DateTime @default(now())
 

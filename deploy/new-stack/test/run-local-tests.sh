@@ -416,13 +416,16 @@ grep -qx "rehearsal client id: $CID (override)" "$T/run1.out" && grep -qx "rehea
 # and the partner fields the rehearsal serves (docs/TGE_SSO.md section 14: points and points_history included).
 ev() { sed -n "s/^$1=\"\(.*\)\"$/\1/p" "$2" | tail -1; }
 W3A_G=web3auth-google-sapphire; W3A_E=web3auth-auth0-email-passwordless-sapphire; W3A_A=web3auth-auth0-apple-sapphire; W3A_T=web3auth-auth0-twitter-sapphire
+# d479402 (2026-10-17): the generator deliberately retains these fixed compatibility names
+# after the configured four. Assert the exact sequence (including defaults repeated), not a wildcard.
+W3A_COMPAT="$W3A_G,$W3A_E,$W3A_A,$W3A_T,web3auth,external-wallet"
 SF_WANT=registered_at,wallet_bound,data_licence_granted,email_masked,avatar,email,wallet_address,points,referral,referral_network,points_history
 REH_ENV="$T/ddcnew/.env.rehearsal"
-[ "$(ev WEB3AUTH_ALLOWED_VERIFIERS "$REH_ENV")" = "$W3A_G,$W3A_E,$W3A_A,$W3A_T,external-wallet" ] \
+[ "$(ev WEB3AUTH_ALLOWED_VERIFIERS "$REH_ENV")" = "$W3A_G,$W3A_E,$W3A_A,$W3A_T,$W3A_COMPAT" ] \
   && [ "$(ev WEB3AUTH_REBIND_VERIFIERS "$REH_ENV")" = "$W3A_G,$W3A_E,$W3A_A,$W3A_T" ] \
   && [ "$(ev WEB3AUTH_EMAIL_TRUSTED_VERIFIERS "$REH_ENV")" = "$W3A_G,$W3A_E,$W3A_A" ] \
   && [ "$(grep -cE '^WEB3AUTH_[A-Z_]*VERIFIERS=.*sapphire-mainnet' "$REH_ENV" || true)" = 0 ] \
-  && ok "Web3Auth lists carry the Mainnet built-in login names (no -mainnet suffix): allowed = the four + external-wallet, re-bind = the four, e-mail-trusted = Google, e-mail, Apple (never X)" \
+  && ok "Web3Auth lists carry the exact configured four + fixed compatibility names; re-bind = configured four, e-mail-trusted = Google, e-mail, Apple (never X)" \
   || bad "Web3Auth login names in .env.rehearsal: allowed=$(ev WEB3AUTH_ALLOWED_VERIFIERS "$REH_ENV") rebind=$(ev WEB3AUTH_REBIND_VERIFIERS "$REH_ENV") trusted=$(ev WEB3AUTH_EMAIL_TRUSTED_VERIFIERS "$REH_ENV")"
 [ "$(ev SSO_TGE_STATUS_FIELDS "$REH_ENV")" = "$SF_WANT" ] && [ "$(grep -c '^SSO_TGE_STATUS_FIELDS=' "$REH_ENV")" = 1 ] \
   && ok "SSO_TGE_STATUS_FIELDS=$SF_WANT (once; the old env's list is replaced): every field of the catalog, the points balance and history among them" \
@@ -444,10 +447,10 @@ export REHEARSAL_REDIRECT_URIS="$RR_T"
 d="$T/w3a-override"; mkdir -p "$d"; rc=0
 DDC_LOCAL_TEST=1 NEW_DIR="$d" OLD_ENV="$OLD" FE_ENV_TGE="$T/env.tge" REHEARSAL_CLIENT_ID="$CID" W3A_EMAIL=lt-email-login W3A_X=lt-x-login \
   bash "$PKG/20-env.sh" > "$d.out" 2>&1 || rc=$?
-[ "$rc" = 0 ] && [ "$(ev WEB3AUTH_ALLOWED_VERIFIERS "$d/.env.rehearsal")" = "$W3A_G,lt-email-login,$W3A_A,lt-x-login,external-wallet" ] \
+[ "$rc" = 0 ] && [ "$(ev WEB3AUTH_ALLOWED_VERIFIERS "$d/.env.rehearsal")" = "$W3A_G,lt-email-login,$W3A_A,lt-x-login,$W3A_COMPAT" ] \
   && [ "$(ev WEB3AUTH_REBIND_VERIFIERS "$d/.env.rehearsal")" = "$W3A_G,lt-email-login,$W3A_A,lt-x-login" ] \
   && [ "$(ev WEB3AUTH_EMAIL_TRUSTED_VERIFIERS "$d/.env.rehearsal")" = "$W3A_G,lt-email-login,$W3A_A" ] \
-  && ok "W3A_EMAIL / W3A_X overrides replace the defaults in the allowed, re-bind and e-mail-trusted lists (the X override never e-mail-trusted)" \
+  && ok "W3A_EMAIL / W3A_X overrides replace configured entries while fixed allowed compatibility names stay exact (X never e-mail-trusted)" \
   || { tail -3 "$d.out"; bad "W3A_* overrides (rc=$rc)"; }
 cid20() { # <label> <NEW_DIR> [REHEARSAL_CLIENT_ID]: one 20-env.sh run, output in <NEW_DIR>.out, status in RC
   RC=0

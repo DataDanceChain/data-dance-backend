@@ -10,6 +10,7 @@
 const prisma = require('../utils/prisma');
 const { ROLES, isRole, staffRole, cleanReason } = require('../constants/opsRoles');
 const { OpsError, writeAudit, isoOrNull, recordLabelOf } = require('./opsAudit');
+const { lockConsentPolicy, resetOwnerConsent } = require('./developerConsentPolicy');
 
 function byRoleOrder(a, b) {
   return ROLES.indexOf(a) - ROLES.indexOf(b);
@@ -143,10 +144,16 @@ async function grantRole({ userId, role, reason, actor, surface = 'ops', request
   }
   try {
     return await db.$transaction(async (tx) => {
+      if (wanted === 'trusted_developer') {
+        await lockConsentPolicy(tx);
+        const current = await findTarget(tx, target.id);
+        if (current.disabledAt) throw new OpsError(409, 'ACCOUNT_DISABLED', 'This account is disabled.');
+      }
       const existing = await tx.userRoleGrant.findUnique({
         where: { userId_role: { userId: target.id, role: wanted } },
       });
       if (existing) throw new OpsError(409, 'ALREADY_GRANTED', 'This account already has that role.');
+      if (wanted === 'trusted_developer') await resetOwnerConsent(tx, target.id);
       const grant = await tx.userRoleGrant.create({
         data: {
           userId: target.id,
@@ -185,6 +192,7 @@ async function revokeRole({ userId, role, reason, actor, surface = 'ops', reques
     throw new OpsError(409, 'SELF_CHANGE', 'You cannot remove your own ddc_admin role.');
   }
   return db.$transaction(async (tx) => {
+    if (wanted === 'trusted_developer') await lockConsentPolicy(tx);
     if (wanted === 'ddc_admin') await lockAdmins(tx);
     const grant = await tx.userRoleGrant.findUnique({
       where: { userId_role: { userId: target.id, role: wanted } },
@@ -200,12 +208,13 @@ async function revokeRole({ userId, role, reason, actor, surface = 'ops', reques
       }
     }
     await tx.userRoleGrant.delete({ where: { userId_role: { userId: target.id, role: wanted } } });
+    const reset = wanted === 'trusted_developer' ? await resetOwnerConsent(tx, target.id) : null;
     const audit = await writeAudit(tx, {
       actor,
       action: 'role.revoke',
       target: { type: 'user', id: target.id, label: target.email },
       reason: why,
-      detail: { role: wanted, grantedAt: isoOrNull(grant.grantedAt), grantedBy: grant.grantedBy },
+      detail: { role: wanted, grantedAt: isoOrNull(grant.grantedAt), grantedBy: grant.grantedBy, ...(reset ? { consentPreferencesReset: reset.count } : {}) },
       surface,
       requestId,
     });

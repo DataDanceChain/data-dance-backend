@@ -91,11 +91,15 @@ const tokens = {
    * The wallet's user JWT (`ver: 2` = a verified session). `ageSec` backdates its `iat` (a sign-in
    * that many seconds ago).
    */
-  wallet: (user, { ver = 2, ageSec = 0 } = {}) =>
-    jwt.sign({ id: user.id, ver, iat: Math.floor(Date.now() / 1000) - ageSec }, JWT_SECRET, { expiresIn: '1h' }),
+  wallet: (user, { ver = 2, ageSec = 0 } = {}) => {
+    const iatMs = Date.now() - ageSec * 1000;
+    return jwt.sign({ id: user.id, ver, iat: Math.floor(iatMs / 1000), iatMs }, JWT_SECRET, { expiresIn: '1h' });
+  },
   /** A personal ops session; `ageSec` backdates its `iat`. */
-  ops: (user, { expiresIn = '5m', ageSec = 0 } = {}) =>
-    jwt.sign({ type: 'ops_admin', kind: 'user', sub: user.id, iat: Math.floor(Date.now() / 1000) - ageSec }, JWT_SECRET, { expiresIn }),
+  ops: (user, { expiresIn = '5m', ageSec = 0 } = {}) => {
+    const iatMs = Date.now() - ageSec * 1000;
+    return jwt.sign({ type: 'ops_admin', kind: 'user', sub: user.id, iat: Math.floor(iatMs / 1000), iatMs }, JWT_SECRET, { expiresIn });
+  },
   /** A legacy shared-login token (before personal sign-in): role 'admin'. */
   legacyShared: () => jwt.sign({ type: 'ops_admin', sub: 'ops-legacy', role: 'admin' }, JWT_SECRET, { expiresIn: '5m' }),
   /** A shared-login token as POST /auth/login issues it now. */

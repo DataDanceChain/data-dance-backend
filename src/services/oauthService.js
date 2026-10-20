@@ -23,7 +23,8 @@ const { normalizeReferralCodeInput, formatReferralCodeForDisplay } = require('..
 const { createLogger } = require('../utils/logger');
 // The write scope's gate (decision 30 A); kept on their own line, apart from the main import.
 const { availablePartnerScopes, referralBindEnabled } = require('../constants/partnerClient');
-const { loadDeveloperPartnerClient, loadPartnerClient } = require('./ssoDeveloperClient');
+const { loadPartnerClient } = require('./ssoDeveloperClient');
+const { lockConsentPolicy } = require('./developerConsentPolicy');
 
 const logger = createLogger('oauthService');
 
@@ -411,15 +412,10 @@ async function loadCimdClient(clientId) {
 async function resolveClient(clientId, req) {
   const id = String(clientId || '').trim();
   if (!id) throw new OAuthError(400, 'invalid_client', 'client_id is required.');
-  const partner = getPartnerClient(id, req);
+  const partner = await loadPartnerClient(id, req);
   if (partner) {
     if (!partner.enabled) throw new OAuthError(400, 'unauthorized_client', 'This client is disabled.');
     return partner;
-  }
-  const developer = await loadDeveloperPartnerClient(id, req);
-  if (developer) {
-    if (!developer.enabled) throw new OAuthError(400, 'unauthorized_client', 'This client is disabled.');
-    return developer;
   }
   const stored = await prisma.oAuthClient.findUnique({ where: { clientId: id } });
   if (stored) {
@@ -778,7 +774,7 @@ async function decideConsent(user, requestId, allow, ctx = {}) {
   // Atomic single-decision consume, exactly as the code-exchange path consumes the code: the
   // where clause requires a request that has neither been finished nor already carries a code,
   // so a second "allow" on the same request affects 0 rows and mints nothing (item 4).
-  const decided = await prisma.oAuthAuthorization.updateMany({
+  const mintCode = (db) => db.oAuthAuthorization.updateMany({
     where: { id: row.id, consumedAt: null, codeHash: null, expiresAt: { gt: new Date() } },
     data: {
       userId: user.id,
@@ -786,6 +782,14 @@ async function decideConsent(user, requestId, allow, ctx = {}) {
       expiresAt: new Date(Date.now() + (client.codeTtlMs || CODE_TTL_MS)),
     },
   });
+  const decided = auto ? await prisma.$transaction(async (tx) => {
+    await lockConsentPolicy(tx);
+    // Read entitlement, owner binding, saved choice, enable and emergency policy AGAIN inside
+    // the same transaction that mints the code. Revoke/disable/settings share this short lock.
+    const current = await loadPartnerClient(row.clientId, undefined, tx);
+    if (!current || !current.enabled || !current.autoApprove?.app) throw new AutoApproveNotAllowedError(entry);
+    return mintCode(tx);
+  }) : await mintCode(prisma);
   if (!decided || decided.count !== 1) {
     throw new OAuthError(400, 'invalid_request', 'This authorization request has expired.');
   }

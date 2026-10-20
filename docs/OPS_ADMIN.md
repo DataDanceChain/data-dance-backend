@@ -55,6 +55,13 @@ node scripts/opsRoles.js revoke --email <e> --role <role> --reason "<why>" [--ap
 while self-serve registration is closed (`SSO_DEVELOPER_REGISTRATION=off`, or `allowlist` without
 the account on the list). A missing permission answers 403 `FORBIDDEN_ROLE`.
 
+`trusted_developer` also permits that registration and grants only the named capability
+`sso.skip_confirmation`, without any ops permission. Admins grant/revoke it with the existing
+reasoned role API. Application owners separately opt their clients in; revoke/disable/owner
+changes reset that choice. See [developer consent controls](DEVELOPER_CONSENT.md) for the owner
+endpoint, managed overlay, reset/audit boundary and default-false migration. Preference audit
+action is `console.consent_settings`; role/account resets remain in their atomic role/account audit.
+
 ### Who acted, outside the audit log
 
 Records that users, merchants or the demo login can read name the actor by a label, never by

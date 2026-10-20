@@ -12,6 +12,8 @@
  *   GET  /api/developer/sso/clients         { email, clients: [...] }
  *   POST /api/developer/sso/clients/update  { client_id, redirect_uris, enabled? } -> the client
  *   POST /api/developer/sso/clients/secret  { client_id } -> a new secret, shown once
+ *   POST /api/developer/sso/clients/consent { client_id, skip_confirmation_enabled, reason,
+ *                                           initiate_login_uri? } -> updated client with consent
  * Each requires a user JWT (`protect`) and is rate-limited per account. A client that is not the
  * account's own answers 404, the same as one that does not exist.
  *
@@ -21,7 +23,7 @@
  *   GET /api/developer/sso/admin/clients        ddc_admin: every client, read-only, never a secret
  *   GET /api/developer/sso/admin/staff-unlock   ddc_admin: the staff network unlock (audited)
  * While registration is off, or allowlist does not admit the account, a signed-in account with
- * the developer or ddc_admin role may still register a client (audited: console.client_register);
+ * the developer, trusted_developer or ddc_admin role may still register (console.client_register);
  * anyone else gets registration_closed, and so does every caller without a token while it is off.
  *
  * These staff uses of a wallet JWT (the two admin routes, and registering while registration is
@@ -46,9 +48,11 @@ const {
   listOwnedClients,
   listAllClients,
   updateOwnedClient,
+  updateOwnedConsent,
   rotateOwnedSecret,
 } = require('../services/ssoDeveloperClient');
 const { activeRoles } = require('../services/userRoles');
+const { capabilitiesFor } = require('../services/developerConsentPolicy');
 const { writeAudit, actorFromUser, OpsError } = require('../services/opsAudit');
 const { assertStaffWalletSession, issuedBeforeReset, verifiedSession } = require('../services/staffSession');
 
@@ -132,9 +136,9 @@ async function registrationAllowed(req, res, next) {
   if (decision.allowed) return next();
   try {
     const roles = await activeRoles(req.user.id);
-    if (roles.includes('developer') || roles.includes('ddc_admin')) {
+    if (roles.includes('developer') || roles.includes('trusted_developer') || roles.includes('ddc_admin')) {
       if (!staffSessionOk(req, res)) return undefined;
-      req.registrationRole = roles.includes('ddc_admin') ? 'ddc_admin' : 'developer';
+      req.registrationRole = roles.includes('ddc_admin') ? 'ddc_admin' : roles.includes('trusted_developer') ? 'trusted_developer' : 'developer';
       req.registrationMode = developerRegistrationMode();
       return next();
     }
@@ -331,10 +335,11 @@ router.get('/me', noStore, protect, rateLimiters.developerConsoleRead, async (re
       user_id: req.user.id,
       email: req.user.email || null,
       roles,
+      capabilities: capabilitiesFor(roles),
       admin,
       // on: any account; allowlist: a listed account with a verified login e-mail (modeDecision);
       // any mode: the roles.
-      can_register: modeDecision(req).allowed || admin || roles.includes('developer'),
+      can_register: modeDecision(req).allowed || admin || roles.includes('developer') || roles.includes('trusted_developer'),
       // The staff routes need a verified session: false tells the console to ask for a new sign-in.
       verified_session: verifiedSession(req.authClaims),
     });
@@ -399,12 +404,28 @@ router.get('/admin/staff-unlock', noStore, protect, rateLimiters.developerConsol
 router.post('/clients/update', noStore, protect, rateLimiters.developerConsoleUpdate, async (req, res) => {
   const body = consoleBody(req);
   try {
-    const client = await updateOwnedClient(req.user.id, body);
+    const client = await updateOwnedClient(req.user.id, body, { actor: actorFromUser(req.user, 'developer'), requestId: req.reqId || null });
     audit(req, 'update', body.client_id, 'ok');
     return res.json(client);
   } catch (error) {
     audit(req, 'update', body.client_id, outcomeOf(error));
     return sendConsoleError(req, res, error, 'update');
+  }
+});
+
+router.post('/clients/consent', noStore, protect, rateLimiters.developerConsoleUpdate, async (req, res) => {
+  const body = consoleBody(req);
+  if ((body.skip_confirmation_enabled === true || body.initiate_login_uri != null) && !staffSessionOk(req, res)) return;
+  try {
+    const roles = await activeRoles(req.user.id);
+    const client = await updateOwnedConsent(req.user.id, body, {
+      actor: actorFromUser(req.user, roles.includes('trusted_developer') ? 'trusted_developer' : 'developer'),
+      authClaims: req.authClaims,
+      requestId: req.reqId || null,
+    });
+    return res.json(client);
+  } catch (error) {
+    return sendConsoleError(req, res, error, 'consent settings');
   }
 });
 

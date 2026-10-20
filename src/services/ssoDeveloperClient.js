@@ -4,11 +4,16 @@
  * A row with kind "partner" is a first-party partner (Data Planet): the same
  * confidential flow, plus points, referral, referral network, and referral bind
  * when this environment serves that write, and the App hand-off once its
- * initiateLoginUri is set (scripts/setPartnerInitiateLoginUri.js). The plaintext
+ * initiateLoginUri is set. An ordinary trusted owner's handoff is separately eligible without
+ * those extra scopes; per-client confirmation is controlled by developerConsentPolicy. The plaintext
  * secret is returned once and is not written to the database or to logs.
  */
 const crypto = require('crypto');
 const prisma = require('../utils/prisma');
+const { consentState, lockConsentPolicy } = require('./developerConsentPolicy');
+const { cleanReason } = require('../constants/opsRoles');
+const { writeAudit } = require('./opsAudit');
+const { assertStaffWalletSession } = require('./staffSession');
 const { createLogger } = require('../utils/logger');
 const {
   sha256Hex,
@@ -179,13 +184,13 @@ const REPORTED_INITIATE_LOGIN_URI_LIMIT = 1000;
  * the environment's partner client has when SSO_TGE_INITIATE_LOGIN_URI is empty. ssoRoutes refuses
  * the hand-off (CLIENT_DISABLED) for a client without one. shapeDeveloperClient reads it only while
  * SSO_TGE_ENABLED is on, so the kill switch stops every App hand-off, a database row's included.
- *   - kind "developer": always '' whatever the column holds; the hand-off is first-party only.
+ *   - kind "developer": absent unless the caller checked the owner's current named capability.
  *   - kind "partner": the stored value when it passes initiateLoginUriProblem (the production rule
  *     for SSO_TGE_INITIATE_LOGIN_URI). A value that fails reads as '' and is logged once, by client
  *     id and column name; the value itself is not logged.
  */
-function rowInitiateLoginUri(row) {
-  if (row.kind !== 'partner') return '';
+function rowInitiateLoginUri(row, entitled = false) {
+  if (row.kind !== 'partner' && !entitled) return '';
   const uri = typeof row.initiateLoginUri === 'string' ? row.initiateLoginUri.trim() : '';
   if (!uri) return '';
   if (!initiateLoginUriProblem(uri)) return uri;
@@ -202,10 +207,11 @@ function rowInitiateLoginUri(row) {
   return '';
 }
 
-function shapeDeveloperClient(row, req) {
+async function shapeDeveloperClient(row, req, db = prisma) {
   if (!row) return null;
   const firstParty = row.kind === 'partner';
   const cfg = readPartnerConfig();
+  const consent = await consentState(row, null, db);
   return {
     kind: PARTNER_KIND,
     clientId: row.clientId,
@@ -214,7 +220,7 @@ function shapeDeveloperClient(row, req) {
     redirectUris: Array.isArray(row.redirectUris) ? row.redirectUris : [],
     // SSO_TGE_ENABLED=false stops the App hand-off for every partner client, as it does for the
     // environment's. The row's web sign-in still follows its own `enabled` flag.
-    initiateLoginUri: cfg.enabled ? rowInitiateLoginUri(row) : '',
+    initiateLoginUri: cfg.enabled ? rowInitiateLoginUri(row, consent.eligible) : '',
     tokenEndpointAuthMethod: 'client_secret_post',
     tokenEndpointAuthMethods: [...PARTNER_TOKEN_ENDPOINT_AUTH_METHODS],
     resource: partnerResourceUrl(req),
@@ -225,25 +231,30 @@ function shapeDeveloperClient(row, req) {
     accessTtlSec: PARTNER_ACCESS_TTL_SEC,
     statusFields: firstParty ? firstPartyStatusFields(cfg) : [...DEVELOPER_STATUS_FIELDS],
     requireVerifiedSession: firstParty ? cfg.requireVerifiedSession : false,
-    autoApprove: firstParty ? { app: cfg.autoApprove.app, web: false } : { app: false, web: false },
+    autoApprove: { app: consent.effective, web: false },
     secretHash: row.secretHash,
     developer: !firstParty,
     firstParty,
   };
 }
 
-async function loadDeveloperPartnerClient(clientId, req) {
+async function loadDeveloperPartnerClient(clientId, req, db = prisma) {
   const id = String(clientId || '').trim();
   if (!id) return null;
-  const row = await prisma.ssoDeveloperClient.findUnique({ where: { clientId: id } });
-  return shapeDeveloperClient(row, req);
+  const row = await db.ssoDeveloperClient.findUnique({ where: { clientId: id } });
+  return shapeDeveloperClient(row, req, db);
 }
 
 /** Env-configured partner first, then a registry row (developer or first-party). */
-async function loadPartnerClient(clientId, req) {
+async function loadPartnerClient(clientId, req, db = prisma) {
   const configured = getPartnerClient(clientId, req);
-  if (configured) return configured;
-  return loadDeveloperPartnerClient(clientId, req);
+  if (configured) {
+    // The persisted owned row is a consent-only overlay. Environment redirects/secrets/URI win.
+    const row = await db.ssoDeveloperClient.findUnique({ where: { clientId: configured.clientId } });
+    const consent = await consentState(row, configured, db);
+    return { ...configured, autoApprove: { app: consent.effective, web: false } };
+  }
+  return loadDeveloperPartnerClient(clientId, req, db);
 }
 
 /**
@@ -258,6 +269,23 @@ async function listFirstPartyClientIds(client = prisma) {
     orderBy: { createdAt: 'asc' },
   });
   return rows.map((row) => row.clientId);
+}
+
+/** Card registration only: existing first-party eligibility plus narrowly entitled ordinary
+ * handoff. Qualification enables manual DDC launch even with saved skip=false/global auto=off.
+ * This list grants neither campaign editing access nor any extra partner data scopes.
+ */
+async function listHandoffClientIds(db = prisma) {
+  const rows = await db.ssoDeveloperClient.findMany({ where: { enabled: true }, orderBy: { createdAt: 'asc' } });
+  const ids = [];
+  for (const row of rows) {
+    if (row.kind === 'partner') ids.push(row.clientId);
+    else {
+      const state = await consentState(row, null, db);
+      if (state.eligible && state.initiate_login_uri) ids.push(row.clientId);
+    }
+  }
+  return ids;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -302,7 +330,7 @@ function environmentClient(clientId) {
 }
 
 /** What the console shows for one client: the settings in effect. Never the secret or its hash. */
-function presentOwnedClient(row) {
+async function presentOwnedClient(row, db = prisma) {
   const configured = environmentClient(row.clientId);
   const kind = configured || row.kind === 'partner' ? 'partner' : 'developer';
   return {
@@ -316,11 +344,12 @@ function presentOwnedClient(row) {
     scopes: kind === 'partner' ? [...availablePartnerScopes()] : [...DEVELOPER_SCOPES],
     managed: Boolean(configured),
     created_at: row.createdAt || null,
+    consent: await consentState(row, configured, db),
   };
 }
 
-async function findOwnedClient(ownerUserId, clientId) {
-  const row = await prisma.ssoDeveloperClient.findFirst({ where: { clientId, ownerUserId } });
+async function findOwnedClient(ownerUserId, clientId, db = prisma) {
+  const row = await db.ssoDeveloperClient.findFirst({ where: { clientId, ownerUserId } });
   if (!row) throw notOnThisAccount();
   return row;
 }
@@ -337,11 +366,11 @@ async function listOwnedClients(ownerUserId) {
     where: { ownerUserId: owner },
     orderBy: { createdAt: 'asc' },
   });
-  return rows.map(presentOwnedClient);
+  return Promise.all(rows.map((row) => presentOwnedClient(row)));
 }
 
 /** Redirect URIs (the registration rules) and, when sent, enabled. Nothing else on the row changes. */
-async function updateOwnedClient(ownerUserId, body = {}) {
+async function updateOwnedClient(ownerUserId, body = {}, { actor, requestId = null } = {}) {
   const owner = requireOwner(ownerUserId);
   const input = body && typeof body === 'object' && !Array.isArray(body) ? body : {};
   const clientId = requireClientId(input.client_id);
@@ -349,16 +378,65 @@ async function updateOwnedClient(ownerUserId, body = {}) {
   if (input.enabled !== undefined && typeof input.enabled !== 'boolean') {
     throw new DeveloperClientError(400, 'invalid_request', 'enabled must be true or false.');
   }
-  const row = await findOwnedClient(owner, clientId);
-  refuseManaged(row);
-  const enabled = typeof input.enabled === 'boolean' ? input.enabled : Boolean(row.enabled);
-  // The owner is part of the write as well as the read.
-  const { count } = await prisma.ssoDeveloperClient.updateMany({
-    where: { clientId, ownerUserId: owner },
-    data: { redirectUris, enabled },
+  return prisma.$transaction(async (tx) => {
+    await lockConsentPolicy(tx);
+    const row = await findOwnedClient(owner, clientId, tx);
+    refuseManaged(row);
+    const enabled = typeof input.enabled === 'boolean' ? input.enabled : Boolean(row.enabled);
+    const reset = !enabled && Boolean(row.skipConfirmationEnabled);
+    const data = { redirectUris, enabled, ...(!enabled ? { skipConfirmationEnabled: false, skipConfirmationOwnerUserId: null } : {}) };
+    const { count } = await tx.ssoDeveloperClient.updateMany({ where: { clientId, ownerUserId: owner }, data });
+    if (count !== 1) throw notOnThisAccount();
+    if (reset) await writeAudit(tx, {
+      actor, action: 'console.consent_settings', target: { type: 'sso_client', id: clientId, label: row.clientName },
+      reason: cleanReason(input.reason) || 'Client disabled by its owner.',
+      detail: { enabled: false, cause: 'client_disabled' }, surface: 'console', requestId,
+    });
+    return presentOwnedClient({ ...row, ...data }, tx);
   });
-  if (count !== 1) throw notOnThisAccount();
-  return presentOwnedClient({ ...row, redirectUris, enabled });
+}
+
+/** The only owner-editable exception for a managed client: its persisted consent preference. */
+async function updateOwnedConsent(ownerUserId, body = {}, { actor, authClaims, requestId = null } = {}) {
+  const owner = requireOwner(ownerUserId);
+  const clientId = requireClientId(body.client_id);
+  if (typeof body.skip_confirmation_enabled !== 'boolean') throw new DeveloperClientError(400, 'invalid_request', 'skip_confirmation_enabled must be a boolean.');
+  const reason = cleanReason(body.reason);
+  if (!reason) throw new DeveloperClientError(400, 'invalid_request', 'A reason of 3 to 200 characters is required.');
+  return prisma.$transaction(async (tx) => {
+    await lockConsentPolicy(tx);
+    const row = await findOwnedClient(owner, clientId, tx);
+    const configured = environmentClient(clientId);
+    if (configured && body.initiate_login_uri !== undefined) refuseManaged(row);
+    const state = await consentState(row, configured, tx);
+    const changesUri = body.initiate_login_uri !== undefined && body.initiate_login_uri !== null;
+    if (body.skip_confirmation_enabled || changesUri) {
+      const currentOwner = await tx.user.findUnique({ where: { id: owner }, select: { id: true, sessionsResetAt: true } });
+      try {
+        assertStaffWalletSession(currentOwner, authClaims);
+      } catch (error) {
+        throw new DeveloperClientError(error.status, error.code === 'SESSION_REVOKED' ? 'session_revoked' : 'verified_session_required', error.message);
+      }
+    }
+    if ((body.skip_confirmation_enabled || changesUri) && !state.eligible) {
+      throw new DeveloperClientError(403, 'qualification_required', 'The application owner needs the sso.skip_confirmation capability.');
+    }
+    const data = { skipConfirmationEnabled: body.skip_confirmation_enabled, skipConfirmationOwnerUserId: body.skip_confirmation_enabled ? owner : null };
+    if (body.initiate_login_uri !== undefined) {
+      if (body.initiate_login_uri !== null && (typeof body.initiate_login_uri !== 'string' || initiateLoginUriProblem(body.initiate_login_uri))) {
+        throw new DeveloperClientError(400, 'invalid_request', 'initiate_login_uri must be an absolute https URL without credentials, fragment or whitespace, or null.');
+      }
+      data.initiateLoginUri = body.initiate_login_uri === null ? null : body.initiate_login_uri.trim();
+    }
+    const { count } = await tx.ssoDeveloperClient.updateMany({ where: { clientId, ownerUserId: owner }, data });
+    if (count !== 1) throw notOnThisAccount();
+    await writeAudit(tx, {
+      actor, action: 'console.consent_settings', target: { type: 'sso_client', id: clientId, label: row.clientName }, reason,
+      detail: { previousEnabled: state.enabled, enabled: data.skipConfirmationEnabled, initiateLoginUriChanged: Object.prototype.hasOwnProperty.call(data, 'initiateLoginUri') && data.initiateLoginUri !== row.initiateLoginUri },
+      surface: 'console', requestId,
+    });
+    return presentOwnedClient({ ...row, ...data }, tx);
+  });
 }
 
 /**
@@ -371,7 +449,7 @@ async function rotateOwnedSecret(ownerUserId, clientIdValue) {
   const row = await findOwnedClient(owner, clientId);
   refuseManaged(row);
   // Built before the write: once the old secret is dead, nothing may fail before the caller has the new one.
-  const client = presentOwnedClient(row);
+  const client = await presentOwnedClient(row);
   // Same format as createDeveloperClient.
   const clientSecret = `ddc_sso_secret_${crypto.randomBytes(32).toString('base64url')}`;
   const secretHash = sha256Hex(clientSecret);
@@ -406,14 +484,14 @@ async function listAllClients() {
     ? await prisma.user.findMany({ where: { id: { in: ownerIds } }, select: { id: true, email: true } })
     : [];
   const ownerEmail = new Map(owners.map((owner) => [owner.id, owner.email]));
-  const clients = rows.map((row) => ({
-    ...presentOwnedClient(row),
+  const clients = await Promise.all(rows.map(async (row) => ({
+    ...await presentOwnedClient(row),
     initiate_login_uri: adminInitiateLoginUri(row, environmentClient(row.clientId)),
     source: 'registry',
     contact_email: row.contactEmail || null,
     owner_user_id: row.ownerUserId || null,
     owner_email: row.ownerUserId ? ownerEmail.get(row.ownerUserId) || null : null,
-  }));
+  })));
   const cfg = readPartnerConfig();
   const configured = cfg.clientId ? getPartnerClient(cfg.clientId) : null;
   if (configured && !rows.some((row) => row.clientId === configured.clientId)) {
@@ -431,6 +509,7 @@ async function listAllClients() {
       contact_email: null,
       owner_user_id: null,
       owner_email: null,
+      consent: await consentState(null, configured),
     });
   }
   return clients;
@@ -446,8 +525,10 @@ module.exports = {
   loadDeveloperPartnerClient,
   loadPartnerClient,
   listFirstPartyClientIds,
+  listHandoffClientIds,
   consoleClientId,
   listOwnedClients,
   updateOwnedClient,
+  updateOwnedConsent,
   rotateOwnedSecret,
 };

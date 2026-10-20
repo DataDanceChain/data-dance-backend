@@ -11,7 +11,7 @@ const {
 } = require('../utils/campaignRules');
 const { drawRaffle } = require('../services/campaignEffects');
 const { noteCreated } = require('../services/opsAudit');
-const { listFirstPartyClientIds } = require('../services/ssoDeveloperClient');
+const { listHandoffClientIds } = require('../services/ssoDeveloperClient');
 const { translateCampaignCopy } = require('../services/campaignTranslate');
 
 function actorOf(req) {
@@ -30,7 +30,7 @@ async function writeEvent(campaignId, actor, action, fromStatus, toStatus, note,
 
 /** parseDraft options: the SSO client ids an EXTERNAL card may name, read once per request. */
 async function draftOptions() {
-  return { ssoClientIds: campaignSsoClientIds(await listFirstPartyClientIds()) };
+  return { ssoClientIds: campaignSsoClientIds(await listHandoffClientIds()) };
 }
 
 function serialize(row) {

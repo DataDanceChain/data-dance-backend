@@ -89,7 +89,7 @@ describe('GET /api/developer/sso/me', () => {
     assert.equal(plain.status, 200, JSON.stringify(plain.body));
     assert.equal(plain.headers['cache-control'], 'no-store');
     assert.deepEqual(plain.body, {
-      user_id: people.plain.id, email: 'member@example.test', roles: [], admin: false, can_register: false, verified_session: true,
+      user_id: people.plain.id, email: 'member@example.test', roles: [], capabilities: [], admin: false, can_register: false, verified_session: true,
     });
 
     const developer = (await get('/me', auth.developer)).body;
@@ -158,7 +158,7 @@ describe('GET /api/developer/sso/admin/clients', () => {
     const byId = Object.fromEntries(res.body.clients.map((c) => [c.client_id, c]));
     assert.deepEqual(Object.keys(byId).sort(), ['sso-rehearsal', 'sso_member_app', 'tge-test']);
 
-    const keys = ['client_id', 'client_name', 'kind', 'managed', 'source', 'enabled', 'redirect_uris', 'scopes', 'initiate_login_uri', 'contact_email', 'owner_user_id', 'owner_email', 'created_at'];
+    const keys = ['client_id', 'client_name', 'kind', 'managed', 'source', 'enabled', 'redirect_uris', 'scopes', 'initiate_login_uri', 'contact_email', 'owner_user_id', 'owner_email', 'created_at', 'consent'];
     for (const client of res.body.clients) assert.deepEqual(Object.keys(client).sort(), [...keys].sort(), client.client_id);
 
     assert.equal(byId['sso-rehearsal'].source, 'registry');

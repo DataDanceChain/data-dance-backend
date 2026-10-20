@@ -99,6 +99,8 @@ function cleanRedirects(value) {
 }
 
 async function ensureTable() {
+  // Compatibility bootstrap only. New consent/admin projections REQUIRE migrate deploy first;
+  // this old bridge must not become a second schema-migration mechanism.
   await prisma.$executeRawUnsafe(`
     CREATE TABLE IF NOT EXISTS "SsoDeveloperClient" (
       "id" TEXT PRIMARY KEY,
@@ -350,6 +352,8 @@ async function grantPlanetManager(email, audit) {
   if (user.disabledAt) throw planetManagerError(403, 'account_disabled', 'That account is disabled.');
   const clientId = PLANET_MANAGER_CLIENT_ID;
   const previousOwnerUserId = await prisma.$transaction(async (tx) => {
+    const { lockConsentPolicy } = require('./developerConsentPolicy');
+    await lockConsentPolicy(tx);
     const existing = await tx.ssoDeveloperClient.findUnique({ where: { clientId } });
     const previous = existing ? existing.ownerUserId || null : null;
     if (!existing) {
@@ -368,7 +372,8 @@ async function grantPlanetManager(email, audit) {
     } else {
       await tx.ssoDeveloperClient.update({
         where: { clientId },
-        data: { ownerUserId: user.id, kind: 'partner', contactEmail: user.email },
+        data: { ownerUserId: user.id, kind: 'partner', contactEmail: user.email,
+          ...(previous !== user.id ? { skipConfirmationEnabled: false, skipConfirmationOwnerUserId: null } : {}) },
       });
     }
     await writeAudit(tx, {
@@ -560,7 +565,8 @@ async function listSsoClients() {
   await ensureTable();
   const rows = await prisma.$queryRaw`
     SELECT c."clientId", c."clientName", c."contactEmail", c."redirectUris",
-           c.enabled, c.kind, c."ownerUserId", c."createdAt",
+           c.enabled, c.kind, c."ownerUserId", c."createdAt", c."initiateLoginUri",
+           c."skipConfirmationEnabled", c."skipConfirmationOwnerUserId",
            u.email AS "ownerEmail"
     FROM "SsoDeveloperClient" c
     LEFT JOIN "User" u ON u.id = c."ownerUserId"
@@ -568,7 +574,7 @@ async function listSsoClients() {
   `;
   return {
     issuer: issuer(),
-    clients: rows.map((row) => ({
+    clients: await Promise.all(rows.map(async (row) => ({
       client_id: row.clientId,
       client_name: row.clientName,
       contact_email: row.contactEmail,
@@ -577,7 +583,8 @@ async function listSsoClients() {
       kind: row.kind === 'partner' ? 'partner' : 'developer',
       owner_email: row.ownerEmail || null,
       created_at: row.createdAt,
-    })),
+      consent: await require('./developerConsentPolicy').consentState(row, require('../constants/partnerClient').getPartnerClient(row.clientId)),
+    }))),
   };
 }
 

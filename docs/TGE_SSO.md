@@ -477,8 +477,11 @@ Takes effect on the next `/partner/tge/*` call. `401 invalid_client` without cre
 
 ## 8a. DataDance launch, standalone login and account choice
 
-Automatic consent requires the existing client-bound `ddc_sso_` handoff session AND the configured
-app auto-approval flag. Both the native App and signed-in DataDance website launch through
+Automatic consent requires the existing client-bound `ddc_sso_` handoff session, the configured
+app auto-approval flag, an active trusted owner and that owner's explicit per-client opt-in.
+New and legacy clients default off; a configured environment client requires an owned persisted
+consent overlay. See [developer consent controls](DEVELOPER_CONSENT.md) for eligibility/settings,
+managed restrictions, audit/reset and migration. Both App and signed-in DataDance website launch through
 `POST /api/sso/app-ticket` and `/sso/continue`; the primary Wallet JWT never leaves DataDance.
 A plain user JWT always gets manual partner confirmation. Legacy `SSO_TGE_AUTO_APPROVE=app,web`
 remains valid syntax, but effective `web` flags are always false; no environment change is needed
@@ -490,8 +493,9 @@ The temporary October 20 confirmation-first rollout uses the existing runtime se
 on regeneration. Later restoring `app` needs the operator's runtime configuration update and API
 container recreation, not a new frontend/native build solely for the toggle. The setting is
 shared across the configured TGE and first-party registry clients. Under this updated interface,
-partners can request `prompt=login` to insist on confirmation but cannot independently enable
-seamless consent. Existing partner sessions are not forcibly reauthorized. Full mode ownership,
+partners can request `prompt=login` to insist on confirmation; trusted owners may save their app
+choice, while the platform emergency deny remains authoritative. Global `app` alone never opts
+clients in after the developer-control release. Existing partner sessions are not forcibly reauthorized. Full mode ownership,
 production evidence and the separate interface-release sequence live in
 `ddc-sso-kit/docs/entry-policy.md`; changing this switch does not deploy these PRs.
 

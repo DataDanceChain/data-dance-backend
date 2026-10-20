@@ -6,6 +6,7 @@
  *   operator   day-to-day ops: ops.read, ops.write, ops.support. Defined now, assigned to nobody yet.
  *   developer  console only: may register SSO clients while public self-serve registration is
  *              closed. It gives no ops access.
+ *   trusted_developer  developer registration + sso.skip_confirmation capability; no ops access.
  *
  * Two session kinds are not roles a user can hold:
  *   shared  the shared login, kept for the move to personal sign-in (on unless
@@ -15,7 +16,7 @@
  * Staff = ddc_admin or operator. A user who has both acts as ddc_admin.
  */
 
-const ROLES = Object.freeze(['ddc_admin', 'operator', 'developer']);
+const ROLES = Object.freeze(['ddc_admin', 'operator', 'developer', 'trusted_developer']);
 const STAFF_ROLES = Object.freeze(['ddc_admin', 'operator']);
 
 const PERMISSIONS = Object.freeze(['ops.read', 'ops.write', 'ops.support', 'ops.payouts', 'ops.admin']);
@@ -39,6 +40,7 @@ const AUDIT_ACTIONS = Object.freeze([
   'sso.planet_manager.assign',
   'console.staff_unlock',
   'console.client_register',
+  'console.consent_settings',
   // Money and balance routes: the row is written in the transaction of the change.
   'payment.confirm',
   'payment.reject',

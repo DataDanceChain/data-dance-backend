@@ -172,6 +172,7 @@ beforeEach(async () => {
     saved[key] = process.env[key];
   });
   await prisma.user.create({ data: cUser });
+  await require('../helpers/developerConsent').enableTrustedConsent(prisma, 'tge-test');
   await prisma.oAuthClient.create({
     data: { clientId: 'ddc_oauth_mcp1', clientName: 'Claude', redirectUris: [MCP_REDIRECT], tokenEndpointAuthMethod: 'none', clientUri: '' },
   });
@@ -211,6 +212,7 @@ describe('Planet entry policy', () => {
       clientId: 'planet-registry', clientName: 'Planet registry', kind: 'partner', enabled: true,
       redirectUris: [REDIRECT], secretHash: SECRET_HASH, initiateLoginUri: 'https://tge.example.com/login/ddc',
     } });
+    await require('../helpers/developerConsent').enableTrustedConsent(prisma, 'planet-registry');
     const { requestId, cookie } = await authorize({ clientId: 'planet-registry' });
     assert.deepEqual((await requestSummary(requestId)).body.data.autoApprove, { app: true, web: false });
     assert.equal((await consent(userJwt(), cookie, { requestId, allow: true, auto: true })).status, 403);

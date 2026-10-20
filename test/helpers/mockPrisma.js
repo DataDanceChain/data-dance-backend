@@ -300,7 +300,9 @@ function createMockPrisma(options = {}) {
     userDailyEvent: model('userDailyEvent'),
     crawlerTask: model('crawlerTask'),
     ssoTicket: model('ssoTicket'),
-    ssoDeveloperClient: model('ssoDeveloperClient'),
+    ssoDeveloperClient: model('ssoDeveloperClient', {
+      defaults: () => ({ skipConfirmationEnabled: false, skipConfirmationOwnerUserId: null }),
+    }),
     // Commerce rows that attestHashOnChain writes to (purchase orders and disbursement items).
     purchaseOrder: model('purchaseOrder', {
       relations: {

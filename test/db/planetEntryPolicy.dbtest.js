@@ -35,6 +35,7 @@ before(async () => {
   for (const name of ['original', 'chosen']) {
     await prisma.user.create({ data: { id: `${RUN}-${name}`, email: `${RUN}-${name}@example.test`, referralCode: `${RUN}-${name}` } });
   }
+  await require('../helpers/developerConsent').enableTrustedConsent(prisma, RUN);
   wallet = jwt.sign({ id: `${RUN}-original`, ver: 2 }, JWT_SECRET, { expiresIn: '10m' });
   chosenWallet = jwt.sign({ id: `${RUN}-chosen`, ver: 2 }, JWT_SECRET, { expiresIn: '10m' });
   server = await listenLoopback(app);
@@ -42,6 +43,8 @@ before(async () => {
 after(async () => {
   if (server) await new Promise((resolve) => server.close(resolve));
   await prisma.oAuthAuthorization.deleteMany({ where: { clientId: RUN } });
+  await prisma.ssoDeveloperClient.deleteMany({ where: { clientId: RUN } });
+  await prisma.user.deleteMany({ where: { id: `consent-owner-${RUN}` } });
   await prisma.user.deleteMany({ where: { id: { startsWith: RUN } } });
   await prisma.$disconnect();
 });

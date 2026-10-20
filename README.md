@@ -2,6 +2,9 @@
 
 一个基于Node.js的Web3数字身份和数据资产管理平台后端服务。
 
+Current contracts: [operations roles/audit](docs/OPS_ADMIN.md), [partner SSO](docs/TGE_SSO.md),
+and [developer qualification and per-application confirmation](docs/DEVELOPER_CONSENT.md).
+
 ## 🚀 快速开始
 
 ### 环境要求

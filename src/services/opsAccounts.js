@@ -15,6 +15,7 @@
 const prisma = require('../utils/prisma');
 const { OpsError, writeAudit, isoOrNull, recordLabelOf } = require('./opsAudit');
 const { lockAdmins, otherEnabledAdmins, requireReason, findTarget } = require('./userRoles');
+const { lockConsentPolicy, resetOwnerConsent } = require('./developerConsentPolicy');
 
 function presentState(user) {
   return {
@@ -33,6 +34,7 @@ async function disableAccount({ userId, reason, actor, surface = 'ops', requestI
   }
   if (target.disabledAt) throw new OpsError(409, 'ALREADY_DISABLED', 'This account is already disabled.');
   return db.$transaction(async (tx) => {
+    await lockConsentPolicy(tx);
     await lockAdmins(tx);
     const adminGrant = await tx.userRoleGrant.findUnique({
       where: { userId_role: { userId: target.id, role: 'ddc_admin' } },
@@ -49,12 +51,13 @@ async function disableAccount({ userId, reason, actor, surface = 'ops', requestI
     if (changed.count !== 1) throw new OpsError(409, 'ALREADY_DISABLED', 'This account is already disabled.');
     const mcpTokens = await tx.mcpToken.deleteMany({ where: { userId: target.id } });
     const ssoTickets = await tx.ssoTicket.deleteMany({ where: { userId: target.id } });
+    const reset = await resetOwnerConsent(tx, target.id);
     const audit = await writeAudit(tx, {
       actor,
       action: 'account.disable',
       target: { type: 'user', id: target.id, label: target.email },
       reason: why,
-      detail: { mcpTokens: mcpTokens.count, ssoTickets: ssoTickets.count },
+      detail: { mcpTokens: mcpTokens.count, ssoTickets: ssoTickets.count, ...(reset.count ? { consentPreferencesReset: reset.count } : {}) },
       surface,
       requestId,
     });
@@ -67,6 +70,7 @@ async function enableAccount({ userId, reason, actor, surface = 'ops', requestId
   const target = await findTarget(db, userId);
   if (!target.disabledAt) throw new OpsError(409, 'NOT_DISABLED', 'This account is not disabled.');
   return db.$transaction(async (tx) => {
+    await lockConsentPolicy(tx);
     // A re-enable changes which accounts count as enabled admins; it runs under the same lock as
     // revoke and disable so their LAST_ADMIN check never reads it half way.
     await lockAdmins(tx);
@@ -80,12 +84,14 @@ async function enableAccount({ userId, reason, actor, surface = 'ops', requestId
       data: { disabledAt: null, disabledBy: null, disabledReason: null, sessionsResetAt: new Date() },
     });
     if (changed.count !== 1) throw new OpsError(409, 'NOT_DISABLED', 'This account is not disabled.');
+    const reset = await resetOwnerConsent(tx, target.id);
     const audit = await writeAudit(tx, {
       actor,
       action: 'account.enable',
       target: { type: 'user', id: target.id, label: target.email },
       reason: why,
       detail: {
+        ...(reset.count ? { consentPreferencesReset: reset.count } : {}),
         previous: {
           disabledAt: isoOrNull(previous.disabledAt),
           disabledBy: previous.disabledBy,

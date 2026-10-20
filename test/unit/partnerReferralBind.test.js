@@ -45,6 +45,7 @@ Object.assign(process.env, {
   SSO_TGE_CLIENT_ID: 'tge-test',
   SSO_TGE_CLIENT_SECRET_SHA256: crypto.createHash('sha256').update(SECRET).digest('hex'),
   SSO_TGE_REDIRECT_URIS: REDIRECT,
+  SSO_TGE_INITIATE_LOGIN_URI: 'https://tge.example.com/login/ddc',
   SSO_TGE_STATUS_FIELDS: 'registered_at,wallet_bound,referral',
   PUBLIC_BASE_URL: 'https://api.test.local',
   APP_PUBLIC_URL: 'https://app.test.local',
@@ -287,7 +288,10 @@ describe('auto-approved like the read scopes (item 35; SSO_TGE_AUTO_APPROVE, bac
   // decides — and nothing here stops the bind scope any more.
   const APP = { kind: 'sso_ticket', clientId: 'tge-test' };
   const WEB = { kind: 'user_jwt', claims: { ver: 2 } };
-  beforeEach(() => { process.env.SSO_TGE_AUTO_APPROVE = 'app,web'; });
+  beforeEach(async () => {
+    process.env.SSO_TGE_AUTO_APPROVE = 'app,web';
+    await require('../helpers/developerConsent').enableTrustedConsent(prisma, 'tge-test');
+  });
   after(() => { delete process.env.SSO_TGE_AUTO_APPROVE; });
 
   it('a scoped App consent carrying tge:referral_bind may auto-approve; standalone web stays manual', async () => {
