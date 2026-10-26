@@ -434,5 +434,8 @@ describe('points adjust balance check', () => {
     assert.equal(res.statusCode, 200, JSON.stringify(res.body));
     assert.equal(res.body.data.balanceBefore, 0);
     assert.equal(res.body.data.balanceAfter, 5);
+    const { describeOpsAdjustment } = require('../../src/utils/opsAdjustment');
+    assert.equal(describeOpsAdjustment(prisma.store.point[0].sourceId).note, 'goodwill credit');
+    assert.equal(describeOpsAdjustment(prisma.store.point[0].sourceId).actor, 'ops-test');
   });
 });

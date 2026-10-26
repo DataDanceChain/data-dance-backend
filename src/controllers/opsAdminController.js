@@ -8,6 +8,7 @@ const {
   formatReferralCodeForDisplay,
   withDisplayReferralCode,
 } = require('../utils/referralCodeFormat');
+const { describeOpsAdjustment, opsAdjustmentSourceId } = require('../utils/opsAdjustment');
 
 /**
  * `referralCode` search clauses for an ops query. Codes are shown as "DDC-XXXXXX" but stored
@@ -263,9 +264,8 @@ exports.adjustPoints = async (req, res) => {
       return res.status(404).json({ status: 'fail', message: 'User not found' });
     }
 
-    const slug = reason.replace(/[^a-zA-Z0-9]+/g, '-').slice(0, 40).toLowerCase() || 'adjustment';
     const admin = req.opsAdmin?.username || 'ops';
-    const sourceId = `ops-manual-${Date.now()}-${slug}__${admin}`;
+    const sourceId = opsAdjustmentSourceId(reason, admin);
 
     const result = await prisma.$transaction(async (tx) => {
       // The member's row is locked first (FOR NO KEY UPDATE: it orders adjustments of this member
@@ -411,7 +411,18 @@ exports.getUserPointHistory = async (req, res) => {
 
     return res.json({
       status: 'success',
-      data: { userId, email: user.email, total, limit, offset, records: rows },
+      data: {
+        userId,
+        email: user.email,
+        total,
+        limit,
+        offset,
+        records: rows.map((row) => {
+          if (row.source !== 'OPS_ADJUSTMENT') return row;
+          const described = describeOpsAdjustment(row.sourceId);
+          return { ...row, note: described.note, actor: described.actor };
+        }),
+      },
     });
   } catch (error) {
     console.error('Ops user point history error:', error);
