@@ -21,6 +21,21 @@ function firstText(...values) {
   return '';
 }
 
+/** A check-in or check-out line is a date, not a hotel or city. */
+function isStayDateLabel(value) {
+  const text = String(value || '').replace(/\s+/g, ' ').trim();
+  if (!text || text.length > 80) return false;
+  if (/^(?:check[- ]?in|check[- ]?out|arrival|departure)\b/i.test(text)) return true;
+  if (/^(?:入住日期|退房日期|入住|退房|出發|出发|到達|到达)/.test(text)) return true;
+  if (
+    /^(?:mon|tue|wed|thu|fri|sat|sun)[a-z]*\b/i.test(text) &&
+    /(?:19|20)\d{2}|\bdate\b/i.test(text)
+  ) {
+    return true;
+  }
+  return false;
+}
+
 function extractPlaceFromTitle(title) {
   const text = String(title || '').replace(/\s+/g, ' ').trim();
   if (!text || text.length < 2) return '';
@@ -80,16 +95,18 @@ function queryStayPlace(payload, metadata) {
   );
   if (address) return { kind: 'address', query: address };
   const named = firstText(
-    row.city,
-    row.localizedCity,
-    row.hotelCity,
-    row.tripLocation,
-    row.location,
-    row.destination,
-    row.region,
-    row.area,
-    meta.city,
-    meta.location,
+    ...[
+      row.city,
+      row.localizedCity,
+      row.hotelCity,
+      row.tripLocation,
+      row.location,
+      row.destination,
+      row.region,
+      row.area,
+      meta.city,
+      meta.location,
+    ].filter((value) => !isStayDateLabel(value)),
   );
   if (named) {
     const parsed = extractPlaceFromTitle(named);
@@ -143,6 +160,7 @@ function nightsFromStayPayload(payload) {
 module.exports = {
   flattenStayPayload,
   extractPlaceFromTitle,
+  isStayDateLabel,
   queryStayPlace,
   placeFromStayPayload,
   nightsFromStayPayload,

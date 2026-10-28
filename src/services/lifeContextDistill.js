@@ -1,4 +1,5 @@
 const prisma = require('../utils/prisma');
+const { extractPlaceFromTitle, isStayDateLabel } = require('../utils/stayPlaces');
 const { DEFAULT_BOUNDARIES } = require('../constants/lifeContext');
 const { cleanCrawlerTraces, generateRefinedPortrait } = require('./lifeContextGemini');
 const { getSettings, saveRefined } = require('./lifeContextSettings');
@@ -49,18 +50,28 @@ function cleanTitle(raw) {
 function cityFrom(payload, metadata) {
   const p = asObject(payload);
   const m = asObject(metadata);
-  const raw =
-    p.city ||
-    p.location ||
-    p.destination ||
-    p.hotelCity ||
-    p.area ||
-    p.region ||
-    p.country ||
-    m.city ||
-    m.location ||
-    '';
-  return String(raw).replace(/\s+/g, ' ').trim();
+  const candidates = [
+    p.city,
+    p.location,
+    p.destination,
+    p.hotelCity,
+    p.area,
+    p.region,
+    p.country,
+    m.city,
+    m.location,
+  ];
+  for (const value of candidates) {
+    const text = String(value || '').replace(/\s+/g, ' ').trim();
+    if (text && !isStayDateLabel(text)) return text;
+  }
+  return (
+    extractPlaceFromTitle(p.listingTitle) ||
+    extractPlaceFromTitle(p.title) ||
+    extractPlaceFromTitle(p.bookingName) ||
+    extractPlaceFromTitle(p.hotelName) ||
+    ''
+  );
 }
 
 function titleFrom(payload) {

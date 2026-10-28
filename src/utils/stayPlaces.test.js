@@ -1,7 +1,7 @@
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const { lookupCity, findCityInText } = require('../constants/cityCoordinates');
-const { extractPlaceFromTitle, placeFromStayPayload, queryStayPlace } = require('./stayPlaces');
+const { extractPlaceFromTitle, isStayDateLabel, placeFromStayPayload, queryStayPlace } = require('./stayPlaces');
 
 describe('city lookup', () => {
   it('matches exact cities and aliases', () => {
@@ -33,6 +33,19 @@ describe('placeFromStayPayload', () => {
   it('reads Booking trip location from nested payload', () => {
     assert.equal(
       placeFromStayPayload({ title: 'Hotel Arts', trip: { location: 'Barcelona' } }),
+      'Barcelona',
+    );
+  });
+
+  it('does not treat a check-in line as the place', () => {
+    assert.equal(isStayDateLabel('Check-in date Wed, 2026 1'), true);
+    assert.equal(isStayDateLabel('Check-out date Thu, 2026 1'), true);
+    assert.equal(
+      placeFromStayPayload({
+        title: 'Hotel Arts Barcelona',
+        location: 'Check-in date Wed, 2026 1',
+        region: 'Check-out date Thu, 2026 1',
+      }),
       'Barcelona',
     );
   });
