@@ -29,6 +29,7 @@ const {
 } = require('../controllers/privacyRequestController');
 // Referral endpoints are now centralized under /api/referrals via referralRoutes.js
 const { protect } = require('../middlewares/authMiddleware');
+const { rejectEmailOtpSession } = require('../middlewares/emailOtpSession');
 const router = express.Router();
 
 // 所有路由都需要认证
@@ -44,19 +45,19 @@ router.put('/me', updateMe);
 router.put('/language', updateLanguage);
 
 // 更新密码
-router.put('/password', updatePassword);
+router.put('/password', rejectEmailOtpSession, updatePassword);
 
 // 更新钱包地址
-router.put('/wallet', updateWalletAddress);
+router.put('/wallet', rejectEmailOtpSession, updateWalletAddress);
 
 // 获取用户积分
 router.get('/points', getUserPoints);
 
 // 生成钱包
-router.post('/wallet/generate', generateWallet);
+router.post('/wallet/generate', rejectEmailOtpSession, generateWallet);
 
 // 导入钱包
-router.post('/wallet/import', importWallet);
+router.post('/wallet/import', rejectEmailOtpSession, importWallet);
 
 // Get user's referral code
 router.get('/referral-code', getReferralCode);

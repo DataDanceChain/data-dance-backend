@@ -189,6 +189,12 @@ function developerRegistrationOpen() {
  *                                                   connection_not_trusted | email_not_login_identity }
  */
 function registrationDecision(user, claims, state = current()) {
+  // A temporary email-code session carries ver:2 so Planet can open. That claim is not a
+  // Web3Auth login, so it cannot register a developer client.
+  if (claims && claims.amr === 'email_otp') {
+    if (state.mode === 'off') return { allowed: false, reason: 'closed' };
+    return { allowed: false, reason: 'session_not_verified' };
+  }
   if (state.mode === 'on') return { allowed: true };
   if (state.mode !== 'allowlist') return { allowed: false, reason: 'closed' };
   const email = normalizeEmail(user && user.email);

@@ -17,10 +17,14 @@ if (missingEnvVars.length > 0) {
 }
 
 // Create a transporter only if all required env vars are present
+const smtpPort = parseInt(process.env.SMTP_PORT, 10);
+const smtpSecure = process.env.SMTP_SECURE === 'true';
 const transporter = missingEnvVars.length === 0 ? nodemailer.createTransport({
   host: process.env.SMTP_HOST,
-  port: parseInt(process.env.SMTP_PORT),
-  secure: process.env.SMTP_SECURE === 'true',
+  port: smtpPort,
+  secure: smtpSecure,
+  // Port 587 speaks STARTTLS. Require it so the password is not offered in cleartext.
+  requireTLS: !smtpSecure && smtpPort === 587,
   auth: {
     user: process.env.SMTP_USER,
     pass: process.env.SMTP_PASS
@@ -80,7 +84,28 @@ const sendBulkPromotionEmails = async (recipients, promotionInfo) => {
   }
 };
 
+/**
+ * One-time login code. The code is the message body and must not be logged by the caller.
+ * @param {string} to
+ * @param {string} code
+ */
+const sendLoginCodeEmail = async (to, code) => {
+  if (!transporter) {
+    const error = new Error('Email is not configured');
+    error.code = 'EMAIL_DISABLED';
+    throw error;
+  }
+  await transporter.sendMail({
+    from: process.env.SMTP_FROM,
+    to,
+    subject: 'Your DataDance login code',
+    text: `Your DataDance login code is ${code}.\n\nIt expires in 10 minutes. If you did not ask for this, you can ignore this email.\n`,
+    html: `<p>Your DataDance login code is <strong>${code}</strong>.</p><p>It expires in 10 minutes. If you did not ask for this, you can ignore this email.</p>`,
+  });
+};
+
 module.exports = {
   sendPromotionEmail,
-  sendBulkPromotionEmails
+  sendBulkPromotionEmails,
+  sendLoginCodeEmail,
 }; 

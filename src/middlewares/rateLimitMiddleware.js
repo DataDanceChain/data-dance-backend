@@ -442,6 +442,24 @@ const rateLimiters = {
     errorFormat: 'oauth'
   }),
 
+  // POST /api/auth/email-code/send — per IP. The per-address gap lives in emailOtpLogin.
+  emailOtpSend: createRateLimiter({
+    name: 'emailOtpSend',
+    windowMs: 15 * 60 * 1000,
+    max: 10,
+    message: 'Too many login codes were requested. Please try again later.',
+    keyGenerator: keyGenerators.ip
+  }),
+
+  // POST /api/auth/email-code/verify — per IP. Five wrong codes retire that code.
+  emailOtpVerify: createRateLimiter({
+    name: 'emailOtpVerify',
+    windowMs: 15 * 60 * 1000,
+    max: 20,
+    message: 'Too many login attempts. Please try again later.',
+    keyGenerator: keyGenerators.ip
+  }),
+
   // POST /api/sso/ticket/exchange — public, per IP (Phase 3)
   ssoExchange: createRateLimiter({
     name: 'ssoExchange',

@@ -2,6 +2,7 @@ const express = require('express');
 const { web3authLogin } = require('../controllers/web3AuthController');
 const { updateWallet } = require('../controllers/web3AuthController');
 const { protect } = require('../middlewares/authMiddleware');
+const { rejectEmailOtpSession } = require('../middlewares/emailOtpSession');
 const { rateLimiters } = require('../middlewares/rateLimitMiddleware');
 
 const router = express.Router();
@@ -10,6 +11,6 @@ const router = express.Router();
 router.post('/web3auth-login', rateLimiters.web3authLogin, web3authLogin);
 
 // 更新钱包地址 - 需要认证
-router.post('/update-wallet', protect, updateWallet);
+router.post('/update-wallet', protect, rejectEmailOtpSession, updateWallet);
 
 module.exports = router; 
