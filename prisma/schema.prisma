@@ -83,9 +83,18 @@ model User {
   disbursementItems        DisbursementItem[]
   networkRebind            Web3AuthNetworkRebind?
   dataDemands              DataDemand[]
+  loginEmail               UserLoginEmail?
 
   @@unique([web3authVerifier, web3authVerifierId])
   @@index([organizationId])
+}
+
+// Explicitly loaded only by the recovery endpoints; never part of the default User selection.
+model UserLoginEmail {
+  userId     String   @id
+  email      String   @unique
+  verifiedAt DateTime @default(now())
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 }
 
 model UserProfile {

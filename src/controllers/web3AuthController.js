@@ -1,5 +1,6 @@
 const prisma = require('../utils/prisma');
 const { generateToken } = require('../utils/jwtUtils');
+const { bindingClaims } = require('../services/emailBinding');
 const { createLogger } = require('../utils/logger');
 const referralService = require('../services/referralService');
 const { generateUniqueReferralCode, validateReferralCode } = require('../utils/referralUtils');
@@ -17,6 +18,7 @@ const {
   assertWalletBound,
   resolveUser,
   getVerifyMode,
+  isTrustedVerifier,
   getAllowLegacyFallback,
   getMissingIdTokenMeansOldApp,
   isRetiredClientIdToken,
@@ -305,7 +307,10 @@ async function verifiedLogin(req, res, { mode, referralCode, campaignSlug, invit
 
   if (action === 'created') {
     if (referrerId) await settleReferral(resolved.id, referrerId, campaignSlug, referralCode);
-    const token = generateToken(resolved.id, { ver: 2 });
+    const token = generateToken(resolved.id, {
+      ver: 2,
+      ...bindingClaims(resolved, identity, isTrustedVerifier(identity.verifier), payload),
+    });
     logger.info('web3auth_login', {
       userId: resolved.id,
       action,
@@ -365,7 +370,10 @@ async function verifiedLogin(req, res, { mode, referralCode, campaignSlug, invit
     ? await prisma.user.update({ where: { id: resolved.id }, data: updateData })
     : resolved;
 
-  const token = generateToken(user.id, { ver: 2 });
+  const token = generateToken(user.id, {
+    ver: 2,
+    ...bindingClaims(user, identity, isTrustedVerifier(identity.verifier), payload),
+  });
   logger.info('web3auth_login', {
     userId: user.id,
     action,

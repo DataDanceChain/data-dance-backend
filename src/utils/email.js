@@ -104,8 +104,23 @@ const sendLoginCodeEmail = async (to, code) => {
   });
 };
 
+const sendBindingCodeEmail = async (to, code) => {
+  if (!transporter) {
+    const error = new Error('Email is not configured');
+    error.code = 'EMAIL_DISABLED';
+    throw error;
+  }
+  await transporter.sendMail({
+    from: process.env.SMTP_FROM,
+    to,
+    subject: 'Confirm your DataDance recovery email',
+    text: `Your DataDance email binding code is ${code}. It expires in 5 minutes. If you did not ask for this, you can ignore this email.`,
+  });
+};
+
 module.exports = {
   sendPromotionEmail,
   sendBulkPromotionEmails,
   sendLoginCodeEmail,
-}; 
+  sendBindingCodeEmail,
+};

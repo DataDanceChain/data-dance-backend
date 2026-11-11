@@ -6,14 +6,16 @@ const { createLogger } = require('../utils/logger');
 const logger = createLogger('emailOtp');
 
 function findUsersByEmail(email) {
-  return prisma.user.findMany({
-    where: { email: { equals: email, mode: 'insensitive' } },
-    take: 2,
-  });
-}
-
-function findUserById(id) {
-  return prisma.user.findUnique({ where: { id } });
+  return prisma.$transaction(async (tx) => {
+    const bound = await tx.userLoginEmail.findUnique({ where: { email }, include: { user: true } });
+    if (bound) {
+      return [{ ...bound.user, loginEmail: { email: bound.email, verifiedAt: bound.verifiedAt } }];
+    }
+    return tx.user.findMany({
+      where: { email: { equals: email, mode: 'insensitive' } },
+      take: 2,
+    });
+  }, { isolationLevel: 'RepeatableRead' });
 }
 
 function fail(res, error, event) {
@@ -39,7 +41,7 @@ exports.verifyEmailCode = async (req, res) => {
     const result = await verifyEmailLoginCode({
       email: req.body && req.body.email,
       code: req.body && req.body.code,
-      findUserById,
+      findUsersByEmail,
     });
     return res.status(result.status).json(result.body);
   } catch (error) {

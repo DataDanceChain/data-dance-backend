@@ -1299,6 +1299,10 @@ module.exports = {
   assertWalletBound,
   resolveUser,
   getVerifyMode,
+  isTrustedVerifier: (verifier) => {
+    const cfg = getConfig();
+    return cfg.mode !== 'off' && cfg.allowedVerifiers.includes(verifier);
+  },
   getAllowLegacyFallback,
   getMissingIdTokenMeansOldApp,
   isRetiredClientIdToken,

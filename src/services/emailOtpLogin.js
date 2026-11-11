@@ -1,7 +1,7 @@
 const crypto = require('crypto');
 const { normalizeEmail, isValidEmail } = require('../utils/emailMask');
 const { generateToken } = require('../utils/jwtUtils');
-const { withDisplayReferralCode } = require('../utils/referralCodeFormat');
+const { publicUser } = require('../utils/publicUser');
 
 // Temporary door while Web3Auth login is paused. EMAIL_OTP_LOGIN must be exactly "true".
 // Turn it off when the usual sign-in works again. This does not create accounts.
@@ -50,7 +50,7 @@ function isTwitterVerifier(verifier) {
 
 /**
  * A code goes only to an existing account whose stored address is a mailbox.
- * X logins are skipped: that column often holds a verifier id, not an inbox.
+ * X logins cannot use the legacy column, which often holds a verifier id.
  * No row is created.
  */
 function eligibleUser(user) {
@@ -59,6 +59,17 @@ function eligibleUser(user) {
   if (!email || email.length > 254 || !isValidEmail(email) || email.includes('|')) return false;
   if (isTwitterVerifier(user.web3authVerifier)) return false;
   return true;
+}
+
+function matchLoginAddress(users, email) {
+  if (!Array.isArray(users) || users.length !== 1) return null;
+  const [user] = users;
+  if (!user || user.disabledAt) return null;
+  if (user.loginEmail?.email === email) {
+    return user.loginEmail.verifiedAt ? { user, kind: 'verified' } : null;
+  }
+  if (eligibleUser(user) && normalizeEmail(user.email) === email) return { user, kind: 'legacy' };
+  return null;
 }
 
 function windowFor(email, now) {
@@ -109,17 +120,6 @@ function invalidCode() {
   return { status: 401, body: INVALID_CODE };
 }
 
-function publicUser(user) {
-  const {
-    password,
-    privateKey,
-    xAccessToken,
-    xRefreshToken,
-    ...rest
-  } = user;
-  return withDisplayReferralCode(rest);
-}
-
 function resetEmailOtpState() {
   sendWindows.clear();
   pending.clear();
@@ -155,8 +155,8 @@ async function requestEmailLoginCode({
   } catch {
     return unavailable();
   }
-  const match = Array.isArray(users) && users.length === 1 ? users[0] : null;
-  if (!match || !eligibleUser(match) || normalizeEmail(match.email) !== email) {
+  const match = matchLoginAddress(users, email);
+  if (!match) {
     // Same accepted body as a real send. The address is not told whether an account exists.
     return { status: 200, body: ACCEPTED };
   }
@@ -169,7 +169,8 @@ async function requestEmailLoginCode({
   }
 
   pending.set(email, {
-    userId: match.id,
+    userId: match.user.id,
+    kind: match.kind,
     codeHash: hashCode(email, code),
     expiresAt: now + CODE_TTL_MS,
     attempts: 0,
@@ -188,7 +189,7 @@ async function verifyEmailLoginCode({
   code: rawCode,
   now = Date.now(),
   env = process.env,
-  findUserById,
+  findUsersByEmail,
 }) {
   if (!emailOtpEnabled(env)) {
     return {
@@ -213,18 +214,19 @@ async function verifyEmailLoginCode({
   }
   pending.delete(email);
 
-  let user;
+  let match;
   try {
-    user = await findUserById(entry.userId);
+    match = matchLoginAddress(await findUsersByEmail(email), email);
   } catch {
     return unavailable();
   }
-  if (!eligibleUser(user) || user.id !== entry.userId || normalizeEmail(user.email) !== email) {
+  if (!match || match.user.id !== entry.userId || match.kind !== entry.kind) {
     return invalidCode();
   }
 
   // ver:2 lets Planet and the other SSO hand-off accept the session while Web3Auth is down.
   // amr marks it so wallet rebinding, password changes, and X linking stay closed.
+  const { user } = match;
   const token = generateToken(user.id, { ver: 2, amr: 'email_otp' });
   return {
     status: 200,

@@ -40,6 +40,10 @@ function user(overrides = {}) {
 function harness(rows, options = {}) {
   const sent = [];
   const db = Array.isArray(rows) ? rows : [rows];
+  const findUsersByEmail = async (email) => {
+    const bound = db.find((row) => row.loginEmail?.email === email);
+    return bound ? [bound] : db.filter((row) => row.email.toLowerCase() === email);
+  };
   return {
     sent,
     async send(email) {
@@ -47,7 +51,7 @@ function harness(rows, options = {}) {
         email,
         now: options.now ?? NOW,
         env: ON,
-        findUsersByEmail: async () => db.filter((row) => row.email.toLowerCase() === email.toLowerCase()),
+        findUsersByEmail,
         sendMail: async (to, code) => {
           if (options.failSend) throw new Error('smtp down');
           sent.push({ to, code });
@@ -62,7 +66,7 @@ function harness(rows, options = {}) {
         code,
         now,
         env: ON,
-        findUserById: async (id) => db.find((row) => row.id === id) || null,
+        findUsersByEmail,
       });
     },
   };
@@ -143,6 +147,29 @@ describe('email login codes', () => {
     const disabled = harness(user({ disabledAt: new Date() }));
     assert.equal((await disabled.send('ada@example.com')).status, 200);
     assert.deepEqual(disabled.sent, []);
+  });
+
+  it('uses a verified X recovery mailbox ahead of a later legacy match and rechecks its owner', async () => {
+    const recovery = { email: 'recovery@example.com', verifiedAt: new Date(NOW) };
+    const xUser = user({ web3authVerifier: 'twitter', email: 'twitter|123', loginEmail: recovery });
+    const rows = [xUser];
+    const box = harness(rows);
+    assert.equal((await box.send(recovery.email)).status, 200);
+    assert.deepEqual(box.sent, [{ to: recovery.email, code: '123456' }]);
+    rows.push(user({ id: 'other', email: 'RECOVERY@example.com' }));
+    const result = await box.verify(recovery.email, '123456');
+    assert.equal(result.status, 200);
+    assert.equal(result.body.data.user.id, xUser.id);
+    assert.equal(result.body.data.user.email, 'twitter|123');
+    assert.equal('loginEmail' in result.body.data.user, false);
+
+    const later = harness(rows, { now: NOW + RESEND_INTERVAL_MS });
+    await later.send(recovery.email);
+    xUser.disabledAt = new Date(NOW);
+    assert.equal((await later.verify(recovery.email, '123456')).status, 401);
+    const stillLater = harness(rows, { now: NOW + 2 * RESEND_INTERVAL_MS });
+    await stillLater.send(recovery.email);
+    assert.deepEqual(stillLater.sent, []);
   });
 
   it('waits a minute between codes and stops after the hourly cap', async () => {
