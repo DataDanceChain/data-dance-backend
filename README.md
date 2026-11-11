@@ -108,6 +108,26 @@ docker compose up -d
 - Web3Auth 只负责人登录钱包，不当 ChatGPT / Claude 的授权服务器
 
 ### Web3Auth ID token verification
+
+**Verified recovery email.** Apply the additive `UserLoginEmail` migration before this
+API revision serves emergency email sign-in. After the migration, opt in to binding with
+`EMAIL_BINDING_ENABLED=true` on an isolated single-instance API. Use the existing SMTP
+configuration. An authenticated `GET /api/auth/email-binding` returns the account's
+`loginEmail` or `null`. The authenticated `POST /api/auth/email-binding/send` and
+`/verify` routes need a recent, allowlisted social Web3Auth sign-in for the account's
+stored provider identity. The signed provider `iat` and any signed `auth_time` must be
+recent. Codes expire after five minutes and are tied to the requesting session. They are
+kept in that API process, so restarting it clears outstanding codes.
+
+To renew proof, submit the fresh provider `idToken` and `walletAddress` to authenticated
+`POST /api/auth/email-binding/reauth`. The original provider identity and any existing
+wallet must match. The endpoint returns a fresh session and cannot register or modify a user.
+
+An address can be bound once per account. Binding preserves the original e-mail field,
+provider identity, account ID and wallet. With the separate `EMAIL_OTP_LOGIN=true` switch,
+an X account can use its explicitly verified recovery address. A verified recovery address
+has priority over a later legacy entry. For legacy-only lookups, ambiguous matches are refused.
+
 - `POST /api/auth/web3auth-login` verifies the Web3Auth ID token (`idToken` in the body) against the Web3Auth JWKS with `jose` and maps the user by the upstream identity pair (`User.web3authVerifier`, `User.web3authVerifierId`); e-mail / name / avatar on that path come only from the verified token. Sessions minted from a verified token carry `ver: 2`.
 - `WEB3AUTH_VERIFY_MODE`: `off` (legacy client-asserted login only; refused at boot in production) → `log` → `enforce` (`idToken` required, token decides). In `log`, a **supplied token that is rejected fails closed exactly as under `enforce`** (`idtoken_rejected`, `outcome: refused`) — it is never downgraded to the legacy path; a request with **no** `idToken` is refused with `IDTOKEN_REQUIRED` unless `WEB3AUTH_ALLOW_LEGACY_FALLBACK=true`.
 - `WEB3AUTH_ALLOW_LEGACY_FALLBACK` (default `false`) is the only switch that still lets a body-asserted identity (`userInfo.email` / `walletAddress` / `xid`) mint a session, and only in `log` with no `idToken`. Rollout: `log` + fallback on → watch the `legacy_login` warning count drop to zero as Wallet builds send the token → fallback off → `enforce` (test, then prod). Old App builds without `idToken` cannot log in once it is off.

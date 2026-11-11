@@ -1,6 +1,8 @@
 const bcrypt = require('bcryptjs');
 const prisma = require('../utils/prisma');
 const { formatReferralCodeForDisplay, withDisplayReferralCode } = require('../utils/referralCodeFormat');
+const { publicUser } = require('../utils/publicUser');
+const { emailBindingEnabled } = require('../services/emailBinding');
 
 /**
  * 获取当前用户信息
@@ -41,6 +43,14 @@ exports.getMe = async (req, res) => {
       xUsername: user.xUsername
     };
 
+    if (user.authType === 'web3auth' && !user.email?.trim()) {
+      const binding = await prisma.userLoginEmail.findUnique({
+        where: { userId: user.id },
+        select: { userId: true },
+      });
+      if (binding || emailBindingEnabled()) userData.hasVerifiedLoginEmail = Boolean(binding);
+    }
+
     res.status(200).json({
       status: 'success',
       data: {
@@ -74,12 +84,9 @@ exports.updateMe = async (req, res) => {
       }
     });
 
-    // 移除敏感信息
-    const { password, ...userWithoutPassword } = updatedUser;
-
     res.status(200).json({
       status: 'success',
-      data: withDisplayReferralCode(userWithoutPassword)
+      data: publicUser(updatedUser)
     });
   } catch (error) {
     res.status(500).json({

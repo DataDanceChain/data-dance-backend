@@ -1,8 +1,9 @@
 const express = require('express');
 const { register, login } = require('../controllers/authController');
 const { sendEmailCode, verifyEmailCode } = require('../controllers/emailOtpController');
+const { getEmailBinding, reauthEmailBinding, sendEmailBindingCode, verifyEmailBindingCode } = require('../controllers/emailBindingController');
 const { protect } = require('../middlewares/authMiddleware');
-const { rateLimiters } = require('../middlewares/rateLimitMiddleware');
+const { createRateLimiter, keyGenerators, rateLimiters } = require('../middlewares/rateLimitMiddleware');
 const { registerUsageLog } = require('../middlewares/registerUsageLog');
 const router = express.Router();
 
@@ -17,6 +18,14 @@ router.post('/login', rateLimiters.auth, login);
 // Temporary email-code sign-in. Closed unless EMAIL_OTP_LOGIN=true.
 router.post('/email-code/send', rateLimiters.emailOtpSend, sendEmailCode);
 router.post('/email-code/verify', rateLimiters.emailOtpVerify, verifyEmailCode);
+
+const emailBindingSend = createRateLimiter({ name: 'emailBindingSend', windowMs: 15 * 60 * 1000, max: 10, keyGenerator: keyGenerators.ip });
+const emailBindingVerify = createRateLimiter({ name: 'emailBindingVerify', windowMs: 15 * 60 * 1000, max: 20, keyGenerator: keyGenerators.ip });
+const emailBindingReauth = createRateLimiter({ name: 'emailBindingReauth', windowMs: 15 * 60 * 1000, max: 10, keyGenerator: keyGenerators.ip });
+router.get('/email-binding', protect, getEmailBinding);
+router.post('/email-binding/reauth', protect, emailBindingReauth, reauthEmailBinding);
+router.post('/email-binding/send', protect, emailBindingSend, sendEmailBindingCode);
+router.post('/email-binding/verify', protect, emailBindingVerify, verifyEmailBindingCode);
 
 // X binding handled via Web3Auth adapter — no direct custom routes
 
