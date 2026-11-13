@@ -92,6 +92,7 @@ function throttle(email, now) {
 function limitedBody(retryAfter) {
   return {
     status: 429,
+    reason: 'address_throttled',
     body: {
       status: 'error',
       code: 'RATE_LIMITED',
@@ -101,12 +102,22 @@ function limitedBody(retryAfter) {
   };
 }
 
-function unavailable() {
-  return { status: 503, body: UNAVAILABLE };
+function unavailable(reason) {
+  return { status: 503, reason, body: UNAVAILABLE };
 }
 
-function invalidCode() {
-  return { status: 401, body: INVALID_CODE };
+function invalidCode(reason = 'invalid_code') {
+  return { status: 401, reason, body: INVALID_CODE };
+}
+
+function mailFailureReason(error) {
+  if (error?.code === 'EMAIL_DISABLED') return 'smtp_configuration_missing';
+  if (error?.code === 'EAUTH') return 'smtp_authentication_failed';
+  const responseCode = error?.responseCode;
+  if (Number.isInteger(responseCode) && responseCode >= 400 && responseCode < 600) {
+    return 'smtp_provider_refused';
+  }
+  return 'smtp_send_failed';
 }
 
 function publicUser(user) {
@@ -136,12 +147,13 @@ async function requestEmailLoginCode({
   if (!emailOtpEnabled(env)) {
     return {
       status: 404,
+      reason: 'feature_disabled',
       body: { status: 'fail', code: 'EMAIL_LOGIN_UNAVAILABLE', message: 'Email sign-in is not available.' },
     };
   }
   const email = normalizeEmail(rawEmail);
   if (!email || email.length > 254 || !isValidEmail(email)) {
-    return { status: 400, body: { status: 'fail', code: 'INVALID_EMAIL', message: 'Enter a valid email address.' } };
+    return { status: 400, reason: 'invalid_email', body: { status: 'fail', code: 'INVALID_EMAIL', message: 'Enter a valid email address.' } };
   }
 
   const gate = throttle(email, now);
@@ -153,19 +165,19 @@ async function requestEmailLoginCode({
   try {
     users = await findUsersByEmail(email);
   } catch {
-    return unavailable();
+    return unavailable('db_lookup_failed');
   }
   const match = Array.isArray(users) && users.length === 1 ? users[0] : null;
   if (!match || !eligibleUser(match) || normalizeEmail(match.email) !== email) {
     // Same accepted body as a real send. The address is not told whether an account exists.
-    return { status: 200, body: ACCEPTED };
+    return { status: 200, reason: 'accepted', body: ACCEPTED };
   }
 
   const code = randomCode();
   try {
     await sendMail(email, code);
-  } catch {
-    return unavailable();
+  } catch (error) {
+    return unavailable(mailFailureReason(error));
   }
 
   pending.set(email, {
@@ -180,7 +192,7 @@ async function requestEmailLoginCode({
       if (pending.size <= 4000) break;
     }
   }
-  return { status: 200, body: ACCEPTED };
+  return { status: 200, reason: 'accepted', body: ACCEPTED };
 }
 
 async function verifyEmailLoginCode({
@@ -193,12 +205,13 @@ async function verifyEmailLoginCode({
   if (!emailOtpEnabled(env)) {
     return {
       status: 404,
+      reason: 'feature_disabled',
       body: { status: 'fail', code: 'EMAIL_LOGIN_UNAVAILABLE', message: 'Email sign-in is not available.' },
     };
   }
   const email = normalizeEmail(rawEmail);
   const code = typeof rawCode === 'string' ? rawCode.trim() : '';
-  if (!email || !isValidEmail(email) || !/^\d{6}$/.test(code)) return invalidCode();
+  if (!email || !isValidEmail(email) || !/^\d{6}$/.test(code)) return invalidCode('invalid_input');
 
   const entry = pending.get(email);
   if (!entry || entry.expiresAt <= now) {
@@ -217,7 +230,7 @@ async function verifyEmailLoginCode({
   try {
     user = await findUserById(entry.userId);
   } catch {
-    return unavailable();
+    return unavailable('db_lookup_failed');
   }
   if (!eligibleUser(user) || user.id !== entry.userId || normalizeEmail(user.email) !== email) {
     return invalidCode();
@@ -228,6 +241,7 @@ async function verifyEmailLoginCode({
   const token = generateToken(user.id, { ver: 2, amr: 'email_otp' });
   return {
     status: 200,
+    reason: 'verified',
     body: {
       status: 'success',
       data: {
