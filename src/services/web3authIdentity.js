@@ -67,7 +67,13 @@ const DEFAULTS = {
   // The subset of WEB3AUTH_REBIND_VERIFIERS that verifies the e-mail address itself (Web3Auth's
   // Google and e-mail passwordless; Apple only releases addresses it verified). Only these may
   // re-bind an account found by its e-mail column; the rest (X) only by their exact verifierId.
+  // The same list decides which connections may be linked to an account (next setting).
   WEB3AUTH_EMAIL_TRUSTED_VERIFIERS: '',
+  // Linked sign-in methods. `off` = today's behaviour, bit for bit. `on` = a connection in
+  // WEB3AUTH_EMAIL_TRUSTED_VERIFIERS that proves the e-mail address of an existing account signs
+  // into that account (its pair and wallet are recorded in Web3AuthLinkedMethod; the account keeps
+  // its own). See resolveUser, "linked sign-in methods". Only "on" and "off" are accepted.
+  WEB3AUTH_LINK_TRUSTED_METHODS: 'off',
   // Old App builds after the network switch. Both only change the ANSWER to a login that is
   // refused anyway (426 APP_UPDATE_REQUIRED instead of the IDTOKEN_* code); neither ever lets one in.
   // Web3Auth client ids (csv) of retired App builds: a token refused with IDTOKEN_AUDIENCE whose
@@ -169,6 +175,9 @@ function loadConfig(env = process.env) {
     networkRebind: envOr(env, 'WEB3AUTH_NETWORK_REBIND').toLowerCase() === 'on',
     rebindVerifiers: csv(envOr(env, 'WEB3AUTH_REBIND_VERIFIERS')),
     emailTrustedVerifiers: csv(envOr(env, 'WEB3AUTH_EMAIL_TRUSTED_VERIFIERS')),
+    // Linked sign-in methods: raw value (validated at boot) and the switch.
+    linkTrustedMethodsRaw: envOr(env, 'WEB3AUTH_LINK_TRUSTED_METHODS').toLowerCase(),
+    linkTrustedMethods: envOr(env, 'WEB3AUTH_LINK_TRUSTED_METHODS').toLowerCase() === 'on',
     // Old App builds: these only pick the message of a refusal (see DEFAULTS).
     retiredClientIds: csv(envOr(env, 'WEB3AUTH_RETIRED_CLIENT_IDS')),
     // WEB3AUTH_EXTERNAL_AUDIENCE as configured (empty = WEB3AUTH_CLIENT_ID, see kinds.external).
@@ -250,6 +259,7 @@ function assertBootConfig(env = process.env) {
     );
   }
   assertRebindConfig(cfg);
+  assertLinkConfig(cfg);
   if (!['on', 'off'].includes(cfg.missingIdTokenMeansOldAppRaw)) {
     throw new Error(
       `LOGIN_MISSING_IDTOKEN_MEANS_OLD_APP must be "on" or "off" (got "${cfg.missingIdTokenMeansOldAppRaw}")`
@@ -296,6 +306,41 @@ function assertRebindConfig(cfg) {
   }
   if (problems.length) {
     throw new Error(`WEB3AUTH_NETWORK_REBIND=on is misconfigured: ${problems.join('; ')}.`);
+  }
+}
+
+/**
+ * WEB3AUTH_LINK_TRUSTED_METHODS: `off` needs nothing. `on` lets the connections named in
+ * WEB3AUTH_EMAIL_TRUSTED_VERIFIERS reach an existing account by proving its e-mail address, so
+ * every prerequisite of that trust is checked here and the boot refuses a half-configured switch.
+ * Connection names are public; they may appear in the message.
+ */
+function assertLinkConfig(cfg) {
+  if (!['on', 'off'].includes(cfg.linkTrustedMethodsRaw)) {
+    throw new Error(`WEB3AUTH_LINK_TRUSTED_METHODS must be "on" or "off" (got "${cfg.linkTrustedMethodsRaw}")`);
+  }
+  if (!cfg.linkTrustedMethods) return;
+  const problems = [];
+  if (cfg.mode === 'off') problems.push('WEB3AUTH_VERIFY_MODE must be log or enforce');
+  if (cfg.allowLegacyFallback) problems.push('WEB3AUTH_ALLOW_LEGACY_FALLBACK must be false');
+  if (cfg.walletMatch === 'none') {
+    problems.push('WEB3AUTH_WALLET_MATCH must not be none (a link records the wallet the token proves)');
+  }
+  if (!cfg.allowedVerifiers.length) problems.push('WEB3AUTH_ALLOWED_VERIFIERS must be set');
+  if (!cfg.emailTrustedVerifiers.length) {
+    problems.push('WEB3AUTH_EMAIL_TRUSTED_VERIFIERS must name the connections that verify the e-mail address');
+  }
+  if (cfg.emailTrustedVerifiers.includes(EXTERNAL_WALLET_VERIFIER)) {
+    problems.push(`WEB3AUTH_EMAIL_TRUSTED_VERIFIERS must not contain ${EXTERNAL_WALLET_VERIFIER}`);
+  }
+  const notAllowed = cfg.emailTrustedVerifiers.filter(
+    (v) => v !== EXTERNAL_WALLET_VERIFIER && !cfg.allowedVerifiers.includes(v)
+  );
+  if (cfg.allowedVerifiers.length && notAllowed.length) {
+    problems.push(`WEB3AUTH_EMAIL_TRUSTED_VERIFIERS entries not in WEB3AUTH_ALLOWED_VERIFIERS: ${notAllowed.join(', ')}`);
+  }
+  if (problems.length) {
+    throw new Error(`WEB3AUTH_LINK_TRUSTED_METHODS=on is misconfigured: ${problems.join('; ')}.`);
   }
 }
 
@@ -450,6 +495,18 @@ function describeOldAppSwitches(cfg = getConfig()) {
     'Old App update answer (426 APP_UPDATE_REQUIRED): ' +
     `WEB3AUTH_RETIRED_CLIENT_IDS count=${prefixes.length} first8=${prefixes.join(',') || '(none)'} ` +
     `LOGIN_MISSING_IDTOKEN_MEANS_OLD_APP=${cfg.missingIdTokenMeansOldApp ? 'on' : 'off'}`
+  );
+}
+
+/**
+ * One startup line (src/server.js): WEB3AUTH_LINK_TRUSTED_METHODS and the connections that may be
+ * linked while it is on (connection names are public).
+ */
+function describeLinkedMethods(cfg = getConfig()) {
+  const trusted = cfg.emailTrustedVerifiers.filter((v) => v !== EXTERNAL_WALLET_VERIFIER);
+  return (
+    `Linked sign-in methods: WEB3AUTH_LINK_TRUSTED_METHODS=${cfg.linkTrustedMethods ? 'on' : 'off'}` +
+    (cfg.linkTrustedMethods ? ` connections=${trusted.join(',')}` : '')
   );
 }
 
@@ -1085,6 +1142,172 @@ async function refuseReplacedWallet(db, identity, walletAddress) {
   throw rebindConflict('replaced_wallet', { id: record.userId }, identity, 'replaced_wallet');
 }
 
+// ---------------------------------------------------------------------------
+// Linked sign-in methods (WEB3AUTH_LINK_TRUSTED_METHODS=on)
+// ---------------------------------------------------------------------------
+//
+// On Sapphire mainnet every login connection derives its own wallet for the same person, so an
+// account made with one method is not found by the pair of another: the e-mail finds it, and the
+// ordinary checks refuse (candidate_already_linked). With the switch on, a connection that verifies
+// the address itself (WEB3AUTH_EMAIL_TRUSTED_VERIFIERS: Google, the e-mail code, Apple) and proves
+// the account's e-mail address is recorded as an additional sign-in method of that account
+// (Web3AuthLinkedMethod) and signs into it, when ALL of these hold:
+//
+//   - the account is an enabled `web3auth` row with its own pair, made or re-bound through a
+//     connection on the same list whose verifierId IS the account e-mail (the address was proven
+//     when the account got it; a legacy row linked through its wallet keeps an e-mail a request
+//     body once supplied, and does not count — same rule as the SSO developer allowlist);
+//   - the token's connection is on the list and on WEB3AUTH_ALLOWED_VERIFIERS, and differs from
+//     the account's own (never external-wallet, never a connection that does not verify e-mail: an
+//     e-mail claim alone still opens no existing account);
+//   - the address found the account and names exactly one account, case-insensitively;
+//   - the token proves a wallet, the account holds a different one, and no other account holds
+//     the proven one;
+//   - the account has no pending network re-bind record (the re-bind decides those).
+//
+// The account keeps its pair and its wallet. Sessions name the account, so points, the partner
+// `wallet_address` and payouts keep using the account's own wallet; the linked method's wallet is
+// recorded and never bound. Anything else is decided exactly as with the switch off. Off: no
+// lookup, no write, today's answers (existing link rows are then simply not read).
+
+/** May this connection be linked to an account, or sign in through an existing link? */
+function isLinkTrustedVerifier(cfg, verifier) {
+  return (
+    typeof verifier === 'string' &&
+    verifier !== EXTERNAL_WALLET_VERIFIER &&
+    cfg.emailTrustedVerifiers.includes(verifier) &&
+    isVerifierAllowed(cfg, verifier)
+  );
+}
+
+function linkKey(identity) {
+  return { verifier_verifierId: { verifier: identity.verifier, verifierId: identity.verifierId } };
+}
+
+/**
+ * The pair missed: is it a sign-in method already linked to an account? Returns
+ * `{ user, action: 'login', linkedMethod: true }`, or null to continue with the ordinary lookup.
+ * A connection no longer on the list does not sign in through its links (they stay recorded).
+ */
+async function loginByLinkedMethod(db, cfg, identity) {
+  if (!isLinkTrustedVerifier(cfg, identity.verifier)) return null;
+  const link = await db.web3AuthLinkedMethod.findUnique({ where: linkKey(identity), include: { user: true } });
+  if (!link || !link.user) return null;
+  if (cfg.networkRebind) {
+    const record = await db.web3AuthNetworkRebind.findUnique({ where: { userId: link.userId } });
+    if (record && record.status === REBIND_STATUS.PENDING) return null; // the re-bind decides
+  }
+  guardAccount(link.user);
+  logger.info('identity_linked_method_login', { userId: link.userId, verifier: identity.verifier });
+  return { user: link.user, action: 'login', linkedMethod: true };
+}
+
+/**
+ * Link the token's connection to `candidate` (found by the address the token proves). Returns
+ * `{ user, action: 'linked' | 'login', linkedMethod: true }`, or null — with one
+ * `identity_link_declined` line naming the rule — to let the ordinary checks answer as today.
+ * Logged: user id, connection names, reason codes; never the e-mail or a wallet address.
+ */
+async function linkTrustedMethod(db, cfg, { candidate, candidateBy, identity, walletAddress, accountEmail }) {
+  // Only an account with its own sign-in method: unlinked legacy rows keep their own routes.
+  if (candidate.web3authVerifier == null || candidate.web3authVerifierId == null) return null;
+  // Found by the token's e-mail-shaped key (claim or verifierId), never by its wallet.
+  if (candidateBy !== 'email' && candidateBy !== 'verifier_id') return null;
+  const decline = (reason) => {
+    logger.info('identity_link_declined', {
+      reason,
+      candidateBy,
+      candidateUserId: candidate.id,
+      verifier: identity.verifier,
+    });
+    return null;
+  };
+  if (!isLinkTrustedVerifier(cfg, identity.verifier)) return decline('method_not_trusted');
+  if (candidate.authType !== 'web3auth') return decline('candidate_not_web3auth');
+  if (candidate.web3authVerifier === identity.verifier) return decline('same_method');
+  if (!isLinkTrustedVerifier(cfg, candidate.web3authVerifier) || !sameEmail(candidate.web3authVerifierId, candidate.email)) {
+    return decline('account_email_not_proven');
+  }
+  if (typeof accountEmail !== 'string' || !accountEmail.includes('@') || !sameEmail(accountEmail, candidate.email)) {
+    return decline('email_mismatch');
+  }
+  if (!walletAddress || !candidate.walletAddress) return decline('no_wallet');
+  if (sameAddress(walletAddress, candidate.walletAddress)) return decline('same_wallet');
+
+  // Two rows that differ only in case cannot be told apart by the token: never pick one.
+  const rows = await db.user.findMany({
+    where: { email: { equals: candidate.email, mode: 'insensitive' } },
+    select: { id: true },
+    take: 2,
+  });
+  if (rows.length !== 1) return decline('ambiguous_email');
+  const holder = await db.user.findFirst({
+    where: { walletAddress: { equals: walletAddress, mode: 'insensitive' }, id: { not: candidate.id } },
+    select: { id: true },
+  });
+  if (holder) return decline('wallet_in_use');
+
+  let outcome;
+  try {
+    outcome = await db.$transaction(async (tx) => {
+      // The account still is what was checked above (no change of pair or wallet in between).
+      const fresh = await tx.user.findUnique({ where: { id: candidate.id } });
+      if (
+        !fresh ||
+        fresh.web3authVerifier !== candidate.web3authVerifier ||
+        fresh.web3authVerifierId !== candidate.web3authVerifierId ||
+        !sameAddress(fresh.walletAddress, candidate.walletAddress)
+      ) {
+        throw Object.assign(new Error('link race'), { linkRace: true });
+      }
+      // ON CONFLICT DO NOTHING: a concurrent first link of the same pair waits for the other one
+      // and then inserts nothing; the row read back says which account the pair belongs to.
+      const inserted = await tx.web3AuthLinkedMethod.createMany({
+        data: [
+          {
+            userId: candidate.id,
+            verifier: identity.verifier,
+            verifierId: identity.verifierId,
+            walletAddress,
+          },
+        ],
+        skipDuplicates: true,
+      });
+      const link = await tx.web3AuthLinkedMethod.findUnique({ where: linkKey(identity) });
+      if (!link || link.userId !== candidate.id) {
+        throw Object.assign(new Error('link race'), { linkRace: true });
+      }
+      return { created: inserted.count === 1 };
+    });
+  } catch (err) {
+    if (err && err.linkRace) {
+      logger.warn('identity_conflict', {
+        reason: 'link_race',
+        candidateBy,
+        candidateUserId: candidate.id,
+        verifier: identity.verifier,
+        route: 'linked_method',
+      });
+      throw fail('IDENTITY_CONFLICT', 'Account was linked concurrently; please retry', {
+        reason: 'link_race',
+        candidateUserId: candidate.id,
+      });
+    }
+    throw err;
+  }
+
+  const user = await db.user.findUnique({ where: { id: candidate.id } });
+  guardAccount(user);
+  logger.info(outcome.created ? 'identity_method_linked' : 'identity_linked_method_login', {
+    userId: user.id,
+    verifier: identity.verifier,
+    primaryVerifier: user.web3authVerifier,
+    candidateBy,
+    reason: 'trusted_email_match',
+  });
+  return { user, action: outcome.created ? 'linked' : 'login', linkedMethod: true };
+}
+
 /**
  * Map a verified identity to a DDC user (plan §2.1):
  *   1. hit by (web3authVerifier, web3authVerifierId) → login
@@ -1095,6 +1318,9 @@ async function refuseReplacedWallet(db, identity, walletAddress) {
  *          is named in WEB3AUTH_LEGACY_VERIFIERS AND, when that key is an IdP-asserted e-mail,
  *          the token asserts `email_verified === true` (F03: an e-mail claim alone is not proof)
  *      plus, only while WEB3AUTH_NETWORK_REBIND=on, the network re-bind described above
+ *      plus, only while WEB3AUTH_LINK_TRUSTED_METHODS=on, the linked sign-in methods described
+ *      above: after the pair misses, a pair linked to an account signs into it; an account with
+ *      its own pair found by the address a trusted connection proves gets that connection linked
  *   3. otherwise IDENTITY_CONFLICT (never merged)
  *   4. no candidate → create
  *
@@ -1104,7 +1330,9 @@ async function refuseReplacedWallet(db, identity, walletAddress) {
  *        runs only when a new row will be created and may throw to abort
  * @param options.afterCreate async (tx, user) => void; runs inside the create transaction
  * @param options.db prisma client (tests inject a mock)
- * @returns {{ user, action: 'login'|'backfilled'|'rebound'|'created' }}
+ * @returns {{ user, action: 'login'|'backfilled'|'rebound'|'linked'|'created', linkedMethod?: true }}
+ *          `linkedMethod: true` = signed in through a linked sign-in method: `user` is the account,
+ *          and the wallet the token proves is NOT the account's wallet (never bind it).
  */
 async function resolveUser(identity, options = {}) {
   const cfg = getConfig();
@@ -1112,12 +1340,18 @@ async function resolveUser(identity, options = {}) {
   const walletAddress = options.walletAddress || null;
   const pair = { web3authVerifier: identity.verifier, web3authVerifierId: identity.verifierId };
   const rebindOn = cfg.networkRebind;
+  const linkOn = cfg.linkTrustedMethods;
 
   // 1. Hit by pair
   const linked = await db.user.findUnique({ where: { web3authVerifier_web3authVerifierId: pair } });
   if (linked) {
     guardAccount(linked);
     return { user: linked, action: 'login' };
+  }
+  // 1b. Hit by a linked sign-in method (switch on only)
+  if (linkOn) {
+    const viaLink = await loginByLinkedMethod(db, cfg, identity);
+    if (viaLink) return viaLink;
   }
 
   // 2. Lazy backfill candidate — only facts the verified token asserts (e-mail / verifierId / proven wallet)
@@ -1182,6 +1416,17 @@ async function resolveUser(identity, options = {}) {
         ambiguousEmail,
       });
       if (rebound) return rebound;
+    }
+    // Linked sign-in methods (switch on only). A pending re-bind record keeps the re-bind's answer.
+    if (linkOn && !(record && record.status === REBIND_STATUS.PENDING)) {
+      const linkedLogin = await linkTrustedMethod(db, cfg, {
+        candidate,
+        candidateBy,
+        identity,
+        walletAddress,
+        accountEmail,
+      });
+      if (linkedLogin) return linkedLogin;
     }
 
     // Explicit opt-in, by verifier name: an EMPTY list links nothing by e-mail (it used to mean
@@ -1303,11 +1548,14 @@ module.exports = {
   getMissingIdTokenMeansOldApp,
   isRetiredClientIdToken,
   describeOldAppSwitches,
+  describeLinkedMethods,
   Web3AuthIdentityError,
   EXTERNAL_WALLET_VERIFIER,
   isNetworkRebindOn: () => getConfig().networkRebind,
   _internals: {
     assertRebindConfig,
+    assertLinkConfig,
+    isLinkTrustedVerifier,
     assertRetiredClientIdsConfig,
     DEFAULTS,
     HTTP_STATUS,

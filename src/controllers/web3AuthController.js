@@ -274,7 +274,7 @@ async function verifiedLogin(req, res, { mode, referralCode, campaignSlug, invit
   const derivedXid = xidFromIdentity(identity);
 
   let referrerId = null;
-  const { user: resolved, action } = await resolveUser(identity, {
+  const { user: resolved, action, linkedMethod } = await resolveUser(identity, {
     walletAddress: boundAddress,
     prepareCreate: async () => {
       // New registration: an unusable campaign still refuses it, as before.
@@ -328,7 +328,7 @@ async function verifiedLogin(req, res, { mode, referralCode, campaignSlug, invit
     );
   }
 
-  // Existing user (hit by pair, or legacy row just backfilled)
+  // Existing user (hit by pair, legacy row just backfilled, or a linked sign-in method)
   const invitationStatus = await applyReferralToExistingUser(
     resolved,
     referralCode,
@@ -346,8 +346,10 @@ async function verifiedLogin(req, res, { mode, referralCode, campaignSlug, invit
     ...(xRefreshToken && !resolved.xRefreshToken && { xRefreshToken }),
   };
 
-  // First wallet binding: only an address the token proves
-  if (boundAddress && !resolved.walletAddress) {
+  // First wallet binding: only an address the token proves, and only the account's own sign-in
+  // method's. A linked sign-in method derives another wallet: it is recorded with the link and
+  // never becomes the account's wallet (points, partner wallet_address and payouts use the account's).
+  if (boundAddress && !resolved.walletAddress && !linkedMethod) {
     const existingWallet = await prisma.user.findFirst({
       where: { walletAddress: boundAddress, id: { not: resolved.id } },
     });
@@ -375,6 +377,7 @@ async function verifiedLogin(req, res, { mode, referralCode, campaignSlug, invit
     authType: user.authType,
     hasReferralCode: Boolean(referralCode),
     campaignSlug,
+    ...(linkedMethod && { linkedMethod: true }),
   });
   return sendLogin(res, 200, token, user, invitationStatus);
 }

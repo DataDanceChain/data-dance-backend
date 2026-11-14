@@ -708,6 +708,19 @@ unconditionally — the issuer is never derived from a request header), `APP_PUB
   partners restart paging.
 - `SSO_REQUIRE_VERIFIED_SESSION=true` requires the consenting user's DataDance JWT to carry
   `ver >= 2` (issued by the verified Web3Auth login); older sessions get `login_required`.
+- **Linked sign-in methods** (`WEB3AUTH_LINK_TRUSTED_METHODS`, default `off`; details in
+  `env.example`). On Sapphire mainnet each Web3Auth login method derives its own wallet, so a
+  person who made their account with the e-mail code and later signs in with Google has two
+  identities and two wallets. With `on`, a method in `WEB3AUTH_EMAIL_TRUSTED_VERIFIERS` (Google,
+  the e-mail code, Apple: they verify the address themselves) that proves the e-mail address of an
+  existing account signs into that account and is recorded as one of its sign-in methods. X, and
+  any method that does not verify the address, is refused as before. The account keeps its own
+  wallet: the partner sees the same `sub`, the same `wallet_address`, the same points and referral
+  data whichever of these methods the person used, and the session is a normal `ver: 2` session.
+  The method's own wallet is recorded with the link and is never bound to the account. While the
+  account's own method is the only one that derives the account's wallet, the Wallet's DDC send
+  page signs with the wallet of the method used to sign in, so sending DDC needs the account's own
+  method. Everything else, including a pending network re-bind, behaves exactly as with `off`.
 - Partner tokens are `McpToken` rows with `source = 'partner'`; they are hidden from the
   user-facing token list and cannot be used on `/mcp` or `/oauth/userinfo`.
 - **Web3Auth key service outage.** When the Web3Auth JWKS (`WEB3AUTH_JWKS_URL` or

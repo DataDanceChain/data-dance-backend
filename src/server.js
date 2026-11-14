@@ -5,7 +5,7 @@ const { applyPartnerKillSwitch } = require('./services/partnerKillSwitch');
 const { warnIfChainSignerUnavailable } = require('./constants/chainConfig');
 const { initVersionPolicy } = require('./constants/appVersionPolicy');
 const { initDeveloperRegistration } = require('./constants/developerRegistration');
-const { describeOldAppSwitches } = require('./services/web3authIdentity');
+const { describeOldAppSwitches, describeLinkedMethods } = require('./services/web3authIdentity');
 
 // 加载环境变量
 dotenv.config();
@@ -60,6 +60,8 @@ if (moneyPath.enforced) {
 // with 426 APP_UPDATE_REQUIRED. One line to confirm them without sending a login; client-id
 // prefixes only (public).
 console.log(describeOldAppSwitches());
+// Linked sign-in methods: whether a second e-mail-verifying connection reaches an existing account.
+console.log(describeLinkedMethods());
 
 const PORT = process.env.PORT || 3000;
 
