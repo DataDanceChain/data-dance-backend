@@ -130,14 +130,15 @@ test('direct partner code exchange has two fresh client reads around one current
   assert.ok(row.consumedAt instanceof Date);
 });
 
-for (const mutation of ['disable', 'rotate']) {
+for (const mutation of ['disable', 'rotate', 'remove']) {
   test(`current ${mutation} committed after subject lookup refuses the old secret before consumption`, async () => {
     const { row, body } = authorization();
     prisma.user.findUnique = async (args) => {
       const user = await originals.userFind(args);
       const client = prisma.ssoDeveloperClient.rows[0];
       if (mutation === 'disable') client.enabled = false;
-      else client.secretHash = hash(NEXT_SECRET);
+      else if (mutation === 'rotate') client.secretHash = hash(NEXT_SECRET);
+      else prisma.ssoDeveloperClient.rows.length = 0;
       return user;
     };
     await refused(oauth.exchangeAuthorizationCode(request(), body), 401, 'invalid_client', row);
@@ -157,8 +158,9 @@ const invalidRequests = [
   { name: 'duplicate client authentication', status: 400, error: 'invalid_request', body: { client_secret: SECRET } },
 ];
 for (const fixture of invalidRequests) {
-  test(`${fixture.name} keeps the code unconsumed and mints nothing`, async () => {
+  test(`${fixture.name} refuses before loading the subject and keeps the code unconsumed`, async () => {
     const { row, body } = authorization();
+    prisma.user.findUnique = () => assert.fail('invalid code proof queried the subject');
     await refused(oauth.exchangeAuthorizationCode(fixture.req ? fixture.req() : request(), { ...body, ...fixture.body }), fixture.status, fixture.error, row);
   });
 }
