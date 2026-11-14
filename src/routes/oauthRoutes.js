@@ -4,7 +4,7 @@ const { protect } = require('../middlewares/authMiddleware');
 const { rateLimiters } = require('../middlewares/rateLimitMiddleware');
 const { createLogger } = require('../utils/logger');
 const { PARTNER_REALM, verifyClientSecret } = require('../constants/partnerClient');
-const { loadPartnerClient } = require('../services/ssoDeveloperClient');
+const { loadPartnerTokenClient } = require('../services/ssoDeveloperClient');
 const { corsOrigins } = require('../constants/corsOrigins');
 const { appPublicUrl } = require('../constants/lifeContext');
 const { verifySsoSession, looksLikeSsoSession, ssoSessionRefusal } = require('./ssoRoutes');
@@ -260,14 +260,15 @@ router.get('/oauth/authorize', lim('oauthAuthorize'), async (req, res) => {
 
 /**
  * The confidential client whose credentials THIS request presents and which VERIFY (enabled partner
- * client, correct secret), or null. Cheap: one sha256 per request, no database. Any malformed or
+ * client, correct secret), or null. Registry clients read current credential fields; configured
+ * clients read current process configuration. Any malformed or
  * ambiguous credential is simply "not authenticated" here — the handler still answers it properly.
  */
 async function verifiedConfidentialClientId(req) {
   try {
     const presented = presentedClientCredentials(req, req.body || {});
     if (!presented || !presented.clientSecret) return null;
-    const client = await loadPartnerClient(presented.clientId, req);
+    const client = await loadPartnerTokenClient(presented.clientId, req);
     if (!client || !client.enabled) return null;
     return verifyClientSecret(client, presented.clientSecret) ? client.clientId : null;
   } catch {
