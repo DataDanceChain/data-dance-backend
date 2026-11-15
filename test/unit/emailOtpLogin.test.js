@@ -11,6 +11,8 @@ const {
   resetEmailOtpState,
   requestEmailLoginCode,
   verifyEmailLoginCode,
+  APP_REVIEW_EMAIL,
+  APP_REVIEW_CODE,
   CODE_TTL_MS,
   RESEND_INTERVAL_MS,
   MAX_SENDS_PER_HOUR,
@@ -63,6 +65,30 @@ function harness(rows, options = {}) {
         now,
         env: ON,
         findUserById: async (id) => db.find((row) => row.id === id) || null,
+        createUser: async (address) => {
+          const created = user({
+            id: 'new-1',
+            email: address,
+            authType: 'email_otp',
+            web3authVerifier: null,
+            walletAddress: null,
+          });
+          db.push(created);
+          return created;
+        },
+        openReviewUser: async (address) => {
+          const existing = db.find((row) => row.email.toLowerCase() === address.toLowerCase());
+          if (existing) return existing;
+          const created = user({
+            id: 'review-1',
+            email: address,
+            authType: 'email_otp',
+            web3authVerifier: null,
+            walletAddress: null,
+          });
+          db.push(created);
+          return created;
+        },
       });
     },
   };
@@ -96,14 +122,46 @@ describe('email login codes', () => {
     assert.equal(looked, 0);
   });
 
-  it('accepts an unknown address without sending or creating an account', async () => {
+  it('opens an account with no wallet when the address is new', async () => {
     const box = harness([]);
-    const result = await box.send('missing@example.com');
-    assert.equal(result.status, 200);
-    assert.deepEqual(result.body, { status: 'success', data: { accepted: true } });
+    const sent = await box.send('new@example.com');
+    assert.equal(sent.status, 200);
+    assert.deepEqual(sent.body, { status: 'success', data: { accepted: true } });
+    assert.equal(box.sent.length, 1);
+    assert.equal(box.sent[0].to, 'new@example.com');
+
+    const ok = await box.verify('new@example.com', '123456');
+    assert.equal(ok.status, 200);
+    assert.equal(ok.body.data.user.id, 'new-1');
+    assert.equal(ok.body.data.user.authType, 'email_otp');
+    assert.equal(ok.body.data.user.walletAddress, null);
+    assert.equal(ok.body.data.user.password, undefined);
+    const claims = jwt.verify(ok.body.data.token, process.env.JWT_SECRET);
+    assert.equal(claims.id, 'new-1');
+    assert.equal(claims.ver, 2);
+    assert.equal(claims.amr, 'email_otp');
+  });
+
+  it('signs the App Store review mailbox in with its fixed code and sends nothing', async () => {
+    const box = harness([]);
+    const sent = await box.send(APP_REVIEW_EMAIL);
+    assert.equal(sent.status, 200);
     assert.deepEqual(box.sent, []);
-    const again = await box.send('missing@example.com');
-    assert.equal(again.status, 429);
+
+    const ok = await box.verify(APP_REVIEW_EMAIL, APP_REVIEW_CODE);
+    assert.equal(ok.status, 200);
+    assert.equal(ok.body.data.user.email, APP_REVIEW_EMAIL);
+    assert.equal(ok.body.data.user.authType, 'email_otp');
+    assert.equal(ok.body.data.user.walletAddress, null);
+    const claims = jwt.verify(ok.body.data.token, process.env.JWT_SECRET);
+    assert.equal(claims.amr, 'email_otp');
+    assert.equal(claims.ver, 2);
+
+    const other = harness([]);
+    assert.equal((await other.verify('ada@example.com', APP_REVIEW_CODE)).status, 401);
+
+    const taken = harness(user({ email: APP_REVIEW_EMAIL, walletAddress: '0xabc', authType: 'web3auth' }));
+    assert.equal((await taken.verify(APP_REVIEW_EMAIL, APP_REVIEW_CODE)).status, 401);
   });
 
   it('mails one code to an existing mailbox and signs that account in once', async () => {

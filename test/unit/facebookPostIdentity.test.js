@@ -271,9 +271,9 @@ describe('Facebook uploads (in-memory store)', () => {
   });
 
   it('the older title key is read for Facebook only', async () => {
-    const meta = { sourceUrl: 'https://x.com/home', host: 'x.com', extract: 'generic' };
+    const meta = { sourceUrl: 'https://x.com/datadance', host: 'x.com', extract: 'generic' };
     const x = (payload) => ({ source: 'x', type: 'post', timestamp: '2026-10-14T01:00:00.000Z', metadata: meta, payload });
-    assert.deepEqual(await upload('user-x', [x({ title: 'Launch day', date: '', href: 'https://x.com/home' })]), [1, 0, 10]);
+    assert.deepEqual(await upload('user-x', [x({ title: 'Launch day', date: '', href: 'https://x.com/datadance' })]), [1, 0, 10]);
     // the same title as an X post link is a record of its own, as before
     assert.deepEqual(await upload('user-x', [x({ title: 'Launch day', date: '', href: 'https://x.com/DataDance/status/1845000000000000001' })]), [1, 0, 10]);
   });

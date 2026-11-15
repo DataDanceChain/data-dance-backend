@@ -713,6 +713,55 @@ describe('legacy backfill gating', () => {
     assert.equal(db._users[0].web3authVerifier, null);
   });
 
+  it('attaches a proven key to an email-code account and leaves every other row alone', async () => {
+    const wallet = '0xABC0000000000000000000000000000000000001';
+    const db = mockPrisma([{ id: 'fresh', email: 'alice@example.com', authType: 'email_otp', walletAddress: null }]);
+    const { user, action } = await resolveUser(IDENTITY, { db, walletAddress: wallet });
+    assert.equal(action, 'attached');
+    assert.equal(user.id, 'fresh');
+    assert.equal(user.authType, 'web3auth');
+    assert.equal(user.walletAddress, wallet);
+    assert.equal(user.web3authVerifier, IDENTITY.verifier);
+    assert.equal(user.web3authVerifierId, IDENTITY.verifierId);
+
+    const occupied = mockPrisma([
+      { id: 'fresh', email: 'alice@example.com', authType: 'email_otp', walletAddress: null },
+      { id: 'other', email: 'other@example.com', walletAddress: wallet },
+    ]);
+    assert.equal(
+      await conflictReason(resolveUser(IDENTITY, { db: occupied, walletAddress: wallet })),
+      'wallet_in_use'
+    );
+    assert.equal(occupied._users[0].web3authVerifier, null);
+
+    const keyed = mockPrisma([{ id: 'fresh', email: 'alice@example.com', authType: 'email_otp', walletAddress: wallet }]);
+    assert.equal(
+      await conflictReason(resolveUser(IDENTITY, { db: keyed, walletAddress: wallet })),
+      'candidate_not_web3auth'
+    );
+    assert.equal(keyed._users[0].authType, 'email_otp');
+
+    const twitter = { ...IDENTITY, verifier: 'web3auth-auth0-twitter-sapphire' };
+    const previous = process.env.WEB3AUTH_ALLOWED_VERIFIERS;
+    process.env.WEB3AUTH_ALLOWED_VERIFIERS = `${previous},${twitter.verifier}`;
+    _internals.resetConfig();
+    const xAccount = mockPrisma([{ id: 'fresh', email: 'alice@example.com', authType: 'email_otp', walletAddress: null }]);
+    assert.equal(
+      await conflictReason(resolveUser(twitter, { db: xAccount, walletAddress: wallet })),
+      'candidate_not_web3auth'
+    );
+    assert.equal(xAccount._users[0].web3authVerifier, null);
+    process.env.WEB3AUTH_ALLOWED_VERIFIERS = previous;
+    _internals.resetConfig();
+
+    const legacy = mockPrisma([{ id: 'victim', email: 'alice@example.com', walletAddress: null }]);
+    assert.equal(
+      await conflictReason(resolveUser({ ...IDENTITY, emailVerified: true }, { db: legacy, walletAddress: wallet })),
+      'verifier_not_allowed'
+    );
+    assert.equal(legacy._users[0].web3authVerifier, null);
+  });
+
   it('does not treat a NULL wallet as wallet-consistent', async () => {
     const { walletConsistent } = _internals;
     assert.equal(walletConsistent({ walletAddress: null }, WALLET), false, 'a row with no wallet proves nothing');

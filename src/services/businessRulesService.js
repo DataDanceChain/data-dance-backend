@@ -155,9 +155,9 @@ async function checkDataLimits(userId, source, itemCount) {
 }
 
 /**
- * 获取数据采集规则信息（通用函数，支持所有数据源）
- * @param {string} source - 数据源 ('amazon', 'luma', 'airbnb', 'booking')
- * @returns {object} 规则信息
+ * Rule card for one source. Social sources share the social card (1 point, 10 a day).
+ * @param {string} source
+ * @returns {object}
  */
 function getDataRules(source) {
   const sourceRules = rulesForSource(source);

@@ -4,7 +4,15 @@ const { generateToken } = require('../utils/jwtUtils');
 const { withDisplayReferralCode } = require('../utils/referralCodeFormat');
 
 // Temporary door while Web3Auth login is paused. EMAIL_OTP_LOGIN must be exactly "true".
-// Turn it off when the usual sign-in works again. This does not create accounts.
+// An unknown mailbox can open an account with no wallet. Web3Auth login later attaches
+// its proven key only to that empty row. Turn the switch off when the usual sign-in works.
+
+const EMAIL_OTP_AUTH_TYPE = 'email_otp';
+
+// App Store review uses this mailbox and code. No message is sent. The account stays an
+// email-code account with no wallet, and the pair never signs in any other address.
+const APP_REVIEW_EMAIL = 'app-review@datadance.ai';
+const APP_REVIEW_CODE = '740258';
 
 const CODE_TTL_MS = 10 * 60 * 1000;
 const RESEND_INTERVAL_MS = 60 * 1000;
@@ -49,9 +57,9 @@ function isTwitterVerifier(verifier) {
 }
 
 /**
- * A code goes only to an existing account whose stored address is a mailbox.
+ * A code goes to an existing mailbox, or opens a new account when the address is unused.
  * X logins are skipped: that column often holds a verifier id, not an inbox.
- * No row is created.
+ * A disabled account is skipped and is not replaced by a new row.
  */
 function eligibleUser(user) {
   if (!user || user.disabledAt) return false;
@@ -109,6 +117,13 @@ function invalidCode() {
   return { status: 401, body: INVALID_CODE };
 }
 
+function isAppReviewLogin(email, code) {
+  if (email !== APP_REVIEW_EMAIL || typeof code !== 'string' || !/^\d{6}$/.test(code)) return false;
+  const left = Buffer.from(code);
+  const right = Buffer.from(APP_REVIEW_CODE);
+  return hashesMatch(left, right);
+}
+
 function publicUser(user) {
   const {
     password,
@@ -143,6 +158,7 @@ async function requestEmailLoginCode({
   if (!email || email.length > 254 || !isValidEmail(email)) {
     return { status: 400, body: { status: 'fail', code: 'INVALID_EMAIL', message: 'Enter a valid email address.' } };
   }
+  if (email === APP_REVIEW_EMAIL) return { status: 200, body: ACCEPTED };
 
   const gate = throttle(email, now);
   if (gate.limited) return limitedBody(gate.retryAfter);
@@ -155,10 +171,17 @@ async function requestEmailLoginCode({
   } catch {
     return unavailable();
   }
-  const match = Array.isArray(users) && users.length === 1 ? users[0] : null;
-  if (!match || !eligibleUser(match) || normalizeEmail(match.email) !== email) {
-    // Same accepted body as a real send. The address is not told whether an account exists.
-    return { status: 200, body: ACCEPTED };
+  const rows = Array.isArray(users) ? users : [];
+  // Two rows that differ only by case cannot be told apart. Say nothing and send nothing.
+  if (rows.length > 1) return { status: 200, body: ACCEPTED };
+  const match = rows.length === 1 ? rows[0] : null;
+  let pendingEntry = { register: true };
+  if (match) {
+    if (!eligibleUser(match) || normalizeEmail(match.email) !== email) {
+      // Same accepted body as a real send. The address is not told whether an account exists.
+      return { status: 200, body: ACCEPTED };
+    }
+    pendingEntry = { register: false, userId: match.id };
   }
 
   const code = randomCode();
@@ -169,7 +192,7 @@ async function requestEmailLoginCode({
   }
 
   pending.set(email, {
-    userId: match.id,
+    ...pendingEntry,
     codeHash: hashCode(email, code),
     expiresAt: now + CODE_TTL_MS,
     attempts: 0,
@@ -183,12 +206,30 @@ async function requestEmailLoginCode({
   return { status: 200, body: ACCEPTED };
 }
 
+function sessionFor(user) {
+  // ver:2 lets Planet and the other SSO hand-off accept the session while Web3Auth is down.
+  // amr marks it so wallet rebinding, password changes, and X linking stay closed.
+  const token = generateToken(user.id, { ver: 2, amr: 'email_otp' });
+  return {
+    status: 200,
+    body: {
+      status: 'success',
+      data: {
+        token,
+        user: publicUser(user),
+      },
+    },
+  };
+}
+
 async function verifyEmailLoginCode({
   email: rawEmail,
   code: rawCode,
   now = Date.now(),
   env = process.env,
   findUserById,
+  createUser,
+  openReviewUser,
 }) {
   if (!emailOtpEnabled(env)) {
     return {
@@ -199,6 +240,27 @@ async function verifyEmailLoginCode({
   const email = normalizeEmail(rawEmail);
   const code = typeof rawCode === 'string' ? rawCode.trim() : '';
   if (!email || !isValidEmail(email) || !/^\d{6}$/.test(code)) return invalidCode();
+
+  if (isAppReviewLogin(email, code)) {
+    if (typeof openReviewUser !== 'function') return invalidCode();
+    let reviewUser;
+    try {
+      reviewUser = await openReviewUser(email);
+    } catch {
+      return unavailable();
+    }
+    // A real account that already has a key, or was not opened by this door, is left alone.
+    if (
+      !reviewUser
+      || !eligibleUser(reviewUser)
+      || normalizeEmail(reviewUser.email) !== email
+      || reviewUser.authType !== EMAIL_OTP_AUTH_TYPE
+      || reviewUser.walletAddress
+    ) {
+      return invalidCode();
+    }
+    return sessionFor(reviewUser);
+  }
 
   const entry = pending.get(email);
   if (!entry || entry.expiresAt <= now) {
@@ -215,30 +277,25 @@ async function verifyEmailLoginCode({
 
   let user;
   try {
-    user = await findUserById(entry.userId);
+    if (entry.register) {
+      if (typeof createUser !== 'function') return unavailable();
+      user = await createUser(email);
+    } else {
+      user = await findUserById(entry.userId);
+    }
   } catch {
     return unavailable();
   }
-  if (!eligibleUser(user) || user.id !== entry.userId || normalizeEmail(user.email) !== email) {
-    return invalidCode();
-  }
+  if (!eligibleUser(user) || normalizeEmail(user.email) !== email) return invalidCode();
+  if (!entry.register && user.id !== entry.userId) return invalidCode();
 
-  // ver:2 lets Planet and the other SSO hand-off accept the session while Web3Auth is down.
-  // amr marks it so wallet rebinding, password changes, and X linking stay closed.
-  const token = generateToken(user.id, { ver: 2, amr: 'email_otp' });
-  return {
-    status: 200,
-    body: {
-      status: 'success',
-      data: {
-        token,
-        user: publicUser(user),
-      },
-    },
-  };
+  return sessionFor(user);
 }
 
 module.exports = {
+  EMAIL_OTP_AUTH_TYPE,
+  APP_REVIEW_EMAIL,
+  APP_REVIEW_CODE,
   emailOtpEnabled,
   eligibleUser,
   resetEmailOtpState,

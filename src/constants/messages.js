@@ -9,6 +9,7 @@ const CRAWLER_MESSAGES = {
   AMAZON_ORDER_FORMAT_WARNING: 'Amazon order ID format should be: 123-1234567-1234567',
   SHOP_IDENTITY_REQUIRED: 'Shop records need an order id or a title',
   CONNECT_IDENTITY_REQUIRED: 'Connect records need an order id or a title',
+  SOCIAL_NOT_OWN_POST: 'Social records must be posts published by the signed-in account',
   
   // Suggestions
   SUGGEST_TITLE: 'Product title is recommended',
@@ -28,6 +29,7 @@ const CRAWLER_MESSAGES = {
   
   // Limit errors
   DAILY_LIMIT_EXCEEDED: (current, limit, attempted) => `Daily upload limit exceeded. Uploaded today: ${current}/${limit}, attempted: ${attempted}`,
+  SOCIAL_DAILY_CAP: (current, limit, attempted) => `Daily upload limit exceeded. Social points are capped at ${limit} per day. Counted today: ${current}/${limit}, attempted: ${attempted}`,
   MONTHLY_LIMIT_EXCEEDED: (current, limit, attempted) => `Monthly upload limit exceeded. Uploaded this month: ${current}/${limit}, attempted: ${attempted}`,
   
   // Response messages

@@ -6,7 +6,7 @@
  * official-id only.
  */
 
-const { isCatalogCrawlerSource, normalizeCrawlerSource } = require('../constants/crawlerSources');
+const { isCatalogCrawlerSource, isSocialCrawlerSource, normalizeCrawlerSource } = require('../constants/crawlerSources');
 
 const TITLE_BACKED_PREFIX = 'title:';
 /** Prefix of a post's permalink key (per user, like every title: key). */
@@ -290,7 +290,8 @@ function titleSourceId(source, payload, metadata = {}) {
  * Luma / Airbnb / Booking generic fallbacks use a title: key unique per
  * host (not collapsed into amazon). A post on X / Instagram / Threads /
  * TikTok / Facebook uses its canonical permalink, also per user (title:
- * prefix): each user who saw the post may keep it once.
+ * prefix). Upload still drops a social row unless it is a post from the
+ * signed-in account's own page (isOwnPublishedRecord).
  */
 function extractSourceId(source, payload, metadata = {}) {
   const postUrl = socialPostUrl(source, payload);
@@ -339,6 +340,282 @@ function needsPermalinkTitleLookup(source, sourceId) {
 
 function hasRecordIdentity(source, payload) {
   return Boolean(socialPostUrl(source, payload) || officialRecordId(source, payload) || payloadTitle(payload));
+}
+
+const X_FEED_SEGMENTS = new Set([
+  'home', 'explore', 'search', 'notifications', 'messages', 'settings', 'compose', 'i', 'intent',
+  'share', 'login', 'signup', 'tos', 'privacy', 'jobs', 'download', 'hashtag', 'hashtags', 'lists',
+  'communities', 'premium', 'account', 'oauth', 'sessions', 'flow',
+]);
+const IG_FEED_SEGMENTS = new Set([
+  'explore', 'reels', 'reel', 'direct', 'accounts', 'stories', 'p', 'tv', 'about', 'legal',
+  'directory', 'nametag', 'challenge', 'privacy', 'terms', 'locations', 'tags', 'popular',
+  'developer', 'emails', 'session', 'fxcal',
+]);
+const FACEBOOK_FEED_SEGMENTS = new Set([
+  'login', 'login.php', 'checkpoint', 'recover', 'watch', 'marketplace', 'groups', 'messages',
+  'gaming', 'events', 'pages', 'help', 'privacy', 'policies', 'settings', 'bookmarks', 'friends',
+  'notifications', 'stories', 'reel', 'reels', 'share', 'photo', 'photo.php', 'posts', 'videos',
+  'ads', 'business', 'reg', 'dialog', 'home.php', 'stories.php', 'lite', 'flx', 'ajax', 'api',
+  'saved', 'memories', 'search', 'sharer', 'sharer.php',
+]);
+const TWITCH_FEED_SEGMENTS = new Set([
+  'directory', 'downloads', 'settings', 'subscriptions', 'inventory', 'wallet', 'search', 'turbo',
+  'jobs', 'p', 'videos', 'prime', 'clips', 'following', 'browse', 'friends', 'messages', 'login',
+  'signup',
+]);
+const SOCIAL_CHROME_TITLE = /^(?:foto profil(?:e)?|profile photo|photo of|image may contain|disukai oleh|liked by|suggested for you)\b/i;
+const CLOCK_WORDS = '(?:sunday|monday|tuesday|wednesday|thursday|friday|saturday|january|february|march|april|may|june|july|august|september|october|november|december|am|pm|\\d{1,4})';
+
+function pageLocation(value) {
+  const text = typeof value === 'string' ? value.trim() : '';
+  if (!text || text.length > 2048) return null;
+  let url;
+  try {
+    url = new URL(text);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== 'https:' && url.protocol !== 'http:') return null;
+  const host = url.hostname.toLowerCase().replace(/\.+$/, '').replace(/^(?:www|m|mobile)\./, '');
+  const parts = url.pathname.split('/').filter(Boolean).map((part) => {
+    try {
+      return decodeURIComponent(part);
+    } catch {
+      return part;
+    }
+  });
+  return { host, parts, url };
+}
+
+function hostIs(host, name) {
+  return host === name || host.endsWith(`.${name}`);
+}
+
+function firstLinkLocation(payload) {
+  const row = asRecord(payload);
+  for (const value of [row.href, row.id, row.orderId, row.orderid]) {
+    const located = pageLocation(value);
+    if (located) return located;
+  }
+  return null;
+}
+
+function isSocialChrome(payload) {
+  const title = payloadTitle(payload);
+  if (!title) return false;
+  if (SOCIAL_CHROME_TITLE.test(title)) return true;
+  const stripped = title.replace(/[^a-z0-9:]+/g, ' ').trim();
+  return new RegExp(`^\\d{1,2}:\\d{2}(?:\\s*${CLOCK_WORDS}){0,12}$`, 'i').test(stripped);
+}
+
+function ownerlessFacebookFeed(located) {
+  if (!located) return false;
+  const head = String(located.parts[0] || '').toLowerCase();
+  return ['reel', 'reels', 'share', 'watch', 'photo', 'photo.php'].includes(head);
+}
+
+function xAuthor(parts) {
+  const at = parts.findIndex((part, index) => index > 0 && /^status(?:es)?$/i.test(part));
+  if (at < 1 || !NUMERIC_ID.test(parts[at + 1] || '')) return '';
+  const handle = parts[at - 1];
+  if (!handle || /^(?:i|web)$/i.test(handle) || !/^[A-Za-z0-9_]{1,15}$/.test(handle)) return '';
+  return handle.toLowerCase();
+}
+
+function xProfile(parts) {
+  if (!parts.length) return '';
+  const head = parts[0];
+  const name = head.toLowerCase();
+  if (X_FEED_SEGMENTS.has(name) || !/^[A-Za-z0-9_]{1,15}$/.test(head)) return '';
+  if (parts.length === 1) return name;
+  if (['with_replies', 'media', 'highlights'].includes(String(parts[1] || '').toLowerCase())) return name;
+  return '';
+}
+
+function igAuthor(parts) {
+  const at = parts.findIndex((part) => ['p', 'reel', 'reels', 'tv'].includes(String(part || '').toLowerCase()));
+  if (at < 1 || !SHORTCODE.test(parts[at + 1] || '')) return '';
+  const handle = parts[at - 1];
+  if (!handle || IG_FEED_SEGMENTS.has(handle.toLowerCase()) || !/^[A-Za-z0-9._]{1,30}$/.test(handle)) return '';
+  return handle.toLowerCase();
+}
+
+function igProfile(parts) {
+  if (!parts.length) return '';
+  const head = parts[0];
+  const name = head.toLowerCase();
+  if (IG_FEED_SEGMENTS.has(name) || !/^[A-Za-z0-9._]{1,30}$/.test(head)) return '';
+  if (parts.length === 1) return name;
+  if (['reels', 'channel', 'feed'].includes(String(parts[1] || '').toLowerCase())) return name;
+  return '';
+}
+
+function atHandle(value) {
+  const text = String(value || '');
+  if (!text.startsWith('@')) return '';
+  const name = text.slice(1);
+  return /^[A-Za-z0-9._]{1,30}$/.test(name) ? name.toLowerCase() : '';
+}
+
+function threadsAuthor(parts) {
+  const name = atHandle(parts[0]);
+  if (!name || String(parts[1] || '').toLowerCase() !== 'post' || !SHORTCODE.test(parts[2] || '')) return '';
+  return name;
+}
+
+function threadsProfile(parts) {
+  const name = atHandle(parts[0]);
+  if (!name) return '';
+  if (parts.length === 1) return name;
+  if (['media', 'replies'].includes(String(parts[1] || '').toLowerCase())) return name;
+  return '';
+}
+
+function tiktokAuthor(parts) {
+  const name = atHandle(parts[0]);
+  if (!name || !['video', 'photo'].includes(String(parts[1] || '').toLowerCase()) || !NUMERIC_ID.test(parts[2] || '')) {
+    return '';
+  }
+  return name;
+}
+
+function tiktokProfile(parts) {
+  const name = atHandle(parts[0]);
+  if (!name) return '';
+  if (parts.length === 1) return name;
+  if (['video', 'photo'].includes(String(parts[1] || '').toLowerCase())) return '';
+  return name;
+}
+
+function facebookProfile(located) {
+  if (!located) return null;
+  const { host, parts, url } = located;
+  if (!hostIs(host, 'facebook.com') && !hostIs(host, 'fb.com')) return null;
+  if (!parts.length) return null;
+  const head = parts[0].toLowerCase();
+  if (head === 'me') return { kind: 'self' };
+  if (head === 'profile.php' && /^\d+$/.test(url.searchParams.get('id') || '')) {
+    return { kind: 'self', id: url.searchParams.get('id') };
+  }
+  if (FACEBOOK_FEED_SEGMENTS.has(head)) return null;
+  if (parts.length === 1 || (parts.length >= 2 && /^(?:posts|photos|videos|reels|about)$/i.test(parts[1]))) {
+    return { kind: 'vanity', name: head };
+  }
+  return null;
+}
+
+function facebookPostOwner(payload) {
+  const located = firstLinkLocation(payload);
+  if (!located || (!hostIs(located.host, 'facebook.com') && !hostIs(located.host, 'fb.com'))) return null;
+  const { parts, url } = located;
+  const after = (keyword) => parts.findIndex((part, index) => index > 0 && part.toLowerCase() === keyword);
+  const posts = after('posts');
+  if (posts > 0 && FACEBOOK_ID.test(parts[posts + 1] || '')) return { name: parts[posts - 1].toLowerCase() };
+  const videos = after('videos');
+  if (videos > 0 && FACEBOOK_ID.test(parts[videos + 1] || '')) return { name: parts[videos - 1].toLowerCase() };
+  const ownerId = url.searchParams.get('id') || '';
+  if (/^\d+$/.test(ownerId) && (parts[0] || '').toLowerCase().match(/^(?:permalink\.php|story\.php)$/)) {
+    return { id: ownerId };
+  }
+  return null;
+}
+
+function authoredByProfile(author, profile) {
+  if (!profile) return false;
+  if (!author) return true;
+  return author === profile;
+}
+
+function redditOwnPage(parts) {
+  if (String(parts[0] || '').toLowerCase() !== 'user' || parts.length < 3) return false;
+  return ['submitted', 'posts', 'comments'].includes(String(parts[2] || '').toLowerCase());
+}
+
+function youtubeOwnPage(located) {
+  if (!located) return false;
+  if (located.host === 'studio.youtube.com') return true;
+  if (!hostIs(located.host, 'youtube.com')) return false;
+  const { parts } = located;
+  if (parts[0] && parts[0].startsWith('@') && String(parts[1] || '').toLowerCase() === 'videos') return true;
+  if (['channel', 'c', 'user'].includes(String(parts[0] || '').toLowerCase()) && String(parts[2] || '').toLowerCase() === 'videos') {
+    return true;
+  }
+  return false;
+}
+
+function linkedinOwnPage(parts) {
+  return String(parts[0] || '').toLowerCase() === 'in' && Boolean(parts[1]) && !['feed', 'login', 'signup'].includes(parts[1].toLowerCase());
+}
+
+function pinterestOwnPage(parts) {
+  if (parts.some((part) => part.toLowerCase() === '_created')) return true;
+  return parts.length >= 2 && ['pins', 'created'].includes(String(parts[1] || '').toLowerCase());
+}
+
+function twitchOwnPage(parts) {
+  if (!parts.length) return false;
+  const head = parts[0].toLowerCase();
+  if (TWITCH_FEED_SEGMENTS.has(head)) return false;
+  return parts.length >= 2 && ['videos', 'clips', 'schedule'].includes(String(parts[1] || '').toLowerCase());
+}
+
+/**
+ * True when a social row is a post from the page of the account that published it.
+ * Shop, travel and life rows are not judged here. A feed, a channel, another
+ * person's permalink, or interface chrome is false.
+ */
+function isOwnPublishedRecord(source, payload, metadata = {}) {
+  const canonical = normalizeCrawlerSource(source);
+  if (!isSocialCrawlerSource(canonical)) return true;
+  if (isSocialChrome(payload)) return false;
+  const page = pageLocation(asRecord(metadata).sourceUrl);
+  const link = firstLinkLocation(payload);
+  if (canonical === 'x') {
+    if (!page || (!hostIs(page.host, 'x.com') && !hostIs(page.host, 'twitter.com'))) return false;
+    const profile = xProfile(page.parts);
+    const author = link && (hostIs(link.host, 'x.com') || hostIs(link.host, 'twitter.com')) ? xAuthor(link.parts) : '';
+    if (link && (hostIs(link.host, 'x.com') || hostIs(link.host, 'twitter.com')) && /status(?:es)?/i.test(link.parts.join('/')) && !author) {
+      return false;
+    }
+    return authoredByProfile(author, profile);
+  }
+  if (canonical === 'instagram') {
+    if (!page || !hostIs(page.host, 'instagram.com')) return false;
+    const profile = igProfile(page.parts);
+    const author = link && hostIs(link.host, 'instagram.com') ? igAuthor(link.parts) : '';
+    return authoredByProfile(author, profile);
+  }
+  if (canonical === 'threads') {
+    if (!page || (!hostIs(page.host, 'threads.net') && !hostIs(page.host, 'threads.com'))) return false;
+    const profile = threadsProfile(page.parts);
+    const author = link && (hostIs(link.host, 'threads.net') || hostIs(link.host, 'threads.com')) ? threadsAuthor(link.parts) : '';
+    return authoredByProfile(author, profile);
+  }
+  if (canonical === 'tiktok') {
+    if (!page || !hostIs(page.host, 'tiktok.com')) return false;
+    const profile = tiktokProfile(page.parts);
+    const author = link && hostIs(link.host, 'tiktok.com') ? tiktokAuthor(link.parts) : '';
+    return authoredByProfile(author, profile);
+  }
+  if (canonical === 'facebook') {
+    const profile = facebookProfile(page);
+    if (!profile) return false;
+    const owner = facebookPostOwner(payload);
+    if (owner) {
+      if (owner.name && profile.kind === 'vanity') return owner.name === profile.name;
+      if (owner.id && profile.id) return owner.id === profile.id;
+      return profile.kind === 'self';
+    }
+    if (ownerlessFacebookFeed(link)) return false;
+    return true;
+  }
+  if (canonical === 'reddit') return Boolean(page && hostIs(page.host, 'reddit.com') && redditOwnPage(page.parts));
+  if (canonical === 'youtube') return youtubeOwnPage(page);
+  if (canonical === 'linkedin') return Boolean(page && hostIs(page.host, 'linkedin.com') && linkedinOwnPage(page.parts));
+  if (canonical === 'pinterest') return Boolean(page && hostIs(page.host, 'pinterest.com') && pinterestOwnPage(page.parts));
+  if (canonical === 'twitch') return Boolean(page && hostIs(page.host, 'twitch.tv') && twitchOwnPage(page.parts));
+  return false;
 }
 
 function calculateDataQuality(item) {
@@ -417,6 +694,7 @@ module.exports = {
   officialRecordId,
   SOCIAL_PERMALINK_SOURCES,
   socialPostUrl,
+  isOwnPublishedRecord,
   isTitleBackedSourceId,
   sourceIdentityKey,
   extractSourceId,

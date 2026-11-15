@@ -147,16 +147,17 @@
       }
     },
     "social": {
-      "pointsPerItem": 10,
-      "dailyLimit": 1000,
+      "pointsPerItem": 1,
+      "dailyLimit": 10,
       "monthlyLimit": 10000,
-      "rewardRule": "Earn 10 points for each valid data item submitted",
+      "rewardRule": "Earn 1 point for each of your own posts, up to 10 points a day",
       "validationRules": [
+        "Only posts published by the signed-in account are counted",
         "Duplicate data will not be counted",
         "Invalid data will not be counted"
       ],
       "errors": {
-        "dailyLimitExceeded": "Daily submission limit reached (1,000 items), please try again tomorrow",
+        "dailyLimitExceeded": "Social points are capped at 10 per day. Please try again tomorrow",
         "monthlyLimitExceeded": "Monthly submission limit reached (10,000 items), please try again next month",
         "duplicateData": "Duplicate data detected, no points awarded",
         "invalidData": "Invalid data format, please check and resubmit",

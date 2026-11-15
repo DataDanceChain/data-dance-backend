@@ -4,7 +4,8 @@
  *
  * What only the database can prove: CrawlerData.contentHash is unique across the whole table and
  * (userId, source, sourceId) per user, and createMany({ skipDuplicates }) silently skips a row that
- * hits either. So: two users who saw the same post both keep it; one post under host / handle
+ * hits either. So: a post on its author's profile is stored, and the same post taken from a home
+ * timeline is refused; one post under host / handle
  * variants is one record; an order keeps its own identity whatever links it holds; points go only
  * to rows really written; a Facebook post is one record per user by its permalink, a row an
  * earlier App version stored under its title is found by that title, and an upload from an earlier
@@ -86,23 +87,26 @@ describe('Connect upload identity (Postgres)', () => {
     await prisma.$disconnect();
   });
 
-  it('two users with the same permalink both keep the post', async () => {
-    const a = await upload('alice', [row('x', { href: `https://x.com/DataDance/status/${TWEET}`, title: 'Launch day' })]);
-    // The same payload: the App strips engagement counts, so everyone who saw the post sends this.
-    const b = await upload('bob', [row('x', { href: `https://x.com/DataDance/status/${TWEET}`, title: 'Launch day' })]);
+  it('a post on its author profile is stored, and a home-timeline copy is refused', async () => {
+    const own = { sourceUrl: 'https://x.com/DataDance' };
+    const a = await upload('alice', [row('x', { href: `https://x.com/DataDance/status/${TWEET}`, title: 'Launch day' }, own)]);
+    const b = await upload('bob', [row('x', { href: `https://x.com/DataDance/status/${TWEET}`, title: 'Launch day' }, { sourceUrl: 'https://x.com/home' })]);
     assert.deepEqual([a.uploadedCount, a.duplicatesCount], [1, 0]);
-    assert.deepEqual([b.uploadedCount, b.duplicatesCount], [1, 0]);
+    assert.deepEqual([b.uploadedCount, b.duplicatesCount, b.pointsEarned], [0, 0, 0]);
     assert.equal((await rowsOf('alice', { source: 'x' })).length, 1);
-    assert.equal((await rowsOf('bob', { source: 'x' })).length, 1);
-    assert.ok(b.pointsEarned > 0);
+    assert.equal((await rowsOf('bob', { source: 'x' })).length, 0);
+    assert.ok(a.pointsEarned > 0);
   });
 
   it('X host, handle and like-count variants are one record for that user', async () => {
+    const own = { sourceUrl: 'https://x.com/DataDance' };
     const again = await upload('alice', [
-      row('x', { href: `https://mobile.twitter.com/DATADANCE/status/${TWEET}/photo/1`, title: 'Launch day 120 likes' }),
-      row('x', { href: `https://x.com/i/web/status/${TWEET}`, title: 'Launch day 121 likes' }),
+      row('x', { href: `https://mobile.twitter.com/DATADANCE/status/${TWEET}/photo/1`, title: 'Launch day 120 likes' }, own),
+      row('x', { href: `https://x.com/i/web/status/${TWEET}`, title: 'Launch day 121 likes' }, own),
     ]);
-    assert.deepEqual([again.uploadedCount, again.duplicatesCount, again.pointsEarned], [0, 2, 0]);
+    assert.equal(again.uploadedCount, 0);
+    assert.equal(again.duplicatesCount, 1);
+    assert.equal(again.pointsEarned, 0);
     assert.equal((await rowsOf('alice', { source: 'x' })).length, 1);
   });
 
@@ -215,7 +219,7 @@ describe('Connect upload identity (Postgres)', () => {
     });
 
     it('after the backfill a re-sync of the old post is a duplicate and pays nothing', async () => {
-      const resync = await upload('erin', [row('x', { href: `https://twitter.com/erinposts/status/${TWEET}1`, title: 'Hello 40 likes' })]);
+      const resync = await upload('erin', [row('x', { href: `https://twitter.com/erinposts/status/${TWEET}1`, title: 'Hello 40 likes' }, { sourceUrl: 'https://x.com/erinposts' })]);
       assert.deepEqual([resync.uploadedCount, resync.duplicatesCount, resync.pointsEarned], [0, 1, 0]);
       assert.equal(await crawlerPoints('erin'), 0);
     });
@@ -291,7 +295,7 @@ describe('Connect upload identity (Postgres)', () => {
     const sheinMeta = { sourceUrl: 'https://m.shein.com/user/orders', host: 'superseded' };
     const sheinPayload = (href) => ({ orderId: `SH-20-${RUN}`, title: 'Linen shirt', price: '20.00', href });
     // Social rows whose link is not a post permalink (a redirect link): a record with a title key.
-    const xMeta = { sourceUrl: 'https://x.com/home' };
+    const xMeta = { sourceUrl: 'https://x.com/a' };
     const xRedirect = { href: 'https://t.co/r1?u=https://x.com/a/status/41', title: `Morning run ${RUN}` };
     const xPostMeta = { ...xMeta, host: 'post' };
     const xRedirectPost = { href: 'https://t.co/r2?u=https://x.com/a/status/42', title: `Evening run ${RUN}` };

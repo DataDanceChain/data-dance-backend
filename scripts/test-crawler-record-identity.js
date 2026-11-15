@@ -147,7 +147,7 @@ const socialTitleOnly = {
   timestamp: '2026-09-05T00:00:00.000Z',
   payload: { title: 'Sunset reel' },
   metadata: {
-    sourceUrl: 'https://www.instagram.com/p/abc',
+    sourceUrl: 'https://www.instagram.com/jane/',
     host: 'instagram.com',
     extract: 'generic',
     cleaned: true,
@@ -201,7 +201,7 @@ const twitterAlias = {
   ...socialTitleOnly,
   source: 'twitter',
   metadata: {
-    sourceUrl: 'https://x.com/user/status/1',
+    sourceUrl: 'https://x.com/user',
     host: 'x.com',
     extract: 'generic',
     cleaned: true,

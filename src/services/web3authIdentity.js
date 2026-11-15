@@ -17,6 +17,7 @@
 const jose = require('jose');
 const { computeAddress, getAddress, isAddress } = require('ethers');
 const { createLogger } = require('../utils/logger');
+const { EMAIL_OTP_AUTH_TYPE } = require('./emailOtpLogin');
 
 const logger = createLogger('web3authIdentity');
 
@@ -938,6 +939,34 @@ function sameEmail(a, b) {
   return typeof a === 'string' && typeof b === 'string' && a.trim().toLowerCase() === b.trim().toLowerCase();
 }
 
+/**
+ * Google, email-passwordless, and Apple verify the mailbox they release.
+ * X and an external wallet do not, so they must not claim an email-code account.
+ */
+function provesMailbox(verifier) {
+  const value = String(verifier || '').toLowerCase();
+  if (!value || value === EXTERNAL_WALLET_VERIFIER) return false;
+  if (value.includes('twitter') || value.includes('x.com')) return false;
+  if (value.includes('google')) return true;
+  if (value.includes('passwordless')) return true;
+  if (value.includes('apple')) return true;
+  return false;
+}
+
+/**
+ * An email-code registration has no key yet. A later Web3Auth login may write its proven
+ * address onto that row only: same mailbox, no wallet, no prior link, and a connection
+ * that verifies the mailbox. Any older account stays on the ordinary rules.
+ */
+function canAttachEmailOtpAccount(candidate, identity, walletAddress, candidateBy) {
+  if (!candidate || candidate.authType !== EMAIL_OTP_AUTH_TYPE) return false;
+  if (candidate.walletAddress || candidate.web3authVerifier || candidate.web3authVerifierId) return false;
+  if (candidateBy !== 'email') return false;
+  if (!identity.email || !sameEmail(identity.email, candidate.email)) return false;
+  if (!provesMailbox(identity.verifier)) return false;
+  return Boolean(walletAddress) && isAddress(walletAddress);
+}
+
 /** Close a pending record after the account was linked on another route (wallet kept). */
 async function closeRebindRecord(db, userId, identity, address) {
   await db.web3AuthNetworkRebind.updateMany({
@@ -1182,6 +1211,48 @@ async function resolveUser(identity, options = {}) {
         ambiguousEmail,
       });
       if (rebound) return rebound;
+    }
+
+    // Email-code accounts are not legacy rows. Attach only the key this token proves.
+    if (canAttachEmailOtpAccount(candidate, identity, walletAddress, candidateBy)) {
+      if (!isVerifierAllowed(cfg, identity.verifier)) {
+        throw fail('IDENTITY_CONFLICT', 'This login cannot be linked to the existing account automatically', {
+          reason: 'verifier_not_in_allowlist',
+          candidateUserId: candidate.id,
+        });
+      }
+      const holder = await db.user.findFirst({
+        where: { walletAddress: { equals: walletAddress, mode: 'insensitive' }, id: { not: candidate.id } },
+      });
+      if (holder) {
+        throw fail('IDENTITY_CONFLICT', 'This login cannot be linked to the existing account automatically', {
+          reason: 'wallet_in_use',
+          candidateUserId: candidate.id,
+        });
+      }
+      const attached = await db.user.updateMany({
+        where: {
+          id: candidate.id,
+          authType: EMAIL_OTP_AUTH_TYPE,
+          walletAddress: null,
+          web3authVerifier: null,
+        },
+        data: {
+          ...pair,
+          web3authLinkedAt: new Date(),
+          walletAddress,
+          authType: 'web3auth',
+        },
+      });
+      if (attached.count !== 1) {
+        throw fail('IDENTITY_CONFLICT', 'Account was linked concurrently; please retry', {
+          reason: 'backfill_race',
+          candidateUserId: candidate.id,
+        });
+      }
+      const user = await db.user.findUnique({ where: { id: candidate.id } });
+      logger.info('email_otp_wallet_attached', { userId: user.id, verifier: identity.verifier });
+      return { user, action: 'attached' };
     }
 
     // Explicit opt-in, by verifier name: an EMPTY list links nothing by e-mail (it used to mean

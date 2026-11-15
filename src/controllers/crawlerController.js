@@ -11,6 +11,7 @@ const {
 } = require('../services/businessRulesService');
 const logger = createLogger('crawlerController');
 const { hasActiveConsent, isCEndSubject } = require('../services/dataLicenceConsent');
+const { isSocialCrawlerSource } = require('../constants/crawlerSources');
 
 /**
  * GET /api/crawler-tasks
@@ -231,7 +232,14 @@ async function uploadData(req, res) {
     // Check limits for each source
     for (const [source, items] of Object.entries(itemsBySource)) {
       if (items.length > 0) {
-        const limitCheck = await checkDataLimits(userId, source, items.length);
+        // Social daily cap is applied to newly stored rows inside the upload
+        // transaction. Counting the raw batch here would reject a resync of
+        // posts that are already stored and earn nothing.
+        const limitCheck = await checkDataLimits(
+          userId,
+          source,
+          isSocialCrawlerSource(source) ? 0 : items.length,
+        );
         
         if (!limitCheck.allowed) {
           return res.status(429).json({

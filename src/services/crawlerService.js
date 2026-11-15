@@ -1,12 +1,14 @@
 const prisma = require('../utils/prisma');
 const { createLogger } = require('../utils/logger');
 const crypto = require('crypto');
-const { calculateAmazonDataPoints, calculateDataPoints } = require('./businessRulesService');
+const { calculateAmazonDataPoints, calculateDataPoints, getDataRules } = require('./businessRulesService');
 const { CRAWLER_MESSAGES } = require('../constants/messages');
 const {
   CORE_SOURCES,
   isAcceptedCrawlerSource,
   isCatalogCrawlerSource,
+  isSocialCrawlerSource,
+  SOCIAL_SOURCES,
   normalizeCrawlerSource,
   catalogTaskTemplates,
 } = require('../constants/crawlerSources');
@@ -14,6 +16,7 @@ const {
   calculateDataQuality,
   extractSourceId,
   hasRecordIdentity,
+  isOwnPublishedRecord,
   isClientSmoothedRecord,
   isTitleBackedSourceId,
   legacyPostTitleSourceId,
@@ -367,6 +370,12 @@ function validateDataItem(item) {
   } else if (isCatalogCrawlerSource(item.source) && !hasRecordIdentity(item.source, payload)) {
     // Client Earn upload already dropped dirty rows; accept title-only catalog shapes.
     errors.push(CRAWLER_MESSAGES.CONNECT_IDENTITY_REQUIRED);
+  }
+
+  // Social points are for posts this signed-in account published. A home
+  // timeline, a channel, or another person's permalink is not that record.
+  if (isSocialCrawlerSource(item.source) && !isOwnPublishedRecord(item.source, payload, item.metadata)) {
+    errors.push(CRAWLER_MESSAGES.SOCIAL_NOT_OWN_POST);
   }
 
   // Luma-specific validation
@@ -752,6 +761,27 @@ async function uploadCrawlerData(data, userId) {
         });
       }
       const actualInserted = inserted.length;
+
+      // New social rows share one cap of 10 points a day. Duplicates insert nothing,
+      // so a resync of posts already counted does not consume the cap again.
+      const socialInserted = inserted.filter(({ item }) => isSocialCrawlerSource(item.source)).length;
+      if (socialInserted > 0) {
+        const socialDailyLimit = getDataRules('x').dailyLimit;
+        const socialToday = await tx.crawlerData.count({
+          where: {
+            userId,
+            source: { in: SOCIAL_SOURCES },
+            createdAt: { gte: today },
+          },
+        });
+        if (socialToday > socialDailyLimit) {
+          throw new Error(CRAWLER_MESSAGES.SOCIAL_DAILY_CAP(
+            socialToday - socialInserted,
+            socialDailyLimit,
+            socialInserted,
+          ));
+        }
+      }
 
       // Attribute inserted rows to their tasks / sources
       const insertedBySource = {};
