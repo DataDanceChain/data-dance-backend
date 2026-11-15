@@ -179,6 +179,37 @@ npm run seed:commerce-demo
 它不依赖 `seed:all` 或数据包导入脚本；若先跑过 `createMerchantsAndDataNFTs.js`，
 同名商家会被复用（见 `docs/MERCHANT_ACCOUNTS.md`）。
 
+### Isolated SSO PostgreSQL fixture (explicit opt-in)
+
+`test/db/ssoTokenPerformance.fixture.js` is intentionally outside the `yarn test:db`
+`test/db/*.dbtest.js` glob. It covers four synthetic credential-change, atomic-consume
+and bookkeeping-lock cases; it is not an ordinary configured-database suite.
+
+Use Node 22 and the normal dependency / Prisma setup documented above. Before running,
+obtain explicit approval for a newly created, positively owned, disposable local
+PostgreSQL fixture. Verify its process or container identity and its exact mapped
+`127.0.0.1` port belong to this run. It must contain only the current
+`prisma/schema.prisma` schema, with no existing data, database name `sso_test` and
+schema `public`. Never point this test at an existing, shared or production database.
+Apply the current schema only to that owned fixture using the approved database
+procedure; do not reuse ordinary suite configuration or seed real accounts.
+
+Set `TEST_DATABASE_URL` privately to that fixture's `postgresql:` URL, including
+`?schema=public`, and `SSO_PG_FIXTURE_PORT` to its positively inspected port. Do not
+put credentials in source or command history. After ownership and approval are
+established, run explicitly:
+
+```sh
+SSO_PG_FIXTURE_APPROVED=OWNED_DISPOSABLE_SSO_V1 \
+  node --test --test-concurrency=1 test/db/ssoTokenPerformance.fixture.js
+```
+
+The marker acknowledges the approval; it does not prove ownership. The test checks
+the literal host, port, database/schema and empty fixture tables, then creates only
+synthetic rows and disconnects its clients. Expect all four cases to pass. Dispose
+of only the positively owned fixture afterward. This is local source regression,
+not real-provider login, application acceptance or deployment evidence.
+
 ## 🛡 金融级加固：合作方 SSO（Partner SSO boot assertions）
 
 TGE 页面这条链路上可能有很大金额，所以协议之外的"部署形态"也必须被程序本身卡死。以下三件事是

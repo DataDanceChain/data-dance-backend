@@ -23,7 +23,7 @@ const { normalizeReferralCodeInput, formatReferralCodeForDisplay } = require('..
 const { createLogger } = require('../utils/logger');
 // The write scope's gate (decision 30 A); kept on their own line, apart from the main import.
 const { availablePartnerScopes, referralBindEnabled } = require('../constants/partnerClient');
-const { loadDeveloperPartnerClient, loadPartnerClient } = require('./ssoDeveloperClient');
+const { loadDeveloperPartnerClient, loadPartnerClient, loadPartnerTokenClient } = require('./ssoDeveloperClient');
 
 const logger = createLogger('oauthService');
 
@@ -870,7 +870,7 @@ async function exchangeAuthorizationCode(req, body) {
   // Partner client authentication happens BEFORE the code lookup (RFC 6749 §4.1.3): the
   // presented client_id decides whether credentials are required at all.
   const presented = presentedClientCredentials(req, body);
-  const presentedPartner = presented?.clientId ? await loadPartnerClient(presented.clientId, req) : null;
+  const presentedPartner = presented?.clientId ? await loadPartnerTokenClient(presented.clientId, req) : null;
   if (presentedPartner) authenticatePartnerClient(presentedPartner, presented);
 
   const row = await prisma.oAuthAuthorization.findUnique({ where: { codeHash: hashSecret(code) } });
@@ -885,7 +885,9 @@ async function exchangeAuthorizationCode(req, body) {
     throw new OAuthError(400, 'invalid_grant', 'Authorization code is invalid or expired.');
   }
 
-  const rowPartner = await loadPartnerClient(row.clientId, req);
+  const rowPartner = presentedPartner?.clientId === row.clientId
+    ? presentedPartner
+    : await loadPartnerTokenClient(row.clientId, req);
   if (rowPartner) {
     if (!presentedPartner || presentedPartner.clientId !== row.clientId) {
       throw new OAuthError(401, 'invalid_client', 'Client authentication is required for this code.');
@@ -914,13 +916,19 @@ async function exchangeAuthorizationCode(req, body) {
     throw new OAuthError(400, 'invalid_target', 'resource does not match this code.');
   }
 
-  // The account is re-read HERE, not only at consent and on refresh: between the consent click
-  // and this exchange there is a whole code lifetime (60 s for the partner) in which support can
-  // disable the account, and a token minted after that decision would outlive it (item 7).
+  // Re-check the account after validating the code proof. The account may have been disabled
+  // since consent, and a token minted after that decision would outlive it (item 7).
   const account = await prisma.user.findUnique({ where: { id: row.userId } });
   if (!account || account.disabledAt) {
     logger.warn('oauth.code_exchange_refused', { reason: account ? 'account_disabled' : 'account_missing', clientId: row.clientId, userId: row.userId });
     throw new OAuthError(400, 'invalid_grant', 'Authorization code is invalid or expired.');
+  }
+
+  // Re-read credentials after the subject lookup so a late rotation or disable still wins.
+  const currentPartner = rowPartner ? await loadPartnerTokenClient(row.clientId, req) : null;
+  if (rowPartner) {
+    if (!currentPartner) throw new OAuthError(401, 'invalid_client', 'Client authentication is required for this code.');
+    authenticatePartnerClient(currentPartner, presented);
   }
 
   // Atomic single-use consume: exactly one concurrent exchange can win (contract T10).
@@ -931,7 +939,7 @@ async function exchangeAuthorizationCode(req, body) {
   if (!consumed || consumed.count !== 1) {
     throw new OAuthError(400, 'invalid_grant', 'Authorization code is invalid or expired.');
   }
-  return issueOAuthTokens(row.userId, row.clientId, row.resource, row.scope, { codeRowId: row.id, client: rowPartner, req });
+  return issueOAuthTokens(row.userId, row.clientId, row.resource, row.scope, { codeRowId: row.id, client: currentPartner, req });
 }
 
 async function issueOAuthTokens(userId, clientId, resource, scope, { codeRowId, client, req } = {}) {

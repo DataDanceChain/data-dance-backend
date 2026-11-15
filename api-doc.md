@@ -80,6 +80,29 @@ POST /auth/login
 }
 ```
 
+### First-party email sign-in
+
+`POST /api/auth/email-code/send` accepts `{ "email": "user@example.com" }`.
+The `200` response `{ "status": "success", "data": { "accepted": true } }`
+acknowledges the request without confirming account eligibility or delivery.
+`POST /api/auth/email-code/verify` accepts the same email and a six-digit `code`.
+On success it returns the existing `data.token` and `data.user` session fields.
+
+| HTTP status | Client action |
+| --- | --- |
+| `400 INVALID_EMAIL` | Correct the email address. |
+| `401 EMAIL_CODE_INVALID` | Check the digits or request a new code. Missing, expired, used and incorrect codes use this same response. |
+| `429` | Wait for `Retry-After` or the numeric `retryAfter` JSON field before retrying. |
+| `404 EMAIL_LOGIN_UNAVAILABLE`, `503 EMAIL_LOGIN_UNAVAILABLE`, or another `5xx` | Try again later and share the `X-Request-Id` support reference if it is available. |
+
+For operations, search `email_otp_result` by that server-generated request ID.
+Each event records the `send` or `verify` stage, HTTP status, and a fixed reason.
+Use `db_lookup_failed` for a database lookup failure and the `smtp_` reasons for
+missing configuration, authentication failure, provider refusal, or other send
+failure. Request and address throttles have separate reasons. The event carries
+no email address, code, token or raw provider error. If the request never reaches
+the API route, use the observed client time and ingress logs to investigate.
+
 ### 通过钱包地址注册/登录
 
 ```

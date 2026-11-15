@@ -134,7 +134,9 @@ async function findUserByPartnerToken(token, resource) {
   if (!row.expiresAt || row.expiresAt <= now) return null;
   if (!row.lastUsedAt || now.getTime() - new Date(row.lastUsedAt).getTime() > LAST_USED_WRITE_INTERVAL_MS) {
     try {
-      await prisma.mcpToken.update({ where: { id: row.id }, data: { lastUsedAt: now } });
+      // Start bookkeeping before the route enters its read-only scope; do not delay identity.
+      // Attach rejection handling immediately, including synchronous client errors below.
+      void prisma.mcpToken.update({ where: { id: row.id }, data: { lastUsedAt: now } }).catch(() => {});
     } catch {
       // bookkeeping only
     }

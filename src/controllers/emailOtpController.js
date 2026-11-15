@@ -52,8 +52,25 @@ async function createEmailOtpUser(email) {
   }
 }
 
-function fail(res, error, event) {
-  logger.error(event, { name: error && error.name });
+// Observe the route's actual result, including 429 responses produced before the handler.
+exports.observeEmailOtp = (stage) => (req, res, next) => {
+  res.once('finish', () => {
+    const status = res.statusCode;
+    const reason = res.locals.emailOtpReason ?? (status === 429 ? 'request_throttled' : 'unexpected_failure');
+    const level = status >= 500 ? 'error' : 'info';
+    logger[level]('email_otp_result', { reqId: req.reqId, stage, status, reason });
+  });
+  next();
+};
+
+function respond(res, result) {
+  res.locals.emailOtpReason = result.reason;
+  if (result.status === 429) res.set('Retry-After', String(result.body.retryAfter));
+  return res.status(result.status).json(result.body);
+}
+
+function fail(res) {
+  res.locals.emailOtpReason = 'unexpected_failure';
   return res.status(500).json({ status: 'error', message: 'Server error' });
 }
 
@@ -64,9 +81,9 @@ exports.sendEmailCode = async (req, res) => {
       findUsersByEmail,
       sendMail: sendLoginCodeEmail,
     });
-    return res.status(result.status).json(result.body);
-  } catch (error) {
-    return fail(res, error, 'email_otp_send_failed');
+    return respond(res, result);
+  } catch {
+    return fail(res);
   }
 };
 
@@ -79,8 +96,8 @@ exports.verifyEmailCode = async (req, res) => {
       createUser: createEmailOtpUser,
       openReviewUser,
     });
-    return res.status(result.status).json(result.body);
-  } catch (error) {
-    return fail(res, error, 'email_otp_verify_failed');
+    return respond(res, result);
+  } catch {
+    return fail(res);
   }
 };

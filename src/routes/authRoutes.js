@@ -1,6 +1,6 @@
 const express = require('express');
 const { register, login } = require('../controllers/authController');
-const { sendEmailCode, verifyEmailCode } = require('../controllers/emailOtpController');
+const { observeEmailOtp, sendEmailCode, verifyEmailCode } = require('../controllers/emailOtpController');
 const { protect } = require('../middlewares/authMiddleware');
 const { rateLimiters } = require('../middlewares/rateLimitMiddleware');
 const { registerUsageLog } = require('../middlewares/registerUsageLog');
@@ -15,8 +15,8 @@ router.post('/register', registerUsageLog, rateLimiters.registerIp, rateLimiters
 router.post('/login', rateLimiters.auth, login);
 
 // Temporary email-code sign-in. Closed unless EMAIL_OTP_LOGIN=true.
-router.post('/email-code/send', rateLimiters.emailOtpSend, sendEmailCode);
-router.post('/email-code/verify', rateLimiters.emailOtpVerify, verifyEmailCode);
+router.post('/email-code/send', observeEmailOtp('send'), rateLimiters.emailOtpSend, sendEmailCode);
+router.post('/email-code/verify', observeEmailOtp('verify'), rateLimiters.emailOtpVerify, verifyEmailCode);
 
 // X binding handled via Web3Auth adapter — no direct custom routes
 

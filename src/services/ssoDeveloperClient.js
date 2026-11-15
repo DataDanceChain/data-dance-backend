@@ -233,6 +233,31 @@ async function loadDeveloperPartnerClient(clientId, req) {
   return shapeDeveloperClient(row, req);
 }
 
+/** Token authentication does not decide handoff/automatic-consent entitlement. Read only the
+ * current client credential/configuration; never load its owner's identity or role grants here.
+ * No cache: every caller gets the current enabled flag and secret (including the final mint gate).
+ */
+async function loadPartnerTokenClient(clientId, req, db = prisma) {
+  const id = String(clientId || '').trim();
+  if (!id) return null;
+  const configured = getPartnerClient(id, req);
+  if (configured) return configured;
+  const row = await db.ssoDeveloperClient.findUnique({
+    where: { clientId: id },
+    select: { clientId: true, clientName: true, enabled: true, secretHash: true },
+  });
+  if (!row) return null;
+  return {
+    kind: PARTNER_KIND,
+    clientId: row.clientId,
+    clientName: row.clientName,
+    enabled: Boolean(row.enabled),
+    secretHash: row.secretHash,
+    resource: partnerResourceUrl(req),
+    accessTtlSec: PARTNER_ACCESS_TTL_SEC,
+  };
+}
+
 /** Env-configured partner first, then a registry row (developer or first-party). */
 async function loadPartnerClient(clientId, req) {
   const configured = getPartnerClient(clientId, req);
@@ -385,6 +410,7 @@ module.exports = {
   createDeveloperClient,
   loadDeveloperPartnerClient,
   loadPartnerClient,
+  loadPartnerTokenClient,
   listFirstPartyClientIds,
   consoleClientId,
   listOwnedClients,
