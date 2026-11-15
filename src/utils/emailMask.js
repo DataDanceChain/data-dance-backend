@@ -6,6 +6,12 @@ function isValidEmail(email) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizeEmail(email));
 }
 
+/** A real mailbox. Provider ids such as `twitter|123` are not one. */
+function isMailbox(email) {
+  const value = normalizeEmail(email);
+  return Boolean(value && value.length <= 254 && !value.includes('|') && isValidEmail(value));
+}
+
 function maskEmail(email) {
   const value = String(email || '').trim();
   const at = value.indexOf('@');
@@ -28,6 +34,7 @@ function stripEmail(row) {
 module.exports = {
   normalizeEmail,
   isValidEmail,
+  isMailbox,
   maskEmail,
   stripEmail,
 };

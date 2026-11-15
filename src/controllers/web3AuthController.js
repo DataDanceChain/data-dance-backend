@@ -16,6 +16,8 @@ const {
   extractIdentity,
   assertWalletBound,
   resolveUser,
+  bindProvenEmail,
+  isMailbox,
   getVerifyMode,
   getAllowLegacyFallback,
   getMissingIdTokenMeansOldApp,
@@ -248,9 +250,17 @@ function sendLogin(res, httpStatus, token, user, invitationStatus) {
     data: {
       token,
       user: sanitizeUser(user),
+      // A placeholder such as twitter|<id> is not a bound mailbox. The app asks for one
+      // and saves it only after our own code is verified.
+      needsEmail: !isMailbox(user && user.email),
       ...(invitationStatus && { invitationStatus }),
     },
   });
+}
+
+async function presentVerifiedLogin(res, httpStatus, token, user, identity, invitationStatus) {
+  const bound = await bindProvenEmail(prisma, user, identity);
+  return sendLogin(res, httpStatus, token, bound, invitationStatus);
 }
 
 /**
@@ -315,11 +325,12 @@ async function verifiedLogin(req, res, { mode, referralCode, campaignSlug, invit
       hasReferralCode: Boolean(referralCode),
       campaignSlug,
     });
-    return sendLogin(
+    return presentVerifiedLogin(
       res,
       201,
       token,
       resolved,
+      identity,
       referrerId && {
         success: true,
         code: 'REFERRAL_SUCCESSFUL',
@@ -376,7 +387,7 @@ async function verifiedLogin(req, res, { mode, referralCode, campaignSlug, invit
     hasReferralCode: Boolean(referralCode),
     campaignSlug,
   });
-  return sendLogin(res, 200, token, user, invitationStatus);
+  return presentVerifiedLogin(res, 200, token, user, identity, invitationStatus);
 }
 
 /**

@@ -18,6 +18,7 @@ const jose = require('jose');
 const { computeAddress, getAddress, isAddress } = require('ethers');
 const { createLogger } = require('../utils/logger');
 const { EMAIL_OTP_AUTH_TYPE } = require('./emailOtpLogin');
+const { isMailbox, normalizeEmail } = require('../utils/emailMask');
 
 const logger = createLogger('web3authIdentity');
 
@@ -873,6 +874,28 @@ function accountEmailFor(identity) {
   return identity.email || identity.verifierId;
 }
 
+/**
+ * A provider-proven address may replace a placeholder (`twitter|<id>`) without a second code.
+ * A typed address never arrives here. Another account already holding the mailbox keeps it.
+ */
+async function bindProvenEmail(db, user, identity) {
+  const proven = normalizeEmail(identity && identity.email);
+  if (!user || !isMailbox(proven) || isMailbox(user.email)) return user;
+  const taken = await db.user.findFirst({
+    where: {
+      email: { equals: proven, mode: 'insensitive' },
+      NOT: { id: user.id },
+    },
+  });
+  if (taken) return user;
+  const updated = await db.user.updateMany({
+    where: { id: user.id, email: user.email },
+    data: { email: proven },
+  });
+  if (updated.count !== 1) return user;
+  return db.user.findUnique({ where: { id: user.id } });
+}
+
 function defaultName(identity, accountEmail) {
   if (identity.name) return identity.name;
   if (identity.email) return identity.email.split('@')[0];
@@ -1369,6 +1392,8 @@ module.exports = {
   extractIdentity,
   assertWalletBound,
   resolveUser,
+  bindProvenEmail,
+  isMailbox,
   getVerifyMode,
   getAllowLegacyFallback,
   getMissingIdTokenMeansOldApp,

@@ -460,6 +460,24 @@ const rateLimiters = {
     keyGenerator: keyGenerators.ip
   }),
 
+  // POST /api/auth/email-bind/send — per signed-in account. The per-address gap is in emailBind.
+  emailBindSend: createRateLimiter({
+    name: 'emailBindSend',
+    windowMs: 15 * 60 * 1000,
+    max: 10,
+    message: 'Too many codes were requested. Please try again later.',
+    keyGenerator: keyGenerators.userOrIp
+  }),
+
+  // POST /api/auth/email-bind/verify — per signed-in account.
+  emailBindVerify: createRateLimiter({
+    name: 'emailBindVerify',
+    windowMs: 15 * 60 * 1000,
+    max: 20,
+    message: 'Too many attempts. Please try again later.',
+    keyGenerator: keyGenerators.userOrIp
+  }),
+
   // POST /api/sso/ticket/exchange — public, per IP (Phase 3)
   ssoExchange: createRateLimiter({
     name: 'ssoExchange',
