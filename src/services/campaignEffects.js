@@ -321,4 +321,5 @@ module.exports = {
   syncRaffleTicketsForInviter,
   drawRaffle,
   raffleRules,
+  grantPoints,
 };

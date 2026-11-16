@@ -79,6 +79,8 @@ model User {
   campaignApplications     CampaignApplication[]
   campaignRaffleTickets    CampaignRaffleTicket[]
   campaignRaffleWins       CampaignRaffleWin[]
+  campaignSpins            CampaignSpin[]
+  campaignCalendarOpens    CampaignCalendarOpen[]
   ssoTickets               SsoTicket[]
   disbursementItems        DisbursementItem[]
   networkRebind            Web3AuthNetworkRebind?
@@ -1138,6 +1140,8 @@ model Campaign {
   applications  CampaignApplication[]
   raffleTickets CampaignRaffleTicket[]
   raffleWins    CampaignRaffleWin[]
+  spins         CampaignSpin[]
+  calendarOpens CampaignCalendarOpen[]
 
   @@index([status, startsAt, endsAt])
 }
@@ -1186,6 +1190,51 @@ model CampaignRaffleWin {
   user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([campaignId])
+}
+
+/// One spin of an instant wheel. Stock is the count of these rows. Points are credited in the
+/// same transaction; gift cards and USDT stay here until ops marks the claim fulfilled.
+model CampaignSpin {
+  id          String   @id @default(uuid())
+  campaignId  String
+  userId      String
+  prizeId     String
+  prizeKind   String
+  points      Int      @default(0)
+  labelEn     String
+  labelZh     String
+  /// none | unclaimed | processing | fulfilled
+  claimStatus String   @default("none")
+  claim       Json?
+  createdAt   DateTime @default(now())
+  campaign    Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([campaignId, createdAt])
+  @@index([campaignId, userId])
+  @@index([campaignId, prizeId])
+}
+
+/// One unwrapped day on an advent calendar. The upload that unlocks a day is not stored here.
+/// Points are credited in the same transaction. A gift card stays here until ops marks it sent.
+model CampaignCalendarOpen {
+  id          String   @id @default(uuid())
+  campaignId  String
+  userId      String
+  day         Int
+  kind        String
+  points      Int      @default(0)
+  labelEn     String
+  labelZh     String
+  /// none | unclaimed | processing | fulfilled
+  claimStatus String   @default("none")
+  claim       Json?
+  createdAt   DateTime @default(now())
+  campaign    Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([campaignId, userId, day])
+  @@index([campaignId, createdAt])
 }
 
 model CampaignEvent {

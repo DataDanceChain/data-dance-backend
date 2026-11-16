@@ -1,9 +1,10 @@
 /**
  * Connect upload sources the Wallet app can extract or catalog-upload.
  * Core platforms have dedicated parsers. Shop / social / travel / life
- * catalog sources use the generic visible-record extract and title-backed
- * identity (host + orderId / title / date). Do not collapse catalog ids
- * into amazon.
+ * catalog sources use the generic visible-record extract. Shop, travel, and
+ * life rows still have to be the signed-in account's own order, trip, or
+ * booking. Social rows keep title-backed identity. Do not collapse catalog
+ * ids into amazon.
  */
 
 const CORE_SOURCES = ['amazon', 'luma', 'airbnb', 'booking'];

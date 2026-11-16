@@ -2,8 +2,11 @@ const { PrismaClient } = require('@prisma/client');
 const {
   CORE_SOURCES,
   ACCEPTED_SOURCES,
+  SHOP_SOURCES,
+  SOCIAL_SOURCES,
 } = require('../src/constants/crawlerSources');
 const { parseDraft, assertPublishable } = require('../src/utils/campaignRules');
+const { THANKSGIVING_PRIZES } = require('../src/utils/wheelRules');
 
 const prisma = new PrismaClient();
 
@@ -11,8 +14,20 @@ const LAUNCH_START = '2026-09-30T00:00:00.000Z';
 const LAUNCH_END = '2026-10-06T23:59:59.000Z';
 const APPLY_START = '2026-09-12T00:00:00.000Z';
 const APPLY_END = '2026-09-29T23:59:59.000Z';
-const BF_START = '2026-11-27T00:00:00.000Z';
-const BF_END = '2026-11-30T23:59:59.000Z';
+const BF_START = '2026-11-01T00:00:00.000Z';
+const BF_END = '2026-11-02T00:00:00.000Z';
+const TG_START = '2026-11-26T00:00:00.000Z';
+const TG_PLAY_END = '2026-11-30T23:59:59.000Z';
+const TG_CLAIM_END = '2026-12-01T23:59:59.000Z';
+const XMAS_START = '2026-12-01T00:00:00.000Z';
+const XMAS_PLAY_END = '2026-12-25T23:59:59.000Z';
+const XMAS_CLAIM_END = '2026-12-26T23:59:59.000Z';
+const TG_SHOP_SITES = [...SHOP_SOURCES.filter((site) => site !== 'generic'), 'amazon'];
+const TG_SOCIAL_SITES = SOCIAL_SOURCES.filter((site) => site !== 'discord');
+const LEGAL_TG =
+  'Play runs 26–30 November 2026 (UTC). Qualifying shopping uploads earn 2× points during play. Each person can win one gift card or USDT. Points are added to My Points when the wheel stops. Gift cards and USDT must be claimed by 1 December 2026, 23:59 UTC, or they are forfeited. Gift cards are US-region and cannot be exchanged. DataDance may withhold a prize for fraud, duplicate accounts, or manipulation, and sends claimed prizes within 7 business days after play ends.';
+const LEGAL_XMAS =
+  'The calendar runs 1–25 December 2026 (UTC). One qualifying shop, travel, or life upload unlocks that UTC day. Social uploads do not count, and a missed day cannot be unlocked later. Points are added to My Points when you unwrap the day. Unlocked gifts can still be unwrapped on 26 December 2026, through 23:59 UTC. The $5 Amazon gift card is for Amazon.com in the US, cannot be exchanged, and is emailed within 7 business days after the event ends. DataDance may withhold a reward for fraud, duplicate accounts, or manipulation. Questions: contact@datadance.ai.';
 
 const NEW_SOURCES = ACCEPTED_SOURCES.filter(
   (site) => site && site !== 'generic' && !CORE_SOURCES.includes(site),
@@ -231,7 +246,7 @@ const DRAFTS = [
     endsAt: BF_END,
     sites: ['amazon'],
     multiplier: 2,
-    purpose: 'Amazon point multiplier for Black Friday and Cyber Monday.',
+    purpose: 'Retired Amazon-only boost. Thanksgiving covers every shop, including Amazon.',
     legalText: LEGAL_BF,
   }),
   base({
@@ -248,8 +263,87 @@ const DRAFTS = [
     endsAt: BF_END,
     ctaKind: 'CONNECT',
     ctaValue: 'amazon',
-    purpose: 'Surface the Amazon Black Friday boost on Earn.',
+    purpose: 'Retired Amazon-only Black Friday card. The Thanksgiving wheel is the Earn card.',
     legalText: LEGAL_BF,
+  }),
+  base({
+    slug: 'thanksgiving-2026-shop',
+    internalName: 'Thanksgiving shop 2x',
+    titleEn: 'Shopping points, doubled',
+    titleZh: '购物积分翻倍',
+    titleZhTw: '購物積分翻倍',
+    titleJa: 'ショッピングポイント 2倍',
+    titleKo: '쇼핑 포인트 2배',
+    blurbEn: 'Qualifying shopping uploads earn 2× points through November 30.',
+    blurbZh: '11 月 30 日前，符合条件的购物上传积分翻倍。',
+    blurbZhTw: '11 月 30 日前，符合條件的購物上傳積分翻倍。',
+    blurbJa: '11月30日まで、対象の買い物アップロードはポイント2倍。',
+    blurbKo: '11월 30일까지 해당하는 쇼핑 업로드는 포인트 2배.',
+    pillEn: '2×',
+    pillZh: '2×',
+    template: 'CONNECT_BOOST',
+    startsAt: TG_START,
+    endsAt: TG_PLAY_END,
+    sites: TG_SHOP_SITES,
+    multiplier: 2,
+    purpose: '2× points on shop uploads, including Amazon, for Thanksgiving and Black Friday.',
+    legalText: LEGAL_TG,
+  }),
+  base({
+    slug: 'thanksgiving-2026',
+    internalName: 'Thanksgiving × Black Friday wheel',
+    titleEn: 'Thanksgiving × Black Friday',
+    titleZh: '感恩节 × 黑五',
+    titleZhTw: '感恩節 × 黑五',
+    titleJa: 'サンクスギビング × ブラックフライデー',
+    titleKo: '추수감사절 × 블랙프라이데이',
+    blurbEn: '$500 prize pool and unlimited 2× points.',
+    blurbZh: '500 美元奖池，购物积分不限次数 2 倍。',
+    blurbZhTw: '500 美元獎池，購物積分不限次數 2 倍。',
+    blurbJa: '賞品総額 $500、ショッピングポイントは何度でも 2倍。',
+    blurbKo: '총 상금 $500, 쇼핑 포인트는 무제한 2배.',
+    pillEn: 'Claim',
+    pillZh: '兑奖',
+    pillZhTw: '兌獎',
+    pillJa: '受け取り',
+    pillKo: '수령',
+    template: 'WHEEL',
+    startsAt: TG_START,
+    endsAt: TG_CLAIM_END,
+    playEndsAt: TG_PLAY_END,
+    shopPer: 5,
+    socialPer: 10,
+    socialMaxDraws: 5,
+    shopSites: TG_SHOP_SITES,
+    socialSites: TG_SOCIAL_SITES,
+    prizes: THANKSGIVING_PRIZES,
+    purpose: 'Thanksgiving and Black Friday wheel. Points credit on spin. Gift cards and USDT are claimed by December 1.',
+    legalText: LEGAL_TG,
+  }),
+  base({
+    slug: 'christmas-2026',
+    internalName: 'Christmas advent calendar',
+    titleEn: 'Christmas Advent Calendar',
+    titleZh: '圣诞倒数日历',
+    titleZhTw: '聖誕倒數日曆',
+    titleJa: 'クリスマスアドベントカレンダー',
+    titleKo: '크리스마스 어드벤트 캘린더',
+    blurbEn: 'Upload. Unlock. Unwrap. One record opens today’s gift.',
+    blurbZh: '上传、解锁、拆开。一条记录打开今天的礼物。',
+    blurbZhTw: '上傳、解鎖、拆開。一筆記錄打開今天的禮物。',
+    blurbJa: 'アップロードして、今日のギフトを開けよう。',
+    blurbKo: '올리고, 열고, 오늘의 선물을 확인하세요.',
+    pillEn: 'Day 1 / 25',
+    pillZh: '第 1 / 25 天',
+    pillZhTw: '第 1 / 25 天',
+    pillJa: '1日目 / 25',
+    pillKo: '1 / 25일',
+    template: 'CALENDAR',
+    startsAt: XMAS_START,
+    endsAt: XMAS_CLAIM_END,
+    playEndsAt: XMAS_PLAY_END,
+    purpose: 'December 2026 advent calendar. One shop, travel, or life upload unlocks that UTC day. Points are granted when the gift is unwrapped.',
+    legalText: LEGAL_XMAS,
   }),
   base({
     slug: 'wallet-launch-2026-testers',
@@ -310,8 +404,9 @@ const SCHEDULED_SLUGS = new Set([
   'launch-week-2026-home-distill',
   'launch-week-2026-home-invite',
   'launch-week-2026-home-redeem',
-  'black-friday-2026-amazon',
-  'black-friday-2026-home',
+  'thanksgiving-2026-shop',
+  'thanksgiving-2026',
+  'christmas-2026',
 ]);
 
 async function upsertOne(body) {

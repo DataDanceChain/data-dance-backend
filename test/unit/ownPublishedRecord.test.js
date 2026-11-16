@@ -57,22 +57,27 @@ describe('social uploads are the signed-in account\'s own posts', () => {
       isOwnPublishedRecord('tiktok', { href: 'https://www.tiktok.com/@other/video/7312345678901234567', title: 'Clip' }, { sourceUrl: 'https://www.tiktok.com/@jane' }),
       false,
     );
-    assert.equal(isOwnPublishedRecord('reddit', { title: 'My post' }, { sourceUrl: 'https://www.reddit.com/user/me/submitted/' }), true);
+    assert.equal(isOwnPublishedRecord('reddit', { title: 'My post', href: 'https://www.reddit.com/r/x/comments/abc123/my_post/' }, { sourceUrl: 'https://www.reddit.com/user/me/submitted/' }), true);
+    assert.equal(isOwnPublishedRecord('reddit', { title: 'My post' }, { sourceUrl: 'https://www.reddit.com/user/me/submitted/' }), false);
     assert.equal(isOwnPublishedRecord('reddit', { title: 'Front page' }, { sourceUrl: 'https://www.reddit.com/' }), false);
-    assert.equal(isOwnPublishedRecord('youtube', { title: 'Upload' }, { sourceUrl: 'https://www.youtube.com/@jane/videos' }), true);
+    assert.equal(isOwnPublishedRecord('youtube', { title: 'Upload', href: 'https://www.youtube.com/watch?v=abcdefghijk' }, { sourceUrl: 'https://www.youtube.com/@jane/videos' }), true);
+    assert.equal(isOwnPublishedRecord('youtube', { title: 'Upload' }, { sourceUrl: 'https://www.youtube.com/@jane/videos' }), false);
     assert.equal(isOwnPublishedRecord('youtube', { title: 'Home' }, { sourceUrl: 'https://www.youtube.com/feed/you' }), false);
-    assert.equal(isOwnPublishedRecord('linkedin', { title: 'Update' }, { sourceUrl: 'https://www.linkedin.com/in/me/' }), true);
-    assert.equal(isOwnPublishedRecord('pinterest', { title: 'Pin' }, { sourceUrl: 'https://www.pinterest.com/_created/' }), true);
+    assert.equal(isOwnPublishedRecord('linkedin', { title: 'Update', href: 'https://www.linkedin.com/posts/me_activity-1234567890' }, { sourceUrl: 'https://www.linkedin.com/in/me/' }), true);
+    assert.equal(isOwnPublishedRecord('linkedin', { title: 'Update' }, { sourceUrl: 'https://www.linkedin.com/in/me/' }), false);
+    assert.equal(isOwnPublishedRecord('pinterest', { title: 'Pin', href: 'https://www.pinterest.com/pin/1234567890/' }, { sourceUrl: 'https://www.pinterest.com/_created/' }), true);
+    assert.equal(isOwnPublishedRecord('pinterest', { title: 'Pin' }, { sourceUrl: 'https://www.pinterest.com/_created/' }), false);
     assert.equal(isOwnPublishedRecord('facebook', { href: 'https://facebook.com/jane.doe/posts/pfbid0SaturdayMarket', title: 'Market' }, { sourceUrl: 'https://www.facebook.com/me' }), true);
     assert.equal(isOwnPublishedRecord('facebook', { href: 'https://facebook.com/other/posts/pfbid0SaturdayMarket', title: 'Market' }, { sourceUrl: 'https://www.facebook.com/jane.doe' }), false);
     assert.equal(isOwnPublishedRecord('threads', { href: 'https://www.threads.net/@jane/post/DAbc123x', title: 'Note' }, { sourceUrl: 'https://www.threads.net/@jane' }), true);
     assert.equal(isOwnPublishedRecord('threads', { href: 'https://www.threads.net/@jane/post/DAbc123x', title: 'Note' }, { sourceUrl: 'https://www.threads.net/' }), false);
-    assert.equal(isOwnPublishedRecord('twitch', { title: 'VOD' }, { sourceUrl: 'https://www.twitch.tv/jane/videos' }), true);
+    assert.equal(isOwnPublishedRecord('twitch', { title: 'VOD', href: 'https://www.twitch.tv/videos/1234567890' }, { sourceUrl: 'https://www.twitch.tv/jane/videos' }), true);
+    assert.equal(isOwnPublishedRecord('twitch', { title: 'VOD' }, { sourceUrl: 'https://www.twitch.tv/jane/videos' }), false);
     assert.equal(isOwnPublishedRecord('twitch', { title: 'Browse' }, { sourceUrl: 'https://www.twitch.tv/' }), false);
   });
 
   it('leaves shop and travel records alone', () => {
-    const order = social('shein', { orderId: 'SO-1', title: 'Linen shirt' }, 'https://m.shein.com/user/orders');
+    const order = social('shein', { orderId: 'SO-100001', title: 'Linen shirt' }, 'https://m.shein.com/user/orders');
     order.type = 'order';
     assert.equal(isOwnPublishedRecord('shein', order.payload, order.metadata), true);
     assert.deepEqual(validateDataItem(order).errors, []);

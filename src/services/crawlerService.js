@@ -30,6 +30,8 @@ const { POINT_SOURCE_SUMMER_TRAVEL_BONUS } = require('../constants/referralCampa
 const { countStayBonusItems } = require('../utils/summerTravelEligibility');
 const { resolveStayBonusRules } = require('../utils/stayBonus');
 const { awardConnectBoosts } = require('./campaignEffects');
+const { isOwnAccountRecord } = require('../utils/ownOrderRecord');
+const { reviewAccountRecords } = require('./orderQualityGemini');
 const logger = createLogger('crawlerService');
 
 // Data validation schema for different data types
@@ -378,6 +380,12 @@ function validateDataItem(item) {
     errors.push(CRAWLER_MESSAGES.SOCIAL_NOT_OWN_POST);
   }
 
+  // Shop, travel, and life points are for this account's own records.
+  // A priced product card from a public page is not one of those records.
+  if (!isOwnAccountRecord(item)) {
+    errors.push(CRAWLER_MESSAGES.OWN_RECORD_REQUIRED);
+  }
+
   // Luma-specific validation
   if (item.source === 'luma') {
     if (!payload.eventId && !payload.taskId && !payload.id) {
@@ -514,6 +522,19 @@ async function uploadCrawlerData(data, userId) {
       
       preValidatedItems.push(item);
     }
+
+    const review = await reviewAccountRecords(preValidatedItems);
+    for (const row of review.rejected) {
+      validationErrors.push({
+        index: row.item.originalIndex,
+        reason: 'not_own_record',
+        reasonText: row.reason || CRAWLER_MESSAGES.OWN_RECORD_REQUIRED,
+        errors: [CRAWLER_MESSAGES.OWN_RECORD_REQUIRED],
+        warnings: [],
+      });
+    }
+    preValidatedItems.length = 0;
+    preValidatedItems.push(...review.accepted);
     
     if (preValidatedItems.length === 0) {
       return {

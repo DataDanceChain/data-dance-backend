@@ -67,6 +67,10 @@ mount('post', '/campaigns/:id/applications/:appId', opsCampaigns.resolveApplicat
 mount('get', '/campaigns/:id/raffle', opsCampaigns.raffleState);
 mount('post', '/campaigns/:id/raffle/draw', opsCampaigns.drawRaffle);
 mount('post', '/campaigns/:id/raffle/wins/:winId/fulfill', opsCampaigns.fulfillRaffleWin);
+mount('get', '/campaigns/:id/wheel', opsCampaigns.wheelState);
+mount('post', '/campaigns/:id/wheel/spins/:spinId/fulfill', opsCampaigns.fulfillWheelSpin);
+mount('get', '/campaigns/:id/calendar', opsCampaigns.calendarState);
+mount('post', '/campaigns/:id/calendar/opens/:openId/fulfill', opsCampaigns.fulfillCalendarOpen);
 mount('get', '/demands', opsDemands.list);
 mount('get', '/demands/:id', opsDemands.get);
 mount('post', '/demands/:id/quote', opsDemands.quote);

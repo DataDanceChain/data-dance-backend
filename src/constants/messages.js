@@ -10,6 +10,7 @@ const CRAWLER_MESSAGES = {
   SHOP_IDENTITY_REQUIRED: 'Shop records need an order id or a title',
   CONNECT_IDENTITY_REQUIRED: 'Connect records need an order id or a title',
   SOCIAL_NOT_OWN_POST: 'Social records must be posts published by the signed-in account',
+  OWN_RECORD_REQUIRED: 'Only the signed-in account\'s own orders, trips, or bookings are counted',
   
   // Suggestions
   SUGGEST_TITLE: 'Product title is recommended',

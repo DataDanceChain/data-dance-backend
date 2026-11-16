@@ -6,6 +6,8 @@ const {
   listActiveRows,
   upsertRaffleTickets,
 } = require('../services/campaignEffects');
+const { wheelState, spinWheel, claimSpin } = require('../services/wheelService');
+const { calendarState, openDay, claimGift } = require('../services/calendarService');
 
 function fail(res, status, message) {
   return res.status(status).json({ status: 'fail', message });
@@ -103,6 +105,60 @@ exports.getRaffle = async (req, res) => {
   } catch (error) {
     console.error('Raffle get error:', error);
     return res.status(500).json({ status: 'error', message: 'Server error' });
+  }
+};
+
+function wheelError(res, error) {
+  if (error.status) return fail(res, error.status, error.message);
+  console.error('Wheel error:', error);
+  return res.status(500).json({ status: 'error', message: 'Server error' });
+}
+
+exports.getWheel = async (req, res) => {
+  try {
+    return res.json({ status: 'success', data: await wheelState(req.user.id) });
+  } catch (error) {
+    return wheelError(res, error);
+  }
+};
+
+exports.spinWheel = async (req, res) => {
+  try {
+    return res.json({ status: 'success', data: await spinWheel(req.user.id) });
+  } catch (error) {
+    return wheelError(res, error);
+  }
+};
+
+exports.claimWheel = async (req, res) => {
+  try {
+    return res.json({ status: 'success', data: await claimSpin(req.user.id, req.params.spinId, req.body || {}) });
+  } catch (error) {
+    return wheelError(res, error);
+  }
+};
+
+exports.getCalendar = async (req, res) => {
+  try {
+    return res.json({ status: 'success', data: await calendarState(req.user.id) });
+  } catch (error) {
+    return wheelError(res, error);
+  }
+};
+
+exports.openCalendarDay = async (req, res) => {
+  try {
+    return res.json({ status: 'success', data: await openDay(req.user.id, req.params.day) });
+  } catch (error) {
+    return wheelError(res, error);
+  }
+};
+
+exports.claimCalendarGift = async (req, res) => {
+  try {
+    return res.json({ status: 'success', data: await claimGift(req.user.id, req.params.openId, req.body || {}) });
+  } catch (error) {
+    return wheelError(res, error);
   }
 };
 

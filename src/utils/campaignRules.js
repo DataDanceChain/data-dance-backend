@@ -8,6 +8,7 @@ const {
   normalizeCrawlerSource,
 } = require('../constants/crawlerSources');
 const { buildCampaignI18n, firstFilled, SIMPLIFIED } = require('./campaignI18n');
+const { CALENDAR_SITES, CHRISTMAS_DAYS } = require('./calendarRules');
 const { readPartnerConfig, isRetiredPartnerClientId } = require('../constants/partnerClient');
 
 const TEMPLATES = new Set([
@@ -22,6 +23,8 @@ const TEMPLATES = new Set([
   'APPLY_COHORT',
   'RAFFLE',
   'STAY_BONUS',
+  'WHEEL',
+  'CALENDAR',
 ]);
 const EXCLUSIVE_TEMPLATES = new Set([
   'REFERRAL_BOOST',
@@ -30,6 +33,8 @@ const EXCLUSIVE_TEMPLATES = new Set([
   'APPLY_COHORT',
   'RAFFLE',
   'STAY_BONUS',
+  'WHEEL',
+  'CALENDAR',
 ]);
 const STAY_SITES = new Set(['airbnb', 'booking', ...TRAVEL_SOURCES]);
 const STATUSES = new Set(['DRAFT', 'SCHEDULED', 'LIVE', 'ENDED']);
@@ -44,6 +49,8 @@ const ROUTES = new Set([
   '/user/life-capsule',
   '/user/apply',
   '/user/raffle',
+  '/user/wheel',
+  '/user/calendar',
   '/user/tourism-map',
 ]);
 const CONNECT_SITES = new Set(
@@ -55,6 +62,8 @@ const POINT_SOURCE_CONNECT_BOOST = 'CAMPAIGN_CONNECT_BOOST';
 const POINT_SOURCE_REFERRAL_BOOST = 'CAMPAIGN_REFERRAL_BOOST';
 const POINT_SOURCE_FIRST_ACTION = 'CAMPAIGN_FIRST_ACTION';
 const POINT_SOURCE_RAFFLE = 'CAMPAIGN_RAFFLE';
+const POINT_SOURCE_WHEEL = 'CAMPAIGN_WHEEL';
+const POINT_SOURCE_CALENDAR = 'CAMPAIGN_CALENDAR';
 
 const SITE_GROUPS = [
   { id: 'core', label: 'Core', sites: CORE_SOURCES },
@@ -387,6 +396,129 @@ function parseStayBonusConfig(body) {
   };
 }
 
+function normalizeWheelSites(raw) {
+  if (!Array.isArray(raw)) return [];
+  return [...new Set(raw.map((site) => normalizeCrawlerSource(site)).filter((site) => CONNECT_SITES.has(site)))];
+}
+
+function normalizeWheelPrizes(raw) {
+  if (!Array.isArray(raw) || raw.length < 1 || raw.length > 12) return null;
+  const ids = new Set();
+  const prizes = [];
+  for (const row of raw) {
+    const id = stripText(row?.id, 40).toLowerCase();
+    if (!id || ids.has(id) || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(id)) return null;
+    ids.add(id);
+    const kind = String(row?.kind || '').trim();
+    if (!['POINTS', 'GIFT_CARD', 'USDT'].includes(kind)) return null;
+    const weight = asInt(row?.weight, 1, 100000);
+    if (weight == null) return null;
+    const unlimited = row?.quantity == null || row?.quantity === '';
+    const quantity = unlimited ? null : asInt(row.quantity, 1, 100000);
+    if (!unlimited && quantity == null) return null;
+    if (kind === 'POINTS' && quantity != null) return null;
+    if (kind !== 'POINTS' && quantity == null) return null;
+    const points = kind === 'POINTS' ? asInt(row?.points, 1, 10000) : 0;
+    if (kind === 'POINTS' && points == null) return null;
+    const labelEn = stripText(row?.labelEn, 80);
+    const labelZh = stripText(row?.labelZh, 80);
+    if (!labelEn && !labelZh) return null;
+    prizes.push({
+      id,
+      kind,
+      weight,
+      quantity,
+      points: points || 0,
+      labelEn: labelEn || labelZh,
+      labelZh: labelZh || labelEn,
+      labelJa: stripText(row?.labelJa, 80) || '',
+      labelZhTw: stripText(row?.labelZhTw, 80) || '',
+      labelKo: stripText(row?.labelKo, 80) || '',
+    });
+  }
+  return prizes;
+}
+
+function parseWheelConfig(body) {
+  const prizes = normalizeWheelPrizes(body.prizes ?? body.config?.prizes);
+  if (!prizes) return { error: 'Add 1–12 wheel prizes with an id, kind, weight, and a label' };
+  const playEndsAt = parseDate(body.playEndsAt ?? body.config?.playEndsAt);
+  if (!playEndsAt) return { error: 'Wheel play end time is required' };
+  const endsAt = parseDate(body.endsAt);
+  if (endsAt && playEndsAt > endsAt) return { error: 'Wheel play must end before the claim deadline' };
+  const shopPer = asInt(body.shopPer ?? body.config?.shopPer ?? 5, 1, 100);
+  const socialPer = asInt(body.socialPer ?? body.config?.socialPer ?? 10, 1, 100);
+  const socialMaxDraws = asInt(body.socialMaxDraws ?? body.config?.socialMaxDraws ?? 5, 1, 50);
+  if (shopPer == null || socialPer == null || socialMaxDraws == null) {
+    return { error: 'Wheel task sizes are invalid' };
+  }
+  const shopSites = normalizeWheelSites(body.shopSites ?? body.config?.shopSites);
+  const socialSites = normalizeWheelSites(body.socialSites ?? body.config?.socialSites);
+  if (shopSites.length === 0 || socialSites.length === 0) {
+    return { error: 'Wheel tasks need shop and social sites' };
+  }
+  return {
+    ctaKind: 'ROUTE',
+    ctaValue: '/user/wheel',
+    coverImageUrl: null,
+    config: {
+      playEndsAt: playEndsAt.toISOString(),
+      shopPer,
+      socialPer,
+      socialMaxDraws,
+      shopSites,
+      socialSites,
+      prizes,
+      testBonusDraws: body.testBonusDraws && typeof body.testBonusDraws === 'object' ? body.testBonusDraws : (body.config?.testBonusDraws && typeof body.config.testBonusDraws === 'object' ? body.config.testBonusDraws : {}),
+    },
+  };
+}
+
+function parseCalendarConfig(body) {
+  const playEndsAt = parseDate(body.playEndsAt ?? body.config?.playEndsAt);
+  if (!playEndsAt) return { error: 'Calendar play end time is required' };
+  const endsAt = parseDate(body.endsAt);
+  if (endsAt && playEndsAt > endsAt) return { error: 'Calendar play must end before the claim deadline' };
+  const rawDays = Array.isArray(body.days) ? body.days : (Array.isArray(body.config?.days) ? body.config.days : CHRISTMAS_DAYS);
+  if (rawDays.length !== 25) return { error: 'A calendar needs 25 days' };
+  const days = [];
+  for (let index = 0; index < rawDays.length; index += 1) {
+    const row = rawDays[index];
+    const day = index + 1;
+    if (Number(row?.day) !== day) return { error: 'Calendar days must be 1 through 25 in order' };
+    const kind = String(row?.kind || '').trim();
+    if (!['POINTS', 'DIGITAL', 'GIFT_CARD'].includes(kind)) return { error: 'Calendar gift kind is invalid' };
+    const points = kind === 'POINTS' ? asInt(row.points, 1, 1000) : 0;
+    if (kind === 'POINTS' && points == null) return { error: 'Calendar point gifts need a point amount' };
+    const labelEn = stripText(row?.labelEn, 80);
+    const labelZh = stripText(row?.labelZh, 80);
+    if (!labelEn || !labelZh) return { error: 'Each calendar day needs an English and Chinese label' };
+    days.push({
+      day,
+      kind,
+      points: points || 0,
+      asset: kind === 'DIGITAL' ? stripText(row?.asset, 120) : '',
+      labelEn,
+      labelZh,
+      labelZhTw: stripText(row?.labelZhTw, 80) || '',
+      labelJa: stripText(row?.labelJa, 80) || '',
+      labelKo: stripText(row?.labelKo, 80) || '',
+    });
+  }
+  const listed = normalizeWheelSites(body.sites ?? body.config?.sites)
+    .filter((site) => site !== 'generic' && !SOCIAL_SOURCES.includes(site));
+  return {
+    ctaKind: 'ROUTE',
+    ctaValue: '/user/calendar',
+    coverImageUrl: null,
+    config: {
+      playEndsAt: playEndsAt.toISOString(),
+      sites: listed.length ? listed : CALENDAR_SITES,
+      days,
+    },
+  };
+}
+
 function parseRaffleConfig(body) {
   const baseTickets = asInt(body.baseTickets ?? body.config?.baseTickets ?? 1, 0, 3);
   if (baseTickets == null) return { error: 'Base tickets must be 0–3' };
@@ -413,6 +545,8 @@ function parseTemplateFields(template, body, options) {
   if (template === 'FIRST_ACTION_BONUS') return parseFirstActionConfig(body);
   if (template === 'APPLY_COHORT') return parseApplyConfig(body);
   if (template === 'RAFFLE') return parseRaffleConfig(body);
+  if (template === 'WHEEL') return parseWheelConfig(body);
+  if (template === 'CALENDAR') return parseCalendarConfig(body);
   if (template === 'STAY_BONUS') return parseStayBonusConfig(body);
   return { error: 'Unknown campaign template' };
 }
@@ -652,6 +786,25 @@ function toPublicCard(row) {
                       maxTickets: Number(config.maxTickets) || 0,
                       prizes: Array.isArray(config.prizes) ? config.prizes : [],
                     }
+                  : row.template === 'WHEEL'
+                    ? {
+                        playEndsAt: config.playEndsAt || null,
+                        shopPer: Number(config.shopPer) || 5,
+                        socialPer: Number(config.socialPer) || 10,
+                        socialMaxDraws: Number(config.socialMaxDraws) || 5,
+                        prizes: (Array.isArray(config.prizes) ? config.prizes : []).map((prize) => ({
+                          id: prize.id,
+                          kind: prize.kind,
+                          points: Number(prize.points) || 0,
+                          labelEn: prize.labelEn,
+                          labelZh: prize.labelZh,
+                          labelJa: prize.labelJa || '',
+                          labelZhTw: prize.labelZhTw || '',
+                          labelKo: prize.labelKo || '',
+                        })),
+                      }
+                  : row.template === 'CALENDAR'
+                    ? { playEndsAt: config.playEndsAt || null }
                   : row.template === 'STAY_BONUS'
                     ? {
                         sites: Array.isArray(config.sites) ? config.sites : [],
@@ -704,6 +857,8 @@ module.exports = {
   POINT_SOURCE_REFERRAL_BOOST,
   POINT_SOURCE_FIRST_ACTION,
   POINT_SOURCE_RAFFLE,
+  POINT_SOURCE_WHEEL,
+  POINT_SOURCE_CALENDAR,
   EXCLUSIVE_TEMPLATES,
   campaignSsoClientIds,
   ssoClientIdProblem,

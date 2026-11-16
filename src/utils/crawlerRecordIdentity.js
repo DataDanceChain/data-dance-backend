@@ -572,6 +572,7 @@ function isOwnPublishedRecord(source, payload, metadata = {}) {
   const page = pageLocation(asRecord(metadata).sourceUrl);
   const link = firstLinkLocation(payload);
   if (canonical === 'x') {
+    if (!link) return false;
     if (!page || (!hostIs(page.host, 'x.com') && !hostIs(page.host, 'twitter.com'))) return false;
     const profile = xProfile(page.parts);
     const author = link && (hostIs(link.host, 'x.com') || hostIs(link.host, 'twitter.com')) ? xAuthor(link.parts) : '';
@@ -581,18 +582,21 @@ function isOwnPublishedRecord(source, payload, metadata = {}) {
     return authoredByProfile(author, profile);
   }
   if (canonical === 'instagram') {
+    if (!link) return false;
     if (!page || !hostIs(page.host, 'instagram.com')) return false;
     const profile = igProfile(page.parts);
     const author = link && hostIs(link.host, 'instagram.com') ? igAuthor(link.parts) : '';
     return authoredByProfile(author, profile);
   }
   if (canonical === 'threads') {
+    if (!link) return false;
     if (!page || (!hostIs(page.host, 'threads.net') && !hostIs(page.host, 'threads.com'))) return false;
     const profile = threadsProfile(page.parts);
     const author = link && (hostIs(link.host, 'threads.net') || hostIs(link.host, 'threads.com')) ? threadsAuthor(link.parts) : '';
     return authoredByProfile(author, profile);
   }
   if (canonical === 'tiktok') {
+    if (!link) return false;
     if (!page || !hostIs(page.host, 'tiktok.com')) return false;
     const profile = tiktokProfile(page.parts);
     const author = link && hostIs(link.host, 'tiktok.com') ? tiktokAuthor(link.parts) : '';
@@ -602,19 +606,55 @@ function isOwnPublishedRecord(source, payload, metadata = {}) {
     const profile = facebookProfile(page);
     if (!profile) return false;
     const owner = facebookPostOwner(payload);
-    if (owner) {
-      if (owner.name && profile.kind === 'vanity') return owner.name === profile.name;
-      if (owner.id && profile.id) return owner.id === profile.id;
-      return profile.kind === 'self';
-    }
-    if (ownerlessFacebookFeed(link)) return false;
-    return true;
+    if (!owner) return false;
+    if (owner.name && profile.kind === 'vanity') return owner.name === profile.name;
+    if (owner.id && profile.id) return owner.id === profile.id;
+    return profile.kind === 'self';
   }
-  if (canonical === 'reddit') return Boolean(page && hostIs(page.host, 'reddit.com') && redditOwnPage(page.parts));
-  if (canonical === 'youtube') return youtubeOwnPage(page);
-  if (canonical === 'linkedin') return Boolean(page && hostIs(page.host, 'linkedin.com') && linkedinOwnPage(page.parts));
-  if (canonical === 'pinterest') return Boolean(page && hostIs(page.host, 'pinterest.com') && pinterestOwnPage(page.parts));
-  if (canonical === 'twitch') return Boolean(page && hostIs(page.host, 'twitch.tv') && twitchOwnPage(page.parts));
+  if (canonical === 'reddit') {
+    return Boolean(
+      page &&
+        hostIs(page.host, 'reddit.com') &&
+        redditOwnPage(page.parts) &&
+        link &&
+        hostIs(link.host, 'reddit.com') &&
+        link.parts.map((part) => part.toLowerCase()).includes('comments'),
+    );
+  }
+  if (canonical === 'youtube') {
+    const video = Boolean(link && /watch|shorts|live/.test(`${link.url.href} ${link.parts.join('/')}`));
+    return youtubeOwnPage(page) && video;
+  }
+  if (canonical === 'linkedin') {
+    return Boolean(
+      page &&
+        hostIs(page.host, 'linkedin.com') &&
+        linkedinOwnPage(page.parts) &&
+        link &&
+        hostIs(link.host, 'linkedin.com') &&
+        /\/posts\/|feed\/update|activity-/.test(link.url.href),
+    );
+  }
+  if (canonical === 'pinterest') {
+    return Boolean(
+      page &&
+        hostIs(page.host, 'pinterest.com') &&
+        pinterestOwnPage(page.parts) &&
+        link &&
+        hostIs(link.host, 'pinterest.com') &&
+        link.parts.map((part) => part.toLowerCase()).includes('pin'),
+    );
+  }
+  if (canonical === 'twitch') {
+    return Boolean(
+      page &&
+        hostIs(page.host, 'twitch.tv') &&
+        twitchOwnPage(page.parts) &&
+        link &&
+        hostIs(link.host, 'twitch.tv') &&
+        /\d{6,}/.test(link.url.href),
+    );
+  }
   return false;
 }
 

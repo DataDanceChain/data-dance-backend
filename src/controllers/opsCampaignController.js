@@ -9,6 +9,8 @@ const {
   toPublicCard,
 } = require('../utils/campaignRules');
 const { drawRaffle } = require('../services/campaignEffects');
+const { opsWheelState, fulfillSpin } = require('../services/wheelService');
+const { opsCalendarState, fulfillOpen } = require('../services/calendarService');
 const { listFirstPartyClientIds } = require('../services/ssoDeveloperClient');
 const { translateCampaignCopy } = require('../services/campaignTranslate');
 
@@ -124,14 +126,14 @@ exports.update = async (req, res) => {
       return res.json({ status: 'success', data: serialize(row) });
     }
     const parsed = parseDraft(
-      {
+      withStoredCampaign(existing, {
         ...(req.body || {}),
         i18n: req.body?.i18n || req.body?.config?.i18n || existing.config?.i18n,
         // The admin form has no SSO field, so a save that omits it keeps the stored id instead of
         // silently dropping the SSO hand-off; an explicit "" still clears it.
         ssoClientId:
           req.body?.ssoClientId ?? req.body?.config?.ssoClientId ?? existing.config?.ssoClientId,
-      },
+      }),
       await draftOptions(),
     );
     if (parsed.error) return fail(res, 400, parsed.error);
@@ -178,7 +180,7 @@ exports.transition = async (req, res) => {
       if (existing.status !== 'DRAFT' && existing.status !== 'SCHEDULED') {
         return fail(res, 409, 'Only drafts can be scheduled');
       }
-      const parsed = parseDraft({ ...existing, ...req.body, slug: existing.slug }, await draftOptions());
+      const parsed = parseDraft(withStoredCampaign(existing, { ...existing, ...req.body, slug: existing.slug }), await draftOptions());
       if (parsed.error) return fail(res, 400, parsed.error);
       const publishError = assertPublishable(parsed.data);
       if (publishError) return fail(res, 400, publishError);
@@ -195,7 +197,7 @@ exports.transition = async (req, res) => {
       if (existing.status !== 'DRAFT' && existing.status !== 'SCHEDULED') {
         return fail(res, 409, 'Only drafts or scheduled campaigns can go live');
       }
-      const parsed = parseDraft({ ...existing, ...req.body, slug: existing.slug }, await draftOptions());
+      const parsed = parseDraft(withStoredCampaign(existing, { ...existing, ...req.body, slug: existing.slug }), await draftOptions());
       if (parsed.error) return fail(res, 400, parsed.error);
       const publishError = assertPublishable(parsed.data);
       if (publishError) return fail(res, 400, publishError);
@@ -301,6 +303,32 @@ exports.resolveApplication = async (req, res) => {
   }
 };
 
+/** A wheel's prize pool and task sizes stay on the row. Copy and dates can still be edited. */
+function withStoredWheel(existing, body) {
+  const next = { ...(body || {}) };
+  if (existing?.template !== 'WHEEL') return next;
+  const stored = existing.config && typeof existing.config === 'object' ? existing.config : {};
+  next.prizes = stored.prizes;
+  next.playEndsAt = stored.playEndsAt;
+  next.shopPer = stored.shopPer;
+  next.socialPer = stored.socialPer;
+  next.socialMaxDraws = stored.socialMaxDraws;
+  next.shopSites = stored.shopSites;
+  next.socialSites = stored.socialSites;
+  next.testBonusDraws = stored.testBonusDraws || {};
+  return next;
+}
+
+function withStoredCampaign(existing, body) {
+  const next = withStoredWheel(existing, body);
+  if (existing?.template !== 'CALENDAR') return next;
+  const stored = existing.config && typeof existing.config === 'object' ? existing.config : {};
+  next.days = stored.days;
+  next.playEndsAt = stored.playEndsAt;
+  next.sites = stored.sites;
+  return next;
+}
+
 function stripNote(value) {
   return String(value || '')
     .replace(/\s+/g, ' ')
@@ -350,6 +378,60 @@ exports.drawRaffle = async (req, res) => {
     return res.json({ status: 'success', data: { created: result.created } });
   } catch (error) {
     console.error('Ops raffle draw error:', error);
+    return res.status(500).json({ status: 'error', message: 'Server error' });
+  }
+};
+
+exports.wheelState = async (req, res) => {
+  try {
+    const campaign = await prisma.campaign.findUnique({ where: { id: req.params.id } });
+    if (!campaign) return fail(res, 404, 'Campaign not found');
+    if (campaign.template !== 'WHEEL') return fail(res, 400, 'Not a wheel');
+    return res.json({ status: 'success', data: await opsWheelState(campaign) });
+  } catch (error) {
+    console.error('Ops wheel state error:', error);
+    return res.status(500).json({ status: 'error', message: 'Server error' });
+  }
+};
+
+exports.fulfillWheelSpin = async (req, res) => {
+  try {
+    const campaign = await prisma.campaign.findUnique({ where: { id: req.params.id } });
+    if (!campaign) return fail(res, 404, 'Campaign not found');
+    if (campaign.template !== 'WHEEL') return fail(res, 400, 'Not a wheel');
+    const row = await fulfillSpin(campaign, req.params.spinId);
+    await writeEvent(campaign.id, actorOf(req), 'wheel_fulfill', campaign.status, campaign.status, row.user?.email || row.userId);
+    return res.json({ status: 'success', data: row });
+  } catch (error) {
+    if (error.status) return fail(res, error.status, error.message);
+    console.error('Ops wheel fulfill error:', error);
+    return res.status(500).json({ status: 'error', message: 'Server error' });
+  }
+};
+
+exports.calendarState = async (req, res) => {
+  try {
+    const campaign = await prisma.campaign.findUnique({ where: { id: req.params.id } });
+    if (!campaign) return fail(res, 404, 'Campaign not found');
+    if (campaign.template !== 'CALENDAR') return fail(res, 400, 'Not a calendar');
+    return res.json({ status: 'success', data: await opsCalendarState(campaign) });
+  } catch (error) {
+    console.error('Ops calendar state error:', error);
+    return res.status(500).json({ status: 'error', message: 'Server error' });
+  }
+};
+
+exports.fulfillCalendarOpen = async (req, res) => {
+  try {
+    const campaign = await prisma.campaign.findUnique({ where: { id: req.params.id } });
+    if (!campaign) return fail(res, 404, 'Campaign not found');
+    if (campaign.template !== 'CALENDAR') return fail(res, 400, 'Not a calendar');
+    const row = await fulfillOpen(campaign, req.params.openId);
+    await writeEvent(campaign.id, actorOf(req), 'calendar_fulfill', campaign.status, campaign.status, row.user?.email || row.userId);
+    return res.json({ status: 'success', data: row });
+  } catch (error) {
+    if (error.status) return fail(res, error.status, error.message);
+    console.error('Ops calendar fulfill error:', error);
     return res.status(500).json({ status: 'error', message: 'Server error' });
   }
 };
