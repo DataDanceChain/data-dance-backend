@@ -6,8 +6,11 @@ const {
   PRIZE_FACE_VALUE,
   availablePrizes,
   drawsFromCounts,
+  otherRecordSites,
   pickWeighted,
+  prizesForSpin,
 } = require('../../src/utils/wheelRules');
+const { ACCEPTED_SOURCES, SHOP_SOURCES } = require('../../src/constants/crawlerSources');
 
 function wheelBody(overrides = {}) {
   return {
@@ -39,9 +42,12 @@ test('thanksgiving prize weights sum to 100% and the finite prizes are $500', ()
   }, 0);
   assert.equal(face, 500);
   assert.equal(THANKSGIVING_PRIZES.filter((prize) => prize.kind === 'POINTS').length, 1);
+  assert.equal(THANKSGIVING_PRIZES.find((prize) => prize.id === 'points-5').weight, 8500);
+  assert.equal(THANKSGIVING_PRIZES.find((prize) => prize.id === 'usdt-50').weight, 30);
+  assert.equal(THANKSGIVING_PRIZES.find((prize) => prize.id === 'amazon-5').weight, 565);
 });
 
-test('draws come from shop orders, capped social posts, and one portrait', () => {
+test('draws come from shop orders, capped non-shopping records, and one portrait', () => {
   assert.deepEqual(drawsFromCounts({ shopCount: 4, socialCount: 9, portrait: false }), {
     shopDraws: 0,
     socialDraws: 0,
@@ -50,6 +56,17 @@ test('draws come from shop orders, capped social posts, and one portrait', () =>
   });
   assert.equal(drawsFromCounts({ shopCount: 12, socialCount: 50, portrait: true }).earned, 2 + 5 + 1);
   assert.equal(drawsFromCounts({ shopCount: 0, socialCount: 1000, portrait: false }).socialDraws, 5);
+  const shopSites = [...SHOP_SOURCES.filter((site) => site !== 'generic'), 'amazon'];
+  const others = otherRecordSites(ACCEPTED_SOURCES, shopSites);
+  assert.equal(others.includes('x'), true);
+  assert.equal(others.includes('airbnb'), true);
+  assert.equal(others.includes('uber'), true);
+  assert.equal(others.includes('expedia'), true);
+  assert.equal(others.includes('luma'), true);
+  assert.equal(others.includes('amazon'), false);
+  assert.equal(others.includes('shein'), false);
+  assert.equal(others.includes('discord'), false);
+  assert.equal(others.includes('generic'), false);
 });
 
 test('a gift or USDT already won, or an empty stock line, leaves only points', () => {
@@ -60,6 +77,27 @@ test('a gift or USDT already won, or an empty stock line, leaves only points', (
   assert.equal(open.includes('amazon-50'), true);
   const blocked = availablePrizes(THANKSGIVING_PRIZES, new Map(), true);
   assert.deepEqual(blocked.map((prize) => prize.kind), ['POINTS']);
+});
+
+test('the 7th draw awards a gift card or USDT when the person has not won one', () => {
+  const early = prizesForSpin(THANKSGIVING_PRIZES, new Map(), false, 6);
+  assert.equal(early.some((prize) => prize.kind === 'POINTS'), true);
+  const pity = prizesForSpin(THANKSGIVING_PRIZES, new Map(), false, 7);
+  assert.equal(pity.every((prize) => prize.kind !== 'POINTS'), true);
+  assert.equal(pity.length, 6);
+  const later = prizesForSpin(THANKSGIVING_PRIZES, new Map(), false, 12);
+  assert.equal(later.every((prize) => prize.kind !== 'POINTS'), true);
+  const already = prizesForSpin(THANKSGIVING_PRIZES, new Map(), true, 7);
+  assert.deepEqual(already.map((prize) => prize.kind), ['POINTS']);
+  const soldOut = prizesForSpin(THANKSGIVING_PRIZES, new Map([
+    ['amazon-50', 1],
+    ['apple-50', 1],
+    ['usdt-50', 1],
+    ['apple-15', 10],
+    ['amazon-5', 20],
+    ['usdt-5', 20],
+  ]), false, 7);
+  assert.deepEqual(soldOut.map((prize) => prize.kind), ['POINTS']);
 });
 
 test('the picker stays inside the prizes that are still available', () => {

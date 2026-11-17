@@ -3,10 +3,9 @@ const {
   CORE_SOURCES,
   ACCEPTED_SOURCES,
   SHOP_SOURCES,
-  SOCIAL_SOURCES,
 } = require('../src/constants/crawlerSources');
 const { parseDraft, assertPublishable } = require('../src/utils/campaignRules');
-const { THANKSGIVING_PRIZES } = require('../src/utils/wheelRules');
+const { THANKSGIVING_PRIZES, otherRecordSites } = require('../src/utils/wheelRules');
 
 const prisma = new PrismaClient();
 
@@ -23,7 +22,7 @@ const XMAS_START = '2026-12-01T00:00:00.000Z';
 const XMAS_PLAY_END = '2026-12-25T23:59:59.000Z';
 const XMAS_CLAIM_END = '2026-12-26T23:59:59.000Z';
 const TG_SHOP_SITES = [...SHOP_SOURCES.filter((site) => site !== 'generic'), 'amazon'];
-const TG_SOCIAL_SITES = SOCIAL_SOURCES.filter((site) => site !== 'discord');
+const TG_SOCIAL_SITES = otherRecordSites(ACCEPTED_SOURCES, TG_SHOP_SITES);
 const LEGAL_TG =
   'Play runs 26–30 November 2026 (UTC). Qualifying shopping uploads earn 2× points during play. Each person can win one gift card or USDT. Points are added to My Points when the wheel stops. Gift cards and USDT must be claimed by 1 December 2026, 23:59 UTC, or they are forfeited. Gift cards are US-region and cannot be exchanged. DataDance may withhold a prize for fraud, duplicate accounts, or manipulation, and sends claimed prizes within 7 business days after play ends.';
 const LEGAL_XMAS =

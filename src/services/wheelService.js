@@ -1,11 +1,11 @@
 const prisma = require('../utils/prisma');
-const { SHOP_SOURCES, SOCIAL_SOURCES } = require('../constants/crawlerSources');
+const { ACCEPTED_SOURCES, SHOP_SOURCES } = require('../constants/crawlerSources');
 const { isActiveNow, POINT_SOURCE_WHEEL, toPublicCard } = require('../utils/campaignRules');
-const { availablePrizes, drawsFromCounts, pickWeighted } = require('../utils/wheelRules');
+const { drawsFromCounts, otherRecordSites, pickWeighted, prizesForSpin } = require('../utils/wheelRules');
 const { grantPoints, listActiveRows } = require('./campaignEffects');
 
 const DEFAULT_SHOP_SITES = [...SHOP_SOURCES.filter((site) => site !== 'generic'), 'amazon'];
-const DEFAULT_SOCIAL_SITES = SOCIAL_SOURCES.filter((site) => site !== 'discord');
+const MAX_BATCH_SPINS = 200;
 
 function fail(status, message) {
   const error = new Error(message);
@@ -22,7 +22,7 @@ function wheelRules(campaign) {
     socialPer: Number(config.socialPer) || 10,
     socialMaxDraws: Number(config.socialMaxDraws) || 5,
     shopSites: Array.isArray(config.shopSites) && config.shopSites.length ? config.shopSites : DEFAULT_SHOP_SITES,
-    socialSites: Array.isArray(config.socialSites) && config.socialSites.length ? config.socialSites : DEFAULT_SOCIAL_SITES,
+    socialSites: otherRecordSites(ACCEPTED_SOURCES, Array.isArray(config.shopSites) && config.shopSites.length ? config.shopSites : DEFAULT_SHOP_SITES),
     prizes: Array.isArray(config.prizes) ? config.prizes : [],
     testBonusDraws: config.testBonusDraws && typeof config.testBonusDraws === 'object' ? config.testBonusDraws : {},
   };
@@ -31,7 +31,7 @@ function wheelRules(campaign) {
 function bonusDrawsFor(rules, userId) {
   const raw = Math.floor(Number(rules.testBonusDraws?.[userId]) || 0);
   if (!Number.isFinite(raw) || raw <= 0) return 0;
-  return Math.min(raw, 20);
+  return Math.min(raw, 80);
 }
 
 function claimEndsAt(campaign) {
@@ -157,17 +157,20 @@ async function wheelState(userId, now = new Date()) {
   };
 }
 
-async function spinWheel(userId, now = new Date()) {
+async function spinWheel(userId, now = new Date(), options = {}) {
   const campaign = await findWheel(now);
   if (!campaign) throw fail(404, 'No giveaway is open');
   if (!playing(campaign, now)) throw fail(409, 'The wheel is closed');
+  const all = options.all === true;
   return prisma.$transaction(async (tx) => {
     await tx.$executeRaw`SELECT 1 FROM "Campaign" WHERE id = ${campaign.id} FOR NO KEY UPDATE`;
     const fresh = await tx.campaign.findUnique({ where: { id: campaign.id } });
     if (!fresh || !isActiveNow(fresh, now) || !playing(fresh, now)) throw fail(409, 'The wheel is closed');
     const progress = await countProgress(tx, userId, fresh);
     const used = await tx.campaignSpin.count({ where: { campaignId: fresh.id, userId } });
-    if (used >= progress.earned) throw fail(409, 'No draws left');
+    const room = progress.earned - used;
+    if (room <= 0) throw fail(409, 'No draws left');
+    const times = all ? Math.min(room, MAX_BATCH_SPINS) : 1;
     const grouped = await tx.campaignSpin.groupBy({
       by: ['prizeId'],
       where: { campaignId: fresh.id },
@@ -177,29 +180,39 @@ async function spinWheel(userId, now = new Date()) {
       where: { campaignId: fresh.id, userId, prizeKind: { not: 'POINTS' } },
       select: { id: true },
     });
-    const candidates = availablePrizes(progress.rules.prizes, awardedMap(grouped), Boolean(priorGift));
-    const prize = pickWeighted(candidates);
-    if (!prize) throw fail(409, 'No prizes are left');
-    const spin = await tx.campaignSpin.create({
-      data: {
-        campaignId: fresh.id,
-        userId,
-        prizeId: prize.id,
-        prizeKind: prize.kind,
-        points: prize.kind === 'POINTS' ? prize.points : 0,
-        labelEn: prize.labelEn,
-        labelZh: prize.labelZh,
-        claimStatus: prize.kind === 'POINTS' ? 'none' : 'unclaimed',
-      },
-    });
-    if (prize.kind === 'POINTS') {
-      await grantPoints(tx, userId, prize.points, POINT_SOURCE_WHEEL, spin.id);
+    const awarded = awardedMap(grouped);
+    let blocked = Boolean(priorGift);
+    let usedNow = used;
+    const created = [];
+    for (let step = 0; step < times; step += 1) {
+      const candidates = prizesForSpin(progress.rules.prizes, awarded, blocked, usedNow + 1);
+      const prize = pickWeighted(candidates);
+      if (!prize) throw fail(409, 'No prizes are left');
+      const spin = await tx.campaignSpin.create({
+        data: {
+          campaignId: fresh.id,
+          userId,
+          prizeId: prize.id,
+          prizeKind: prize.kind,
+          points: prize.kind === 'POINTS' ? prize.points : 0,
+          labelEn: prize.labelEn,
+          labelZh: prize.labelZh,
+          claimStatus: prize.kind === 'POINTS' ? 'none' : 'unclaimed',
+        },
+      });
+      if (prize.kind === 'POINTS') {
+        await grantPoints(tx, userId, prize.points, POINT_SOURCE_WHEEL, spin.id);
+      } else {
+        blocked = true;
+      }
+      awarded.set(prize.id, (awarded.get(prize.id) || 0) + 1);
+      usedNow += 1;
+      created.push(presentClaim(spin, claimEndsAt(fresh), now));
     }
-    return {
-      spin: presentClaim(spin, claimEndsAt(fresh), now),
-      drawsLeft: progress.earned - used - 1,
-    };
-  }, { maxWait: 10000, timeout: 15000 });
+    const drawsLeft = progress.earned - usedNow;
+    if (!all) return { spin: created[0], drawsLeft };
+    return { spins: created, drawsLeft };
+  }, { maxWait: 10000, timeout: 20000 });
 }
 
 function cleanClaim(body) {

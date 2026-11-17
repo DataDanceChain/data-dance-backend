@@ -124,7 +124,7 @@ exports.getWheel = async (req, res) => {
 
 exports.spinWheel = async (req, res) => {
   try {
-    return res.json({ status: 'success', data: await spinWheel(req.user.id) });
+    return res.json({ status: 'success', data: await spinWheel(req.user.id, new Date(), { all: req.body?.all === true }) });
   } catch (error) {
     return wheelError(res, error);
   }
