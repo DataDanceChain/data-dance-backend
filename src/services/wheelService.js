@@ -3,9 +3,14 @@ const { ACCEPTED_SOURCES, SHOP_SOURCES } = require('../constants/crawlerSources'
 const { isActiveNow, POINT_SOURCE_WHEEL, toPublicCard } = require('../utils/campaignRules');
 const { drawsFromCounts, otherRecordSites, pickWeighted, prizesForSpin } = require('../utils/wheelRules');
 const { grantPoints, listActiveRows } = require('./campaignEffects');
-
 const DEFAULT_SHOP_SITES = [...SHOP_SOURCES.filter((site) => site !== 'generic'), 'amazon'];
 const MAX_BATCH_SPINS = 200;
+const SHARE_EVENT = 'wheel-x-share';
+const SHARE_MAX_DRAWS = 5;
+
+function startOfUtcDay(date) {
+  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
+}
 
 function fail(status, message) {
   const error = new Error(message);
@@ -21,6 +26,7 @@ function wheelRules(campaign) {
     shopPer: Number(config.shopPer) || 5,
     socialPer: Number(config.socialPer) || 10,
     socialMaxDraws: Number(config.socialMaxDraws) || 5,
+    shareMaxDraws: SHARE_MAX_DRAWS,
     shopSites: Array.isArray(config.shopSites) && config.shopSites.length ? config.shopSites : DEFAULT_SHOP_SITES,
     socialSites: otherRecordSites(ACCEPTED_SOURCES, Array.isArray(config.shopSites) && config.shopSites.length ? config.shopSites : DEFAULT_SHOP_SITES),
     prizes: Array.isArray(config.prizes) ? config.prizes : [],
@@ -47,30 +53,40 @@ async function findWheel(now = new Date()) {
   return rows.find((row) => isActiveNow(row, now)) || null;
 }
 
-async function countProgress(client, userId, campaign) {
+async function countProgress(client, userId, campaign, now = new Date()) {
   const rules = wheelRules(campaign);
   const db = client || prisma;
   const window = { gte: campaign.startsAt, lte: rules.playEndsAt };
-  const [shopCount, socialCount, settings] = await Promise.all([
+  const [shopCount, socialCount, settings, shareRows] = await Promise.all([
     db.crawlerData.count({ where: { userId, source: { in: rules.shopSites }, createdAt: window } }),
     db.crawlerData.count({ where: { userId, source: { in: rules.socialSites }, createdAt: window } }),
     db.lifeContextSettings.findUnique({ where: { userId }, select: { refinedAt: true } }),
+    db.userDailyEvent.findMany({
+      where: { userId, type: SHARE_EVENT, day: window },
+      select: { day: true },
+    }),
   ]);
   const refinedAt = settings?.refinedAt ? new Date(settings.refinedAt) : null;
   const portrait = Boolean(refinedAt && refinedAt >= new Date(campaign.startsAt) && refinedAt <= rules.playEndsAt);
+  const todayKey = startOfUtcDay(now).toISOString();
+  const shareDays = shareRows.length;
+  const sharedToday = shareRows.some((row) => startOfUtcDay(new Date(row.day)).toISOString() === todayKey);
   const draws = drawsFromCounts({
     shopCount,
     socialCount,
     portrait,
+    shareDays,
     shopPer: rules.shopPer,
     socialPer: rules.socialPer,
     socialMaxDraws: rules.socialMaxDraws,
+    shareMaxDraws: rules.shareMaxDraws,
   });
   const bonusDraws = bonusDrawsFor(rules, userId);
   return {
     shopCount,
     socialCount,
     portrait,
+    sharedToday,
     ...draws,
     bonusDraws,
     earned: draws.earned + bonusDraws,
@@ -121,7 +137,7 @@ async function wheelState(userId, now = new Date()) {
   }
   const endsAt = claimEndsAt(campaign);
   const [progress, used, grouped, spins] = await Promise.all([
-    countProgress(prisma, userId, campaign),
+    countProgress(prisma, userId, campaign, now),
     prisma.campaignSpin.count({ where: { campaignId: campaign.id, userId } }),
     prisma.campaignSpin.groupBy({
       by: ['prizeId'],
@@ -151,6 +167,9 @@ async function wheelState(userId, now = new Date()) {
       socialDraws: progress.socialDraws,
       socialMaxDraws: progress.rules.socialMaxDraws,
       portrait: progress.portrait,
+      shareDraws: progress.shareDraws,
+      shareMaxDraws: progress.rules.shareMaxDraws,
+      sharedToday: progress.sharedToday,
     },
     prizes: progress.rules.prizes.map((prize) => prizeView(prize, awarded)),
     spins: spins.map((spin) => presentClaim(spin, endsAt, now)),
@@ -166,7 +185,7 @@ async function spinWheel(userId, now = new Date(), options = {}) {
     await tx.$executeRaw`SELECT 1 FROM "Campaign" WHERE id = ${campaign.id} FOR NO KEY UPDATE`;
     const fresh = await tx.campaign.findUnique({ where: { id: campaign.id } });
     if (!fresh || !isActiveNow(fresh, now) || !playing(fresh, now)) throw fail(409, 'The wheel is closed');
-    const progress = await countProgress(tx, userId, fresh);
+    const progress = await countProgress(tx, userId, fresh, now);
     const used = await tx.campaignSpin.count({ where: { campaignId: fresh.id, userId } });
     const room = progress.earned - used;
     if (room <= 0) throw fail(409, 'No draws left');
@@ -290,10 +309,31 @@ async function fulfillSpin(campaign, spinId) {
   });
 }
 
+async function recordShare(userId, now = new Date()) {
+  const campaign = await findWheel(now);
+  if (!campaign) throw fail(404, 'No giveaway is open');
+  if (!playing(campaign, now)) throw fail(409, 'The wheel is closed');
+  const rules = wheelRules(campaign);
+  const day = startOfUtcDay(now);
+  if (day < startOfUtcDay(new Date(campaign.startsAt)) || day > rules.playEndsAt) {
+    throw fail(409, 'The wheel is closed');
+  }
+  const progress = await countProgress(prisma, userId, campaign, now);
+  if (!progress.sharedToday && progress.shareDraws < rules.shareMaxDraws) {
+    await prisma.userDailyEvent.upsert({
+      where: { userId_type_day: { userId, type: SHARE_EVENT, day } },
+      update: {},
+      create: { userId, type: SHARE_EVENT, day },
+    });
+  }
+  return wheelState(userId, now);
+}
+
 module.exports = {
   wheelState,
   spinWheel,
   claimSpin,
+  recordShare,
   opsWheelState,
   fulfillSpin,
   findWheel,

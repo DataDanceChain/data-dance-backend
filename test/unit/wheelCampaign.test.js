@@ -10,6 +10,7 @@ const {
   pickWeighted,
   prizesForSpin,
 } = require('../../src/utils/wheelRules');
+const { invitePostOnDay } = require('../../src/utils/xInvite');
 const { ACCEPTED_SOURCES, SHOP_SOURCES } = require('../../src/constants/crawlerSources');
 
 function wheelBody(overrides = {}) {
@@ -52,9 +53,13 @@ test('draws come from shop orders, capped non-shopping records, and one portrait
     shopDraws: 0,
     socialDraws: 0,
     portraitDraws: 0,
+    shareDraws: 0,
     earned: 0,
   });
   assert.equal(drawsFromCounts({ shopCount: 12, socialCount: 50, portrait: true }).earned, 2 + 5 + 1);
+  assert.equal(drawsFromCounts({ shareDays: 1 }).shareDraws, 1);
+  assert.equal(drawsFromCounts({ shareDays: 9 }).shareDraws, 5);
+  assert.equal(drawsFromCounts({ shopCount: 12, socialCount: 50, portrait: true, shareDays: 3 }).earned, 2 + 5 + 1 + 3);
   assert.equal(drawsFromCounts({ shopCount: 0, socialCount: 1000, portrait: false }).socialDraws, 5);
   const shopSites = [...SHOP_SOURCES.filter((site) => site !== 'generic'), 'amazon'];
   const others = otherRecordSites(ACCEPTED_SOURCES, shopSites);
@@ -69,6 +74,22 @@ test('draws come from shop orders, capped non-shopping records, and one portrait
   assert.equal(others.includes('generic'), false);
 });
 
+test('an invite counts only when the bound account posted the wheel link today', () => {
+  const now = new Date('2026-11-26T15:00:00.000Z');
+  const today = {
+    created_at: '2026-11-26T12:00:00.000Z',
+    text: 'Come join me https://t.co/abc',
+    entities: { urls: [{ expanded_url: 'https://app.datadance.ai/user/wheel' }] },
+  };
+  assert.equal(invitePostOnDay(today, now), true);
+  assert.equal(invitePostOnDay({ ...today, created_at: '2026-11-25T12:00:00.000Z' }, now), false);
+  assert.equal(invitePostOnDay({ created_at: today.created_at, text: 'hello' }, now), false);
+  assert.equal(invitePostOnDay({
+    created_at: today.created_at,
+    text: 'https://app.datadance.ai/user/wheel',
+  }, now), true);
+});
+
 test('a gift or USDT already won, or an empty stock line, leaves only points', () => {
   const awarded = new Map([['amazon-5', 20], ['usdt-50', 1]]);
   const open = availablePrizes(THANKSGIVING_PRIZES, awarded, false).map((prize) => prize.id);
@@ -79,15 +100,15 @@ test('a gift or USDT already won, or an empty stock line, leaves only points', (
   assert.deepEqual(blocked.map((prize) => prize.kind), ['POINTS']);
 });
 
-test('the 7th draw awards a gift card or USDT when the person has not won one', () => {
-  const early = prizesForSpin(THANKSGIVING_PRIZES, new Map(), false, 6);
+test('the 12th draw awards a gift card or USDT when the person has not won one', () => {
+  const early = prizesForSpin(THANKSGIVING_PRIZES, new Map(), false, 11);
   assert.equal(early.some((prize) => prize.kind === 'POINTS'), true);
-  const pity = prizesForSpin(THANKSGIVING_PRIZES, new Map(), false, 7);
+  const pity = prizesForSpin(THANKSGIVING_PRIZES, new Map(), false, 12);
   assert.equal(pity.every((prize) => prize.kind !== 'POINTS'), true);
   assert.equal(pity.length, 6);
-  const later = prizesForSpin(THANKSGIVING_PRIZES, new Map(), false, 12);
+  const later = prizesForSpin(THANKSGIVING_PRIZES, new Map(), false, 13);
   assert.equal(later.every((prize) => prize.kind !== 'POINTS'), true);
-  const already = prizesForSpin(THANKSGIVING_PRIZES, new Map(), true, 7);
+  const already = prizesForSpin(THANKSGIVING_PRIZES, new Map(), true, 12);
   assert.deepEqual(already.map((prize) => prize.kind), ['POINTS']);
   const soldOut = prizesForSpin(THANKSGIVING_PRIZES, new Map([
     ['amazon-50', 1],
@@ -96,7 +117,7 @@ test('the 7th draw awards a gift card or USDT when the person has not won one', 
     ['apple-15', 10],
     ['amazon-5', 20],
     ['usdt-5', 20],
-  ]), false, 7);
+  ]), false, 12);
   assert.deepEqual(soldOut.map((prize) => prize.kind), ['POINTS']);
 });
 

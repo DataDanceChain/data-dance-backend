@@ -6,7 +6,7 @@ const {
   listActiveRows,
   upsertRaffleTickets,
 } = require('../services/campaignEffects');
-const { wheelState, spinWheel, claimSpin } = require('../services/wheelService');
+const { wheelState, spinWheel, claimSpin, recordShare } = require('../services/wheelService');
 const { calendarState, openDay, claimGift } = require('../services/calendarService');
 
 function fail(res, status, message) {
@@ -125,6 +125,14 @@ exports.getWheel = async (req, res) => {
 exports.spinWheel = async (req, res) => {
   try {
     return res.json({ status: 'success', data: await spinWheel(req.user.id, new Date(), { all: req.body?.all === true }) });
+  } catch (error) {
+    return wheelError(res, error);
+  }
+};
+
+exports.shareWheel = async (req, res) => {
+  try {
+    return res.json({ status: 'success', data: await recordShare(req.user.id) });
   } catch (error) {
     return wheelError(res, error);
   }

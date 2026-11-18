@@ -1,5 +1,6 @@
 const xClient = require('../utils/xClient');
 const prisma = require('../utils/prisma');
+const { invitePostOnDay, INVITE_PATH } = require('../utils/xInvite');
 const { createLogger } = require('../utils/logger');
 const logger = createLogger('xService');
 const axios = require('axios');
@@ -133,6 +134,30 @@ async function verifyUserEngagement(userId, targetPostId) {
 }
 
 /**
+ * The bound X account posted today's public invite. Recent search only sees the last 7 days.
+ * Returns the matching tweet, or null when the account is bound and the post is not there yet.
+ */
+async function findTodayInvitePost(userId, now = new Date()) {
+  const user = await prisma.user.findUnique({ where: { id: userId }, select: { xid: true } });
+  if (!user?.xid) {
+    throw new Error('X account not bound');
+  }
+  const query = `from:${user.xid} url:"https://${INVITE_PATH}"`;
+  let result;
+  try {
+    result = await xClient.search(query, { 'tweet.fields': 'created_at,entities', fresh: true });
+  } catch (error) {
+    logger.error('Invite post search failed', { userId, error: error.message });
+    throw new Error('Could not check the X post');
+  }
+  if (!result) {
+    throw new Error('Could not check the X post');
+  }
+  const tweets = Array.isArray(result.data) ? result.data : [];
+  return tweets.find((tweet) => invitePostOnDay(tweet, now)) || null;
+}
+
+/**
  * Generate X OAuth2 authorization URL
  * @param {string} state - OAuth state (xBindFlow.createFlow)
  * @param {string} codeChallenge - PKCE code challenge
@@ -140,9 +165,12 @@ async function verifyUserEngagement(userId, targetPostId) {
  * @returns {string} The complete authorization URL
  */
 function generateAuthUrl(state, codeChallenge, redirectUri) {
-  const authUrl = new URL(`${process.env.X_API_URL}/oauth2/authorize`);
+  if (!process.env.X_CLIENT_ID) throw new Error('X client id is not configured');
+  // The consent screen is not on the API host. api.twitter.com/2/oauth2/authorize
+  // answers 215 Bad Authentication data because that host expects a bearer token.
+  const authUrl = new URL('https://twitter.com/i/oauth2/authorize');
   authUrl.searchParams.append('response_type', 'code');
-  authUrl.searchParams.append('client_id', process.env.X_CLIENT_ID);
+  authUrl.searchParams.append('client_id', process.env.X_CLIENT_ID || '');
   authUrl.searchParams.append('redirect_uri', redirectUri);
   authUrl.searchParams.append('scope', 'tweet.read users.read offline.access');
   authUrl.searchParams.append('state', state);
@@ -154,6 +182,7 @@ function generateAuthUrl(state, codeChallenge, redirectUri) {
 module.exports = {
   getPostDetails,
   verifyUserEngagement,
+  findTodayInvitePost,
   generateAuthUrl,
   // Exchange OAuth2 code for tokens
   exchangeCodeForToken,

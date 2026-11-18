@@ -3,7 +3,7 @@ const { randomInt } = require('crypto');
 const WHEEL_KINDS = new Set(['POINTS', 'GIFT_CARD', 'USDT']);
 
 /** The first draw at or after this number awards a gift card or USDT when the person has none yet. */
-const PITY_SPIN = 7;
+const PITY_SPIN = 12;
 
 /** Documented Thanksgiving × Black Friday pool. Weights are hundredths of a percent and sum to 10000. */
 const THANKSGIVING_PRIZES = [
@@ -33,15 +33,26 @@ function otherRecordSites(acceptedSources, shopSites) {
   return [...new Set(acceptedSources)].filter((site) => site && !shop.has(site));
 }
 
-function drawsFromCounts({ shopCount = 0, socialCount = 0, portrait = false, shopPer = 5, socialPer = 10, socialMaxDraws = 5 }) {
+function drawsFromCounts({
+  shopCount = 0,
+  socialCount = 0,
+  portrait = false,
+  shareDays = 0,
+  shopPer = 5,
+  socialPer = 10,
+  socialMaxDraws = 5,
+  shareMaxDraws = 5,
+}) {
   const shopDraws = Math.floor(Math.max(0, shopCount) / shopPer);
   const socialDraws = Math.min(socialMaxDraws, Math.floor(Math.max(0, socialCount) / socialPer));
   const portraitDraws = portrait ? 1 : 0;
+  const shareDraws = Math.min(shareMaxDraws, Math.floor(Math.max(0, shareDays)));
   return {
     shopDraws,
     socialDraws,
     portraitDraws,
-    earned: shopDraws + socialDraws + portraitDraws,
+    shareDraws,
+    earned: shopDraws + socialDraws + portraitDraws + shareDraws,
   };
 }
 
@@ -60,7 +71,7 @@ function availablePrizes(prizes, awardedById, blocked) {
 }
 
 /**
- * One pity draw. From the 7th spin onward, a person with no gift card or USDT yet
+ * One pity draw. From the 12th spin onward, a person with no gift card or USDT yet
  * draws only from those prizes. Someone who already won one stays on points.
  * If every finite prize is gone, the draw falls back to whatever is still open.
  */

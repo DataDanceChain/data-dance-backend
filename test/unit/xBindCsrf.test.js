@@ -167,7 +167,8 @@ beforeEach(() => {
 describe('normal flow still works', () => {
   it('start -> X -> callback -> complete binds the initiator, with PKCE S256', async () => {
     const flow = await start('victim');
-    assert.equal(flow.url.origin + flow.url.pathname, 'https://x.test.local/2/oauth2/authorize');
+    assert.equal(flow.url.origin + flow.url.pathname, 'https://twitter.com/i/oauth2/authorize');
+    assert.equal(flow.url.searchParams.get('client_id'), 'x-client-id');
     assert.equal(flow.url.searchParams.get('redirect_uri'), CALLBACK);
     assert.equal(flow.url.searchParams.get('code_challenge_method'), 'S256');
     assert.match(flow.state, /^[A-Za-z0-9_-]{43}$/);

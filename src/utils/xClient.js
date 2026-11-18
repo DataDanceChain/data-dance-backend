@@ -205,11 +205,14 @@ module.exports = {
     }
   },
   search: async (query, options = {}) => {
+    const { fresh, ...params } = options;
     const cacheKey = `quotes:${query}`;
-    const cached = await getCachedRecord(cacheKey);
-    if (cached) {
-      logger.info('Using cached quote search', { query, cached });
-      return cached;
+    if (!fresh) {
+      const cached = await getCachedRecord(cacheKey);
+      if (cached) {
+        logger.info('Using cached quote search', { query, cached });
+        return cached;
+      }
     }
     try {
       // Add max_results to ensure we get enough tweets to search through
@@ -217,12 +220,12 @@ module.exports = {
         params: { 
           query,
           max_results: 100, // Get maximum allowed tweets
-          ...options
+          ...params
         }
       });
       const result = response.data;
-      logger.info('Fresh quote search from API', { query, result });
-      await setCachedRecord(cacheKey, result);
+      logger.info('Fresh quote search from API', { query, resultCount: Array.isArray(result?.data) ? result.data.length : 0 });
+      if (!fresh) await setCachedRecord(cacheKey, result);
       return result;
     } catch (error) {
       const status = error.response?.status;
