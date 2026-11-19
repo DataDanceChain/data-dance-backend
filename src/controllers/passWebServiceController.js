@@ -3,41 +3,30 @@ const prisma = new PrismaClient();
 const apn = require('apn');
 const path = require('path');
 
-// 配置 APN
-const apnProvider = new apn.Provider({
-  token: {
-    key: path.join(__dirname, '../../keys_fixed/apn_key.p8'),
-    keyId: process.env.APNS_KEY_ID,
-    teamId: process.env.APNS_TEAM_ID
-  },
-  production: process.env.NODE_ENV === 'production',
-  // 添加更多的配置选项
-  debug: true,
-  connectionRetryLimit: 3,
-  gateway: process.env.NODE_ENV === 'production' 
-    ? 'api.push.apple.com'
-    : 'api.sandbox.push.apple.com'
-});
+const fs = require('node:fs');
+const signingKey = path.join(__dirname, '../../keys_fixed/apn_key.p8');
+let apnProvider;
 
-console.log(
-  '[APNs] 当前使用的服务器:',
-  process.env.NODE_ENV === 'production'
-    ? 'api.push.apple.com (Production)'
-    : 'api.sandbox.push.apple.com (Sandbox)'
-);
+function getApnProvider() {
+  if (apnProvider) return apnProvider;
 
-// 监听 APN Provider 的错误
-apnProvider.on('error', (error) => {
-  console.error('APN Provider Error:', error);
-});
-
-apnProvider.on('transmitted', (notification, device) => {
-  console.log('Notification transmitted to:', device);
-});
-
-apnProvider.on('completed', (notification) => {
-  console.log('Notification completed:', notification);
-});
+  const { APNS_KEY_ID: keyId, APNS_TEAM_ID: teamId, NODE_ENV, SSO_ENVIRONMENT } = process.env;
+  if (!keyId || !teamId || !fs.existsSync(signingKey)) {
+    throw new Error('APNs is not configured');
+  }
+  const production = NODE_ENV === 'production' && SSO_ENVIRONMENT !== 'test';
+  apnProvider = new apn.Provider({
+    token: { key: signingKey, keyId, teamId },
+    production,
+    debug: true,
+    connectionRetryLimit: 3,
+    gateway: production ? 'api.push.apple.com' : 'api.sandbox.push.apple.com',
+  });
+  apnProvider.on('error', error => console.error('APN Provider Error:', error));
+  apnProvider.on('transmitted', (_notification, device) => console.log('Notification transmitted to:', device));
+  apnProvider.on('completed', notification => console.log('Notification completed:', notification));
+  return apnProvider;
+}
 
 /**
  * 处理日志请求
@@ -352,7 +341,7 @@ exports.sendPushNotification = async (pushToken, passTypeIdentifier, serialNumbe
       pushToken
     });
 
-    const result = await apnProvider.send(notification, pushToken);
+    const result = await getApnProvider().send(notification, pushToken);
     console.log('推送结果:', result);
 
     if (result.failed.length > 0) {
