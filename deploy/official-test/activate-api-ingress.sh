@@ -21,7 +21,7 @@ for name in "$api" "$pg"; do
   [[ "$(docker inspect --format '{{.State.Running}} {{index .Config.Labels "ddc.owner"}} {{index .Config.Labels "ddc.component"}} {{len .HostConfig.PortBindings}} {{range $n, $_ := .NetworkSettings.Networks}}{{$n}}{{end}}' "$name")" == \
     "true $owner $expected 0 $network" ]] || refuse "Unexpected TEST service state $name"
 done
-[[ "$(docker network inspect --format '{{range .Containers}}{{.Name}}{{"\n"}}{{end}}' "$network" | sort)" == \
+[[ "$(docker network inspect --format '{{range .Containers}}{{.Name}}{{"\n"}}{{end}}' "$network" | awk 'NF' | sort)" == \
   "$(printf '%s\n' "$api" "$pg" | sort)" ]] || refuse 'Unexpected services on original TEST bridge'
 
 image=$(docker inspect --format '{{.Image}}' "$api")
