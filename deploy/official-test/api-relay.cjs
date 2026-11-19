@@ -1,8 +1,9 @@
 'use strict';
 
-const { Resolver } = require('node:dns').promises;
+const { lookup, Resolver } = require('node:dns').promises;
 const { chmodSync, lstatSync, unlinkSync } = require('node:fs');
 const net = require('node:net');
+const { networkInterfaces } = require('node:os');
 
 const [purpose, target] = process.argv.slice(2);
 const vendorHosts = new Set(['api-auth.web3auth.io', 'authjs.web3auth.io']);
@@ -34,7 +35,6 @@ function connect(client, options) {
   client.on('error', () => upstream.destroy());
   client.on('close', () => upstream.destroy());
   upstream.on('error', () => client.destroy());
-  upstream.on('close', () => client.destroy());
   if (jwksOk) upstream.setTimeout(15000, () => upstream.destroy());
   upstream.on('connect', () => {
     client.pipe(upstream);
@@ -73,5 +73,11 @@ if (ingressOk) {
   }
   server.listen(socket, () => chmodSync(socket, 0o660));
 } else {
-  server.listen(443, '0.0.0.0');
+  lookup(target, { family: 4 }).then(({ address }) => {
+    const interfaces = Object.values(networkInterfaces()).flat();
+    if (publicAddress(address) || !interfaces.some(record => record.address === address && !record.internal)) {
+      throw Error('Vendor alias is not bound to this TEST relay');
+    }
+    server.listen(443, address);
+  }).catch(error => { throw error; });
 }
