@@ -196,6 +196,11 @@ app.use('/api/app', appRoutes);
 // Open (on, or allowlist), the route itself requires a signed-in account (`protect`). Before, that requirement came only
 // from crawlerRoutes' blanket login check on everything under /api. The router claims only
 // /api/developer/sso/*. test/unit/appMountOrder.test.js covers both.
+// A Developer host session is bound to the explicitly configured Wallet network and issuer.
+if (process.env.DEVELOPER_HOST_NETWORK) {
+  app.use('/api/developer/auth', require('./routes/developerHostAuthRoutes'));
+  app.use('/api/developer/sso', require('./routes/developerHostSsoRoutes'));
+}
 const developerSsoRoutes = require('./routes/developerSsoRoutes');
 app.use('/api/developer/sso', developerSsoRoutes);
 app.use('/api/auth', authRoutes);

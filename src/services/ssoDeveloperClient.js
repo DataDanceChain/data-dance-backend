@@ -403,6 +403,10 @@ async function rotateOwnedSecret(ownerUserId, clientIdValue) {
 }
 
 module.exports = {
+  cleanName,
+  cleanEmail,
+  cleanRedirects,
+  presentOwnedClient,
   DeveloperClientError,
   DEVELOPER_SCOPES,
   DEVELOPER_STATUS_FIELDS,

@@ -23,6 +23,11 @@ const PUBLIC_ORIGINS = Object.freeze([
   'https://admin.datadance.ai',
 ]);
 
+const OFFICIAL_TEST_ORIGINS = new Set([
+  'https://test-app.datadance.ai',
+  'https://test-developers.datadance.ai',
+]);
+
 function configuredOrigins(env = process.env) {
   return String(env.FRONTEND_URL || '')
     .split(',')
@@ -31,11 +36,15 @@ function configuredOrigins(env = process.env) {
 }
 
 /**
- * The `origin` value for `cors()`: the deployed list (plus anything FRONTEND_URL names) as soon
- * as either is present or NODE_ENV=production; otherwise the local development list.
+ * Official TEST accepts only canonical TEST origins. Other deployments keep their existing
+ * production or local allowlist and the configured FRONTEND_URL.
  */
 function corsOrigins(env = process.env) {
   const configured = configuredOrigins(env);
+  if (String(env.SSO_ENVIRONMENT || '').trim() === 'test' &&
+      String(env.PUBLIC_BASE_URL || '').trim().replace(/\/$/, '') === 'https://test-api.datadance.ai') {
+    return [...new Set(configured.filter((origin) => OFFICIAL_TEST_ORIGINS.has(origin)))];
+  }
   if (configured.length || env.NODE_ENV === 'production') {
     return [...new Set([...configured, ...PUBLIC_ORIGINS])];
   }

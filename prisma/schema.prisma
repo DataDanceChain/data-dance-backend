@@ -35,6 +35,9 @@ model User {
   web3authVerifierId       String?
   web3authLinkedAt         DateTime?
   disabledAt               DateTime?
+  disabledBy               String?
+  disabledReason           String?
+  sessionsResetAt          DateTime?
   createdActivities        Activity[]
   activityClaims           ActivityClaim[]
   transactions             AssetTransaction[]
@@ -80,6 +83,9 @@ model User {
   campaignRaffleTickets    CampaignRaffleTicket[]
   campaignRaffleWins       CampaignRaffleWin[]
   campaignSpins            CampaignSpin[]
+  roleGrants               UserRoleGrant[]
+  opsSignInCodes           OpsSignInCode[]
+  developerHostSessions    DeveloperHostSession[]
   campaignCalendarOpens    CampaignCalendarOpen[]
   ssoTickets               SsoTicket[]
   disbursementItems        DisbursementItem[]
@@ -1024,6 +1030,8 @@ model SsoDeveloperClient {
 
   @@index([contactEmail])
   @@index([ownerUserId])
+  skipConfirmationEnabled Boolean @default(false)
+  skipConfirmationOwnerUserId String?
 }
 
 /// Public OAuth clients from DCR or CIMD (ChatGPT / Claude).
@@ -1320,4 +1328,116 @@ model TrackedLinkHit {
 
   @@index([linkId, event, createdAt])
   @@index([linkId, visitorId, event])
+}
+
+model UserRoleGrant {
+  userId          String
+  role            String
+  grantedAt       DateTime @default(now())
+  /// null when scripts/opsRoles.js granted it
+  grantedByUserId String?
+  /// the actor's record label at the time (ops:<hmac prefix>, 'shared' or 'script'; never an
+  /// e-mail, see docs/OPS_ADMIN.md)
+  grantedBy       String
+  reason          String
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([userId, role])
+  @@index([role])
+}
+
+
+model OpsAuditLog {
+  id          String   @id @default(uuid())
+  createdAt   DateTime @default(now())
+  actorKind   String
+  actorUserId String?
+  actorLabel  String
+  actorRole   String
+  action      String
+  targetType  String
+  targetId    String?
+  targetLabel String?
+  reason      String?
+  detail      Json?
+  surface     String
+  requestId   String?
+
+  @@index([createdAt])
+  @@index([targetType, targetId, createdAt])
+  @@index([actorUserId, createdAt])
+  @@index([action, createdAt])
+}
+
+
+model OpsSignInCode {
+  id         String    @id @default(uuid())
+  codeHash   String    @unique
+  userId     String
+  challenge  String
+  expiresAt  DateTime
+  consumedAt DateTime?
+  createdAt  DateTime  @default(now())
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([expiresAt])
+}
+
+
+model IdentityConflict {
+  id              String   @id @default(uuid())
+  createdAt       DateTime @default(now())
+  reason          String
+  route           String
+  candidateBy     String?
+  candidateUserId String?
+  verifier        String
+
+  @@index([createdAt])
+  @@index([candidateUserId, createdAt])
+  @@index([reason, createdAt])
+}
+
+
+model DeveloperHostSession {
+  id                      String    @id @default(uuid())
+  tokenHash               String    @unique
+  environment             String
+  issuer                  String
+  callbackUri             String
+  generation              Int       @default(0)
+  activeRequestId         String?
+  userId                  String?
+  user                    User?     @relation(fields: [userId], references: [id], onDelete: SetNull)
+  authClaims              Json?
+  grantedScopes           String[]  @default([])
+  authenticationExpiresAt DateTime?
+  expiresAt               DateTime
+  revokedAt               DateTime?
+  createdAt               DateTime  @default(now())
+  requests                DeveloperHostRequest[]
+
+  @@index([expiresAt])
+  @@index([userId])
+}
+
+
+model DeveloperHostRequest {
+  id             String    @id
+  sessionId      String
+  session        DeveloperHostSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  generation     Int
+  challenge      String
+  state          String
+  requestedScopes String[]
+  userId         String?
+  authClaims     Json?
+  codeHash       String?   @unique
+  codeExpiresAt  DateTime?
+  consumedAt     DateTime?
+  expiresAt      DateTime
+  createdAt      DateTime  @default(now())
+
+  @@index([sessionId, generation])
+  @@index([expiresAt])
 }
