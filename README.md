@@ -119,6 +119,10 @@ docker compose up -d
 - Env (see `env.example`): `WEB3AUTH_VERIFY_MODE`, `WEB3AUTH_CLIENT_ID`, `WEB3AUTH_ALLOWED_VERIFIERS`, `WEB3AUTH_JWKS_PIN_MODE`, `WEB3AUTH_JWKS_PINNED_THUMBPRINTS`, `WEB3AUTH_JWKS_URL`, `WEB3AUTH_ISSUERS`, `WEB3AUTH_EXTERNAL_JWKS_URL`, `WEB3AUTH_EXTERNAL_ISSUERS`, `WEB3AUTH_EXTERNAL_AUDIENCE`, `WEB3AUTH_ALGS`, `WEB3AUTH_MAX_TOKEN_AGE`, `WEB3AUTH_VERIFIER_CLAIM`, `WEB3AUTH_VERIFIER_ID_CLAIM`, `WEB3AUTH_EMAIL_CLAIM`, `WEB3AUTH_WALLETS_CLAIM`, `WEB3AUTH_WALLET_MATCH`, `WEB3AUTH_LEGACY_VERIFIERS`, `WEB3AUTH_EMAIL_VERIFIED_CLAIM`, `WEB3AUTH_ALLOW_LEGACY_FALLBACK`, `WEB3AUTH_RETIRED_CLIENT_IDS`, `LOGIN_MISSING_IDTOKEN_MEANS_OLD_APP`. `JWT_EXPIRES_IN` is mandatory in production.
 - 迁移：`20260922100000_user_upstream_identity_and_disable`；单测：`npm test`（`test/unit/web3authIdentity.test.js`、`test/unit/web3authLogin.test.js` 和 `test/unit/web3authJwksPin.test.js`，本地 JWKS + supertest，无需数据库，不联网）
 
+#### Existing-account recovery
+
+When `EMAIL_OTP_LOGIN=true`, Wallet can offer DataDance email-code recovery after a Web3Auth identity conflict. `POST /api/auth/email-code/recovery/send` accepts `email`, and `POST /api/auth/email-code/recovery/verify` accepts `email` and `code`. Only an eligible, unambiguous existing mailbox receives a recovery code. The same account must still own that mailbox at verification. Recovery issues the existing restricted `amr: email_otp` session without creating an account or changing its Web3Auth identity or wallet. The original provider remains the route to the wallet signer. Deploy the API routes before activating the Wallet recovery form.
+
 ## 🛠 开发环境
 
 ### Docker开发（推荐）
