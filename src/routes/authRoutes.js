@@ -1,6 +1,8 @@
 const express = require('express');
 const { register, login } = require('../controllers/authController');
-const { observeEmailOtp, sendEmailCode, verifyEmailCode } = require('../controllers/emailOtpController');
+const {
+  observeEmailOtp, sendEmailCode, verifyEmailCode, sendRecoveryEmailCode, verifyRecoveryEmailCode,
+} = require('../controllers/emailOtpController');
 const { sendEmailBindCode, verifyEmailBindCode } = require('../controllers/emailBindController');
 const { protect } = require('../middlewares/authMiddleware');
 const { rejectEmailOtpSession } = require('../middlewares/emailOtpSession');
@@ -19,6 +21,10 @@ router.post('/login', rateLimiters.auth, login);
 // Temporary email-code sign-in. Closed unless EMAIL_OTP_LOGIN=true.
 router.post('/email-code/send', observeEmailOtp('send'), rateLimiters.emailOtpSend, sendEmailCode);
 router.post('/email-code/verify', observeEmailOtp('verify'), rateLimiters.emailOtpVerify, verifyEmailCode);
+
+// A recovery code can sign in to an existing mailbox. It cannot register a replacement account.
+router.post('/email-code/recovery/send', observeEmailOtp('recovery_send'), rateLimiters.emailOtpSend, sendRecoveryEmailCode);
+router.post('/email-code/recovery/verify', observeEmailOtp('recovery_verify'), rateLimiters.emailOtpVerify, verifyRecoveryEmailCode);
 
 // Bind a mailbox the user typed. The Web3Auth session is required. A code session cannot
 // use this to change the address it just signed in with.

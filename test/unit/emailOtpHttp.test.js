@@ -2,6 +2,7 @@ const { beforeEach, it } = require('node:test');
 const assert = require('node:assert/strict');
 const express = require('express');
 const request = require('supertest');
+const jwt = require('jsonwebtoken');
 
 const { installMockPrisma } = require('../helpers/mockPrisma');
 const prisma = installMockPrisma();
@@ -35,7 +36,7 @@ replaceModule('../../src/controllers/authController', { register() {}, login() {
 const authRoutes = require('../../src/routes/authRoutes');
 const { requestIdMiddleware } = require('../../src/middlewares/requestIdMiddleware');
 const { clearRateLimitStore } = require('../../src/middlewares/rateLimitMiddleware');
-const { resetEmailOtpState } = require('../../src/services/emailOtpLogin');
+const { APP_REVIEW_EMAIL, APP_REVIEW_CODE, resetEmailOtpState } = require('../../src/services/emailOtpLogin');
 
 const app = express();
 app.use(requestIdMiddleware);
@@ -101,6 +102,57 @@ it('logs the same accepted outcome for both send branches and a uniform invalid-
   assert.equal(verified.status, 200);
   assert.equal(verified.body.data.user.id, record.id);
   expectEvent(verified, 'verify', 'verified');
+});
+
+it('recovers the original Google account after a code without registering or changing its wallet', async () => {
+  const walletAddress = '0x0000000000000000000000000000000000000001';
+  const googleAccount = { ...record, authType: 'web3auth', walletAddress };
+  prisma.user.findMany = async ({ where }) => where.email.equals === knownEmail ? [googleAccount] : [];
+  prisma.user.create = async () => assert.fail('recovery must not create a user');
+  prisma.user.update = async () => assert.fail('recovery must not change a user');
+  prisma.user.updateMany = async () => assert.fail('recovery must not change a user');
+
+  const unknown = await post('recovery/send', { email: unknownEmail });
+  assert.equal(unknown.status, 200);
+  assert.equal(deliveredCode, undefined);
+  const sent = await post('recovery/send', { email: knownEmail });
+  assert.deepEqual(sent.body, unknown.body);
+  expectEvent(sent, 'recovery_send', 'accepted');
+  assert.match(deliveredCode, /^\d{6}$/);
+
+  const verified = await post('recovery/verify', { email: knownEmail, code: deliveredCode });
+  assert.equal(verified.status, 200);
+  assert.equal(verified.body.data.user.id, record.id);
+  assert.equal(verified.body.data.user.walletAddress, walletAddress);
+  const claims = jwt.verify(verified.body.data.token, process.env.JWT_SECRET);
+  assert.equal(claims.id, record.id);
+  assert.equal(claims.amr, 'email_otp');
+  expectEvent(verified, 'recovery_verify', 'verified');
+  assert.equal((await post('recovery/verify', { email: knownEmail, code: deliveredCode })).status, 401);
+});
+
+it('rejects a registration code and an account ID change during recovery', async () => {
+  await post('send', { email: unknownEmail });
+  assert.match(deliveredCode, /^\d{6}$/);
+  const registrationCode = await post('recovery/verify', { email: unknownEmail, code: deliveredCode });
+  assert.equal(registrationCode.status, 401);
+
+  await post('recovery/send', { email: knownEmail });
+  prisma.user.findMany = async () => [{ ...record, id: 'different-account-id' }];
+  const reboundMailbox = await post('recovery/verify', { email: knownEmail, code: deliveredCode });
+  assert.equal(reboundMailbox.status, 401);
+  assert.deepEqual(reboundMailbox.body, registrationCode.body);
+});
+
+it('requires a delivered code and a unique active mailbox for recovery', async () => {
+  const review = await post('recovery/verify', { email: APP_REVIEW_EMAIL, code: APP_REVIEW_CODE });
+  assert.equal(review.status, 401);
+
+  await post('recovery/send', { email: knownEmail });
+  const code = deliveredCode;
+  assert.match(code, /^\d{6}$/);
+  prisma.user.findMany = async () => [record, { ...record, id: 'duplicate-account' }];
+  assert.equal((await post('recovery/verify', { email: knownEmail, code })).status, 401);
 });
 
 it('correlates feature-off, validation and both 429 responses with the server request ID', async () => {

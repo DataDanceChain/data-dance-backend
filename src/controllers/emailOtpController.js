@@ -74,30 +74,42 @@ function fail(res) {
   return res.status(500).json({ status: 'error', message: 'Server error' });
 }
 
-exports.sendEmailCode = async (req, res) => {
-  try {
-    const result = await requestEmailLoginCode({
-      email: req.body && req.body.email,
-      findUsersByEmail,
-      sendMail: sendLoginCodeEmail,
-    });
-    return respond(res, result);
-  } catch {
-    return fail(res);
-  }
-};
+function sendCode(existingAccountOnly) {
+  return async (req, res) => {
+    try {
+      const result = await requestEmailLoginCode({
+        email: req.body && req.body.email,
+        existingAccountOnly,
+        findUsersByEmail,
+        sendMail: sendLoginCodeEmail,
+      });
+      return respond(res, result);
+    } catch {
+      return fail(res);
+    }
+  };
+}
 
-exports.verifyEmailCode = async (req, res) => {
-  try {
-    const result = await verifyEmailLoginCode({
-      email: req.body && req.body.email,
-      code: req.body && req.body.code,
-      findUserById,
-      createUser: createEmailOtpUser,
-      openReviewUser,
-    });
-    return respond(res, result);
-  } catch {
-    return fail(res);
-  }
-};
+function verifyCode(existingAccountOnly) {
+  return async (req, res) => {
+    try {
+      const result = await verifyEmailLoginCode({
+        email: req.body && req.body.email,
+        code: req.body && req.body.code,
+        existingAccountOnly,
+        findUsersByEmail,
+        findUserById,
+        createUser: existingAccountOnly ? undefined : createEmailOtpUser,
+        openReviewUser: existingAccountOnly ? undefined : openReviewUser,
+      });
+      return respond(res, result);
+    } catch {
+      return fail(res);
+    }
+  };
+}
+
+exports.sendEmailCode = sendCode(false);
+exports.verifyEmailCode = verifyCode(false);
+exports.sendRecoveryEmailCode = sendCode(true);
+exports.verifyRecoveryEmailCode = verifyCode(true);

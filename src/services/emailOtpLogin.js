@@ -155,6 +155,7 @@ async function requestEmailLoginCode({
   email: rawEmail,
   now = Date.now(),
   env = process.env,
+  existingAccountOnly = false,
   findUsersByEmail,
   sendMail,
   randomCode = newCode,
@@ -187,6 +188,7 @@ async function requestEmailLoginCode({
   // Two rows that differ only by case cannot be told apart. Say nothing and send nothing.
   if (rows.length > 1) return { status: 200, reason: 'accepted', body: ACCEPTED };
   const match = rows.length === 1 ? rows[0] : null;
+  if (!match && existingAccountOnly) return { status: 200, reason: 'accepted', body: ACCEPTED };
   let pendingEntry = { register: true };
   if (match) {
     if (!eligibleUser(match) || normalizeEmail(match.email) !== email) {
@@ -205,6 +207,7 @@ async function requestEmailLoginCode({
 
   pending.set(email, {
     ...pendingEntry,
+    existingAccountOnly,
     codeHash: hashCode(email, code),
     expiresAt: now + CODE_TTL_MS,
     attempts: 0,
@@ -240,6 +243,8 @@ async function verifyEmailLoginCode({
   code: rawCode,
   now = Date.now(),
   env = process.env,
+  existingAccountOnly = false,
+  findUsersByEmail,
   findUserById,
   createUser,
   openReviewUser,
@@ -256,7 +261,7 @@ async function verifyEmailLoginCode({
   if (!email || !isValidEmail(email) || !/^\d{6}$/.test(code)) return invalidCode('invalid_input');
 
   if (isAppReviewLogin(email, code)) {
-    if (typeof openReviewUser !== 'function') return invalidCode();
+    if (existingAccountOnly || typeof openReviewUser !== 'function') return invalidCode();
     let reviewUser;
     try {
       reviewUser = await openReviewUser(email);
@@ -281,6 +286,10 @@ async function verifyEmailLoginCode({
     pending.delete(email);
     return invalidCode();
   }
+  // A challenge from the ordinary sign-in route may be authorized to register a mailbox.
+  if (entry.existingAccountOnly !== existingAccountOnly || (existingAccountOnly && entry.register)) {
+    return invalidCode();
+  }
   entry.attempts += 1;
   const matched = hashesMatch(entry.codeHash, hashCode(email, code));
   if (!matched) {
@@ -291,7 +300,11 @@ async function verifyEmailLoginCode({
 
   let user;
   try {
-    if (entry.register) {
+    if (existingAccountOnly) {
+      const matches = await findUsersByEmail(email);
+      if (matches.length !== 1) return invalidCode();
+      user = matches[0];
+    } else if (entry.register) {
       if (typeof createUser !== 'function') return unavailable();
       user = await createUser(email);
     } else {
