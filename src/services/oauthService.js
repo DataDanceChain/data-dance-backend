@@ -616,6 +616,21 @@ async function startAuthorization(req, query, res) {
   return consent.toString();
 }
 
+const planetReadScopes = new Set(['sso:identity', 'sso:status', 'sso:wallet', 'sso:email']);
+
+function consentAutoApproval(row, partner) {
+  if (!partner || row.clientId !== process.env.SSO_WALLET_PLANET_CLIENT_ID) {
+    return partner?.autoApprove ?? autoApproveFor(partner ? row.clientId : null);
+  }
+  const scopes = String(row.scope || '').trim().split(/\s+/);
+  const eligible = partner.firstParty === true && partner.enabled &&
+    partner.initiateLoginUri === 'https://dataplanet.cc/pages/oauth/start' &&
+    row.redirectUri === 'https://dataplanet.cc/pages/oauth/callback' &&
+    partner.redirectUris.includes(row.redirectUri) && Boolean(row.initiatorHash) &&
+    scopes.includes('sso:identity') && scopes.every(scope => planetReadScopes.has(scope));
+  return { app: eligible, web: false };
+}
+
 async function getConsentRequest(id) {
   const row = await prisma.oAuthAuthorization.findUnique({ where: { id } });
   if (!row || row.consumedAt || row.expiresAt < new Date()) {
@@ -649,7 +664,7 @@ async function getConsentRequest(id) {
     expiresAt: row.expiresAt,
     // Only a hint for the Wallet (post the Allow without a tap). Never a decision: the code is
     // minted by the credentialed POST /api/oauth/consent, which re-checks the switch itself.
-    autoApprove: partner && partner.autoApprove ? partner.autoApprove : autoApproveFor(partner ? row.clientId : null),
+    autoApprove: consentAutoApproval(row, partner),
     // This API also takes the decision as a top-level form submission (POST /oauth/consent,
     // src/routes/oauthRoutes.js). The Wallet falls back to it only when this flag is true, so a
     // Wallet build never posts that form to an API that predates it.
@@ -686,14 +701,14 @@ async function decideConsent(user, requestId, allow, ctx = {}) {
   const principal = ctx && ctx.kind ? ctx.kind : 'user_jwt';
   // An SSO session may only answer for the client it was minted for (T11.6): 403, never a
   // decision on someone else's request.
-  if (principal === 'sso_ticket' && ctx.clientId && ctx.clientId !== row.clientId) {
+  if (principal === 'sso_ticket' && ctx.clientId !== row.clientId) {
     throw new OAuthError(403, 'access_denied', 'This session is bound to a different client.');
   }
   // Auto-approval gate: a partner client only (the configured TGE client, or a first-party row of
   // the database), and only for an entry type the switch allows. Checked before anything is
   // consumed, so a refusal leaves the request decidable by hand.
   const entry = consentEntry(ctx);
-  const autoFlags = client && client.autoApprove ? client.autoApprove : autoApproveFor(row.clientId);
+  const autoFlags = consentAutoApproval(row, partner ? client : null);
   if (auto && !(partner && autoFlags[entry])) {
     throw new AutoApproveNotAllowedError(entry);
   }
