@@ -17,6 +17,7 @@ const SENSITIVE_QUERY_KEYS = [
   'sessionToken',
   'code',
   'ticket',
+  'wallet_open_id',
   'id_token',
   'idToken',
   'client_secret',
@@ -31,7 +32,7 @@ const SENSITIVE_META_KEYS = [...SENSITIVE_QUERY_KEYS, 'authorization', 'Authoriz
 
 // Keys whose value is never partially shown (a 6-digit OTP with 4 digits kept
 // is not masked; a password prefix is a password hint).
-const FULLY_HIDDEN_KEYS = ['password', 'otp'];
+const FULLY_HIDDEN_KEYS = ['password', 'otp', 'wallet_open_id'];
 
 const sensitiveMetaSet = new Set(SENSITIVE_META_KEYS.map((key) => key.toLowerCase()));
 const fullyHiddenSet = new Set(FULLY_HIDDEN_KEYS.map((key) => key.toLowerCase()));

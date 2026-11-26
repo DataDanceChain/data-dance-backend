@@ -40,6 +40,8 @@ const { loadPartnerClient } = require('../services/ssoDeveloperClient');
 const { isCEndSubject } = require('../services/dataLicenceConsent');
 
 const router = express.Router();
+const { bindInitiator } = require('../services/oauthService');
+const { configuredPlanet, issueWalletOpen } = require('../services/planetWalletOpen');
 const logger = createLogger('ssoRoutes');
 
 const passthrough = (req, res, next) => next();
@@ -304,6 +306,8 @@ router.post('/ticket/exchange', lim('ssoExchange'), async (req, res, next) => {
     if (!user) return fail(res, 400, 'TICKET_INVALID', 'This sign-in link is no longer valid.');
     if (user.disabledAt) return fail(res, 403, 'ACCOUNT_DISABLED', 'This account has been disabled.');
 
+    const walletOpenId = configuredPlanet(client)
+      ? await issueWalletOpen(prisma, row.id, bindInitiator(req, res)) : null;
     const session = signSsoSession({ userId: user.id, clientId: row.clientId, jti: row.id });
     logger.info('sso.ticket_exchanged', {
       ticketId: row.id, userId: user.id, clientId: row.clientId, expiresIn: session.expiresIn,
@@ -314,6 +318,7 @@ router.post('/ticket/exchange', lim('ssoExchange'), async (req, res, next) => {
       status: 'success',
       data: {
         session_token: session.token,
+        ...(walletOpenId ? { wallet_open_id: walletOpenId } : {}),
         expires_in: session.expiresIn,
         client: {
           client_id: client.clientId,

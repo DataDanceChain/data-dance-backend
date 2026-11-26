@@ -348,7 +348,8 @@ router.get('/oauth/userinfo', async (req, res) => {
 
 router.get('/api/oauth/requests/:id', consentPrincipal(bearerMustVerify), async (req, res) => {
   try {
-    const data = await getConsentRequest(req.params.id);
+    const session = req.ssoSession && { ...req.ssoSession, userId: req.user.id };
+    const data = await getConsentRequest(req.params.id, session);
     if (req.ssoSession && req.ssoSession.clientId !== data.clientId) {
       logger.warn('SSO session presented for another client', { requestId: req.params.id });
       res.set('Cache-Control', 'no-store');
@@ -409,7 +410,7 @@ async function decideFromRequest(req) {
   // claims of its own — the verified-login check happened when the ticket was minted.
   const initiatorNonce = readInitiatorNonce(req);
   const ctx = req.ssoSession
-    ? { kind: 'sso_ticket', clientId: req.ssoSession.clientId, initiatorNonce }
+    ? { kind: 'sso_ticket', ...req.ssoSession, userId: req.user.id, initiatorNonce }
     : { kind: 'user_jwt', claims: req.authClaims, initiatorNonce };
   // Only an automatic Allow carries the flag, so a manual decision reaches decideConsent
   // with exactly the context it always had.

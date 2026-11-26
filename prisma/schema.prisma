@@ -1080,6 +1080,11 @@ model OAuthAuthorization {
 model SsoTicket {
   id         String    @id @default(uuid())
   ticketHash String    @unique
+  /// One fresh Planet hand-off. The raw handle and browser cookie are never stored. The request
+  /// binding stays fixed even after the request is cleaned up; clearing the hash spends it.
+  walletOpenHash          String? @unique
+  walletOpenBrowserHash   String?
+  walletOpenAuthorizationId String? @unique
   userId     String
   clientId   String
   expiresAt  DateTime

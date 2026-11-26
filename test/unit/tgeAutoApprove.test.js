@@ -108,7 +108,7 @@ function pkce() {
 }
 
 /** Browser step: start an authorization; returns the request id, its cookie and PKCE verifier. */
-async function authorize({ clientId = 'tge-test', redirectUri = REDIRECT, scope } = {}) {
+async function authorize({ clientId = 'tge-test', redirectUri = REDIRECT, scope, openId, browserCookie } = {}) {
   const { verifier, challenge } = pkce();
   const query = {
     response_type: 'code',
@@ -119,19 +119,29 @@ async function authorize({ clientId = 'tge-test', redirectUri = REDIRECT, scope 
     code_challenge_method: 'S256',
   };
   if (scope) query.scope = scope;
-  const res = await request(server).get('/oauth/authorize').query(query);
+  if (openId) query.wallet_open_id = openId;
+  const call = request(server).get('/oauth/authorize').query(query);
+  if (browserCookie) call.set('Cookie', browserCookie);
+  const res = await call;
   assert.equal(res.status, 302, res.text);
   const cookie = ((res.headers['set-cookie'] || [])[0] || '').split(';')[0];
   return { requestId: new URL(res.headers.location).searchParams.get('request'), cookie, verifier };
 }
 
 /** App hand-off: a consent-only SSO session (`ddc_sso_…`) for the TGE client. */
-async function appSession(clientId = 'tge-test') {
-  const minted = await request(server).post('/api/sso/app-ticket').set('Authorization', `Bearer ${userJwt()}`).send({ client_id: clientId });
+async function exchangeSession(clientId, browserCookie, userToken = userJwt()) {
+  const minted = await request(server).post('/api/sso/app-ticket').set('Authorization', `Bearer ${userToken}`).send({ client_id: clientId });
   assert.equal(minted.status, 200, minted.text);
-  const redeemed = await request(server).post('/api/sso/ticket/exchange').send({ ticket: minted.body.data.ticket });
+  const call = request(server).post('/api/sso/ticket/exchange');
+  if (browserCookie) call.set('Cookie', browserCookie);
+  const redeemed = await call.send({ ticket: minted.body.data.ticket });
   assert.equal(redeemed.status, 200, redeemed.text);
-  return redeemed.body.data.session_token;
+  return { token: redeemed.body.data.session_token, openId: redeemed.body.data.wallet_open_id,
+    browserCookie: (redeemed.headers['set-cookie']?.[0] || '').split(';')[0] };
+}
+
+async function appSession(clientId = 'tge-test') {
+  return (await exchangeSession(clientId)).token;
 }
 
 async function credential(entry) {
@@ -548,27 +558,79 @@ describe('Wallet entry to the registered Data Planet client', () => {
       redirectUris: [redirectUri, 'https://dataplanet.cc/other'],
     } });
   });
-  it('only auto-approves the matching Wallet ticket with the initiating browser', async () => {
-    const { requestId, cookie } = await authorize({ clientId, redirectUri, scope });
-    assert.deepEqual((await requestSummary(requestId)).body.data.autoApprove, { app: true, web: false });
-    const body = { requestId, allow: true, auto: true };
-    assert.equal((await consent(userJwt(), cookie, body)).status, 403);
-    assert.equal((await consent(await appSession(), cookie, body)).status, 403);
-    const token = await appSession(clientId);
-    assert.notEqual((await consent(token, '', body)).status, 200);
-    const result = await consent(token, cookie, body);
-    assert.equal(result.status, 200, result.text);
-    assert.equal(authzRow(requestId).userId, cUser.id);
-    assert.equal((await consent(token, cookie, body)).status, 400);
-  });
-  it('keeps another callback, an unconfigured client, and expanded scopes on manual approval', async () => {
-    for (const uri of [redirectUri, 'https://dataplanet.cc/other']) {
-      const { requestId } = await authorize({ clientId, redirectUri: uri, scope });
-      if (uri === redirectUri) authzRow(requestId).scope += ' sso:referral_bind';
-      assert.deepEqual((await requestSummary(requestId)).body.data.autoApprove, { app: false, web: false });
+  const params = { clientId, redirectUri, scope };
+  const decision = (flow) => ({ requestId: flow.requestId, allow: true, auto: true });
+  const hint = async (flow, session) => {
+    const response = await requestSummary(flow.requestId).set('Authorization', `Bearer ${session.token}`);
+    assert.equal(response.status, 200, response.text);
+    return response.body.data.autoApprove;
+  };
+  const manual = { app: false, web: false };
+  const automatic = { app: true, web: false };
+
+  it('binds a fresh Wallet Open to one request, its ticket, account and browser', async () => {
+    const session = await exchangeSession(clientId);
+    assert.match(session.openId, /^[A-Za-z0-9_-]{43}$/);
+    assert.ok(!JSON.stringify(prisma.store.ssoTicket).includes(session.openId));
+    assert.ok(!loggerModule.redactUrl(`/oauth/authorize?wallet_open_id=${session.openId}`).includes(session.openId));
+    const flow = await authorize({ ...params, ...session });
+    assert.deepEqual(await hint(flow, session), automatic);
+    assert.deepEqual((await requestSummary(flow.requestId)).body.data.autoApprove, manual);
+    const otherAccount = { ...cUser, id: 'user-auto-2', email: 'other@example.test' };
+    await prisma.user.create({ data: otherAccount });
+    const other = await exchangeSession(clientId, flow.cookie, userJwt({ id: otherAccount.id, ver: 2 }));
+    assert.deepEqual(await hint(flow, other), manual);
+    for (const token of [other.token, userJwt(), await appSession(clientId)]) {
+      assert.equal((await consent(token, flow.cookie, decision(flow))).status, 403);
     }
+    assert.equal((await consent(session.token, '', decision(flow))).status, 409);
+    assert.equal((await consent(session.token, flow.cookie, decision(flow))).status, 200);
+    assert.equal(authzRow(flow.requestId).userId, cUser.id);
+    assert.equal((await consent(session.token, flow.cookie, decision(flow))).status, 400);
+    const revisit = await authorize({ ...params, browserCookie: flow.cookie });
+    assert.deepEqual(await hint(revisit, session), manual);
+    assert.equal((await consent(session.token, revisit.cookie, decision(revisit))).status, 403);
+    assert.equal((await consent(session.token, revisit.cookie, { requestId: revisit.requestId, allow: true })).status, 200);
+  });
+
+  it('selects exactly one PKCE request from concurrent starts, and spends its decision once', async () => {
+    const session = await exchangeSession(clientId);
+    const requests = await Promise.all([1, 2].map(() => authorize({ ...params, ...session })));
+    assert.notEqual(requests[0].verifier, requests[1].verifier);
+    const flags = await Promise.all(requests.map(flow => hint(flow, session)));
+    assert.equal(flags.filter(flag => flag.app).length, 1);
+    const winner = requests[flags.findIndex(flag => flag.app)];
+    const loser = requests[flags.findIndex(flag => !flag.app)];
+    assert.equal((await consent(session.token, loser.cookie, decision(loser))).status, 403);
+    const writes = await Promise.all([1, 2].map(() => consent(session.token, winner.cookie, decision(winner))));
+    assert.equal(writes.filter(res => res.status === 200).length, 1);
+    assert.ok(writes.every(res => [200, 400, 403].includes(res.status)));
+  });
+
+  it('keeps unmatched handles, stale hand-offs and a different browser manual', async () => {
+    const session = await exchangeSession(clientId);
+    const otherBrowser = await authorize({ ...params, openId: session.openId });
+    assert.deepEqual(await hint(otherBrowser, session), manual);
+    const invalid = await authorize({ ...params, ...session, openId: 'X'.repeat(43) });
+    assert.deepEqual(await hint(invalid, session), manual);
+    const flow = await authorize({ ...params, ...session });
+    const ticket = prisma.store.ssoTicket.find(row => row.walletOpenAuthorizationId === flow.requestId);
+    ticket.consumedAt = new Date(Date.now() - 61000);
+    assert.deepEqual(await hint(flow, session), manual);
+    assert.equal((await consent(session.token, flow.cookie, decision(flow))).status, 403);
+  });
+
+  it('keeps unrelated callbacks, expanded scopes and older Planet integrations on manual approval', async () => {
+    const session = await exchangeSession(clientId);
+    const other = await authorize({ ...params, ...session, redirectUri: 'https://dataplanet.cc/other' });
+    const extra = await authorize({ ...params, ...session, scope: scope + ' sso:points' });
+    for (const flow of [other, extra]) assert.deepEqual(await hint(flow, session), manual);
+    setSwitch('app,web');
+    const oldPartner = await authorize({ ...params, browserCookie: session.browserCookie });
+    assert.deepEqual(await hint(oldPartner, session), manual);
     delete process.env.SSO_WALLET_PLANET_CLIENT_ID;
-    const { requestId } = await authorize({ clientId, redirectUri, scope });
-    assert.deepEqual((await requestSummary(requestId)).body.data.autoApprove, { app: false, web: false });
+    const unconfigured = await authorize({ ...params, ...session });
+    assert.deepEqual(await hint(unconfigured, session), manual);
+    assert.equal((await consent(session.token, unconfigured.cookie, decision(unconfigured))).status, 403);
   });
 });
