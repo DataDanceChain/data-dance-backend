@@ -25,6 +25,7 @@ const { createLogger } = require('../utils/logger');
 const { availablePartnerScopes, referralBindEnabled } = require('../constants/partnerClient');
 const { loadDeveloperPartnerClient, loadPartnerClient, loadPartnerTokenClient } = require('./ssoDeveloperClient');
 
+const { isPlanetRegistration, eligibleRequest, bindWalletOpen, decisionBinding } = require('./planetWalletOpen');
 const logger = createLogger('oauthService');
 
 const CODE_TTL_MS = 10 * 60 * 1000;
@@ -604,6 +605,7 @@ async function startAuthorization(req, query, res) {
         initiatorMismatchCount: 0,
       },
     });
+    await bindWalletOpen(prisma, client, row, query.wallet_open_id);
   } catch (error) {
     if (error instanceof OAuthError) markRedirectable(error, { redirectUri, state, iss });
     throw error;
@@ -616,22 +618,16 @@ async function startAuthorization(req, query, res) {
   return consent.toString();
 }
 
-const planetReadScopes = new Set(['sso:identity', 'sso:status', 'sso:wallet', 'sso:email']);
-
-function consentAutoApproval(row, partner) {
-  if (!partner || row.clientId !== process.env.SSO_WALLET_PLANET_CLIENT_ID) {
+async function consentAutoApproval(row, partner, session) {
+  if (!isPlanetRegistration(partner)) {
     return partner?.autoApprove ?? autoApproveFor(partner ? row.clientId : null);
   }
-  const scopes = String(row.scope || '').trim().split(/\s+/);
-  const eligible = partner.firstParty === true && partner.enabled &&
-    partner.initiateLoginUri === 'https://dataplanet.cc/pages/oauth/start' &&
-    row.redirectUri === 'https://dataplanet.cc/pages/oauth/callback' &&
-    partner.redirectUris.includes(row.redirectUri) && Boolean(row.initiatorHash) &&
-    scopes.includes('sso:identity') && scopes.every(scope => planetReadScopes.has(scope));
-  return { app: eligible, web: false };
+  const binding = eligibleRequest(partner, row) && decisionBinding(row, session);
+  const matched = binding && await prisma.ssoTicket.findFirst({ where: binding, select: { id: true } });
+  return { app: Boolean(matched), web: false };
 }
 
-async function getConsentRequest(id) {
+async function getConsentRequest(id, session) {
   const row = await prisma.oAuthAuthorization.findUnique({ where: { id } });
   if (!row || row.consumedAt || row.expiresAt < new Date()) {
     throw new OAuthError(404, 'invalid_request', 'This authorization request has expired.');
@@ -664,7 +660,7 @@ async function getConsentRequest(id) {
     expiresAt: row.expiresAt,
     // Only a hint for the Wallet (post the Allow without a tap). Never a decision: the code is
     // minted by the credentialed POST /api/oauth/consent, which re-checks the switch itself.
-    autoApprove: consentAutoApproval(row, partner),
+    autoApprove: await consentAutoApproval(row, partner, session),
     // This API also takes the decision as a top-level form submission (POST /oauth/consent,
     // src/routes/oauthRoutes.js). The Wallet falls back to it only when this flag is true, so a
     // Wallet build never posts that form to an API that predates it.
@@ -708,8 +704,7 @@ async function decideConsent(user, requestId, allow, ctx = {}) {
   // the database), and only for an entry type the switch allows. Checked before anything is
   // consumed, so a refusal leaves the request decidable by hand.
   const entry = consentEntry(ctx);
-  const autoFlags = consentAutoApproval(row, partner ? client : null);
-  if (auto && !(partner && autoFlags[entry])) {
+  if (auto && !(partner && (await consentAutoApproval(row, client, ctx))[entry])) {
     throw new AutoApproveNotAllowedError(entry);
   }
 
@@ -782,16 +777,32 @@ async function decideConsent(user, requestId, allow, ctx = {}) {
   // Atomic single-decision consume, exactly as the code-exchange path consumes the code: the
   // where clause requires a request that has neither been finished nor already carries a code,
   // so a second "allow" on the same request affects 0 rows and mints nothing (item 4).
-  const decided = await prisma.oAuthAuthorization.updateMany({
+  const decision = {
     where: { id: row.id, consumedAt: null, codeHash: null, expiresAt: { gt: new Date() } },
     data: {
       userId: user.id,
       codeHash: hashSecret(code),
       expiresAt: new Date(Date.now() + (client.codeTtlMs || CODE_TTL_MS)),
     },
-  });
-  if (!decided || decided.count !== 1) {
-    throw new OAuthError(400, 'invalid_request', 'This authorization request has expired.');
+  };
+  const recordDecision = async (db) => {
+    const decided = await db.oAuthAuthorization.updateMany(decision);
+    if (decided.count !== 1) {
+      throw new OAuthError(400, 'invalid_request', 'This authorization request has expired.');
+    }
+  };
+  if (auto && isPlanetRegistration(client)) {
+    // Revocation, expiry and competing decisions are checked again at the write. Spending
+    // this hand-off and issuing its code either both commit or neither does.
+    await prisma.$transaction(async (tx) => {
+      const spent = await tx.ssoTicket.updateMany({
+        where: decisionBinding(row, ctx), data: { walletOpenHash: null },
+      });
+      if (spent.count !== 1) throw new AutoApproveNotAllowedError(entry);
+      await recordDecision(tx);
+    });
+  } else {
+    await recordDecision(prisma);
   }
   if (auto) {
     logger.info('oauth.consent_auto_approved', {
@@ -1083,6 +1094,7 @@ module.exports = {
   ConsentInitiatorError,
   AutoApproveNotAllowedError,
   AUTHZ_COOKIE_NAME,
+  bindInitiator,
   readInitiatorNonce,
   publicRegistrationEnabled,
   metadataDocuments,
