@@ -126,8 +126,8 @@ async function authorize({ clientId = 'tge-test', redirectUri = REDIRECT, scope 
 }
 
 /** App hand-off: a consent-only SSO session (`ddc_sso_…`) for the TGE client. */
-async function appSession() {
-  const minted = await request(server).post('/api/sso/app-ticket').set('Authorization', `Bearer ${userJwt()}`).send({ client_id: 'tge-test' });
+async function appSession(clientId = 'tge-test') {
+  const minted = await request(server).post('/api/sso/app-ticket').set('Authorization', `Bearer ${userJwt()}`).send({ client_id: clientId });
   assert.equal(minted.status, 200, minted.text);
   const redeemed = await request(server).post('/api/sso/ticket/exchange').send({ ticket: minted.body.data.ticket });
   assert.equal(redeemed.status, 200, redeemed.text);
@@ -158,7 +158,7 @@ function setSwitch(value) {
   else process.env.SSO_TGE_AUTO_APPROVE = value;
 }
 
-const TOGGLES = ['SSO_TGE_AUTO_APPROVE', 'SSO_REQUIRE_VERIFIED_SESSION'];
+const TOGGLES = ['SSO_WALLET_PLANET_CLIENT_ID', 'SSO_TGE_AUTO_APPROVE', 'SSO_REQUIRE_VERIFIED_SESSION'];
 const saved = {};
 
 beforeEach(async () => {
@@ -532,5 +532,43 @@ describe('manual allow / deny are unchanged', () => {
     const res = await consent(userJwt(), null, { requestId, allow: true });
     assert.equal(res.status, 409);
     assert.equal(res.body.code, 'AUTHZ_INITIATOR_MISMATCH');
+  });
+});
+
+describe('Wallet entry to the registered Data Planet client', () => {
+  const clientId = 'planet-fixture';
+  const redirectUri = 'https://dataplanet.cc/pages/oauth/callback';
+  const scope = 'sso:identity sso:wallet sso:email sso:status';
+  beforeEach(async () => {
+    setSwitch('off');
+    process.env.SSO_WALLET_PLANET_CLIENT_ID = clientId;
+    await prisma.ssoDeveloperClient.create({ data: {
+      clientId, clientName: 'Planet fixture', kind: 'partner', enabled: true, secretHash: SECRET_HASH,
+      initiateLoginUri: 'https://dataplanet.cc/pages/oauth/start',
+      redirectUris: [redirectUri, 'https://dataplanet.cc/other'],
+    } });
+  });
+  it('only auto-approves the matching Wallet ticket with the initiating browser', async () => {
+    const { requestId, cookie } = await authorize({ clientId, redirectUri, scope });
+    assert.deepEqual((await requestSummary(requestId)).body.data.autoApprove, { app: true, web: false });
+    const body = { requestId, allow: true, auto: true };
+    assert.equal((await consent(userJwt(), cookie, body)).status, 403);
+    assert.equal((await consent(await appSession(), cookie, body)).status, 403);
+    const token = await appSession(clientId);
+    assert.notEqual((await consent(token, '', body)).status, 200);
+    const result = await consent(token, cookie, body);
+    assert.equal(result.status, 200, result.text);
+    assert.equal(authzRow(requestId).userId, cUser.id);
+    assert.equal((await consent(token, cookie, body)).status, 400);
+  });
+  it('keeps another callback, an unconfigured client, and expanded scopes on manual approval', async () => {
+    for (const uri of [redirectUri, 'https://dataplanet.cc/other']) {
+      const { requestId } = await authorize({ clientId, redirectUri: uri, scope });
+      if (uri === redirectUri) authzRow(requestId).scope += ' sso:referral_bind';
+      assert.deepEqual((await requestSummary(requestId)).body.data.autoApprove, { app: false, web: false });
+    }
+    delete process.env.SSO_WALLET_PLANET_CLIENT_ID;
+    const { requestId } = await authorize({ clientId, redirectUri, scope });
+    assert.deepEqual((await requestSummary(requestId)).body.data.autoApprove, { app: false, web: false });
   });
 });
