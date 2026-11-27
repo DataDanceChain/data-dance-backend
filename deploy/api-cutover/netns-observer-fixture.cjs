@@ -16,7 +16,7 @@ const pipeline = () => trackFamily({
   // This fixture must never transfer the application owner.
   commitOwner: () => { throw new Error('Fixture does not permit a change of application owner'); },
 });
-let family = pipeline();
+const family = pipeline();
 let observationStarted = false;
 let transportChecked = false;
 let routed = 0;
@@ -80,13 +80,18 @@ http.createServer((req, res) => {
     if (req.url === '/invalidate') {
       observationStarted = false;
       transportChecked = false;
-      family = pipeline();
+      family.invalidateObservation();
     }
     const sockets = oldSockets();
-    if (req.url === '/start-observation' && !observationStarted &&
-        transportChecked && sockets.listener && sockets.direct === 0 && sockets.observed > 0) {
-      family.startObservation();
-      observationStarted = true;
+    if (req.url === '/start-observation' && !observationStarted) {
+      observationStarted = family.startObservation({
+        ingressVerified: transportChecked && sockets.listener && sockets.observed > 0,
+        directConnections: sockets.direct,
+        // The test driver starts observation after seeing the synthetic direct
+        // handlers' final bytes. Unknown completion in a real controller must
+        // stay unknown and refuse observation.
+        unresolvedLegacyWrites: req.headers['x-fixture-completed'] === 'yes' ? 0 : null,
+      });
     }
     res.setHeader('Content-Type', 'application/json');
     res.end(JSON.stringify({

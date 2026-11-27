@@ -158,13 +158,14 @@ def test(apks, observer):
         rule(REDIRECT)
         new_host_response, new_bridge_response = fresh_host(), bridge_call()
         if observer:
-            def control(route):
+            def control(route, completed=False):
                 code = (
                     "const r=require('node:http').get('http://127.0.0.1:3999/'+process.argv[1],"
+                    "{headers:{'x-fixture-completed':process.argv[2]}},"
                     "s=>{if(s.statusCode!==200){process.exitCode=2;return;}s.pipe(process.stdout)});"
                     "r.setTimeout(2000,()=>r.destroy());r.on('error',()=>process.exitCode=2);"
                 )
-                return json.loads(docker("exec", green, "node", "-e", code, route).stdout)
+                return json.loads(docker("exec", green, "node", "-e", code, route, "yes" if completed else "unknown").stdout)
 
             result["fresh_paths_enter_observer_but_still_reach_legacy"] = all(
                 m["owner"] == "blue" and m["observed"] for m in (new_host_response, new_bridge_response))
@@ -172,7 +173,7 @@ def test(apks, observer):
                 old_host["key"] == new_host_response["key"]
                 and old_bridge["key"] == new_bridge_response["key"])
             assert control("transport-checked")["transportChecked"]
-            refused = control("start-observation")
+            refused = control("start-observation", completed=True)
             result["retained_direct_connection_blocks_first_handoff"] = (
                 refused["originalDirectStillAlive"] and not refused["observationStarted"]
                 and refused["dedicatedLegacyPathAlive"])
@@ -183,9 +184,11 @@ def test(apks, observer):
             assert json_request(hold_blue, headers={"Connection": "close"})["owner"] == "blue"
             # The real client closes both connections with successful HTTP
             # responses. The observer-to-legacy keep-alive should remain live.
+            result["unknown_handler_completion_still_blocks_observation"] = not control(
+                "start-observation")["observationStarted"]
             deadline = time.monotonic() + 5
             while time.monotonic() < deadline:
-                admitted = control("start-observation")
+                admitted = control("start-observation", completed=True)
                 if admitted["observationStarted"]:
                     break
                 time.sleep(0.1)

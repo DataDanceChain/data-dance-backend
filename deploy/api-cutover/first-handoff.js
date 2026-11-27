@@ -13,9 +13,17 @@ function trackFamily({ lifetimeMs, initialOwner, commitOwner, now = () => perfor
   let pending = 0;
   let observed = false;
   return {
-    startObservation() {
-      lastCompletion = now();
-      observed = true;
+    startObservation(proof) {
+      // A socket can disconnect while its handler continues. Require both
+      // observations. Missing values must never be interpreted as zero.
+      observed = proof?.ingressVerified === true && proof.directConnections === 0 &&
+        proof.unresolvedLegacyWrites === 0;
+      if (observed) lastCompletion = now();
+      return observed;
+    },
+    invalidateObservation() {
+      // In particular, preserve requests still outstanding through a routing inverse.
+      observed = false;
     },
     admit() {
       if (owner === 'legacy' && observed && pending === 0 && now() - lastCompletion > lifetimeMs) {
