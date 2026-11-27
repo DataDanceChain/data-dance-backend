@@ -125,7 +125,11 @@ function createProxy(options) {
     // A direct request must not supply its own effective limiter identity.
     // Opt-in only in a wrapper whose sole data listener is a restricted Unix socket.
     const fromUnixIngress = options.trustedUnixIngress === true && peer === undefined;
-    const effective = (fromUnixIngress || trusted.has(normalize(peer))) && given ? given : peer;
+    // When Nginx used TCP, a request without XFF inherited its actual upstream
+    // peer. A Unix socket has no IP. Preserve the verified baseline key only
+    // on this private ingress; direct TCP connections retain their own peer.
+    const fallback = fromUnixIngress ? options.unixBaselinePeer : peer;
+    const effective = (fromUnixIngress || trusted.has(normalize(peer))) && given ? given : fallback;
     if (!net.isIP(effective)) throw new Error('Cannot determine client identity');
     delete out.forwarded;
     delete out['x-real-ip'];

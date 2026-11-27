@@ -109,6 +109,33 @@ test('unknown flow, protected identities, positive observation and guarded inver
   }
 });
 
+test('restricted Unix ingress retains the exact no-XFF key and the last forwarded IPv6 key', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ddc-peer-'));
+  const socketPath = path.join(dir, 'ingress.sock');
+  const legacy = await listen(http.createServer((req, res) => res.end(req.headers['x-forwarded-for'])));
+  const proxy = createProxy({ stateDir: dir, trustedUnixIngress: true, unixBaselinePeer: '::ffff:172.19.0.1',
+    legacyOrigin: 'http://127.0.0.1:' + legacy.address().port, sharedSocket: path.join(dir, 'unused.sock') });
+  try {
+    proxy.server.listen(socketPath);
+    await once(proxy.server, 'listening');
+    for (const [headers, expected] of [
+      [{}, '::ffff:172.19.0.1'],
+      [{ 'x-forwarded-for': '192.0.2.1, 2001:db8::1' }, '2001:db8::1'],
+    ]) {
+      const response = await new Promise((resolve, reject) =>
+        http.get({ socketPath, path: '/', headers, agent: false }, resolve).on('error', reject));
+      assert.equal(response.statusCode, 200);
+      const chunks = [];
+      for await (const chunk of response) chunks.push(chunk);
+      assert.equal(Buffer.concat(chunks).toString(), expected);
+    }
+  } finally {
+    await proxy.close();
+    await new Promise(resolve => legacy.close(resolve));
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('real CLI separates mode-0600 control socket from private legacy-default TCP', { timeout: 9500 }, async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ddc-cli-handoff-'));
   const legacy = await listen(http.createServer((req, res) => res.end('legacy')));
