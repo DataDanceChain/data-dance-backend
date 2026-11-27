@@ -53,9 +53,9 @@ function isValidReferralCodeFormat(raw) {
 
 function referralCodeLookupValues(raw) {
   const compact = String(raw || '').trim().replace(/\s+/g, '');
-  if (!compact) return [];
-
   const noHyphen = compact.replace(/-/g, '');
+  // An empty lookup variant would match every NULL legacy code via COALESCE.
+  if (!noHyphen) return [];
   const values = new Set([
     compact,
     compact.toUpperCase(),
