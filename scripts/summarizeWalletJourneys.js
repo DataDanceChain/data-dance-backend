@@ -9,7 +9,8 @@ const spans = [
   ['open_tap', 'popup_reserved'], ['open_tap', 'ticket_ready'],
   ['ticket_ready', 'launch_requested'], ['launch_requested', 'handoff_navigation'],
   ['handoff_navigation', 'handoff_response'], ['handoff_response', 'handoff_ready'],
-  ['handoff_ready', 'exchange_start'], ['exchange_start', 'exchange_done'],
+  ['handoff_response', 'handoff_script_fetch'], ['handoff_script_fetch', 'handoff_script_loaded'],
+  ['handoff_script_loaded', 'handoff_ready'], ['handoff_ready', 'exchange_start'], ['exchange_start', 'exchange_done'],
   ['open_tap', 'exchange_done'],
 ];
 async function main() {

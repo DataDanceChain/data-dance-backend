@@ -5,7 +5,7 @@ const { corsOrigins } = require('../constants/corsOrigins');
 
 const stages = new Set([
   'login_start', 'login_action', 'provider_return', 'account_ready', 'wallet_ready', 'login_failed',
-  'open_tap', 'popup_reserved', 'ticket_ready', 'launch_requested', 'handoff_navigation', 'handoff_response',
+  'open_tap', 'popup_reserved', 'ticket_ready', 'launch_requested', 'handoff_navigation', 'handoff_response', 'handoff_script_fetch', 'handoff_script_loaded',
   'handoff_ready', 'exchange_start', 'exchange_done', 'open_failed',
 ]);
 const platforms = new Set(['ios', 'android', 'web']);
