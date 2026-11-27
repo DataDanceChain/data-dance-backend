@@ -118,6 +118,10 @@ app.set('trust proxy', Number.isFinite(trustProxyHops) ? trustProxyHops : 2);
 app.use(requestIdMiddleware);
 
 // 中间件 - 生产环境也需要 CORS
+// Anonymous stage durations use a small body budget and never enter the request logger.
+const logger = createLogger('app');
+const { journeyTiming } = require('./routes/journeyTiming');
+app.use('/api/app/journey-timing', journeyTiming(events => logger.info('wallet_journey_timing', { events })));
 app.use(cors(corsOptions));
 app.use(express.json({ limit: '20mb' }));
 // 访问日志里的 URL 脱敏：query 中的 token / code / ticket 等值不落盘
@@ -125,7 +129,6 @@ morgan.token('url', (req) => redactUrl(req.originalUrl || req.url));
 app.use(morgan('dev'));
 
 // Add request logging
-const logger = createLogger('app');
 app.use(logger.requestLogger);
 
 // 设置请求超时时间为 5 分钟

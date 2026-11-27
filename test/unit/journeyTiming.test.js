@@ -1,0 +1,37 @@
+const { test } = require('node:test');
+const assert = require('node:assert/strict');
+const express = require('express');
+const request = require('supertest');
+const { randomUUID } = require('node:crypto');
+const { journeyTiming } = require('../../src/routes/journeyTiming');
+
+function fixture() {
+  const logged = [];
+  const app = express();
+  app.use('/api/app/journey-timing', journeyTiming(batch => logged.push(batch), { NODE_ENV: 'production' }));
+  const send = (body, origin = 'https://app.datadance.ai', type = 'text/plain') =>
+    request(app).post('/api/app/journey-timing').set('Origin', origin).set('Content-Type', type).send(body);
+  return { send, logged };
+}
+
+test('same flow can span browser documents, uploads no account data and needs no cookie', async () => {
+  const { send, logged } = fixture();
+  const flow = randomUUID(), at = Date.now() - 2000;
+  const batch = ['launch_requested', 'handoff_navigation', 'exchange_start'].map((stage, i) =>
+    ({ flow, stage, at: at + i * 800, platform: 'web' }));
+  await send(JSON.stringify(batch)).expect(204);
+  assert.deepEqual(logged, [batch]);
+});
+
+test('malformed, sensitive, stale, oversized and unapproved samples never reach logs', async () => {
+  const { send, logged } = fixture();
+  const e = { flow: randomUUID(), at: Date.now(), stage: 'login_start', platform: 'android' };
+  for (const invalid of [{ ...e, account: 'test' }, { ...e, stage: 'anything' },
+    { ...e, flow: 'invalid' }, { ...e, at: 1 }, null]) await send(JSON.stringify([invalid])).expect(400);
+  await send('[').expect(400);
+  await send(JSON.stringify(Array(13).fill(e))).expect(400);
+  await send('x'.repeat(4500)).expect(413);
+  await send(JSON.stringify([e]), 'https://unrelated.invalid').expect(403);
+  await send(JSON.stringify([e]), 'https://app.datadance.ai', 'application/json').expect(415);
+  assert.deepEqual(logged, []);
+});
