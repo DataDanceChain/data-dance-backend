@@ -63,6 +63,40 @@ console.log(describeOldAppSwitches());
 
 const PORT = process.env.PORT || 3000;
 
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+async function startServer() {
+  const { sharedAuthStateEnabled, pruneExpired } = require('./utils/authWindowStore');
+  const prisma = require('./utils/prisma');
+  if (process.env.DDC_SHARED_AUTH_STATE !== undefined && !['true', 'false'].includes(process.env.DDC_SHARED_AUTH_STATE)) {
+    throw new Error('Invalid shared authentication mode');
+  }
+  if (sharedAuthStateEnabled()) {
+    if (Buffer.byteLength(process.env.JWT_SECRET || '') < 32) throw new Error('Shared authentication signing key is unavailable');
+    // Do not accept traffic until the shared-state migration can be read.
+    await prisma.$queryRaw`SELECT "keyHash", "codeId" FROM "DdcAuthWindow", "DdcOAuthCodeIssuance" LIMIT 0`;
+  }
+  const server = app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+  const cleanup = sharedAuthStateEnabled() ? setInterval(() => {
+    pruneExpired().catch(() => console.error('Shared authentication cleanup failed'));
+  }, 60000).unref() : null;
+  let closing = false;
+  const drain = () => {
+    if (closing) return;
+    closing = true;
+    if (cleanup) clearInterval(cleanup);
+    server.close(async error => {
+      try {
+        await prisma.$disconnect();
+      } finally {
+        process.exit(error ? 1 : 0);
+      }
+    });
+    server.closeIdleConnections?.();
+  };
+  process.on('SIGTERM', drain);
+  process.on('SIGINT', drain);
+}
+
+startServer().catch(() => {
+  console.error('Cannot initialize API server or shared authentication state');
+  process.exit(1);
 });

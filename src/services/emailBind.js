@@ -6,15 +6,9 @@ const { APP_REVIEW_EMAIL } = require('./emailOtpLogin');
 // The address is stored only after this code is verified. Login codes live in a
 // different map and hash, so one cannot be reused as the other.
 
-const CODE_TTL_MS = 10 * 60 * 1000;
-const RESEND_INTERVAL_MS = 60 * 1000;
-const MAX_SENDS_PER_HOUR = 5;
-const MAX_ATTEMPTS = 5;
-const HOUR_MS = 60 * 60 * 1000;
+const { createEmailChallengeState, CODE_TTL_MS, RESEND_INTERVAL_MS, MAX_SENDS_PER_HOUR, MAX_ATTEMPTS } = require('./emailChallengeState');
+const challenge = createEmailChallengeState('bind');
 const NAME_MAX = 80;
-
-const sendWindows = new Map();
-const pending = new Map();
 
 const ACCEPTED = { status: 'success', data: { accepted: true } };
 
@@ -22,17 +16,8 @@ function newCode() {
   return String(crypto.randomInt(0, 1000000)).padStart(6, '0');
 }
 
-function hashCode(email, code) {
-  return crypto.createHash('sha256').update(`ddc-email-bind:v1:${email}:${code}`).digest();
-}
-
-function hashesMatch(left, right) {
-  return Buffer.isBuffer(left) && Buffer.isBuffer(right) && left.length === right.length && crypto.timingSafeEqual(left, right);
-}
-
 function resetEmailBindState() {
-  sendWindows.clear();
-  pending.clear();
+  challenge.reset();
 }
 
 function publicUser(user) {
@@ -49,34 +34,6 @@ function cleanName(name) {
 
 function fail(status, reason, code, message) {
   return { status, reason, body: { status: 'fail', code, message } };
-}
-
-function windowFor(email, now) {
-  let entry = sendWindows.get(email);
-  if (!entry) {
-    entry = { timestamps: [] };
-    sendWindows.set(email, entry);
-  }
-  entry.timestamps = entry.timestamps.filter((stamp) => now - stamp < HOUR_MS);
-  if (sendWindows.size > 5000) {
-    for (const [key, value] of sendWindows) {
-      if (value.timestamps.length === 0) sendWindows.delete(key);
-      if (sendWindows.size <= 4000) break;
-    }
-  }
-  return entry;
-}
-
-function throttle(email, now) {
-  const entry = windowFor(email, now);
-  const last = entry.timestamps[entry.timestamps.length - 1];
-  if (last !== undefined && now - last < RESEND_INTERVAL_MS) {
-    return { limited: true, retryAfter: Math.max(1, Math.ceil((RESEND_INTERVAL_MS - (now - last)) / 1000)) };
-  }
-  if (entry.timestamps.length >= MAX_SENDS_PER_HOUR) {
-    return { limited: true, retryAfter: Math.max(1, Math.ceil((entry.timestamps[0] + HOUR_MS - now) / 1000)) };
-  }
-  return { limited: false, entry };
 }
 
 function limited(retryAfter) {
@@ -142,28 +99,20 @@ async function requestEmailBindCode({
     return fail(409, 'email_in_use', 'EMAIL_IN_USE', 'This email address is already registered to another account.');
   }
 
-  const gate = throttle(email, now);
-  if (gate.limited) return limited(gate.retryAfter);
-  gate.entry.timestamps.push(now);
+  const started = Date.now();
+  const retryAfter = await challenge.reserveSend(email, now);
+  if (retryAfter) return limited(retryAfter);
 
   const code = randomCode();
+  const digest = challenge.digest(pendingKey(user.id, email), code);
   try {
     await sendMail(email, code);
   } catch (error) {
     return unavailable(mailFailureReason(error));
   }
 
-  pending.set(pendingKey(user.id, email), {
-    codeHash: hashCode(email, code),
-    expiresAt: now + CODE_TTL_MS,
-    attempts: 0,
-  });
-  if (pending.size > 5000) {
-    for (const [key, value] of pending) {
-      if (value.expiresAt <= now) pending.delete(key);
-      if (pending.size <= 4000) break;
-    }
-  }
+  const saved = await challenge.saveDelivered(pendingKey(user.id, email), digest, {}, now, now + (Date.now() - started));
+  if (!saved) return unavailable('delivery_superseded_or_expired');
   return { status: 200, reason: 'accepted', body: ACCEPTED };
 }
 
@@ -189,18 +138,9 @@ async function verifyEmailBindCode({
   }
 
   const key = pendingKey(user.id, email);
-  const entry = pending.get(key);
-  if (!entry || entry.expiresAt <= now) {
-    pending.delete(key);
-    return fail(401, 'invalid_code', 'EMAIL_CODE_INVALID', 'That code is incorrect or has expired.');
-  }
-  entry.attempts += 1;
-  const presented = hashCode(email, code);
-  const matches = hashesMatch(entry.codeHash, presented);
-  if (!matches || entry.attempts > MAX_ATTEMPTS) {
-    if (entry.attempts >= MAX_ATTEMPTS) pending.delete(key);
-    return fail(401, 'invalid_code', 'EMAIL_CODE_INVALID', 'That code is incorrect or has expired.');
-  }
+  const started = Date.now();
+  const entry = await challenge.check(key, code, now, false);
+  if (!entry) return fail(401, 'invalid_code', 'EMAIL_CODE_INVALID', 'That code is incorrect or has expired.');
 
   let others = [];
   try {
@@ -208,12 +148,12 @@ async function verifyEmailBindCode({
   } catch {
     return unavailable('db_lookup_failed');
   }
+  const consumed = await challenge.consumeChecked(key, entry.issuedAt, now + (Date.now() - started));
+  if (!consumed) return fail(401, 'invalid_code', 'EMAIL_CODE_INVALID', 'That code is incorrect or has expired.');
   if (Array.isArray(others) && others.length > 0) {
-    pending.delete(key);
     return fail(409, 'email_in_use', 'EMAIL_IN_USE', 'This email address is already registered to another account.');
   }
 
-  pending.delete(key);
   let saved;
   try {
     saved = await saveBinding(user, email, cleanName(name));

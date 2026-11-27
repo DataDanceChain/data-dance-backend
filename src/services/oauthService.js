@@ -854,9 +854,8 @@ function authenticatePartnerClient(client, presented) {
 
 /**
  * Which tokens came out of which authorization code, so a replayed code can revoke them
- * (RFC 6749 §4.1.2, contract T10). In-process only (single instance, see plan D10): after a
- * restart a replay is still refused with invalid_grant, only the best-effort revocation is
- * lost. Entries expire 5 minutes after issue (the partner token itself lives 300 s).
+ * (RFC 6749 §4.1.2, contract T10). Legacy single-process deployments retain the memory map.
+ * The opt-in DB path stores only hashes, atomically with the single-use consume and issuance.
  */
 const issuedTokensByCode = new Map();
 
@@ -888,7 +887,49 @@ async function revokeTokensIssuedFromCode(codeRowId) {
   return true;
 }
 
+async function recordSharedIssuance(tx, codeId, tokenHash, refreshHash = null) {
+  // Bounded lazy cleanup. Skipping locked rows keeps unrelated sign-ins and
+  // revocations from waiting behind another worker's cleanup.
+  await tx.$executeRaw`
+    DELETE FROM "DdcOAuthCodeIssuance" WHERE "codeId" IN (
+      SELECT "codeId" FROM "DdcOAuthCodeIssuance"
+      WHERE "expiresAt" <= clock_timestamp() AT TIME ZONE 'UTC'
+      ORDER BY "expiresAt" LIMIT 128 FOR UPDATE SKIP LOCKED
+    )
+  `;
+  await tx.$executeRaw`
+    INSERT INTO "DdcOAuthCodeIssuance" ("codeId", "tokenHash", "refreshHash", "expiresAt")
+    VALUES (${codeId}, ${tokenHash}, ${refreshHash},
+            (clock_timestamp() AT TIME ZONE 'UTC') + interval '5 minutes')
+  `;
+}
+
+async function revokeSharedIssuance(codeId) {
+  try {
+    await prisma.$transaction(async (tx) => {
+      const [entry] = await tx.$queryRaw`
+        DELETE FROM "DdcOAuthCodeIssuance" WHERE "codeId" = ${codeId}
+          AND "expiresAt" > clock_timestamp() AT TIME ZONE 'UTC'
+        RETURNING "tokenHash", "refreshHash"
+      `;
+      if (!entry) return;
+      if (entry.refreshHash) {
+        await tx.oAuthRefreshToken.updateMany({
+          where: { tokenHash: entry.refreshHash, revokedAt: null },
+          data: { revokedAt: new Date() },
+        });
+      }
+      await tx.mcpToken.deleteMany({ where: { tokenHash: entry.tokenHash } });
+    });
+  } catch {
+    // Preserve the association on rollback so a later valid repeat can retry.
+    // The client is still refused and no token/hash is included in telemetry.
+    logger.warn('oauth.shared_code_revocation_failed');
+  }
+}
+
 async function exchangeAuthorizationCode(req, body) {
+  const shared = process.env.DDC_SHARED_AUTH_STATE === 'true';
   const code = String(body.code || '');
   const verifier = String(body.code_verifier || '');
   if (!code || !verifier) throw new OAuthError(400, 'invalid_request', 'code and code_verifier are required.');
@@ -903,11 +944,11 @@ async function exchangeAuthorizationCode(req, body) {
   if (!row || !row.userId) {
     throw new OAuthError(400, 'invalid_grant', 'Authorization code is invalid or expired.');
   }
-  if (row.consumedAt) {
+  if (row.consumedAt && !shared) {
     await revokeTokensIssuedFromCode(row.id);
     throw new OAuthError(400, 'invalid_grant', 'Authorization code has already been used.');
   }
-  if (row.expiresAt < new Date()) {
+  if (!row.consumedAt && row.expiresAt < new Date()) {
     throw new OAuthError(400, 'invalid_grant', 'Authorization code is invalid or expired.');
   }
 
@@ -941,6 +982,11 @@ async function exchangeAuthorizationCode(req, body) {
   if (body.resource && !(rowPartner ? samePartnerResource(body.resource, row.resource) : sameResource(body.resource, row.resource))) {
     throw new OAuthError(400, 'invalid_target', 'resource does not match this code.');
   }
+  if (row.consumedAt) {
+    // Even a consumed code needs valid client proof before it can revoke a credential.
+    await revokeSharedIssuance(row.id);
+    throw new OAuthError(400, 'invalid_grant', 'Authorization code has already been used.');
+  }
 
   // Re-check the account after validating the code proof. The account may have been disabled
   // since consent, and a token minted after that decision would outlive it (item 7).
@@ -958,21 +1004,47 @@ async function exchangeAuthorizationCode(req, body) {
   }
 
   // Atomic single-use consume: exactly one concurrent exchange can win (contract T10).
-  const consumed = await prisma.oAuthAuthorization.updateMany({
+  const consume = () => ({
     where: { id: row.id, consumedAt: null, expiresAt: { gt: new Date() } },
     data: { consumedAt: new Date() },
   });
+  if (shared) {
+    // Resolve labels before opening the DB transaction. No provider/network wait
+    // is allowed to hold the code's write lock.
+    const publicName = currentPartner ? undefined : await publicOAuthClientName(row.clientId);
+    return prisma.$transaction(async (db) => {
+      const consumed = await db.oAuthAuthorization.updateMany(consume());
+      if (consumed.count !== 1) {
+        throw new OAuthError(400, 'invalid_grant', 'Authorization code is invalid or expired.');
+      }
+      return issueOAuthTokens(row.userId, row.clientId, row.resource, row.scope,
+        { codeRowId: row.id, client: currentPartner, db, shared, publicName });
+    });
+  }
+  const consumed = await prisma.oAuthAuthorization.updateMany(consume());
   if (!consumed || consumed.count !== 1) {
     throw new OAuthError(400, 'invalid_grant', 'Authorization code is invalid or expired.');
   }
   return issueOAuthTokens(row.userId, row.clientId, row.resource, row.scope, { codeRowId: row.id, client: currentPartner, req });
 }
 
-async function issueOAuthTokens(userId, clientId, resource, scope, { codeRowId, client, req } = {}) {
-  const partner = client || await loadPartnerClient(clientId, req);
+async function publicOAuthClientName(clientId) {
+  try { return (await resolveClient(clientId)).clientName || 'ChatGPT / Claude'; }
+  catch { return 'ChatGPT / Claude'; }
+}
+
+async function issueOAuthTokens(userId, clientId, resource, scope, { codeRowId, client, req, db = prisma, shared = false, publicName } = {}) {
+  const partner = shared ? client : client || await loadPartnerClient(clientId, req);
+  async function record(token, refresh) {
+    if (!codeRowId) return;
+    const tokenHash = hashToken(token);
+    const refreshHash = refresh ? hashToken(refresh) : null;
+    if (shared) await recordSharedIssuance(db, codeRowId, tokenHash, refreshHash);
+    else rememberIssuedToken(codeRowId, refresh ? { tokenHash, refreshHash } : { tokenHash });
+  }
   if (isPartnerClient(partner)) {
-    const issued = await issuePartnerToken(userId, partner, { resource, scope });
-    if (codeRowId) rememberIssuedToken(codeRowId, { tokenHash: hashToken(issued.token) });
+    const issued = await issuePartnerToken(userId, partner, { resource, scope }, db);
+    await record(issued.token);
     return {
       access_token: issued.token,
       token_type: 'Bearer',
@@ -981,21 +1053,16 @@ async function issueOAuthTokens(userId, clientId, resource, scope, { codeRowId, 
       resource,
     };
   }
-  let clientName = 'ChatGPT / Claude';
-  try {
-    clientName = (await resolveClient(clientId)).clientName;
-  } catch {
-    clientName = 'ChatGPT / Claude';
-  }
+  const clientName = publicName || await publicOAuthClientName(clientId);
   const issued = await issueMcpToken(userId, clientName, {
     source: 'oauth',
     clientId,
     resource,
     scope,
     expiresAt: new Date(Date.now() + ACCESS_TTL_SEC * 1000),
-  });
+  }, db);
   const refresh = randomSecret('ddc_rt_');
-  await prisma.oAuthRefreshToken.create({
+  await db.oAuthRefreshToken.create({
     data: {
       tokenHash: hashToken(refresh),
       userId,
@@ -1006,7 +1073,7 @@ async function issueOAuthTokens(userId, clientId, resource, scope, { codeRowId, 
       expiresAt: new Date(Date.now() + REFRESH_TTL_MS),
     },
   });
-  if (codeRowId) rememberIssuedToken(codeRowId, { tokenHash: hashToken(issued.token), refreshHash: hashToken(refresh) });
+  await record(issued.token, refresh);
   return {
     access_token: issued.token,
     token_type: 'Bearer',
