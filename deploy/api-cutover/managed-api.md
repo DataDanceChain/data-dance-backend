@@ -61,8 +61,13 @@ values to fill out and never substitute for the real evidence producer.
 Compose and release script only if both exact input SHA-256s match. The generated
 Compose change affects only the API. Direct `compose up --force-recreate api`
 without a managed image uses a reserved unavailable image and cannot replace the
-running service. Restart is disabled for the managed container. The default
-entrypoint refuses stale evidence and cannot launch the old image. Keep both
+running service. The tool verifies that the reserved image does not resolve
+locally and the default Compose configuration selects only that reserved name.
+Do not tag an image as the reserve or set the managed image in project dotenv.
+Docker administrators retain the ability to override the protected inputs.
+The DB and web services can still run independently of the API release.
+Restart is disabled for the managed container. Its entrypoint checks the live
+admission and the shared-compatible image before opening a listener. Keep both
 the installed template and its existing release-package source identical at
 deployment, or the old installer can restore bare startup. The existing
 installer guards before writing the template or starting other services. The
