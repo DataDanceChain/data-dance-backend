@@ -123,7 +123,9 @@ function createProxy(options) {
       ? req.headers['x-forwarded-for'].split(',').at(-1).trim() : '';
     // Express trust-proxy=1 selects the closest trusted edge-supplied address.
     // A direct request must not supply its own effective limiter identity.
-    const effective = trusted.has(normalize(peer)) && given ? given : peer;
+    // Opt-in only in a wrapper whose sole data listener is a restricted Unix socket.
+    const fromUnixIngress = options.trustedUnixIngress === true && peer === undefined;
+    const effective = (fromUnixIngress || trusted.has(normalize(peer))) && given ? given : peer;
     if (!net.isIP(effective)) throw new Error('Cannot determine client identity');
     delete out.forwarded;
     delete out['x-real-ip'];
