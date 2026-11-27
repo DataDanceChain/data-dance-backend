@@ -19,7 +19,7 @@ if (missingEnvVars.length > 0) {
 // Create a transporter only if all required env vars are present
 const smtpPort = parseInt(process.env.SMTP_PORT, 10);
 const smtpSecure = process.env.SMTP_SECURE === 'true';
-const transporter = missingEnvVars.length === 0 ? nodemailer.createTransport({
+const smtpOptions = {
   host: process.env.SMTP_HOST,
   port: smtpPort,
   secure: smtpSecure,
@@ -29,6 +29,14 @@ const transporter = missingEnvVars.length === 0 ? nodemailer.createTransport({
     user: process.env.SMTP_USER,
     pass: process.env.SMTP_PASS
   }
+};
+const transporter = missingEnvVars.length === 0 ? nodemailer.createTransport(smtpOptions) : null;
+// Reuse authenticated connections for OTPs without queuing them behind bulk promotions.
+const loginTransport = missingEnvVars.length === 0 ? nodemailer.createTransport({
+  ...smtpOptions,
+  pool: true,
+  maxConnections: 5,
+  maxRequeues: 0, // A lost SMTP acknowledgement must not cause an automatic second send.
 }) : null;
 
 /**
@@ -90,12 +98,12 @@ const sendBulkPromotionEmails = async (recipients, promotionInfo) => {
  * @param {string} code
  */
 const sendLoginCodeEmail = async (to, code) => {
-  if (!transporter) {
+  if (!loginTransport) {
     const error = new Error('Email is not configured');
     error.code = 'EMAIL_DISABLED';
     throw error;
   }
-  await transporter.sendMail({
+  await loginTransport.sendMail({
     from: process.env.SMTP_FROM,
     to,
     subject: 'Your DataDance login code',
@@ -108,4 +116,4 @@ module.exports = {
   sendPromotionEmail,
   sendBulkPromotionEmails,
   sendLoginCodeEmail,
-}; 
+};

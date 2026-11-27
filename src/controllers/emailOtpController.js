@@ -9,6 +9,7 @@ const {
 } = require('../services/emailOtpLogin');
 const { normalizeEmail } = require('../utils/emailMask');
 const { createLogger } = require('../utils/logger');
+const { performance } = require('node:perf_hooks');
 
 const logger = createLogger('emailOtp');
 
@@ -75,15 +76,26 @@ function fail(res) {
 }
 
 exports.sendEmailCode = async (req, res) => {
+  const timings = {};
+  async function measure(key, operation, ...args) {
+    const start = performance.now();
+    try {
+      return await operation(...args);
+    } finally {
+      timings[key] = Math.round(performance.now() - start);
+    }
+  }
   try {
     const result = await requestEmailLoginCode({
       email: req.body && req.body.email,
-      findUsersByEmail,
-      sendMail: sendLoginCodeEmail,
+      findUsersByEmail: (email) => measure('lookupMs', findUsersByEmail, email),
+      sendMail: (email, code) => measure('smtpAcceptMs', sendLoginCodeEmail, email, code),
     });
     return respond(res, result);
   } catch {
     return fail(res);
+  } finally {
+    if (Object.keys(timings).length) logger.info('email_otp_send_latency', timings);
   }
 };
 
