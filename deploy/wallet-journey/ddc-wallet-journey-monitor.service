@@ -1,0 +1,24 @@
+[Unit]
+Description=DDC Wallet journey aggregate reports
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+Environment=DOCKER_HOST=unix:///var/run/docker.sock
+EnvironmentFile=-/etc/default/ddc-wallet-journey-monitor
+ExecStart=/usr/bin/python3 -I /opt/ddc/wallet-journey/summarize.py --output /var/lib/ddc-wallet-journey-monitor/latest.json
+StateDirectory=ddc-wallet-journey-monitor
+StateDirectoryMode=0700
+UMask=0077
+Restart=on-failure
+RestartSec=15s
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+RestrictAddressFamilies=AF_UNIX
+MemoryMax=256M
+
+[Install]
+WantedBy=multi-user.target
