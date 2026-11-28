@@ -1052,6 +1052,8 @@ model OAuthAuthorization {
   expiresAt           DateTime
   consumedAt          DateTime?
   createdAt           DateTime  @default(now())
+  /// Direct Planet request admitted under the explicit first-party read policy at creation.
+  planetDirectPreapproval Boolean @default(false)
   /// sha256 of the initiator nonce carried by the `__Host-ddc_authz` cookie of the browser that
   /// started this authorization. The consent decision must present the same nonce, so a consent
   /// link forwarded to another browser cannot mint a code for the initiator (authorization

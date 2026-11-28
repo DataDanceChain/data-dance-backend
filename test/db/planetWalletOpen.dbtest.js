@@ -10,6 +10,7 @@ const { listenLoopback } = require('../helpers/loopbackServer');
 const url = process.env.TEST_DATABASE_URL;
 if (!url || !/\/[^/?]*test[^/?]*(\?|$)/.test(url)) throw new Error('A disposable TEST_DATABASE_URL is required');
 const run = crypto.randomUUID();
+const secret = crypto.randomBytes(32).toString('hex');
 const clientId = `planet-${run}`;
 const callback = 'https://dataplanet.cc/pages/oauth/callback';
 Object.assign(process.env, {
@@ -22,6 +23,7 @@ Object.assign(process.env, {
 const prisma = require('../../src/utils/prisma');
 const app = express();
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 app.use('/api/sso', require('../../src/routes/ssoRoutes'));
 app.use('/', require('../../src/routes/oauthRoutes'));
 
@@ -31,7 +33,7 @@ test('one Wallet Open elects and approves one PKCE request across concurrent HTT
     await prisma.user.create({ data: { id: run, email: `${run}@example.test`, referralCode: run, authType: 'web3auth' } });
     await prisma.ssoDeveloperClient.create({ data: {
       clientId, clientName: 'Planet fixture', contactEmail: `${run}@example.test`, kind: 'partner',
-      secretHash: crypto.randomBytes(32).toString('hex'), redirectUris: [callback],
+      secretHash: crypto.createHash('sha256').update(secret).digest('hex'), redirectUris: [callback],
       initiateLoginUri: 'https://dataplanet.cc/pages/oauth/start', enabled: true,
     } });
     const jwtToken = jwt.sign({ id: run, ver: 2 }, process.env.JWT_SECRET, { expiresIn: '5m' });
@@ -42,11 +44,11 @@ test('one Wallet Open elects and approves one PKCE request across concurrent HTT
     const { wallet_open_id: openId, session_token: session } = exchange.body.data;
     assert.match(openId, /^[A-Za-z0-9_-]{43}$/);
     const cookie = exchange.headers['set-cookie'][0].split(';')[0];
-    const start = async (handle) => {
+    const start = async (handle, verifier = crypto.randomBytes(32).toString('base64url')) => {
       const response = await request(server).get('/oauth/authorize').set('Cookie', cookie).query({
         client_id: clientId, redirect_uri: callback, response_type: 'code', scope: 'sso:identity sso:wallet',
         state: crypto.randomUUID(), code_challenge_method: 'S256',
-        code_challenge: crypto.randomBytes(32).toString('base64url'), ...(handle ? { wallet_open_id: handle } : {}),
+        code_challenge: crypto.createHash('sha256').update(verifier).digest('base64url'), ...(handle ? { wallet_open_id: handle } : {}),
       }).expect(302);
       return new URL(response.headers.location).searchParams.get('request');
     };
@@ -66,6 +68,29 @@ test('one Wallet Open elects and approves one PKCE request across concurrent HTT
     const directId = await start();
     await decide(directId, true).expect(403);
     await decide(directId, false).expect(200);
+
+    // A separate synthetic browser account models the independent direct-Web scenario.
+    const webUser = crypto.randomUUID();
+    await prisma.user.create({ data: { id: webUser, email: webUser + '@example.test', referralCode: webUser, authType: 'web3auth' } });
+    process.env.SSO_PLANET_PREAPPROVED_READ_CLIENT_ID = clientId;
+    const verifier = crypto.randomBytes(32).toString('base64url');
+    const requestId = await start(undefined, verifier);
+    const established = jwt.sign({ id: webUser, ver: 2, iat: Math.floor(Date.now() / 1000) - 10 },
+      process.env.JWT_SECRET, { expiresIn: '5m' });
+    const webDecision = () => request(server).post('/api/oauth/consent')
+      .set('Authorization', 'Bearer ' + established).set('Cookie', cookie).send({ requestId, auto: true, allow: true });
+    const summary = await request(server).get('/api/oauth/requests/' + requestId)
+      .set('Authorization', 'Bearer ' + established).expect(200);
+    assert.deepEqual(summary.body.data.autoApprove, { app: false, web: true });
+    const responses = await Promise.all([webDecision(), webDecision()]);
+    assert.deepEqual(responses.map(r => r.status).sort(), [200, 400]);
+    const code = new URL(responses.find(r => r.status === 200).body.data.redirectTo).searchParams.get('code');
+    const redeem = () => request(server).post('/oauth/token').auth(clientId, secret).type('form')
+      .send({ grant_type: 'authorization_code', code, redirect_uri: callback, code_verifier: verifier });
+    await redeem().expect(200);
+    await redeem().expect(400);
+    assert.equal((await prisma.oAuthAuthorization.findUniqueOrThrow({ where: { id: requestId } })).userId, webUser);
+    await prisma.user.delete({ where: { id: webUser } });
   } finally {
     await new Promise(resolve => server.close(resolve));
     await prisma.oAuthAuthorization.deleteMany({ where: { clientId } });

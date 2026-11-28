@@ -108,7 +108,7 @@ function pkce() {
 }
 
 /** Browser step: start an authorization; returns the request id, its cookie and PKCE verifier. */
-async function authorize({ clientId = 'tge-test', redirectUri = REDIRECT, scope, openId, browserCookie } = {}) {
+async function authorize({ clientId = 'tge-test', redirectUri = REDIRECT, scope, openId, browserCookie, prompt, loginHint } = {}) {
   const { verifier, challenge } = pkce();
   const query = {
     response_type: 'code',
@@ -120,6 +120,8 @@ async function authorize({ clientId = 'tge-test', redirectUri = REDIRECT, scope,
   };
   if (scope) query.scope = scope;
   if (openId) query.wallet_open_id = openId;
+  if (prompt) query.prompt = prompt;
+  if (loginHint) query.login_hint = loginHint;
   const call = request(server).get('/oauth/authorize').query(query);
   if (browserCookie) call.set('Cookie', browserCookie);
   const res = await call;
@@ -168,7 +170,7 @@ function setSwitch(value) {
   else process.env.SSO_TGE_AUTO_APPROVE = value;
 }
 
-const TOGGLES = ['SSO_WALLET_PLANET_CLIENT_ID', 'SSO_TGE_AUTO_APPROVE', 'SSO_REQUIRE_VERIFIED_SESSION'];
+const TOGGLES = ['SSO_TGE_REFERRAL_BIND', 'SSO_PLANET_PREAPPROVED_READ_CLIENT_ID', 'SSO_WALLET_PLANET_CLIENT_ID', 'SSO_TGE_AUTO_APPROVE', 'SSO_REQUIRE_VERIFIED_SESSION'];
 const saved = {};
 
 beforeEach(async () => {
@@ -567,6 +569,41 @@ describe('Wallet entry to the registered Data Planet client', () => {
   };
   const manual = { app: false, web: false };
   const automatic = { app: true, web: false };
+
+  it('uses a separate operator decision for an established verified direct browser session', async () => {
+    process.env.SSO_PLANET_PREAPPROVED_READ_CLIENT_ID = clientId;
+    const flow = await authorize(params);
+    const token = userJwt({ ver: 2, iat: Math.floor(Date.now() / 1000) - 5 });
+    const summary = await requestSummary(flow.requestId).set('Authorization', 'Bearer ' + token);
+    assert.deepEqual(summary.body.data.autoApprove, { app: false, web: true });
+    assert.equal((await consent(token, '', decision(flow))).status, 409);
+    assert.equal((await consent(userJwt({ ver: 1 }), flow.cookie, decision(flow))).status, 403);
+    const newLogin = userJwt({ ver: 2, iat: Math.ceil(authzRow(flow.requestId).createdAt.getTime() / 1000) });
+    assert.equal((await consent(newLogin, flow.cookie, decision(flow))).status, 403);
+    delete process.env.SSO_PLANET_PREAPPROVED_READ_CLIENT_ID;
+    assert.equal((await consent(token, flow.cookie, decision(flow))).status, 403);
+    process.env.SSO_PLANET_PREAPPROVED_READ_CLIENT_ID = clientId;
+    assert.equal((await consent(token, flow.cookie, decision(flow))).status, 200);
+    assert.equal(authzRow(flow.requestId).userId, cUser.id);
+    assert.equal((await consent(token, flow.cookie, decision(flow))).status, 400);
+  });
+
+  it('keeps other scopes, callbacks, hinted identities and Wallet hand-offs out of direct Web policy', async () => {
+    process.env.SSO_PLANET_PREAPPROVED_READ_CLIENT_ID = clientId;
+    const token = userJwt({ ver: 2, iat: Math.floor(Date.now() / 1000) - 5 });
+    process.env.SSO_TGE_REFERRAL_BIND = 'true';
+    for (const extra of [{ scope: scope + ' sso:referral_bind' }, { scope: scope + ' sso:points' }, { redirectUri: 'https://dataplanet.cc/other' },
+      { openId: 'X'.repeat(43) }, { prompt: 'login' }, { loginHint: 'a@example.test' }]) {
+      const flow = await authorize({ ...params, ...extra });
+      assert.equal((await consent(token, flow.cookie, decision(flow))).status, 403);
+    }
+    const session = await exchangeSession(clientId);
+    const flow = await authorize({ ...params, ...session });
+    assert.equal((await consent(token, flow.cookie, decision(flow))).status, 403);
+    assert.equal((await consent(session.token, flow.cookie, decision(flow))).status, 200);
+    const direct = await authorize({ ...params, browserCookie: flow.cookie });
+    assert.equal((await consent(session.token, direct.cookie, decision(direct))).status, 403);
+  });
 
   it('binds a fresh Wallet Open to one request, its ticket, account and browser', async () => {
     const session = await exchangeSession(clientId);
