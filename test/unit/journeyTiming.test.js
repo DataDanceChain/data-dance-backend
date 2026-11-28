@@ -35,3 +35,16 @@ test('malformed, sensitive, stale, oversized and unapproved samples never reach 
   await send(JSON.stringify([e]), 'https://app.datadance.ai', 'application/json').expect(415);
   assert.deepEqual(logged, []);
 });
+
+test('old and classified clients can share a batch, with strictly bounded diagnostic labels', async () => {
+  const { send, logged } = fixture();
+  const start = { flow: randomUUID(), at: Date.now(), stage: 'login_start', platform: 'web' };
+  const event = { ...start, stage: 'provider_start', channel: 'google', visibility: 'visible', release: '1021904' };
+  await send(JSON.stringify([start, event])).expect(204);
+  assert.deepEqual(logged, [[start, event]]);
+  for (const unsafe of [
+    { channel: 'person@example.test' }, { release: 'refs/heads/private' }, { visibility: null },
+    { reason: 'arbitrary exception contents' }, { callback: 'https://example.test/' },
+  ]) await send(JSON.stringify([start, { ...event, ...unsafe }])).expect(400);
+  assert.equal(logged.length, 1);
+});

@@ -5,16 +5,25 @@ const { corsOrigins } = require('../constants/corsOrigins');
 
 const stages = new Set([
   'login_start', 'login_action', 'provider_return', 'account_ready', 'wallet_ready', 'login_failed',
+  'provider_start', 'otp_send_start', 'otp_send_done', 'otp_verify_start', 'otp_verify_done',
+  'login_cancelled', 'login_timeout', 'login_backgrounded', 'login_redirect_done', 'login_incomplete',
+  'login_account_request_start', 'login_account_response',
   'open_tap', 'popup_reserved', 'ticket_ready', 'launch_requested', 'handoff_navigation', 'handoff_response', 'handoff_script_fetch', 'handoff_script_loaded',
   'handoff_ready', 'exchange_start', 'exchange_done', 'open_failed',
 ]);
 const platforms = new Set(['ios', 'android', 'web']);
 const flowId = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
-const keys = ['at', 'flow', 'platform', 'stage'];
+const requiredKeys = ['at', 'flow', 'platform', 'stage'];
+const channels = new Set(['google', 'apple', 'x', 'email_otp', 'web3auth_email', 'other', 'unknown']);
+const visibilities = new Set(['visible', 'hidden', 'unknown']);
+const allowedKeys = new Set([...requiredKeys, 'channel', 'visibility', 'release']);
 
 function validEvent(event, now) {
   return event !== null && typeof event === 'object' &&
-    Object.keys(event).length === keys.length && keys.every(key => Object.hasOwn(event, key)) &&
+    requiredKeys.every(key => Object.hasOwn(event, key)) && Object.keys(event).every(key => allowedKeys.has(key)) &&
+    (!Object.hasOwn(event, 'channel') || channels.has(event.channel)) &&
+    (!Object.hasOwn(event, 'visibility') || visibilities.has(event.visibility)) &&
+    (!Object.hasOwn(event, 'release') || (typeof event.release === 'string' && /^[0-9a-f]{7,40}$/.test(event.release))) &&
     typeof event.flow === 'string' && flowId.test(event.flow) &&
     stages.has(event.stage) && platforms.has(event.platform) &&
     Number.isSafeInteger(event.at) && event.at >= now - 20 * 60_000 && event.at <= now + 120_000;
