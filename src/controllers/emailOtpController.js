@@ -55,11 +55,21 @@ async function createEmailOtpUser(email) {
 
 // Observe the route's actual result, including 429 responses produced before the handler.
 exports.observeEmailOtp = (stage) => (req, res, next) => {
+  // Untrusted correlation hint only; reqId remains the server-owned request identity.
+  const flow = req.body?.flow;
+  const hasFlow = typeof flow === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(flow);
+  const trace = { reqId: req.reqId, stage, ...(hasFlow ? { flow } : {}) };
+  if (hasFlow) {
+    logger.info('email_otp_received', trace);
+    res.once('close', () => {
+      if (!res.writableFinished) logger.info('email_otp_disconnected', trace);
+    });
+  }
   res.once('finish', () => {
     const status = res.statusCode;
     const reason = res.locals.emailOtpReason ?? (status === 429 ? 'request_throttled' : 'unexpected_failure');
     const level = status >= 500 ? 'error' : 'info';
-    logger[level]('email_otp_result', { reqId: req.reqId, stage, status, reason });
+    logger[level]('email_otp_result', { ...trace, status, reason });
   });
   next();
 };
@@ -95,7 +105,7 @@ exports.sendEmailCode = async (req, res) => {
   } catch {
     return fail(res);
   } finally {
-    if (Object.keys(timings).length) logger.info('email_otp_send_latency', timings);
+    if (Object.keys(timings).length) logger.info('email_otp_send_latency', { reqId: req.reqId, ...timings, reason: res.locals.emailOtpReason });
   }
 };
 

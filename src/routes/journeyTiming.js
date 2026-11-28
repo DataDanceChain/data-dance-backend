@@ -16,7 +16,11 @@ const flowId = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]
 const requiredKeys = ['at', 'flow', 'platform', 'stage'];
 const channels = new Set(['google', 'apple', 'x', 'email_otp', 'web3auth_email', 'other', 'unknown']);
 const visibilities = new Set(['visible', 'hidden', 'unknown']);
-const allowedKeys = new Set([...requiredKeys, 'channel', 'visibility', 'release']);
+const failureStages = new Set(['login_failed', 'login_timeout', 'login_incomplete', 'login_cancelled']);
+const failureReasons = new Set(['cancelled', 'timeout', 'connection', 'incomplete', 'provider', 'identity', 'account',
+  'unexpected', 'invalidEmail', 'invalidCode', 'unavailable', 'rateLimit', 'offline']);
+const failurePhases = new Set(['provider', 'identity', 'account', 'return', 'otp_send', 'otp_verify']);
+const allowedKeys = new Set([...requiredKeys, 'channel', 'visibility', 'release', 'reason', 'phase']);
 
 function validEvent(event, now) {
   return event !== null && typeof event === 'object' &&
@@ -25,8 +29,23 @@ function validEvent(event, now) {
     (!Object.hasOwn(event, 'visibility') || visibilities.has(event.visibility)) &&
     (!Object.hasOwn(event, 'release') || (typeof event.release === 'string' && /^[0-9a-f]{7,40}$/.test(event.release))) &&
     typeof event.flow === 'string' && flowId.test(event.flow) &&
+    ((!Object.hasOwn(event, 'reason') && !Object.hasOwn(event, 'phase')) ||
+      (failureStages.has(event.stage) && failureReasons.has(event.reason) && failurePhases.has(event.phase))) &&
     stages.has(event.stage) && platforms.has(event.platform) &&
     Number.isSafeInteger(event.at) && event.at >= now - 20 * 60_000 && event.at <= now + 120_000;
+}
+
+// Keep the original monitor's strict event shape. Optional diagnostics are bounded
+// side records linked to the same anonymous terminal, outside the event array.
+function timingLog(events) {
+  const loginFailures = [];
+  const timingEvents = events.map(event => {
+    if (!event.reason) return event;
+    const { reason, phase, ...timing } = event;
+    loginFailures.push({ flow: event.flow, stage: event.stage, at: event.at, phase, reason });
+    return timing;
+  });
+  return loginFailures.length ? { events: timingEvents, loginFailures } : { events };
 }
 
 function journeyTiming(record, env = process.env) {
@@ -68,4 +87,4 @@ function journeyTiming(record, env = process.env) {
   return router;
 }
 
-module.exports = { journeyTiming };
+module.exports = { journeyTiming, timingLog };
