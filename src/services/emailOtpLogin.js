@@ -14,14 +14,8 @@ const EMAIL_OTP_AUTH_TYPE = 'email_otp';
 const APP_REVIEW_EMAIL = 'app-review@datadance.ai';
 const APP_REVIEW_CODE = '740258';
 
-const CODE_TTL_MS = 10 * 60 * 1000;
-const RESEND_INTERVAL_MS = 60 * 1000;
-const MAX_SENDS_PER_HOUR = 5;
-const MAX_ATTEMPTS = 5;
-const HOUR_MS = 60 * 60 * 1000;
-
-const sendWindows = new Map();
-const pending = new Map();
+const { createEmailChallengeState, CODE_TTL_MS, RESEND_INTERVAL_MS, MAX_SENDS_PER_HOUR, MAX_ATTEMPTS } = require('./emailChallengeState');
+const challenge = createEmailChallengeState('login');
 
 const ACCEPTED = { status: 'success', data: { accepted: true } };
 const INVALID_CODE = {
@@ -41,10 +35,6 @@ function emailOtpEnabled(env = process.env) {
 
 function newCode() {
   return String(crypto.randomInt(0, 1000000)).padStart(6, '0');
-}
-
-function hashCode(email, code) {
-  return crypto.createHash('sha256').update(`ddc-email-otp:v1:${email}:${code}`).digest();
 }
 
 function hashesMatch(left, right) {
@@ -67,34 +57,6 @@ function eligibleUser(user) {
   if (!email || email.length > 254 || !isValidEmail(email) || email.includes('|')) return false;
   if (isTwitterVerifier(user.web3authVerifier)) return false;
   return true;
-}
-
-function windowFor(email, now) {
-  let entry = sendWindows.get(email);
-  if (!entry) {
-    entry = { timestamps: [] };
-    sendWindows.set(email, entry);
-  }
-  entry.timestamps = entry.timestamps.filter((stamp) => now - stamp < HOUR_MS);
-  if (sendWindows.size > 5000) {
-    for (const [key, value] of sendWindows) {
-      if (value.timestamps.length === 0) sendWindows.delete(key);
-      if (sendWindows.size <= 4000) break;
-    }
-  }
-  return entry;
-}
-
-function throttle(email, now) {
-  const entry = windowFor(email, now);
-  const last = entry.timestamps[entry.timestamps.length - 1];
-  if (last !== undefined && now - last < RESEND_INTERVAL_MS) {
-    return { limited: true, retryAfter: Math.max(1, Math.ceil((RESEND_INTERVAL_MS - (now - last)) / 1000)) };
-  }
-  if (entry.timestamps.length >= MAX_SENDS_PER_HOUR) {
-    return { limited: true, retryAfter: Math.max(1, Math.ceil((entry.timestamps[0] + HOUR_MS - now) / 1000)) };
-  }
-  return { limited: false, entry };
 }
 
 function limitedBody(retryAfter) {
@@ -147,8 +109,7 @@ function publicUser(user) {
 }
 
 function resetEmailOtpState() {
-  sendWindows.clear();
-  pending.clear();
+  challenge.reset();
 }
 
 async function requestEmailLoginCode({
@@ -172,10 +133,9 @@ async function requestEmailLoginCode({
   }
   if (email === APP_REVIEW_EMAIL) return { status: 200, reason: 'accepted', body: ACCEPTED };
 
-  const gate = throttle(email, now);
-  if (gate.limited) return limitedBody(gate.retryAfter);
-  // Count the attempt before any await so two clicks cannot both pass the gap.
-  gate.entry.timestamps.push(now);
+  const started = Date.now();
+  const retryAfter = await challenge.reserveSend(email, now);
+  if (retryAfter) return limitedBody(retryAfter);
 
   let users = [];
   try {
@@ -197,24 +157,15 @@ async function requestEmailLoginCode({
   }
 
   const code = randomCode();
+  const digest = challenge.digest(email, code);
   try {
     await sendMail(email, code);
   } catch (error) {
     return unavailable(mailFailureReason(error));
   }
 
-  pending.set(email, {
-    ...pendingEntry,
-    codeHash: hashCode(email, code),
-    expiresAt: now + CODE_TTL_MS,
-    attempts: 0,
-  });
-  if (pending.size > 5000) {
-    for (const [key, value] of pending) {
-      if (value.expiresAt <= now) pending.delete(key);
-      if (pending.size <= 4000) break;
-    }
-  }
+  const saved = await challenge.saveDelivered(email, digest, pendingEntry, now, now + (Date.now() - started));
+  if (!saved) return unavailable('delivery_superseded_or_expired');
   return { status: 200, reason: 'accepted', body: ACCEPTED };
 }
 
@@ -276,18 +227,8 @@ async function verifyEmailLoginCode({
     return sessionFor(reviewUser);
   }
 
-  const entry = pending.get(email);
-  if (!entry || entry.expiresAt <= now) {
-    pending.delete(email);
-    return invalidCode();
-  }
-  entry.attempts += 1;
-  const matched = hashesMatch(entry.codeHash, hashCode(email, code));
-  if (!matched) {
-    if (entry.attempts >= MAX_ATTEMPTS) pending.delete(email);
-    return invalidCode();
-  }
-  pending.delete(email);
+  const entry = await challenge.check(email, code, now, true);
+  if (!entry) return invalidCode();
 
   let user;
   try {

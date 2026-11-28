@@ -33,9 +33,9 @@ async function listMcpTokens(userId) {
   return rows.map(toSummary);
 }
 
-async function createTokenRow(userId, label, extras, prefix) {
+async function createTokenRow(userId, label, extras, prefix, db) {
   const token = createMcpTokenSecret(prefix);
-  const row = await prisma.mcpToken.create({
+  const row = await db.mcpToken.create({
     data: {
       userId,
       tokenHash: hashToken(token),
@@ -51,8 +51,8 @@ async function createTokenRow(userId, label, extras, prefix) {
   return { token, row };
 }
 
-async function issueMcpToken(userId, label, extras = {}) {
-  const { token, row } = await createTokenRow(userId, label, extras, TOKEN_PREFIX);
+async function issueMcpToken(userId, label, extras = {}, db = prisma) {
+  const { token, row } = await createTokenRow(userId, label, extras, TOKEN_PREFIX, db);
   return { token, ...toSummary(row) };
 }
 
@@ -60,7 +60,7 @@ async function issueMcpToken(userId, label, extras = {}) {
  * Partner (TGE) access token: opaque `ddc_tge_…`, audience-bound to the partner resource,
  * 300 s, no refresh token. Stored in the same McpToken table with source 'partner'.
  */
-async function issuePartnerToken(userId, client, { resource, scope } = {}) {
+async function issuePartnerToken(userId, client, { resource, scope } = {}, db = prisma) {
   const ttlSec = Number(client?.accessTtlSec) > 0 ? Number(client.accessTtlSec) : PARTNER_ACCESS_TTL_SEC;
   const expiresAt = new Date(Date.now() + ttlSec * 1000);
   const { token, row } = await createTokenRow(
@@ -74,6 +74,7 @@ async function issuePartnerToken(userId, client, { resource, scope } = {}) {
       expiresAt,
     },
     PARTNER_TOKEN_PREFIX,
+    db,
   );
   return { token, id: row.id, expiresAt: row.expiresAt, createdAt: row.createdAt, expiresIn: ttlSec };
 }

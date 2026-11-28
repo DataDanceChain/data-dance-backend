@@ -1,12 +1,10 @@
 const crypto = require('crypto');
 const { createLogger } = require('../utils/logger');
 const logger = createLogger('rateLimitMiddleware');
+const { sharedAuthStateEnabled, withState } = require('../utils/authWindowStore');
 
-// In-process store: one Map for the single container we run today.
-// A second replica needs a shared store (Redis via rate-limiter-flexible,
-// already a dependency) before any per-IP limit here means anything —
-// each process would otherwise grant the full budget on its own.
-// See README "运行加固" / plan §8 D10.
+// Used only by the legacy single-process mode. Shared mode stores each
+// limiter's rolling window in the same database as the email challenges.
 const rateLimitStore = new Map();
 
 let limiterCounter = 0;
@@ -66,6 +64,51 @@ function createRateLimiter(options = {}) {
     const limit = typeof max === 'function' ? max(req) : max;
     const key = `${name}:${keyGenerator(req) || 'anonymous'}`;
     const current = now();
+    if (sharedAuthStateEnabled()) {
+      // Failed-only limiters must reserve a slot before the handler runs. Give
+      // back exactly this reservation on success, even for same-millisecond requests.
+      const reservation = skipSuccessfulRequests ? crypto.randomUUID() : null;
+      let admission;
+      try {
+        admission = await withState('route-limit', key, windowMs, (old) => {
+          const requests = (old || []).filter(entry => entry.at > current - windowMs);
+          if (requests.length >= limit) {
+            const first = requests.reduce((earliest, entry) => Math.min(earliest, entry.at), current);
+            return { state: requests, value: { retryAfter: (first + windowMs - current) / 1000 } };
+          }
+          requests.push(reservation ? { at: current, reservation } : { at: current });
+          return { state: requests, value: { remaining: limit - requests.length } };
+        });
+      } catch {
+        logger.error('Shared rate limit store unavailable', { limiter: name });
+        res.setHeader('Retry-After', '1');
+        return res.status(503).json(isOAuthStylePath(req)
+          ? { error: 'temporarily_unavailable' }
+          : { status: 'error', message: 'Please try again.' });
+      }
+      if (admission.retryAfter !== undefined) {
+        return sendRateLimited(req, res, { message, retryAfter: admission.retryAfter, errorFormat, code });
+      }
+      if (reservation) {
+        const end = res.end;
+        let finishing = false;
+        res.end = function(...args) {
+          if (finishing) return res;
+          finishing = true;
+          if (res.statusCode >= 400) return end.apply(res, args);
+          withState('route-limit', key, windowMs, (entries) => {
+            const remaining = (entries || []).filter(entry => entry.reservation !== reservation);
+            return { state: remaining.length ? remaining : null };
+          }).catch(() => logger.error('Shared rate limit reservation retained', { limiter: name }))
+            .finally(() => end.apply(res, args));
+          return res;
+        };
+      }
+      res.setHeader('X-RateLimit-Limit', limit);
+      res.setHeader('X-RateLimit-Remaining', Math.max(0, admission.remaining));
+      res.setHeader('X-RateLimit-Reset', new Date(current + windowMs).toISOString());
+      return next();
+    }
     const windowStart = current - windowMs;
 
     // Get or create client's request history
