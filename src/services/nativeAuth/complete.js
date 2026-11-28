@@ -104,6 +104,9 @@ async function reissueToken({ loginId, loginSecret, reason, db = defaultDb(), cf
   const attempt = await loadAttempt({ loginId, loginSecret, db, cfg, now });
   if (!TOKEN_REASONS.includes(reason)) throw expired();
   await guardAttemptAccount(attempt, db);
+  if (cfg.newAccounts === 'bound_only') {
+    await reResolve(attempt, identityOf(attempt), db, cfg, now);
+  }
   const ref = loginRefFor(attempt.id, cfg);
   // One atomic step: only an identified, unexpired attempt below the limit gets a new token.
   const { count } = await db.authLoginAttempt.updateMany({
@@ -174,6 +177,7 @@ async function reResolve(attempt, identity, db, cfg, now) {
     if (err instanceof NativeAuthError && err.code === 'ACCOUNT_LINK_REQUIRED') throw race();
     throw err;
   }
+  if (cfg.newAccounts === 'bound_only' && (attempt.resolution !== 'existing' || current.binding.subject !== attempt.w3aSubject)) throw race();
   const isNew = accounts.NEW_ACCOUNT_RESOLUTIONS.includes(attempt.resolution);
   if (isNew) {
     if (current.resolution !== attempt.resolution || !attempt.pendingUserId) throw race();
@@ -321,7 +325,7 @@ async function completeLogin({ body = {}, db = defaultDb(), cfg = readNativeAuth
     await db.authLoginAttempt
       .updateMany({ where: { id: attempt.id, state: 'completing' }, data: { state: 'identified' } })
       .catch(() => {});
-    if (isP2002(err)) {
+    if (isP2002(err) || (cfg.newAccounts === 'bound_only' && err?.code === 'P2034')) {
       logger.warn('native_auth.login_race', { loginRef: ref, target: err.meta && err.meta.target });
       throw race();
     }
@@ -360,7 +364,7 @@ async function completeClaimed({ attempt, body, walletAddress, signature, db, cf
   if (isNewUser) {
     return createAccount({ attempt, identity, grade, address, referralCode, campaignSlug, inviteError, body, db, cfg, now, ref });
   }
-  return completeExisting({ attempt, identity, grade, user: existing, identityRow: current.identityRow, address, referralCode, campaignSlug, inviteError, db, cfg, now, ref });
+  return completeExisting({ attempt, identity, grade, user: existing, identityRow: current.identityRow, boundWallet: current.binding, address, referralCode, campaignSlug, inviteError, db, cfg, now, ref });
 }
 
 async function createAccount({ attempt, identity, grade, address, referralCode, campaignSlug, inviteError, body, db, cfg, now, ref }) {
@@ -430,8 +434,9 @@ async function createAccount({ attempt, identity, grade, address, referralCode, 
   };
 }
 
-async function completeExisting({ attempt, identity, grade, user, identityRow, address, referralCode, campaignSlug, inviteError, db, cfg, now, ref }) {
-  const binding = await db.nativeWalletBinding.findUnique({ where: { userId: user.id } });
+async function completeExisting({ attempt, identity, grade, user, identityRow, boundWallet, address, referralCode, campaignSlug, inviteError, db, cfg, now, ref }) {
+  if (boundWallet && !sameAddress(boundWallet.address, address)) throw proofInvalid();
+  const binding = boundWallet || await db.nativeWalletBinding.findUnique({ where: { userId: user.id } });
   // The attempt was minted for another subject than the account's binding (a binding appeared
   // after identify): re-identify to get the bound subject.
   if (binding && binding.subject !== attempt.w3aSubject) throw race();
@@ -449,6 +454,10 @@ async function completeExisting({ attempt, identity, grade, user, identityRow, a
     : null;
 
   const updated = await db.$transaction(async (tx) => {
+    if (boundWallet) {
+      const checked = await reResolve(attempt, identity, tx, cfg, now);
+      if (!sameAddress(checked.binding.address, address)) throw race();
+    }
     // The identity: a login through a known identity refreshes it; a link creates it.
     if (identityRow) {
       await tx.authIdentity.update({ where: { id: identityRow.id }, data: { lastLoginAt: now } });
@@ -504,7 +513,7 @@ async function completeExisting({ attempt, identity, grade, user, identityRow, a
     }
     if (!Object.keys(updates).length) return tx.user.findUnique({ where: { id: user.id } });
     return tx.user.update({ where: { id: user.id }, data: updates });
-  });
+  }, boundWallet ? { isolationLevel: 'Serializable' } : undefined);
   if (action === 'rebind') logger.warn('native_auth.wallet_rebound', { loginRef: ref });
 
   const invitationStatus = await loginCompletion.applyReferralToExistingUser(updated, referralCode, campaignSlug, inviteError);

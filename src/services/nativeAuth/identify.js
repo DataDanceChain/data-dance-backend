@@ -99,7 +99,9 @@ async function createLoginAttempt({ identity: rawIdentity, intent = 'login', met
     throw err;
   }
   const userId = resolved.user ? resolved.user.id : null;
-  const { pendingUserId, w3aSubject } = await accounts.pendingSubjects({ identity, userId, db, now });
+  const { pendingUserId, w3aSubject } = resolved.binding
+    ? { pendingUserId: null, w3aSubject: resolved.binding.subject }
+    : await accounts.pendingSubjects({ identity, userId, db, now });
 
   const walletProof = createWalletProof({ cfg, loginRef: ref, expiresAt, now });
   const minted = await issueW3aToken({ subject: w3aSubject, loginRef: ref, count: 1, cfg, now: now.getTime() });

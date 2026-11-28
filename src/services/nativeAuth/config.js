@@ -22,7 +22,7 @@ const PLATFORMS = Object.freeze(['web', 'ios', 'android']);
 const AUTH_ENVS = Object.freeze(['local', 'test', 'prod']);
 const W3A_NETWORKS = Object.freeze(['sapphire_devnet', 'sapphire_mainnet']);
 const SIGNERS = Object.freeze(['file', 'kms']);
-const NEW_ACCOUNT_MODES = Object.freeze(['open', 'allowlist', 'closed']);
+const NEW_ACCOUNT_MODES = Object.freeze(['open', 'allowlist', 'closed', 'bound_only']);
 const REBIND_POLICIES = Object.freeze(['refuse', 'lazy']);
 const TURNSTILE_MODES = Object.freeze(['off', 'log', 'enforce']);
 
@@ -521,6 +521,9 @@ function nativeAuthProblems(cfg, env = process.env, { loadKey } = {}) {
   push(enumProblem('DDC_AUTH_SIGNER', cfg.signer, SIGNERS));
   push(enumProblem('DDC_AUTH_NEW_ACCOUNTS', cfg.newAccounts, NEW_ACCOUNT_MODES));
   push(enumProblem('DDC_AUTH_REBIND_POLICY', cfg.rebindPolicy, REBIND_POLICIES));
+  if (cfg.newAccounts === 'bound_only' && cfg.rebindPolicy !== 'refuse') {
+    problems.push('DDC_AUTH_NEW_ACCOUNTS=bound_only requires DDC_AUTH_REBIND_POLICY=refuse');
+  }
   push(enumProblem('DDC_AUTH_TURNSTILE_MODE', cfg.turnstile.mode, TURNSTILE_MODES));
   const unknownMethods = cfg.methods.filter((m) => !NATIVE_METHODS.includes(m));
   if (unknownMethods.length) problems.push(`DDC_AUTH_METHODS: unknown method(s) ${unknownMethods.join(', ')} (allowed: ${NATIVE_METHODS.join(',')})`);
