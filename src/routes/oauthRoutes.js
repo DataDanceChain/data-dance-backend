@@ -348,7 +348,9 @@ router.get('/oauth/userinfo', async (req, res) => {
 
 router.get('/api/oauth/requests/:id', consentPrincipal(bearerMustVerify), async (req, res) => {
   try {
-    const session = req.ssoSession && { ...req.ssoSession, userId: req.user.id };
+    const session = req.ssoSession
+      ? { ...req.ssoSession, userId: req.user.id }
+      : { kind: 'user_jwt', claims: req.authClaims };
     const data = await getConsentRequest(req.params.id, session);
     if (req.ssoSession && req.ssoSession.clientId !== data.clientId) {
       logger.warn('SSO session presented for another client', { requestId: req.params.id });

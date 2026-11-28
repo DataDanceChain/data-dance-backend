@@ -602,6 +602,10 @@ async function startAuthorization(req, query, res) {
         expiresAt: new Date(Date.now() + (client.requestTtlMs || REQUEST_TTL_MS)),
         initiatorHash: initiatorNonce ? hashInitiator(initiatorNonce) : null,
         initiatorBoundAt: initiatorNonce ? new Date() : null,
+        planetDirectPreapproval: Boolean(partner && initiatorNonce &&
+          planetAdminPreapproved(client) && query.wallet_open_id === undefined &&
+          query.prompt === undefined && query.login_hint === undefined &&
+          eligibleRequest(client, { scope, redirectUri, initiatorHash: hashInitiator(initiatorNonce) })),
         initiatorMismatchCount: 0,
       },
     });
@@ -618,13 +622,27 @@ async function startAuthorization(req, query, res) {
   return consent.toString();
 }
 
+// An operator opts in one exact registered application. Renaming/replacing its
+// configured identity requires a new decision. An empty setting is always off.
+function planetAdminPreapproved(client) {
+  return Boolean(client?.clientId && client.firstParty === true &&
+    client.clientId === process.env.SSO_PLANET_PREAPPROVED_READ_CLIENT_ID &&
+    client.clientId === process.env.SSO_WALLET_PLANET_CLIENT_ID);
+}
+
 async function consentAutoApproval(row, partner, session) {
   if (!isPlanetRegistration(partner)) {
     return partner?.autoApprove ?? autoApproveFor(partner ? row.clientId : null);
   }
   const binding = eligibleRequest(partner, row) && decisionBinding(row, session);
   const matched = binding && await prisma.ssoTicket.findFirst({ where: binding, select: { id: true } });
-  return { app: Boolean(matched), web: false };
+  const issuedAt = session?.claims?.iat;
+  // JWT issue time has one-second precision. A same-second login stays manual.
+  const web = Boolean(row.planetDirectPreapproval && planetAdminPreapproved(partner) &&
+    eligibleRequest(partner, row) && session?.kind === 'user_jwt' &&
+    Number(session.claims?.ver) >= 2 && Number.isSafeInteger(issuedAt) && issuedAt > 0 &&
+    (issuedAt + 1) * 1000 <= row.createdAt.getTime());
+  return { app: Boolean(matched), web };
 }
 
 async function getConsentRequest(id, session) {
@@ -791,7 +809,7 @@ async function decideConsent(user, requestId, allow, ctx = {}) {
       throw new OAuthError(400, 'invalid_request', 'This authorization request has expired.');
     }
   };
-  if (auto && isPlanetRegistration(client)) {
+  if (auto && entry === 'app' && isPlanetRegistration(client)) {
     // Revocation, expiry and competing decisions are checked again at the write. Spending
     // this hand-off and issuing its code either both commit or neither does.
     await prisma.$transaction(async (tx) => {
