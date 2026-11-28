@@ -5,7 +5,7 @@ import sys
 import tempfile
 import unittest
 
-from summarize import Journeys, Lines, MAX_LINE, WAIT, date
+from summarize import Journeys, Lines, MAX_LINE, WAIT, date, parse_date
 
 
 T = 1_800_000_000_000
@@ -30,6 +30,10 @@ def ingest(state, *events, received=None, key='event'):
 
 
 class Tests(unittest.TestCase):
+    def test_docker_nanosecond_timestamp(self):
+        self.assertEqual(parse_date('1970-01-01T00:00:00.123456789Z'), 123)
+        self.assertEqual(parse_date('1970-01-01T08:00:00.001234567+08:00'), 1)
+
     def test_by_flow_and_dimensions_dedup_reverse_order(self):
         state = Journeys({RELEASE})
         a = event(1, 'wallet_ready', T + 70, channel='google', visibility='visible', release=RELEASE[:12])

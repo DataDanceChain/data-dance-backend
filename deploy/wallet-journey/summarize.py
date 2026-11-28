@@ -67,6 +67,9 @@ def date(ms):
 
 
 def parse_date(value):
+    # Docker uses nanoseconds. Python 3.9/3.10 require a 3- or 6-digit
+    # fraction in fromisoformat(), so normalize before parsing.
+    value = re.sub(r'\.(\d+)(?=Z|[+-])', lambda m: '.' + m[1].ljust(6, '0')[:6], value)
     parsed = datetime.fromisoformat(value.replace('Z', '+00:00'))
     if parsed.tzinfo is None:
         raise ValueError
