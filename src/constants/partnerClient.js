@@ -263,10 +263,13 @@ function hashesEqual(a, b) {
 
 /** Parses every SSO_TGE_* / SSO_* variable; never logged as a whole (contains hashes). */
 function readPartnerConfig(env = process.env) {
+  const clientId = String(env.SSO_TGE_CLIENT_ID || '').trim();
+  const retirementId = String(env.SSO_RETIRED_STATIC_CLIENT_ID || '').trim();
   return {
     environment: String(env.SSO_ENVIRONMENT || '').trim(),
     enabled: flag(env.SSO_TGE_ENABLED),
-    clientId: String(env.SSO_TGE_CLIENT_ID || '').trim(),
+    clientId,
+    staticClientRetired: Boolean(clientId && retirementId === clientId),
     clientName: String(env.SSO_TGE_CLIENT_NAME || '').trim() || 'DataDance',
     secretHash: normalizeHash(env.SSO_TGE_CLIENT_SECRET_SHA256),
     previousSecretHash: normalizeHash(env.SSO_TGE_CLIENT_SECRET_SHA256_PREVIOUS),
@@ -290,7 +293,7 @@ function isRetiredPartnerClientId(clientId) {
 
 function autoApproveFor(clientId, env = process.env) {
   const cfg = readPartnerConfig(env);
-  if (!cfg.clientId || isRetiredPartnerClientId(cfg.clientId)) return { ...AUTO_APPROVE_OFF };
+  if (!cfg.clientId || cfg.staticClientRetired || isRetiredPartnerClientId(cfg.clientId)) return { ...AUTO_APPROVE_OFF };
   if (clientId === undefined || clientId === null || !samePartnerClientId(cfg.clientId, clientId)) {
     return { ...AUTO_APPROVE_OFF };
   }
@@ -357,7 +360,7 @@ function getPartnerClient(clientId, req) {
     kind: PARTNER_KIND,
     clientId: cfg.clientId,
     clientName: cfg.clientName,
-    enabled: cfg.enabled,
+    enabled: cfg.enabled && !cfg.staticClientRetired,
     environment: cfg.environment,
     redirectUris: [...cfg.redirectUris],
     initiateLoginUri: cfg.initiateLoginUri,
@@ -387,7 +390,7 @@ function verifyClientSecret(client, secret, { now = Date.now() } = {}) {
   // A registry partner carries its own hash. The env client never sets one.
   if (client.secretHash) return hashesEqual(sha256Hex(secret), client.secretHash);
   const cfg = readPartnerConfig();
-  if (!cfg.clientId || client.clientId !== cfg.clientId) return false;
+  if (!cfg.clientId || cfg.staticClientRetired || client.clientId !== cfg.clientId) return false;
   const presented = sha256Hex(secret);
   const currentOk = hashesEqual(presented, cfg.secretHash);
   const rotationOpen = Boolean(cfg.previousSecretHash && cfg.rotationUntil && now < cfg.rotationUntil.getTime());
@@ -553,6 +556,10 @@ function assertPartnerConfig(env = process.env) {
   const production = env.NODE_ENV === 'production' || cfg.environment === 'prod';
   const problems = [];
 
+  if (String(env.SSO_RETIRED_STATIC_CLIENT_ID || '').trim() &&
+      (!cfg.staticClientRetired || cfg.clientId === String(env.SSO_WALLET_PLANET_CLIENT_ID || '').trim())) {
+    problems.push('SSO_RETIRED_STATIC_CLIENT_ID must identify the static registration and must differ from the Wallet Planet registration');
+  }
   if (cfg.environment && !PARTNER_ENVIRONMENTS.includes(cfg.environment)) {
     problems.push(`SSO_ENVIRONMENT must be one of ${PARTNER_ENVIRONMENTS.join('|')} (got "${cfg.environment}")`);
   }
@@ -605,6 +612,7 @@ function assertPartnerConfig(env = process.env) {
   }
   return {
     enabled: cfg.enabled,
+    staticClientRetired: cfg.staticClientRetired,
     environment: cfg.environment,
     clientId: cfg.clientId,
     redirectUriCount: cfg.redirectUris.length,

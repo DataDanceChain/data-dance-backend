@@ -81,6 +81,7 @@ const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use('/api/sso', ssoRoutes);
+app.use('/partner/sso', require('../../src/routes/partnerTgeRoutes'));
 app.use('/', oauthRoutes);
 
 let server;
@@ -168,7 +169,7 @@ function setSwitch(value) {
   else process.env.SSO_TGE_AUTO_APPROVE = value;
 }
 
-const TOGGLES = ['SSO_WALLET_PLANET_CLIENT_ID', 'SSO_TGE_AUTO_APPROVE', 'SSO_REQUIRE_VERIFIED_SESSION'];
+const TOGGLES = ['SSO_RETIRED_STATIC_CLIENT_ID', 'SSO_WALLET_PLANET_CLIENT_ID', 'SSO_TGE_AUTO_APPROVE', 'SSO_REQUIRE_VERIFIED_SESSION'];
 const saved = {};
 
 beforeEach(async () => {
@@ -567,6 +568,60 @@ describe('Wallet entry to the registered Data Planet client', () => {
   };
   const manual = { app: false, web: false };
   const automatic = { app: true, web: false };
+
+  it('retires only the reserved static client while an independent Planet Open remains single-use', async () => {
+    const oldId = process.env.SSO_TGE_CLIENT_ID;
+    const { getPartnerClient } = require('../../src/constants/partnerClient');
+    const { campaignSsoClientIds } = require('../../src/utils/campaignRules');
+    const oldSession = await exchangeSession(oldId);
+    const oldRequest = await authorize();
+    const issued = await authorize();
+    const grant = await consent(userJwt(), issued.cookie, { requestId: issued.requestId, allow: true });
+    assert.equal(grant.status, 200);
+    const code = new URL(grant.body.data.redirectTo).searchParams.get('code');
+    const access = await request(server).post('/oauth/token').auth(oldId, SECRET).type('form')
+      .send({ grant_type: 'authorization_code', code, redirect_uri: REDIRECT, code_verifier: issued.verifier }).expect(200);
+    const oldMe = () => request(server).get('/partner/sso/me').set('Authorization', 'Bearer ' + access.body.access_token);
+    await oldMe().expect(200);
+    // Even a conflicting DB row cannot take ownership of the retired ID.
+    await prisma.ssoDeveloperClient.create({ data: {
+      clientId: oldId, clientName: 'shadow', kind: 'partner', enabled: true, secretHash: SECRET_HASH,
+      initiateLoginUri: 'https://example.test/start', redirectUris: [REDIRECT],
+    } });
+    process.env.SSO_RETIRED_STATIC_CLIENT_ID = oldId;
+    assert.equal(getPartnerClient(oldId).enabled, false);
+    await oldMe().expect(401);
+    const blocked = await request(server).get('/oauth/authorize').query({ client_id: oldId, redirect_uri: REDIRECT });
+    assert.equal(blocked.status, 400);
+    assert.equal(blocked.headers.location, undefined);
+    await request(server).post('/oauth/token').auth(oldId, SECRET).type('form')
+      .send({ grant_type: 'authorization_code', code, redirect_uri: REDIRECT, code_verifier: issued.verifier }).expect(401);
+    assert.equal(assertPartnerConfig().enabled, true);
+    assert.equal(assertPartnerConfig().staticClientRetired, true);
+    assert.deepEqual(campaignSsoClientIds([oldId, clientId, 'tge', 'tge-rehearsal']), [clientId]);
+    assert.deepEqual(autoApproveFor(oldId), { app: false, web: false });
+    assert.equal((await requestSummary(oldRequest.requestId).set('Authorization', 'Bearer ' + oldSession.token)).status, 401);
+    await request(server).post('/api/sso/app-ticket').set('Authorization', 'Bearer ' + userJwt())
+      .send({ client_id: oldId }).expect(403);
+    const session = await exchangeSession(clientId);
+    const flow = await authorize({ ...params, ...session });
+    assert.deepEqual(await hint(flow, session), automatic);
+    assert.equal((await consent(session.token, flow.cookie, decision(flow))).status, 200);
+    assert.equal((await consent(session.token, flow.cookie, decision(flow))).status, 400);
+    const direct = await authorize({ ...params, browserCookie: flow.cookie });
+    assert.deepEqual(await hint(direct, session), manual);
+    assert.equal((await consent(session.token, direct.cookie, decision(direct))).status, 403);
+    for (const wrong of [clientId, 'tge', 'tge-rehearsal']) {
+      assert.throws(() => assertPartnerConfig({ ...process.env, SSO_RETIRED_STATIC_CLIENT_ID: wrong }),
+        /must identify the static registration/);
+    }
+    assert.throws(() => assertPartnerConfig({ ...process.env, SSO_WALLET_PLANET_CLIENT_ID: oldId }),
+      /must differ from the Wallet Planet registration/);
+    delete process.env.SSO_RETIRED_STATIC_CLIENT_ID;
+    assert.equal(getPartnerClient(oldId).enabled, true);
+    await oldMe().expect(200);
+    assert.equal((await requestSummary(oldRequest.requestId).set('Authorization', 'Bearer ' + oldSession.token)).status, 200);
+  });
 
   it('binds a fresh Wallet Open to one request, its ticket, account and browser', async () => {
     const session = await exchangeSession(clientId);
