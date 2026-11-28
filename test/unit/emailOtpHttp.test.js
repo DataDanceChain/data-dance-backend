@@ -51,7 +51,7 @@ function expectEvent(response, stage, reason) {
   const reqId = response.headers['x-request-id'];
   assert.match(reqId, /^[0-9a-f-]{36}$/);
   assert.notEqual(reqId, callerId);
-  assert.deepEqual(events.filter((event) => event.data.reqId === reqId), [
+  assert.deepEqual(events.filter((event) => event.message === 'email_otp_result' && event.data.reqId === reqId), [
     { message: 'email_otp_result', data: { reqId, stage, status: response.status, reason } },
   ]);
 }
@@ -175,4 +175,51 @@ it('keeps upstream failures uniform outside the server and classifies them witho
   assert.equal(unexpected.status, 500);
   assert.deepEqual(unexpected.body, { status: 'error', message: 'Server error' });
   expectEvent(unexpected, 'verify', 'unexpected_failure');
+});
+
+it('links one browser flow to its server request and lookup/SMTP result without copying client text', async () => {
+  const flow = require('node:crypto').randomUUID();
+  mailFailure = Object.assign(new Error('private mail detail'), { code: 'EAUTH' });
+  const response = await post('send', { email: knownEmail, flow });
+  assert.equal(response.status, 503);
+  const reqId = response.headers['x-request-id'];
+  const linked = events.filter(event => event.data.reqId === reqId);
+  assert.deepEqual(linked.find(event => event.message === 'email_otp_received').data, { flow, reqId, stage: 'send' });
+  assert.deepEqual(linked.find(event => event.message === 'email_otp_result').data,
+    { flow, reqId, stage: 'send', status: 503, reason: 'smtp_authentication_failed' });
+  assert.equal(typeof linked.find(event => event.message === 'email_otp_send_latency').data.smtpAcceptMs, 'number');
+  assert.doesNotMatch(JSON.stringify(linked), /example\.test|private mail detail/);
+  const bad = await post('send', { email: knownEmail, flow: 'private data' });
+  assert.ok(events.filter(event => event.data.reqId === bad.headers['x-request-id']).every(event => !('flow' in event.data)));
+});
+
+it('observes a dropped HTTP client before the in-flight lookup finishes and keeps its eventual result', async () => {
+  const { once } = require('node:events');
+  const http = require('node:http');
+  const flow = require('node:crypto').randomUUID();
+  let started, unblock;
+  const entered = new Promise(resolve => { started = resolve; });
+  prisma.user.findMany = () => { started(); return new Promise(resolve => { unblock = resolve; }); };
+  const server = app.listen(0, '127.0.0.1');
+  try {
+    await once(server, 'listening');
+    const disconnected = new Promise(resolve => server.once('request', (_request, response) => response.once('close', resolve)));
+    const req = http.request({ hostname: '127.0.0.1', port: server.address().port,
+      path: '/api/auth/email-code/send', method: 'POST', headers: { 'Content-Type': 'application/json' } });
+    req.on('error', () => {});
+    req.end(JSON.stringify({ email: knownEmail, flow }));
+    await entered;
+    req.destroy();
+    await disconnected;
+    const seen = events.find(event => event.message === 'email_otp_received' && event.data.flow === flow);
+    assert.deepEqual(events.find(event => event.message === 'email_otp_disconnected')?.data, seen.data);
+    unblock([record]);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.ok(events.some(event => event.message === 'email_otp_send_latency' &&
+      event.data.reqId === seen.data.reqId && event.data.reason === 'accepted'));
+  } finally {
+    unblock?.([record]);
+    server.closeAllConnections();
+    if (server.listening) server.close();
+  }
 });

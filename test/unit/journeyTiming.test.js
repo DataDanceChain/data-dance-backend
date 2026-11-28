@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const express = require('express');
 const request = require('supertest');
 const { randomUUID } = require('node:crypto');
-const { journeyTiming } = require('../../src/routes/journeyTiming');
+const { journeyTiming, timingLog } = require('../../src/routes/journeyTiming');
 
 function fixture() {
   const logged = [];
@@ -47,4 +47,21 @@ test('old and classified clients can share a batch, with strictly bounded diagno
     { reason: 'arbitrary exception contents' }, { callback: 'https://example.test/' },
   ]) await send(JSON.stringify([start, { ...event, ...unsafe }])).expect(400);
   assert.equal(logged.length, 1);
+});
+
+test('accepts bounded failure phase and reason only as a complete pair on failed login terminals', async () => {
+  const { send, logged } = fixture();
+  const event = { flow: randomUUID(), at: Date.now(), stage: 'login_timeout', platform: 'web',
+    channel: 'email_otp', phase: 'otp_send', reason: 'timeout' };
+  await send(JSON.stringify([event])).expect(204);
+  for (const change of [{ phase: undefined }, { reason: undefined }, { stage: 'wallet_ready' },
+    { reason: 'private provider error' }, { phase: 'https://example.test/?token=private' }]) {
+    await send(JSON.stringify([{ ...event, ...change }])).expect(400);
+  }
+  assert.deepEqual(logged, [[event]]);
+  const { phase, reason, ...legacyEvent } = event;
+  assert.deepEqual(timingLog(logged[0]), { events: [legacyEvent], loginFailures: [
+    { flow: event.flow, at: event.at, stage: event.stage, phase, reason },
+  ] });
+  assert.deepEqual(timingLog([legacyEvent]), { events: [legacyEvent] });
 });
