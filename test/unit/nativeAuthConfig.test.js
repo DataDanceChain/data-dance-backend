@@ -190,6 +190,12 @@ describe('native auth boot rule 1: required values and per-method configuration'
     assertRefused(localEnv(key, { ...x, DDC_AUTH_ENV: 'test' }), /custom scheme only with DDC_AUTH_ENV=local/);
   });
 
+  it('bound_only explicitly supports refusal and rejects lazy rebind', () => {
+    const enrollment = { DDC_AUTH_NEW_ACCOUNTS: 'bound_only' };
+    assert.deepEqual(problemsFor(localEnv(key, { ...enrollment, DDC_AUTH_REBIND_POLICY: 'refuse' })), []);
+    assertRefused(localEnv(key, { ...enrollment, DDC_AUTH_REBIND_POLICY: 'lazy' }), /bound_only requires DDC_AUTH_REBIND_POLICY=refuse/);
+  });
+
   it('dev echo is legal only locally with SMTP unset; lazy rebind only local/test', () => {
     assertRefused(localEnv(key, { DDC_AUTH_ENV: 'test', DDC_AUTH_OTP_DEV_ECHO: 'true' }), /DEV_ECHO is legal only with DDC_AUTH_ENV=local/);
     assertRefused(localEnv(key, { DDC_AUTH_OTP_DEV_ECHO: 'true', SMTP_HOST: 'smtp.example.com' }), /DEV_ECHO is legal only while SMTP_HOST is unset/);

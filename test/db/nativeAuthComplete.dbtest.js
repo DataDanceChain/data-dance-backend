@@ -207,3 +207,102 @@ async function attemptPending(identified) {
   const row = await prisma.authLoginAttempt.findUnique({ where: { id: identified.loginId } });
   return row.pendingUserId;
 }
+
+describe('bound_only original-wallet PostgreSQL receipt', () => {
+  const methods = ['google','x','apple','email'];
+  for (const provider of methods) {
+    it(provider + ' uses the same stored UID and wallet for completion and refuses a different signer', async () => {
+      overrides = { DDC_AUTH_NEW_ACCOUNTS: 'bound_only', DDC_AUTH_REBIND_POLICY: 'refuse' };
+      const contact = addr(provider);
+      const identity = { provider, subject: provider === 'email' ? contact : RUN + '-' + provider, email: contact, emailVerified: true };
+      const subject = crypto.randomUUID();
+      const signer = walletFor(subject);
+      const legacyIdentity = { verifier: 'synthetic-standard-' + provider, verifierId: RUN + '-legacy-' + provider };
+      const original = await prisma.user.create({ data: { email: contact, authType: 'web3auth', walletAddress: signer.address, referralCode: RUN + provider,
+        web3authVerifier: legacyIdentity.verifier, web3authVerifierId: legacyIdentity.verifierId } });
+      createdUsers.push(original.id);
+      const legacy = await require('../../src/services/web3authIdentity').resolveUser(legacyIdentity,{db:prisma,walletAddress:signer.address});
+      assert.equal(legacy.user.id, original.id);
+      assert.equal(legacy.user.walletAddress, original.walletAddress);
+      const issue = () => createLoginAttempt({ identity, cfg: cfg() });
+      // A legacy-only user is a real distinct case; no new binding may be invented.
+      await assert.rejects(issue(), e => e.code === 'ACCOUNT_LINK_REQUIRED');
+      assert.equal(await prisma.authIdentity.count({where:{userId:original.id}}),0);
+      assert.equal(await prisma.nativeWalletBinding.count({where:{userId:original.id}}),0);
+      const preserved = await prisma.user.findUnique({where:{id:original.id}});
+      assert.equal(preserved.walletAddress,original.walletAddress);
+      assert.equal(preserved.web3authVerifierId,original.web3authVerifierId);
+      const saved = await prisma.nativeWalletBinding.create({ data: { userId: original.id, network: cfg().network, connection: cfg().connectionId, subject, address: signer.address } });
+      const enrolled = await prisma.authIdentity.create({ data: { userId: original.id, provider, subject: identity.subject, email: contact, emailLinkGrade: 'none', linkedVia: 'manual' } });
+      const attempt = await issue();
+      assert.equal(attempt.web3auth.verifierId, saved.subject);
+      const stranger = walletFor('synthetic-other');
+      const message = buildProofMessage(attempt.walletProof, stranger.address);
+      const wrong = await proofBody(attempt, {walletAddress: stranger.address, signature: await stranger.signMessage(message)});
+      await assert.rejects(completeLogin({body:wrong,cfg:cfg()}),e=>e.code==='WALLET_PROOF_INVALID');
+      const { httpStatus, data } = await completeLogin({body:await proofBody(attempt),cfg:cfg()});
+      assert.equal(httpStatus,200);
+      assert.equal(data.isNewUser,false);
+      assert.equal(data.user.id,original.id);
+      assert.equal(data.user.walletAddress,original.walletAddress);
+      const readback = await prisma.nativeWalletBinding.findUnique({where:{userId:original.id}});
+      assert.deepEqual(readback,saved);
+      assert.equal(await prisma.walletAddressHistory.count({where:{userId:original.id}}),0);
+      await prisma.authIdentity.delete({where:{id:enrolled.id}});
+      await assert.rejects(issue(), e => e.code === 'ACCOUNT_LINK_REQUIRED');
+      assert.equal(await prisma.authIdentity.count({where:{userId:original.id}}),0);
+    });
+  }
+});
+
+describe('legacy self-service enrollment with provider address evidence', () => {
+  for (const providerDerivesOldWallet of [true, false]) {
+    it('original address derived by synthetic nodes: ' + providerDerivesOldWallet, async () => {
+      const methods = require(src('services/nativeAuth/identities.js'));
+      overrides = { DDC_AUTH_NEW_ACCOUNTS: 'closed', DDC_AUTH_REBIND_POLICY: 'refuse' };
+      const label = providerDerivesOldWallet ? 'match' : 'different';
+      const contact = addr('legacy-' + label);
+      const signer = Wallet.createRandom();
+      const verifiedIdentity = {provider:'google',subject:RUN + '-' + label,email:contact,emailVerified:true};
+      const user = await prisma.user.create({data:{
+        email:contact,referralCode:RUN + label,authType:'web3auth',walletAddress:signer.address,
+        web3authVerifier:'synthetic-old-google',web3authVerifierId:RUN + '-' + label,
+      }});
+      createdUsers.push(user.id);
+      assert.equal(await prisma.nativeWalletBinding.count({where:{userId:user.id}}),0);
+      assert.equal(await prisma.authIdentity.count({where:{userId:user.id}}),0);
+
+      const linked = await createLoginAttempt({identity:verifiedIdentity,intent:'link',bearerUser:user,cfg:cfg()});
+      const challenge = await methods.createStepUpChallenge({user,body:{action:'link',loginId:linked.loginId},cfg:cfg()});
+      assert.equal(challenge.mode,'wallet');
+      const stepUpSignature = await signer.signMessage(buildProofMessage(challenge.stepUp,user.walletAddress));
+      const link = await methods.linkIdentity({user,body:{loginId:linked.loginId,loginSecret:linked.loginSecret,stepUpSignature},cfg:cfg(),
+        notifier:{sendIdentityNotices:async()=>({sent:0,failed:0})}});
+      await link.notice;
+      assert.equal(await prisma.nativeWalletBinding.count({where:{userId:user.id}}),0);
+      const issue = () => createLoginAttempt({identity:verifiedIdentity,cfg:cfg()});
+      const attempt = await issue();
+
+      // External prerequisite only: program the fake nodes' answer. No application binding is seeded.
+      if (providerDerivesOldWallet) wallets.set(attempt.web3auth.verifierId,signer);
+      if (providerDerivesOldWallet) {
+        const result = await completeLogin({body:await proofBody(attempt),cfg:cfg()});
+        assert.equal(result.data.user.walletAddress,signer.address);
+        const saved = await prisma.nativeWalletBinding.findUnique({where:{userId:user.id}});
+        assert.equal(saved.address,signer.address);
+        overrides.DDC_AUTH_NEW_ACCOUNTS = 'bound_only';
+        const resumed = await issue();
+        const checked = await completeLogin({body:await proofBody(resumed),cfg:cfg()});
+        assert.equal(checked.data.user.id,user.id);
+        assert.equal(checked.data.user.walletAddress,signer.address);
+      } else {
+        await assert.rejects(completeLogin({body:await proofBody(attempt),cfg:cfg()}),e=>e.code==='WALLET_REBIND_REQUIRED');
+        assert.equal(await prisma.nativeWalletBinding.count({where:{userId:user.id}}),0);
+      }
+      const preserved = await prisma.user.findUnique({where:{id:user.id}});
+      assert.equal(preserved.walletAddress,user.walletAddress);
+      assert.equal(preserved.web3authVerifier,user.web3authVerifier);
+      assert.equal(await prisma.walletAddressHistory.count({where:{userId:user.id}}),0);
+    });
+  }
+});

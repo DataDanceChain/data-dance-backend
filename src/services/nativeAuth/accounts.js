@@ -239,9 +239,24 @@ async function resolveNativeIdentity({ identity: rawIdentity, cfg, db = defaultD
     const user = await db.user.findUnique({ where: { id: identityRow.userId } });
     if (user) {
       guardAccount(user);
-      return result('existing', { user, identityRow, grade });
+      const matched = result('existing', { user, identityRow, grade });
+      if (cfg.newAccounts === 'bound_only') {
+        // A historical e-mail match is insufficient evidence of explicit enrollment.
+        if (!['manual', 'created'].includes(identityRow.linkedVia)) throw linkRequired('legacy_method');
+        const binding = await db.nativeWalletBinding.findUnique({ where: { userId: user.id } });
+        const validAddress = typeof user.walletAddress === 'string' && /^0x[0-9a-f]{40}$/i.test(user.walletAddress);
+        const matchesWallet = validAddress && binding && binding.address.toLowerCase() === user.walletAddress.toLowerCase();
+        if (!matchesWallet || !binding.subject || binding.connection !== cfg.connectionId || binding.network !== cfg.network) {
+          throw new NativeAuthError('WALLET_REBIND_REQUIRED', { message: 'Use the previous sign-in for this wallet.' });
+        }
+        matched.binding = binding;
+      }
+      return matched;
     }
   }
+
+  // Existing-wallet rollout: only the exact upstream provider and subject can select an account.
+  if (cfg.newAccounts === 'bound_only') throw linkRequired('legacy_method', { hint: 'sign_in_with_previous_method_then_link' });
 
   // 2. X: only the legacy Web3Auth X pair links (never User.xid).
   if (identity.provider === 'x') {

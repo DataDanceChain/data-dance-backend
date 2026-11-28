@@ -758,3 +758,112 @@ describe('loadAttempt for other packages (BE7 link)', () => {
     );
   });
 });
+
+describe('bound_only original wallet continuity', () => {
+  const identities = [
+    google('shared@example.test', { subject: 'google-sub', hd: 'example.test' }),
+    x('123456789'),
+    { provider: 'apple', subject: 'apple-sub', email: null },
+    email('shared@example.test'),
+  ];
+
+  function fixture(identity) {
+    const signer = walletFor('pre-enrolled-original-wallet');
+    const user = addUser({ email: 'shared@example.test', walletAddress: signer.address, web3authVerifier: LEGACY_EMAIL, web3authVerifierId: 'shared@example.test' });
+    prisma.authIdentity.rows.push({ id: 'explicit-link', userId: user.id, provider: identity.provider, subject: identity.subject, linkedVia: 'manual' });
+    const binding = { id: 'original-wallet', userId: user.id, subject: 'pre-enrolled-original-wallet', connection: CONN, network: 'sapphire_devnet', address: signer.address };
+    prisma.nativeWalletBinding.rows.push(binding);
+    return { signer, user, binding };
+  }
+
+  beforeEach(() => { envOverrides = { DDC_AUTH_NEW_ACCOUNTS: 'bound_only', DDC_AUTH_REBIND_POLICY: 'refuse' }; });
+  for (const identity of identities) {
+    it(identity.provider + ': issued subject retains original signer, address and UID', async () => {
+      const { user, signer, binding } = fixture(identity);
+      const uid = user.id;
+      const storedAddress = user.walletAddress;
+      const verified = await identify(identity);
+      assert.equal(verified.web3auth.verifierId, binding.subject);
+      assert.equal(verified.account.linkedBy, 'identity');
+      const message = buildProofMessage(verified.walletProof, storedAddress);
+      assert.equal(require('ethers').verifyMessage(message, await signer.signMessage(message)), storedAddress);
+      const res = await completeWith(verified, {}, signer);
+      assert.equal(res.status, 200);
+      assert.equal(res.body.data.user.id, uid);
+      assert.equal(res.body.data.user.walletAddress, storedAddress);
+      assert.equal(res.body.data.isNewUser, false);
+      assert.equal(prisma.user.rows.length, 1);
+      assert.equal(prisma.nativeWalletBinding.rows.length, 1);
+      assert.equal(prisma.walletAddressHistory.rows.length, 0);
+    });
+
+    it(identity.provider + ': valid signature from a different fixture wallet is refused', async () => {
+      fixture(identity);
+      const attempt = await identify(identity);
+      const before = tables();
+      const res = await completeWith(attempt, {}, walletFor('different-fixture-wallet'));
+      expectCode(res, 401, 'WALLET_PROOF_INVALID');
+      assert.equal(tables(), before);
+    });
+
+    it(identity.provider + ': matching contact or legacy pair alone cannot create or attach a wallet', async () => {
+      fixture(identity);
+      prisma.authIdentity.rows.length = 0;
+      const before = tables();
+      await assert.rejects(identify(identity), e => e.code === 'ACCOUNT_LINK_REQUIRED');
+      assert.equal(prisma.authLoginAttempt.rows.length, 0);
+      assert.equal(tables(), before);
+    });
+  }
+
+  it('a shared e-mail string cannot enroll a new provider on another known identity', async () => {
+    fixture(identities[0]);
+    const before = tables();
+    await assert.rejects(identify(identities[3]), err => err.code === 'ACCOUNT_LINK_REQUIRED');
+    assert.equal(prisma.authLoginAttempt.rows.length, 0);
+    assert.equal(tables(), before);
+  });
+
+  it('four explicitly enrolled methods converge on the same UID and wallet', async () => {
+    const {user, signer} = fixture(identities[0]);
+    for (const identity of identities.slice(1)) {
+      prisma.authIdentity.rows.push({id:'manual-' + identity.provider, userId:user.id, provider:identity.provider, subject:identity.subject, linkedVia:'manual'});
+    }
+    for (const identity of identities) {
+      const attempt = await identify(identity);
+      const res = await completeWith(attempt, {}, signer);
+      assert.equal(res.status, 200);
+      assert.equal(res.body.data.user.id, user.id);
+      assert.equal(res.body.data.user.walletAddress, signer.address);
+    }
+    assert.equal(prisma.user.rows.length,1);
+    assert.equal(prisma.nativeWalletBinding.rows.length,1);
+    assert.equal(prisma.walletAddressHistory.rows.length,0);
+  });
+
+  for (const change of ['unbound','account_address','network','connection','unproven_link']) {
+    it('refuses before issuing when the stored evidence is inconsistent: ' + change, async () => {
+      const identity = identities[0];
+      const { user, binding } = fixture(identity);
+      if (change === 'unbound') prisma.nativeWalletBinding.rows.length = 0;
+      if (change === 'account_address') user.walletAddress = walletFor('different-wallet').address;
+      if (change === 'network') binding.network = 'sapphire_mainnet';
+      if (change === 'connection') binding.connection = 'unrelated-connection';
+      if (change === 'unproven_link') prisma.authIdentity.rows[0].linkedVia = 'verified_email';
+      const before = tables();
+      await assert.rejects(identify(identity), e => e.code === (change === 'unproven_link' ? 'ACCOUNT_LINK_REQUIRED' : 'WALLET_REBIND_REQUIRED'));
+      assert.equal(prisma.authLoginAttempt.rows.length, 0);
+      assert.equal(tables(), before);
+    });
+  }
+
+  it('rechecks enrollment at token refresh and completion', async () => {
+    fixture(identities[1]);
+    const attempt = await identify(identities[1]);
+    prisma.authIdentity.rows.length = 0;
+    const before = tables();
+    expectCode(await token(attempt), 409, 'LOGIN_RACE');
+    expectCode(await completeWith(attempt), 409, 'LOGIN_RACE');
+    assert.equal(tables(), before);
+  });
+});
