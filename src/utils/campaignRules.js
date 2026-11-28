@@ -167,9 +167,10 @@ function validateCta(kind, value) {
  * ids "tge" and "tge-rehearsal" are never client ids. Blanks and repeats are dropped, order is kept.
  */
 function campaignSsoClientIds(firstPartyIds = [], env = process.env) {
-  const ids = [readPartnerConfig(env).clientId, ...firstPartyIds]
+  const cfg = readPartnerConfig(env);
+  const ids = [cfg.clientId, ...firstPartyIds]
     .map((value) => String(value ?? '').trim())
-    .filter((value) => value && !isRetiredPartnerClientId(value));
+    .filter((value) => value && !isRetiredPartnerClientId(value) && !(cfg.staticClientRetired && value === cfg.clientId));
   return [...new Set(ids)];
 }
 
